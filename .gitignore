@@ -219,3 +219,6 @@ __marimo__/
 
 # Work-in-progress / not-ready scripts
 wip/
+
+# Runtime state
+link_queue_state.yaml
