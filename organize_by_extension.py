@@ -1,0 +1,1931 @@
+#!/usr/bin/env python3
+"""Organize files by extension into bucketed directories.
+
+This script scans a directory tree, creates a top-level directory for each file extension,
+then moves each file into: <extension>/<first-letter>00000/<filename>
+A directory is filled up to 500 files, and new numbered directories are created as needed.
+Files already inside a matching extension bucket are skipped.
+
+Bucketing uses the file's *real* type as inferred from its header bytes
+(``mypdf.doc`` → ``pdf/``). When the header is unknown or compatible with the
+declared extension (e.g. ``.jpeg`` for a JPEG, ``.docx`` for a ZIP container),
+the declared extension is kept. Pass ``--no-sniff`` to disable header inspection
+and revert to extension-only bucketing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import errno
+import logging
+import os
+import secrets
+import stat as _stat
+import re
+import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
+import shutil
+from typing import Callable, Iterable, Iterator, NamedTuple, NoReturn, Protocol, Set
+
+BUCKET_SIZE = 500
+PROGRESS_EVERY = 10_000   # oze-obs-02: emit a progress line every N done items
+# Outstanding-futures cap relative to ``num_threads`` (oze-scal-04 / oze-conc-03).
+# The planner blocks on a drain when the in-flight set reaches
+# ``num_threads * SUBMIT_BACKLOG_MULT``. 4× keeps every worker fed at full
+# rate (each can pre-fetch ~3 jobs) without growing memory linearly with N.
+SUBMIT_BACKLOG_MULT = 4
+# Bucket directory width: 5 zero-padded digits (oze-rel-08). The previous
+# 4-digit format topped out at 9999 buckets per (ext, prefix) pair — for a
+# tree with >5M files in one extension that ceiling was reachable. 5 digits
+# raises it to 99999 buckets × BUCKET_SIZE = ~50M files per prefix.
+BUCKET_INDEX_WIDTH = 5
+BUCKET_NAME_PATTERN = re.compile(r"^(.)(\d{5})$")
+ROOT_MAX_LENGTH = 4096
+# Number of header bytes to read for type sniffing. 32 covers every signature
+# in MAGIC_SIGNATURES (longest is the OLE2 8-byte stamp; ISO BMFF needs offset
+# 4 + 4 bytes; RIFF subtype needs offset 8 + 4 bytes), with slack.
+HEADER_SNIFF_BYTES = 32
+# oze-rel-05/oze-rel-08: refuse to treat out-of-range bucket indices as the
+# floor for new allocations. Matches the regex contract exactly: 5 digits → 0..99999.
+BUCKET_INDEX_MAX = 99_999
+
+# Sentinel placed in `state_cache` once a bucket reaches BUCKET_SIZE so the
+# planner can skip it without re-reading the directory and without holding the
+# full name set forever (oze-scal-02). Frozenset is hashable, immutable, and
+# distinguishable by `is`.
+_BUCKET_FULL: frozenset[str] = frozenset()
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+def normalize_extension(path: Path) -> str:
+    """Return the normalized extension string for a file path.
+
+    Files without a valid suffix (no dot, suffix with spaces, etc.)
+    are grouped under `no_extension`.
+    """
+    suffix = path.suffix
+    # Heuristic: valid extensions are non-empty and free of whitespace/control
+    # characters (a control char would leak into the bucket directory name).
+    if not suffix or suffix == '.' or any(c.isspace() or ord(c) < 0x20 for c in suffix):
+        return 'no_extension'
+    return suffix.lower().lstrip('.')
+
+
+# Header-sniff registry uses a uniform `Signature` protocol (oze-arch-03):
+# a `matches(head: bytes) -> str | None` method per detector. Two concrete
+# implementations cover (a) flat byte-offset stamps and (b) RIFF / ISO BMFF
+# style container peeks that look at a sub-range. `SIGNATURES` is the single
+# iteration list used by :func:`detect_type_by_header`; `MAGIC_SIGNATURES`
+# below is preserved as the flat-stamp seed for back-compat with external
+# imports / tests.
+
+class Signature(Protocol):
+    """Protocol every header detector implements. Returns canonical extension
+    on a positive match, ``None`` on miss. Detectors must never raise."""
+
+    def matches(self, head: bytes) -> str | None: ...  # pragma: no cover
+
+
+@dataclass(frozen=True)
+class MagicSignature:
+    """Flat byte-offset stamp: ``head[offset:offset+len(sig)] == sig``."""
+
+    sig: bytes
+    offset: int
+    label: str
+
+    def matches(self, head: bytes) -> str | None:
+        end = self.offset + len(self.sig)
+        if len(head) >= end and head[self.offset:end] == self.sig:
+            return self.label
+        return None
+
+
+@dataclass(frozen=True)
+class IsoBmffSignature:
+    """ISO BMFF (mp4 / mov / heic / …) stores its ``ftyp`` box at offset 4."""
+
+    def matches(self, head: bytes) -> str | None:
+        if len(head) >= 8 and head[4:8] == b"ftyp":
+            return "mp4"
+        return None
+
+
+@dataclass(frozen=True)
+class RiffSignature:
+    """RIFF stores its subtype at offset 8 — wav/avi/webp differ only there."""
+
+    def matches(self, head: bytes) -> str | None:
+        if head[:4] == b"RIFF" and len(head) >= 12:
+            sub = head[8:12]
+            if sub == b"WAVE":
+                return "wav"
+            if sub == b"AVI ":
+                return "avi"
+            if sub == b"WEBP":
+                return "webp"
+        return None
+
+
+# (signature, offset, label) — checked in order; first match wins.
+# Offsets are byte offsets into the file head. Labels are the canonical
+# extension we want to bucket under when the header is the authoritative type.
+MAGIC_SIGNATURES: tuple[tuple[bytes, int, str], ...] = (
+    (b"%PDF-", 0, "pdf"),
+    (b"\x89PNG\r\n\x1a\n", 0, "png"),
+    (b"\xff\xd8\xff", 0, "jpg"),
+    (b"GIF87a", 0, "gif"),
+    (b"GIF89a", 0, "gif"),
+    (b"PK\x03\x04", 0, "zip"),
+    (b"PK\x05\x06", 0, "zip"),
+    (b"PK\x07\x08", 0, "zip"),
+    (b"Rar!\x1a\x07\x00", 0, "rar"),
+    (b"Rar!\x1a\x07\x01\x00", 0, "rar"),
+    (b"\x1f\x8b", 0, "gz"),
+    (b"BZh", 0, "bz2"),
+    (b"\xfd7zXZ\x00", 0, "xz"),
+    (b"7z\xbc\xaf\x27\x1c", 0, "7z"),
+    (b"ID3", 0, "mp3"),
+    (b"\xff\xfb", 0, "mp3"),
+    (b"\xff\xf3", 0, "mp3"),
+    (b"\xff\xf2", 0, "mp3"),
+    (b"OggS", 0, "ogg"),
+    (b"fLaC", 0, "flac"),
+    (b"\x1aE\xdf\xa3", 0, "mkv"),
+    (b"MZ", 0, "exe"),
+    (b"\x7fELF", 0, "elf"),
+    (b"\xca\xfe\xba\xbe", 0, "class"),
+    (b"\xcf\xfa\xed\xfe", 0, "macho"),
+    (b"BM", 0, "bmp"),
+    (b"{\\rtf", 0, "rtf"),
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", 0, "ole2"),
+    (b"SQLite format 3\x00", 0, "sqlite"),
+    (b"II*\x00", 0, "tiff"),
+    (b"MM\x00*", 0, "tiff"),
+    (b"%!PS", 0, "ps"),
+    (b"wOFF", 0, "woff"),
+    (b"wOF2", 0, "woff2"),
+    (b"OTTO", 0, "otf"),
+)
+
+
+# Unified registry — container detectors first (they peek inside RIFF/ISO BMFF
+# at sub-offsets the flat list can't express), then every entry from
+# MAGIC_SIGNATURES wrapped as a `MagicSignature`. `detect_type_by_header`
+# iterates this once with no special-case branch (oze-arch-03).
+SIGNATURES: tuple[Signature, ...] = (
+    IsoBmffSignature(),
+    RiffSignature(),
+    *(MagicSignature(s, o, l) for s, o, l in MAGIC_SIGNATURES),
+)
+
+
+# Synonym → canonical extension. Used so a real JPEG named .jpeg isn't moved
+# to a separate jpg/ bucket from one named .jpg.
+EXTENSION_ALIASES: dict[str, str] = {
+    "jpeg": "jpg",
+    "tif": "tiff",
+    "htm": "html",
+}
+
+
+@dataclass(frozen=True)
+class ContainerFamily:
+    """Group of declared extensions that share the same container header (oze-pat-02).
+
+    When a file's header reports ``detected_label`` but its declared extension
+    is in ``members``, the declared extension is preserved — a ``.docx`` IS a
+    ZIP but should not be bucketed under ``zip/``. One concept, one value
+    object, replacing the previous fan-out across six module-level frozensets
+    and a separate ``_FAMILY_BY_DETECTED`` lookup dict.
+    """
+
+    detected_label: str
+    members: frozenset[str]
+
+
+# Registry list — single source of truth for "which declared extensions count
+# as compatible with which header-detected container type". Iteration order
+# doesn't matter; lookup is done by `detected_label` (see :func:`_family_for`).
+CONTAINER_FAMILIES: tuple[ContainerFamily, ...] = (
+    ContainerFamily("zip", frozenset({
+        "zip", "docx", "xlsx", "pptx", "odt", "ods", "odp",
+        "epub", "jar", "apk", "ipa", "war", "ear", "kmz", "xpi",
+    })),
+    ContainerFamily("ole2", frozenset({
+        "ole2", "doc", "xls", "ppt", "msi", "msg", "vsd",
+    })),
+    ContainerFamily("mp4", frozenset({
+        "mp4", "m4a", "m4v", "mov", "3gp", "3g2", "heic", "heif", "f4v",
+    })),
+    ContainerFamily("mp3", frozenset({"mp3", "mp2"})),
+    ContainerFamily("gz", frozenset({"gz", "tgz"})),
+)
+
+_FAMILY_BY_DETECTED: dict[str, ContainerFamily] = {
+    fam.detected_label: fam for fam in CONTAINER_FAMILIES
+}
+
+# Legacy aliases — preserved for back-compat with external imports / tests that
+# referenced the per-family frozensets directly. New code should query through
+# :func:`_family_for` or iterate :data:`CONTAINER_FAMILIES`.
+ZIP_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["zip"].members
+OLE2_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["ole2"].members
+ISO_BMFF_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["mp4"].members
+MP3_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["mp3"].members
+GZIP_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["gz"].members
+
+
+def _family_for(
+    detected_label: str,
+    extra_zip_family: frozenset[str] = frozenset(),
+) -> frozenset[str] | None:
+    """Return the member set for ``detected_label`` or None when no family
+    is registered. For the ``zip`` family, union in ``extra_zip_family``
+    (oze-rel-07) so a runtime-extended ZIP_FAMILY is honoured without mutating
+    the static registry.
+    """
+    fam = _FAMILY_BY_DETECTED.get(detected_label)
+    if fam is None:
+        return None
+    if detected_label == "zip" and extra_zip_family:
+        return fam.members | extra_zip_family
+    return fam.members
+
+
+_CONTAINER_SIGNATURES: tuple[Signature, ...] = (
+    IsoBmffSignature(),
+    RiffSignature(),
+)
+
+
+def _detect_iso_bmff_or_riff(head: bytes) -> str | None:
+    """Return detected label for offset-dependent container formats.
+
+    Thin wrapper around the container `Signature` entries — kept for
+    back-compat with tests / external imports. New code should iterate
+    :data:`SIGNATURES` directly (oze-arch-03).
+    """
+    for sig in _CONTAINER_SIGNATURES:
+        label = sig.matches(head)
+        if label is not None:
+            return label
+    return None
+
+
+class _Unreadable:
+    """Singleton sentinel returned by :func:`read_head_bytes` when the file
+    can't be opened/read (oze-rel-11). A dedicated class — not a magic byte
+    string — so identity checks (``is _HEAD_UNREADABLE``) are unambiguous and
+    consumers iterating ``head_cache.values()`` can ``isinstance``-test rather
+    than guess from the bytes.
+
+    Behaves like a zero-length bytes object for backwards compatibility: any
+    code that previously did ``if not head:`` to skip empty files still skips
+    the unreadable sentinel naturally.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return "<_Unreadable>"
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __len__(self) -> int:
+        return 0
+
+
+_HEAD_UNREADABLE: _Unreadable = _Unreadable()
+HeadBytes = bytes | _Unreadable
+
+
+@contextmanager
+def _safe_scandir(path: Path) -> Iterator[Iterable[os.DirEntry]]:
+    """Yield ``os.scandir(path)`` entries, or an empty iterable on OSError
+    (oze-dup-04). The same try/except/with pattern was open-coded in three
+    callers; centralising it makes "scan and skip on permission denied" a
+    one-line contract.
+
+    Errors are logged at debug so ``-v`` users see what was skipped (oze-rel-10).
+    """
+    try:
+        scanner = os.scandir(path)
+    except OSError as exc:
+        logger.debug("scandir failed for %s: %s", path, exc)
+        yield ()
+        return
+    try:
+        yield scanner
+    finally:
+        scanner.close()
+
+
+def read_head_bytes(
+    path: Path,
+    head_cache: dict[Path, HeadBytes] | None = None,
+) -> HeadBytes:
+    """Return the first ``HEADER_SNIFF_BYTES`` bytes of ``path``.
+
+    When ``head_cache`` is provided, the read is memoised by ``path`` (oze-perf-04):
+    the scan stage primes the cache once per file and every downstream sniff
+    consumer (``is_bucketed_file`` during scan, ``resolve_real_extension``
+    during planning) reuses the same bytes without re-opening the file.
+
+    On OSError the ``_HEAD_UNREADABLE`` singleton is returned (and cached) so
+    callers can branch on "unreadable" without re-attempting the open
+    (oze-rel-06 / oze-rel-11). An empty file returns ``b""``.
+    """
+    if head_cache is not None and path in head_cache:
+        return head_cache[path]
+    head: HeadBytes
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(HEADER_SNIFF_BYTES)
+    except OSError:
+        head = _HEAD_UNREADABLE
+    if head_cache is not None:
+        head_cache[path] = head
+    return head
+
+
+def detect_type_by_header(
+    path: Path,
+    head_cache: dict[Path, HeadBytes] | None = None,
+) -> str | None:
+    """Return canonical extension inferred from ``path``'s leading bytes, or
+    ``None`` when no signature matches or the file can't be read.
+
+    Reads at most ``HEADER_SNIFF_BYTES`` once; subsequent calls served from
+    ``head_cache`` when supplied (oze-perf-04). Unreadable files log at INFO
+    (visible under ``-v``) and return ``None`` so the caller falls back to the
+    declared extension — a transient read failure can never relocate the file
+    (oze-rel-06).
+    """
+    head = read_head_bytes(path, head_cache=head_cache)
+    if isinstance(head, _Unreadable):
+        logger.info("header sniff: cannot read %s — keeping declared extension", path)
+        return None
+    if not head:
+        return None
+    for signature in SIGNATURES:
+        label = signature.matches(head)
+        if label is not None:
+            return label
+    return None
+
+
+@dataclass(frozen=True)
+class SniffContext:
+    """Per-run sniff configuration (oze-dup-03).
+
+    Bundles the three values that every sniff consumer needs:
+
+    * ``sniff`` — whether to consult file headers at all (``--no-sniff`` flips this off).
+    * ``head_cache`` — shared per-path head-bytes memo (oze-perf-04). Single dict
+      threaded from the scan stage through the planner so each file is opened
+      at most once. ``None`` disables caching.
+    * ``extra_zip_family`` — runtime extension of :data:`ZIP_FAMILY`
+      (oze-rel-07) so users can teach the script about new zip-based formats
+      without editing source.
+
+    Passing one ``SniffContext`` parameter end-to-end replaces fifteen-plus
+    verbatim argument-pass lines.
+    """
+
+    sniff: bool = True
+    head_cache: dict[Path, HeadBytes] | None = None
+    extra_zip_family: frozenset[str] = frozenset()
+
+
+# Module-level default — used when a caller omits ``ctx`` and doesn't need
+# caching/family extension. Safe to share because the dataclass is frozen and
+# its head_cache field is None.
+_DEFAULT_SNIFF_CTX = SniffContext()
+
+
+_SNIFF_SENTINEL = object()
+
+
+def resolve_real_extension(
+    path: Path,
+    sniff: bool = _SNIFF_SENTINEL,
+    head_cache: dict[Path, HeadBytes] | None = _SNIFF_SENTINEL,
+    extra_zip_family: frozenset[str] = _SNIFF_SENTINEL,
+    ctx: SniffContext | None = None,
+) -> str:
+    """Return the bucket extension for ``path``.
+
+    Header detection **always wins** when it disagrees with the declared
+    extension (oze-perf-06): ``mypdf.doc`` → ``pdf``, ``photo.png`` declared as
+    ``.gif`` → ``png``, with a WARNING log line so the user notices misnamed
+    files. Family-compatible declarations (``.docx`` ↔ ZIP, ``.mov`` ↔ MP4
+    container, ``.jpeg`` alias of jpg) are not mismatches and are preserved
+    silently.
+
+    Pass ``ctx`` to bundle ``sniff``/``head_cache``/``extra_zip_family``
+    (oze-dup-03). The keyword form is retained for backward-compat callers
+    that pre-date the dataclass.
+
+    oze-arch-05: pass EITHER `ctx` OR the legacy keyword args, not both.
+    Mixing the two silently ignored the keyword side and was a footgun;
+    `ValueError` makes the bug loud.
+    """
+    kw_supplied = (
+        sniff is not _SNIFF_SENTINEL
+        or head_cache is not _SNIFF_SENTINEL
+        or extra_zip_family is not _SNIFF_SENTINEL
+    )
+    if ctx is not None and kw_supplied:
+        raise ValueError(
+            "resolve_real_extension: pass either `ctx` OR sniff/head_cache/"
+            "extra_zip_family keywords, not both (oze-arch-05)"
+        )
+    if ctx is None:
+        ctx = SniffContext(
+            sniff=True if sniff is _SNIFF_SENTINEL else sniff,
+            head_cache=None if head_cache is _SNIFF_SENTINEL else head_cache,
+            extra_zip_family=(frozenset() if extra_zip_family is _SNIFF_SENTINEL
+                              else extra_zip_family),
+        )
+    declared = normalize_extension(path)
+    if not ctx.sniff:
+        return declared
+    detected = detect_type_by_header(path, head_cache=ctx.head_cache)
+    if detected is None:
+        return declared
+    declared_canon = EXTENSION_ALIASES.get(declared, declared)
+    if declared_canon == detected:
+        return declared
+    family = _family_for(detected, ctx.extra_zip_family)
+    if family is not None and declared_canon in family:
+        return declared
+    # oze-perf-06: real mismatch — header authoritative. Warn so the user
+    # notices misnamed / mistyped files.
+    logger.warning(
+        "header mismatch on %s: declared .%s but header is %s — bucketing under %s/",
+        path, declared, detected, detected,
+    )
+    return detected
+
+
+def normalize_prefix(name: str) -> str:
+    """Return a filesystem-safe first-letter prefix for a filename.
+
+    Non-alphanumeric first characters are mapped to `_`.
+    """
+    if not name:
+        return '_'
+    first = name[0].lower()
+    return first if first.isalnum() else '_'
+
+
+def bucket_name(prefix: str, index: int) -> str:
+    """Format a bucket directory name from a prefix and numeric index.
+
+    Validates ``index`` is within ``[0, BUCKET_INDEX_MAX]`` (oze-rel-09); silent
+    formatting of negative or out-of-range indices would emit a directory name
+    the next scan's ``BUCKET_NAME_PATTERN`` rejects, leaking the bucket from
+    the planner's view and triggering a duplicate allocation. Width is
+    ``BUCKET_INDEX_WIDTH`` digits (oze-rel-08).
+    """
+    if not isinstance(index, int) or isinstance(index, bool):
+        raise TypeError(f"bucket index must be int, got {type(index).__name__}")
+    if index < 0 or index > BUCKET_INDEX_MAX:
+        raise ValueError(
+            f"bucket index out of range: {index} (allowed 0..{BUCKET_INDEX_MAX})"
+        )
+    return f"{prefix}{index:0{BUCKET_INDEX_WIDTH}d}"
+
+
+def is_bucketed_file(
+    root: Path,
+    path: Path,
+    sniff: bool = True,
+    head_cache: dict[Path, HeadBytes] | None = None,
+    extra_zip_family: frozenset[str] = frozenset(),
+    ctx: SniffContext | None = None,
+) -> bool:
+    """Determine if a file is already inside a valid bucket structure.
+
+    Returns True if the file path matches the expected <ext>/<prefix><index>/<filename> format.
+    When sniffing is enabled the bucket directory is compared against the
+    header-resolved extension, so a file already sitting under its true type
+    (e.g. ``pdf/p00000/mypdf.doc``) is recognised as bucketed and not moved.
+    Pass ``ctx`` to share head-bytes / extra-family settings (oze-dup-03);
+    keyword args are kept for back-compat.
+    """
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+
+    # Exactly <ext>/<bucket>/<filename>: a file nested deeper than a bucket
+    # (e.g. <ext>/<bucket>/sub/file) is NOT directly bucketed (oze-rel-01).
+    if len(relative.parts) != 3:
+        return False
+
+    ext_dir, bucket_dir = relative.parts[0], relative.parts[1]
+    if not bucket_dir or not BUCKET_NAME_PATTERN.match(bucket_dir):
+        return False
+
+    if ctx is None:
+        ctx = SniffContext(sniff=sniff, head_cache=head_cache,
+                           extra_zip_family=extra_zip_family)
+
+    # Under "header always wins" (oze-perf-06) we cannot trust the declared
+    # extension to confirm placement — a real PDF sitting under doc/d00000/
+    # with a .doc suffix would slip through a structural-only check. The sniff
+    # head_cache (oze-perf-04) keeps the cost to one read per file across the
+    # whole run anyway.
+    return ext_dir == resolve_real_extension(path, ctx=ctx)
+
+
+def list_files(
+    root: Path,
+    skip_paths: Iterable[Path],
+    verbose: bool = False,
+    sniff: bool = True,
+    head_cache: dict[Path, HeadBytes] | None = None,
+    extra_zip_family: frozenset[str] = frozenset(),
+    ctx: SniffContext | None = None,
+) -> list[Path]:
+    """Return all files under the root, excluding skipped paths and bucketed outputs.
+
+    Implementation note (oze-perf-03): walks the tree with `os.scandir` instead
+    of `Path.rglob('*')`, so we never materialise the full tree into a list
+    before filtering. Each `DirEntry` caches its stat result, so the symlink /
+    is-file checks below use the cache instead of a fresh syscall per file
+    (oze-perf-02).
+
+    Pass a single :class:`SniffContext` ``ctx`` (oze-dup-03) to share
+    head-bytes / extra-zip-family / sniff toggle with downstream stages;
+    the keyword form is kept for back-compat.
+    """
+    if ctx is None:
+        ctx = SniffContext(sniff=sniff, head_cache=head_cache,
+                           extra_zip_family=extra_zip_family)
+    skip = {str(p) for p in skip_paths}   # O(1) membership; compare on path string (oze-perf-01)
+    files: list[Path] = []
+    already_bucketed = 0
+    symlink_resolve_cache: dict[Path, Path | None] = {}
+    for entry in _walk_scandir(root):
+        # oze-conc-04: single `stat(follow_symlinks=False)` and branch on
+        # `st_mode` so a hostile filesystem can't swap a symlink for a
+        # regular file between `is_symlink()` and `is_file()` checks.
+        try:
+            st = entry.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        mode = st.st_mode
+        if _stat.S_ISLNK(mode) or not _stat.S_ISREG(mode):
+            # oze-sec-02: log when a symlink we're already skipping
+            # points OUTSIDE `root`. The skip itself is the safety
+            # guarantee; the log is defence-in-depth so a sysadmin who
+            # accidentally added a symlink pointing into /etc sees that
+            # the script ignored it instead of silently following it.
+            if _stat.S_ISLNK(mode):
+                _warn_if_symlink_escapes_root(Path(entry.path), root, symlink_resolve_cache)
+            continue
+        path = Path(entry.path)
+        if entry.path in skip:
+            continue
+        if is_bucketed_file(root, path, ctx=ctx):
+            already_bucketed += 1
+            continue
+        files.append(path)
+    if verbose: # Use logger.info for verbose output
+        logger.info(f"Scanning complete. Found {len(files)} files to organize ({already_bucketed} already bucketed).")
+    return files
+
+
+def _warn_if_symlink_escapes_root(
+    link_path: Path,
+    root: Path,
+    resolve_cache: dict[Path, Path | None] | None = None,
+) -> None:
+    """Log a debug message when `link_path`'s target resolves OUTSIDE
+    `root` (oze-sec-02).
+
+    Pure defence-in-depth: the walker already skips symlinks, so the
+    file at `link_path` is never moved or read. The log surfaces the
+    case where someone introduced a symlink into the tree by mistake,
+    helping the operator notice it before it accumulates.
+
+    Failure of `resolve()` itself (broken link, NUL byte) is swallowed
+    — there's nothing actionable for the operator and the skip
+    semantics already protect them."""
+    if resolve_cache is None:
+        resolve_cache = {}
+    if link_path in resolve_cache:
+        target = resolve_cache[link_path]
+        if target is None:
+            return
+    else:
+        try:
+            target = link_path.resolve()
+        except (OSError, ValueError):
+            resolve_cache[link_path] = None
+            return
+        resolve_cache[link_path] = target
+    try:
+        target.relative_to(root)
+        return    # target is INSIDE root — quiet skip
+    except ValueError:
+        # target is OUTSIDE root — log but stay quiet at default level.
+        logger.debug(
+            "skipping symlink whose target escapes root: %s -> %s",
+            link_path, target,
+        )
+
+
+def _walk_scandir(root: Path):
+    """Iteratively yield `os.DirEntry` objects under `root` (depth-first).
+
+    Generator-based so a 1M-file tree never sits in memory as a list, and so
+    each entry carries its own cached stat for the caller (oze-perf-02 / oze-perf-03).
+    Permission/OS errors on a sub-directory are skipped via :func:`_safe_scandir`
+    (oze-dup-04) and logged at debug (oze-rel-10) — we'd rather organise what
+    we can than abort the whole run.
+
+    oze-rel-20: uses an explicit stack instead of `yield from _walk_scandir(...)`
+    recursion so a tree deeper than the Python recursion limit (~1000 by
+    default) doesn't raise `RecursionError` mid-walk. The stack is a list of
+    `Path`s pending traversal; depth-first order is preserved by appending
+    subdirectories in reverse so the leftmost subdir is processed first.
+    """
+    stack: list[Path] = [root]
+    while stack:
+        current = stack.pop()
+        subdirs: list[Path] = []
+        with _safe_scandir(current) as it:
+            for entry in it:
+                yield entry
+                # Recurse into real subdirs only; symlinked dirs are not followed
+                # so the walk never escapes `root` or loops.
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_dir:
+                    subdirs.append(Path(entry.path))
+        # Reverse so popping the stack yields children in original scandir order.
+        stack.extend(reversed(subdirs))
+
+
+def _scan_bucket_indices(ext_dir: Path) -> dict[str, list[int]]:
+    """One-shot scandir of ``ext_dir`` returning ``{prefix: sorted indices}``.
+
+    Walks the directory once and partitions every matching bucket name by its
+    first-letter prefix. Replaces the per-(ext_dir, prefix) scandir that
+    :func:`existing_bucket_indices` used to do — for an extension with 26
+    prefixes the same directory was opened 26 times before (oze-perf-05).
+    """
+    by_prefix: dict[str, list[int]] = {}
+    with _safe_scandir(ext_dir) as entries:
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            match = BUCKET_NAME_PATTERN.match(entry.name)
+            if not match:
+                continue
+            idx = int(match.group(2))
+            if idx > BUCKET_INDEX_MAX:
+                logger.warning(
+                    "ignoring out-of-range bucket index %d under %s (cap=%d)",
+                    idx, ext_dir, BUCKET_INDEX_MAX)
+                continue
+            by_prefix.setdefault(match.group(1), []).append(idx)
+    for indices in by_prefix.values():
+        indices.sort()
+    return by_prefix
+
+
+def existing_bucket_indices(ext_dir: Path, prefix: str) -> list[int]:
+    """Return sorted bucket indices for a given extension folder and prefix.
+
+    Thin wrapper over :func:`_scan_bucket_indices` (oze-perf-05) — preserved
+    so the legacy `(ext_dir, prefix)` call shape keeps working. Hot callers
+    inside :class:`BucketManager` cache the full map and avoid re-scanning
+    the directory once per prefix.
+
+    Indices beyond ``BUCKET_INDEX_MAX`` are dropped with a warning (oze-rel-05).
+    """
+    return list(_scan_bucket_indices(ext_dir).get(prefix, ()))
+
+
+def bucket_file_names(bucket_path: Path) -> Set[str]:
+    """Return the set of file names currently present in a bucket."""
+    with _safe_scandir(bucket_path) as entries:
+        return {entry.name for entry in entries
+                if entry.is_file(follow_symlinks=False)}
+
+
+class BucketChoice(NamedTuple):
+    """Result of :func:`_find_reusable_bucket` (oze-cx-02).
+
+    ``bucket`` is the reusable bucket directory if one was found, else None.
+    ``next_index`` is the lowest bucket index the caller should allocate when
+    ``bucket`` is None — either the gap slot or one past the last index.
+    Implemented as a NamedTuple so legacy ``chosen, nxt = ...`` unpacking
+    keeps working.
+    """
+    bucket: Path | None
+    next_index: int
+
+
+def _find_reusable_bucket(
+    ext_dir: Path,
+    prefix: str,
+    filename: str,
+    state_cache: dict[Path, Set[str] | frozenset[str]],
+    indices: list[int],
+) -> BucketChoice:
+    """Walk `indices` sorted, looking for an existing bucket with room and
+    without a name clash on `filename` (oze-cx-01). Returns a
+    :class:`BucketChoice` (oze-cx-02): ``bucket`` is the reusable bucket if
+    any (else None); ``next_index`` is the lowest index to allocate when no
+    reusable bucket is found. Populates `state_cache` lazily.
+
+    Once a bucket is full, its entry in `state_cache` is collapsed to the
+    `_BUCKET_FULL` sentinel (oze-scal-02): we skip it without re-reading the
+    directory and without retaining the full name set, which would otherwise
+    grow unbounded on million-file runs."""
+    next_expected = 0
+    # oze-perf-10: `indices` is already sorted by `_scan_bucket_indices`
+    # (L644-645). The redundant `sorted(...)` ran on every bucket selection;
+    # iterating directly is identical in result and skips a list copy.
+    for index in indices:
+        if index > next_expected:
+            break                           # first gap: caller fills it
+        bucket_path = ext_dir / bucket_name(prefix, index)
+        names = state_cache.get(bucket_path)
+        if names is _BUCKET_FULL:
+            next_expected = index + 1
+            continue
+        if names is None:
+            names = bucket_file_names(bucket_path)
+            state_cache[bucket_path] = names
+        if len(names) >= BUCKET_SIZE:
+            state_cache[bucket_path] = _BUCKET_FULL
+            next_expected = index + 1
+            continue
+        if filename not in names:
+            return BucketChoice(bucket_path, next_expected)
+        next_expected = index + 1
+    return BucketChoice(None, next_expected)
+
+
+def _allocate_new_bucket(
+    ext_dir: Path,
+    prefix: str,
+    index: int,
+    state_cache: dict[Path, Set[str]],
+    indices: list[int],
+) -> Path:
+    """Create the bucket-path entry for `index` (oze-cx-01): seed an empty
+    state_cache entry and record the index. The directory itself is created
+    later by ensure_directory on the actual move."""
+    new_path = ext_dir / bucket_name(prefix, index)
+    state_cache[new_path] = set()
+    indices.append(index)
+    return new_path
+
+
+def choose_bucket(
+    ext_dir: Path,
+    prefix: str,
+    filename: str,
+    state_cache: dict[Path, Set[str]],
+    indices: list[int],
+) -> Path:
+    """Choose or create the bucket for `filename`, preferring gaps and
+    existing rooms. Thin orchestrator over _find_reusable_bucket +
+    _allocate_new_bucket (oze-cx-01)."""
+    choice = _find_reusable_bucket(
+        ext_dir, prefix, filename, state_cache, indices)
+    if choice.bucket is not None:
+        return choice.bucket
+    return _allocate_new_bucket(
+        ext_dir, prefix, choice.next_index, state_cache, indices)
+
+
+@dataclass(frozen=True)
+class Bucket:
+    """Immutable value object for a bucket directory (oze-pat-01 / oze-cx-06).
+
+    A bucket is a (path, prefix, index, members) tuple — previously expressed
+    as an anonymous ``Path`` keying into a ``set[str]`` inside
+    ``BucketManager.state_cache``. Lifting it to a named value object gives
+    the planner a single handle to pass downstream and makes the "full?"
+    predicate a method rather than a sentinel-identity check.
+
+    `frozen=True` (oze-cx-06): a caller holding a Bucket reference no longer
+    sees its `members` field silently reassigned to `_BUCKET_FULL` after
+    creation. The transition to full is now visible only via the manager's
+    `state_cache`; a new `Bucket` is constructed on each `choose` so the
+    in-hand reference's view is always the snapshot it was handed.
+    """
+
+    path: Path
+    prefix: str
+    index: int
+    members: Set[str] | frozenset[str] = field(default_factory=set)
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+    def is_full(self) -> bool:
+        """True once the bucket has reached ``BUCKET_SIZE`` (oze-scal-02)."""
+        return self.members is _BUCKET_FULL or len(self.members) >= BUCKET_SIZE
+
+    def reserve(self, filename: str) -> None:
+        """Record ``filename`` as taken in this bucket. Caller must check
+        :meth:`is_full` first — `BucketManager.choose` enforces that contract.
+
+        Mutates the shared `members` set in place (the underlying object is
+        still mutable even though the dataclass is frozen). The frozen flag
+        only blocks rebinding the field, which is the bug we wanted to
+        prevent (oze-cx-06)."""
+        if isinstance(self.members, frozenset):  # _BUCKET_FULL is frozenset
+            raise RuntimeError(f"reserve on full bucket {self.path}")
+        self.members.add(filename)
+
+
+@dataclass
+class BucketManager:
+    """Bundles the bookkeeping for bucket selection (oze-arch-02).
+
+    Encapsulates ``state_cache`` (per-bucket filename sets and the
+    ``_BUCKET_FULL`` sentinel) and ``indices_cache`` (per (ext, prefix) list
+    of seen bucket indices). The plan stage talks to ``choose`` only; the
+    internal dicts stay private so "selected but never created" drift between
+    selection and bucket I/O is impossible.
+
+    The directory itself is still created lazily by :func:`move_file` via
+    :func:`ensure_directory` — :meth:`choose` just reserves the slot in the
+    planner caches and the target filename.
+    """
+
+    root: Path
+    state_cache: dict[Path, Set[str] | frozenset[str]] = field(default_factory=dict)
+    # Indices cache is keyed by *directory* (oze-perf-05): one scandir per
+    # ext_dir populates every prefix at once, so the 26-times-per-extension
+    # re-scan is gone.
+    _by_dir_cache: dict[Path, dict[str, list[int]]] = field(default_factory=dict)
+    # Legacy-shape view kept for tests/external callers that introspect
+    # ``BucketManager.indices_cache[(ext_dir, prefix)]``. Populated lazily on
+    # each ``_indices_for`` call from the directory-level cache.
+    indices_cache: dict[tuple[Path, str], list[int]] = field(default_factory=dict)
+    # oze-obs-01: per-allocation counters surfaced in the end-of-run
+    # debug line so the user can tune BUCKET_SIZE / spot pathological
+    # name distributions. Incremented inside `choose` and `choose_bucket`.
+    stats: dict[str, int] = field(default_factory=lambda: {
+        "new_bucket_allocated": 0,
+        "bucket_reused": 0,
+        "buckets_full": 0,
+    })
+
+    def _indices_for(self, ext_dir: Path, prefix: str) -> list[int]:
+        # Honour any pre-seeded entry in the legacy-shape view first so tests
+        # / external callers that populate `indices_cache` directly still win.
+        seeded = self.indices_cache.get((ext_dir, prefix))
+        if seeded is not None:
+            return seeded
+        by_prefix = self._by_dir_cache.get(ext_dir)
+        if by_prefix is None:
+            by_prefix = _scan_bucket_indices(ext_dir)
+            self._by_dir_cache[ext_dir] = by_prefix
+        indices = by_prefix.setdefault(prefix, [])
+        # Mirror into the legacy-shape view so existing tests/observers still
+        # see the same list object (mutations to either reach both).
+        self.indices_cache[(ext_dir, prefix)] = indices
+        return indices
+
+    def choose(self, source: Path, ext_dir: Path, prefix: str) -> Bucket:
+        """Reserve a bucket for ``source.name`` under ``ext_dir`` and return
+        a :class:`Bucket` value object (oze-pat-01).
+
+        Records ``source.name`` in the bucket's name set BEFORE the caller
+        submits the move (oze-conc-01) — workers never touch the cache, so
+        the invariant "every accepted destination is in the cache" holds
+        trivially. Collapses to ``_BUCKET_FULL`` once the bucket reaches
+        ``BUCKET_SIZE`` (oze-scal-02).
+        """
+        indices = self._indices_for(ext_dir, prefix)
+        # oze-obs-01 / oze-hyg-01: snapshot of bucket paths before the
+        # call so we can tell whether choose_bucket reused or freshly
+        # allocated. Single-name binding now (the prior chained
+        # assignment kept an unused alias).
+        pre_known = set(self.state_cache.keys())
+        bucket_path = choose_bucket(
+            ext_dir, prefix, source.name, self.state_cache, indices)
+        names = self.state_cache[bucket_path]
+        if names is _BUCKET_FULL:  # oze-cx-05: assertion replaced by real raise
+            raise RuntimeError(
+                f"choose_bucket returned full bucket {bucket_path}"
+            )
+        if bucket_path in pre_known:
+            self.stats["bucket_reused"] += 1
+        else:
+            self.stats["new_bucket_allocated"] += 1
+        names.add(source.name)
+        match = BUCKET_NAME_PATTERN.match(bucket_path.name)
+        if match is None:
+            raise RuntimeError(
+                f"choose_bucket returned non-conforming path {bucket_path}"
+            )
+        bucket = Bucket(
+            path=bucket_path,
+            prefix=match.group(1),
+            index=int(match.group(2)),
+            members=names,
+        )
+        if bucket.is_full():
+            self.state_cache[bucket_path] = _BUCKET_FULL
+            self.stats["buckets_full"] += 1
+            # oze-cx-06: Bucket is frozen — return a fresh instance with
+            # the sentinel members instead of mutating the in-hand object.
+            bucket = Bucket(
+                path=bucket.path,
+                prefix=bucket.prefix,
+                index=bucket.index,
+                members=_BUCKET_FULL,
+            )
+        return bucket
+
+
+def ensure_directory(path: Path) -> None:
+    """Create a directory path if it does not already exist."""
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _reject_existing_target(target: Path, exc: FileExistsError) -> NoReturn:
+    """Raise the unified 'target already exists' error from a no-overwrite
+    reservation failure (oze-dup-01) — shared by the same-fs link path and
+    the cross-fs O_EXCL path so both produce the same message."""
+    raise FileExistsError(f"Target file already exists: {target}") from exc
+
+
+def _link_exclusive(src: Path, dst: Path) -> None:
+    """Hardlink ``src`` → ``dst`` with no-overwrite semantics (oze-dup-02).
+
+    Wraps :func:`_link_with_transient_retry` and maps FileExistsError through
+    :func:`_reject_existing_target` so the same-fs path produces a uniform
+    error message. Other OSErrors (notably ``errno.EXDEV``) propagate so the
+    caller can fall back to the cross-device copy path.
+    """
+    try:
+        _link_with_transient_retry(src, dst)
+    except FileExistsError as exc:
+        _reject_existing_target(dst, exc)
+
+
+def _reserve_target(target: Path) -> None:
+    """Reserve ``target`` with ``O_CREAT|O_EXCL`` (oze-dup-02).
+
+    Atomic no-overwrite create — the symmetric primitive of
+    :func:`_link_exclusive` for the cross-device copy path. Closes the
+    descriptor immediately; ``os.replace`` later atomically swaps the
+    completed temp file into this reserved slot.
+    """
+    try:
+        fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError as exc:
+        _reject_existing_target(target, exc)
+    os.close(fd)
+
+
+def _unlink_with_rollback(source: Path, target: Path) -> None:
+    """Remove ``source`` after a successful hardlink; roll back the new link
+    if the source unlink fails (oze-cx-04).
+
+    Flattens the previous three-deep ``try`` nest in :func:`move_file`. The
+    invariant is "the file ends up in exactly one place" — either the hardlink
+    survives and the source is gone (success), or both are removed and the
+    caller sees the original OSError (rollback succeeded), or a RuntimeError
+    surfaces with both errnos so manual cleanup is unmistakable
+    (oze-rel-02 / oze-rel-04).
+    """
+    try:
+        os.unlink(source)
+        return
+    except OSError as src_exc:
+        try:
+            os.unlink(target)
+        except OSError as tgt_exc:
+            raise RuntimeError(
+                f"double-copy: hardlinked {target} but failed to remove "
+                f"both the source ({src_exc}) and the new link ({tgt_exc}); "
+                f"manual cleanup required"
+            ) from src_exc
+        raise
+
+
+def move_file(path: Path, destination: Path) -> Path:
+    """Move a file into the destination directory without overwriting an existing target.
+
+    Same-filesystem moves use an atomic hardlink+unlink: `os.link` fails with
+    FileExistsError if the target name is taken, closing the TOCTOU window of a
+    separate exists()-then-move check (conc-02). Cross-filesystem moves fall back
+    to copy-to-temp + atomic rename, so an interrupted copy never leaves a partial
+    file at the target (conc-03).
+
+    Transient FD-exhaustion errnos (EMFILE/ENFILE/EAGAIN) are retried with
+    jittered exponential backoff (oze-perf-07) before we fall through to the
+    cross-device copy.
+
+    oze-rel-12: a source whose name collides with an ancestor of the
+    destination (e.g. a file literally named ``avi`` whose header pushes it
+    under ``<root>/avi/a00000/``) would otherwise blow up `ensure_directory`
+    with ``NotADirectoryError``. The source is renamed in place to a
+    collision-resolved sibling before the dir is created so the data is
+    preserved and the move proceeds.
+    """
+    path = _resolve_source_collision(path, destination)
+    ensure_directory(destination)
+    target = destination / path.name
+    try:
+        _link_exclusive(path, target)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        _move_cross_device(path, target)
+    else:
+        _unlink_with_rollback(path, target)
+    return target
+
+
+def _resolve_source_collision(source: Path, destination: Path) -> Path:
+    """If any ancestor of `destination` exists as a non-directory, rename
+    the blocker aside before the destination dir is created (oze-rel-12 /
+    oze-rel-13).
+
+    Two collision shapes are handled by the same rename-aside strategy:
+
+      * **self-collision** (oze-rel-12): the blocker IS `source`. Rename
+        the source and return the new path so the move can proceed under
+        the bucket.
+      * **cross-source collision** (oze-rel-13): some unrelated regular
+        file already occupies a path the destination needs. Rename that
+        file (it stays in the same dir, just with a `.collision<n>`
+        suffix) so the bucket dir can be created. The source is returned
+        unchanged.
+
+    Picks the first free `<name>.collision<n>` sibling for the renamed
+    file so re-runs are deterministic and idempotent."""
+    # Loop because a sibling worker thread may resolve the same blocker
+    # in parallel; if the rename races and loses (FileNotFoundError or
+    # ENOENT), the blocker is already gone — re-probe and either move on
+    # or pick up the next blocker up the chain.
+    for _ in range(8):
+        blocker = _find_destination_blocker(destination)
+        if blocker is None:
+            return source
+        try:
+            # oze-rel-19: atomic free-slot reservation closes the
+            # TOCTOU window between `exists()` and `rename`.
+            candidate = _atomic_rename_to_free_slot(blocker)
+        except FileNotFoundError:
+            continue   # sibling worker already moved/renamed the blocker
+        except OSError as exc:
+            # oze-rel-17: distinguish transient (race) from permanent
+            # (EACCES / EROFS / EISDIR / EBUSY). Transients already
+            # handled by FileNotFoundError above; everything else here is
+            # a real reason the bucket can't be created and the caller
+            # needs to know rather than burning retry budget.
+            if exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS,
+                              errno.EISDIR, errno.EBUSY):
+                raise
+            continue
+        if blocker == source:
+            logger.warning(
+                "name collision: source %s would collide with destination "
+                "ancestor %s; renamed to %s before placing under bucket",
+                source, destination, candidate,
+            )
+            return candidate
+        logger.warning(
+            "name collision: file %s blocks destination ancestor under %s; "
+            "renamed to %s so the bucket dir can be created",
+            blocker, destination, candidate,
+        )
+        return source
+    # Gave up after 8 retries (extremely unlikely on real workloads).
+    logger.warning(
+        "name collision retries exhausted for %s -> %s; falling through",
+        source, destination,
+    )
+    return source
+
+
+def _find_destination_blocker(destination: Path) -> "Path | None":
+    """Walk up `destination` looking for the first ancestor that exists
+    but is not a directory (oze-rel-13). Returns that ancestor or None
+    when the chain is unblocked. Symlinks are treated as blockers — even
+    a symlink-to-dir would mean the bucket lives under the link, which
+    we refuse to follow for safety."""
+    cur = destination
+    while cur != cur.parent:
+        try:
+            st = cur.lstat()
+        except FileNotFoundError:
+            cur = cur.parent
+            continue
+        except NotADirectoryError:
+            # An ancestor exists as a regular file: lstat on a deeper
+            # path raises ENOTDIR. Walk up and try the parent — the
+            # blocker is somewhere above.
+            cur = cur.parent
+            continue
+        except OSError:
+            return None
+        # Symlinks count as blockers; a file blocks; a dir is fine.
+        if _stat.S_ISDIR(st.st_mode) and not _stat.S_ISLNK(st.st_mode):
+            cur = cur.parent
+            continue
+        return cur
+    return None
+
+
+def _source_blocks_destination(source: Path, destination: Path) -> bool:
+    """Back-compat probe (oze-rel-12). True iff `source` itself blocks
+    `destination`. Cross-source blockers are handled by
+    :func:`_find_destination_blocker` directly."""
+    blocker = _find_destination_blocker(destination)
+    if blocker is None:
+        return False
+    try:
+        return blocker.resolve() == source.resolve()
+    except OSError:
+        return False
+
+
+_COLLISION_RETRY_CAP = 1000
+
+
+def _free_collision_name(source: Path) -> Path:
+    """First free `<name>.collision<n>` sibling of `source` (oze-rel-16).
+
+    Caps the search at `_COLLISION_RETRY_CAP` slots so an adversarial
+    filesystem with pre-existing `.collision1` … `.collisionN` siblings
+    can't hang the planner indefinitely.
+
+    NOTE (oze-rel-19): the returned path is a SUGGESTION, not an atomic
+    reservation. Between `exists()` here and the caller's actual rename,
+    a sibling process can create the same name (TOCTOU). Callers MUST
+    wrap their `os.rename` in `try/except FileExistsError` and retry
+    via :func:`_atomic_rename_to_free_slot` rather than trusting this
+    path is still free."""
+    prefix = f"{source.name}.collision"
+    taken = set()
+    with os.scandir(source.parent) as entries:
+        for entry in entries:
+            if not entry.name.startswith(prefix):
+                continue
+            suffix = entry.name[len(prefix):]
+            if suffix.isdigit():
+                taken.add(int(suffix))
+    for n in range(1, _COLLISION_RETRY_CAP + 1):
+        if n not in taken:
+            return source.with_name(f"{source.name}.collision{n}")
+    raise RuntimeError(
+        f"unable to find free collision name for {source} "
+        f"after {_COLLISION_RETRY_CAP} attempts"
+    )
+
+
+def _atomic_rename_to_free_slot(source: Path) -> Path:
+    """Rename `source` to the first free `<name>.collisionN` slot,
+    closing the TOCTOU window in `_free_collision_name` (oze-rel-19).
+
+    Loops: pick a suggested free name, try `os.rename(source, candidate)`,
+    on `FileExistsError` (someone else grabbed that slot) bump `n` and
+    retry. Caps at `_COLLISION_RETRY_CAP` overall attempts."""
+    last_exc: OSError | None = None
+    for n in range(1, _COLLISION_RETRY_CAP + 1):
+        candidate = source.with_name(f"{source.name}.collision{n}")
+        if candidate.exists():
+            continue
+        try:
+            os.rename(source, candidate)
+            return candidate
+        except FileExistsError as exc:
+            last_exc = exc
+            continue
+    raise RuntimeError(
+        f"unable to atomically reserve a collision name for {source} "
+        f"after {_COLLISION_RETRY_CAP} attempts"
+    ) from last_exc
+
+
+_TRANSIENT_LINK_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.EAGAIN})
+
+# Jittered exponential backoff schedule for `_link_with_transient_retry`
+# (oze-perf-07). Three attempts at 5ms / 20ms / 80ms — covers the typical
+# FD-exhaustion window without burning a fixed 20ms when the slot frees up
+# sooner. Each delay is multiplied by a uniform random factor in [0.5, 1.5]
+# to desynchronise contending workers.
+_LINK_RETRY_DELAYS_SEC: tuple[float, ...] = (0.005, 0.020, 0.080)
+
+# oze-sec-03: `random` is per-process state derived from the import-time seed;
+# workers forked after that share the same sequence and reproduce correlated
+# jitter, which defeats the desynchronisation we want under FD exhaustion.
+# `SystemRandom` reads from the kernel CSPRNG on every call, so each worker
+# (and any post-fork child) draws independent values.
+_RETRY_JITTER = secrets.SystemRandom()
+
+
+def _link_with_transient_retry(src: Path, dst: Path) -> None:
+    """`os.link(src, dst)` with jittered exponential backoff on transient
+    FD-exhaustion errnos (oze-conc-02 / oze-perf-07).
+
+    First attempt is unconditional; on EMFILE/ENFILE/EAGAIN we retry up to
+    ``len(_LINK_RETRY_DELAYS_SEC)`` times. The delays start at 5ms — most
+    EMFILE bursts clear faster than the old fixed 20ms — and grow geometrically
+    to 80ms. Jitter avoids the thundering-herd where N workers all wake at the
+    same instant and reproduce the original FD pressure.
+    """
+    # oze-perf-09: `_RETRY_JITTER` is module-level so heavy migrations don't pay
+    # the import-lookup cost per retry attempt.
+    last_exc: OSError | None = None
+    for attempt, base_delay in enumerate((0.0,) + _LINK_RETRY_DELAYS_SEC):
+        if base_delay > 0.0:
+            time.sleep(base_delay * _RETRY_JITTER.uniform(0.5, 1.5))
+        try:
+            os.link(src, dst)
+            return
+        except OSError as exc:
+            if exc.errno not in _TRANSIENT_LINK_ERRNOS:
+                raise
+            last_exc = exc
+    # Exhausted retries — surface the last transient error so the caller can
+    # decide whether to fall back to the cross-device copy path. Convert the
+    # assert to a real check so `python -O` still enforces it (oze-cx-05).
+    if last_exc is None:
+        raise RuntimeError("link retry loop exhausted without capturing an exception")  # pragma: no cover - defensive: loop returns on success
+    raise last_exc
+
+
+def _move_cross_device(source: Path, target: Path) -> None:
+    """Move a file across filesystems atomically, then remove the source.
+
+    Reserves the final name with O_EXCL (no-overwrite), copies to a temp file,
+    then atomically renames it into place. Any failure rolls back the temp and
+    reservation so no partial file survives.
+    """
+    _reserve_target(target)
+    # oze-sec-01: replace the PID-based suffix with cryptographically
+    # random bytes. The previous `.{name}.{pid}.tmp` pattern was
+    # predictable: an attacker with write access to the bucket dir
+    # could pre-create that exact path (or symlink it elsewhere) and
+    # race `shutil.copy2` into clobbering the wrong target. 8 bytes
+    # of `secrets.token_hex` collapse that race to ~2^-64 odds.
+    tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        shutil.copy2(source, tmp)
+        os.replace(tmp, target)  # atomic: target only ever holds the complete file
+    except BaseException:
+        # oze-cx-03: cleanup must never mask the real failure. Narrow to OSError
+        # (the only thing os.unlink can raise on a missing/locked leftover) and
+        # log at debug so unexpected exception classes still surface.
+        for leftover in (tmp, target):
+            try:
+                os.unlink(leftover)
+            except OSError as unlink_exc:
+                logger.debug(
+                    "cross-device cleanup: could not unlink %s: %s",
+                    leftover, unlink_exc,
+                )
+        raise
+    os.unlink(source)
+
+
+def _walk_prunable_dirs(
+    root: Path,
+    visit: Callable[[Path], None],
+    label: str,
+) -> bool:
+    """Post-order walk of directories strictly under ``root`` (oze-dup-01).
+
+    Shared traversal for :func:`prune_empty_dirs` and
+    :func:`_count_prunable_dirs`: resolves ``root``, rejects a symlinked /
+    non-directory root, then visits every non-symlink directory below it in
+    ``os.walk(topdown=False)`` order, invoking ``visit(current)`` for each.
+    Returns False when the root is unusable (caller returns 0).
+    """
+    try:
+        root_resolved = Path(root).resolve(strict=True)
+    except OSError as exc:
+        logger.debug("%s: cannot resolve root %s: %s", label, root, exc)
+        return False
+    if root_resolved.is_symlink() or not root_resolved.is_dir():
+        return False
+
+    def _on_error(exc: OSError) -> None:
+        logger.debug("%s: walk error: %s", label, exc)
+
+    for dirpath, _dirnames, _filenames in os.walk(
+        root_resolved, topdown=False, followlinks=False, onerror=_on_error
+    ):
+        try:
+            current = Path(dirpath)
+        except (ValueError, OSError) as exc:
+            logger.debug("%s: skip unparseable path %r: %s", label, dirpath, exc)
+            continue
+        if current == root_resolved:
+            continue
+        try:
+            if current.is_symlink():
+                continue
+        except OSError:
+            continue
+        visit(current)
+    return True
+
+
+def prune_empty_dirs(root: Path, verbose: bool = False) -> int:
+    """Remove every empty directory strictly *under* ``root``.
+
+    Post-order traversal (``os.walk(topdown=False)``) lets a directory whose
+    only contents were now-removed empty children also be pruned. ``root``
+    itself is never removed, even when empty.
+
+    Robustness contract:
+
+    * Symlinks are entries, not destinations — we never follow a symlink during
+      the walk (``followlinks=False``) and a symlinked directory is not pruned
+      even if its target is empty. A directory containing only symlinks is
+      therefore NOT empty.
+    * Race-tolerant: ``rmdir`` failures with ``ENOENT`` / ``ENOTEMPTY`` /
+      ``EEXIST`` are normal outcomes (concurrent removal / late-arriving entry)
+      and counted silently as skipped. All other ``OSError`` (notably
+      ``EACCES``, ``EBUSY``) are logged at debug and skipped.
+    * Encoding-safe: paths are walked via the OS-native byte layer
+      (``os.walk`` over ``os.scandir``), so surrogate-escaped names from
+      non-UTF-8 filesystems flow through without raising.
+    * Name-content-blind: any byte sequence the kernel accepts as a dirname
+      (control chars, newlines, BOMs, RTL marks, …) is handled — emptiness is
+      determined by ``rmdir``, never by parsing the name.
+
+    Returns the number of directories actually removed.
+    """
+    counter = {"removed": 0}
+
+    def _try_remove(current: Path) -> None:
+        try:
+            os.rmdir(current)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.ENOTEMPTY, errno.EEXIST, errno.ENOENT):
+                logger.debug("prune_empty_dirs: cannot remove %s: %s", current, exc)
+            return
+        counter["removed"] += 1
+        if verbose:
+            logger.info("Removed empty dir: %s", current)
+
+    _walk_prunable_dirs(root, _try_remove, "prune_empty_dirs")
+    return counter["removed"]
+
+
+def resolve_root(root: str | Path | None) -> Path:
+    """Validate and resolve the root path to an absolute Path object."""
+    if root is None or (isinstance(root, (str, Path)) and not str(root).strip()):
+        raise ValueError('root path must be a non-empty string or Path')
+
+    # Apply the length guard to Path too, not just str (oze-rel-03).
+    if isinstance(root, (str, Path)) and len(str(root)) > ROOT_MAX_LENGTH:
+        raise ValueError(f'root path must be at most {ROOT_MAX_LENGTH} characters')
+
+    if not isinstance(root, (str, Path)):
+        raise TypeError('root must be a path or string')
+
+    resolved = Path(root) # Path.resolve() canonicalizes the path, resolving '..' components.
+
+    if not resolved.is_dir():
+        raise FileNotFoundError(f'Error: root folder does not exist: {resolved}')
+
+    return resolved.resolve()
+
+
+MoveResult = tuple[Path, Path, Exception | None]
+WorkerFn = Callable[[Path, Path], MoveResult]
+
+
+def make_worker(preview: bool) -> WorkerFn:
+    """Return the per-move worker (oze-arch-01).
+
+    Closing over ``preview`` lets the worker body stay pure: the planner picks
+    the worker once, then submits ``(source, bucket_dir)`` pairs without
+    re-passing the preview flag on every call. Preview mode short-circuits
+    without touching the filesystem; live mode delegates to :func:`move_file`
+    and converts expected per-file move failures into a skip-with-error tuple
+    so a single failure cannot kill the worker pool. OSError covers filesystem
+    errors; RuntimeError (collision-cap exhaustion, double-copy) and ValueError
+    (out-of-range bucket index) are equally per-file, not run-fatal. A
+    BaseException (KeyboardInterrupt, SystemExit) is never swallowed.
+    """
+    def _move_worker(source: Path, bucket_dir: Path) -> MoveResult:
+        dest = bucket_dir / source.name
+        if preview:
+            return source, dest, None
+        try:
+            move_file(source, bucket_dir)
+            return source, dest, None
+        except (OSError, RuntimeError, ValueError) as exc:
+            return source, dest, exc
+    return _move_worker
+
+
+def plan_moves(
+    root: Path,
+    files: Iterable[Path],
+    manager: BucketManager,
+    sniff: bool = True,
+    head_cache: dict[Path, HeadBytes] | None = None,
+    extra_zip_family: frozenset[str] = frozenset(),
+    ctx: SniffContext | None = None,
+) -> Iterator[tuple[Path, Path]]:
+    """Yield ``(source, bucket_dir)`` pairs for every file in ``files`` (oze-decl-01).
+
+    Pure planning: only the manager's caches are mutated; no filesystem writes
+    happen here EXCEPT the pre-pass at the top that resolves source-name /
+    bucket-dir collisions (oze-rel-14) — those renames MUST happen serially
+    before any worker fires, otherwise worker A can rename the source of
+    worker B mid-flight (the prior in-worker resolution race). Bucket
+    directories are reserved in the manager's name-set cache as a side effect
+    of :meth:`BucketManager.choose` so a later iteration can see the
+    reservation (oze-conc-01).
+
+    The caller is responsible for ordering — pass ``sorted(files)`` if
+    deterministic plans matter; the function asserts the sort to catch
+    callers that forget (oze-decl-02).
+
+    Returning an iterator means the plan can be inspected (or unit-tested)
+    without running any moves, and a million-file run never materialises the
+    full plan in memory (oze-scal-01).
+    """
+    if ctx is None:
+        ctx = SniffContext(sniff=sniff, head_cache=head_cache,
+                           extra_zip_family=extra_zip_family)
+    # oze-decl-02: enforce the docstring contract. Sorted-list inputs are
+    # required for deterministic plans; iterators are accepted (we have
+    # no way to assert order without consuming first).
+    if isinstance(files, list):
+        if not all(a <= b for a, b in zip(files, files[1:])):
+            raise ValueError(
+                "plan_moves expects `files` to be sorted; pass sorted(files)"
+            )
+    # Returns [(current_source_path, original_ext_dir)] — preplan resolves
+    # the extension BEFORE any rename so a `.collision<n>` suffix doesn't
+    # accidentally re-classify the file (oze-rel-14).
+    plan_pairs = _preplan_resolve_collisions(root, list(files), ctx)
+    for source, ext_dir in plan_pairs:
+        # oze-rel-18: use `.name` so dotfiles (`.bashrc` → stem="") and
+        # multi-dot names (`archive.tar.gz` → stem="archive.tar") get
+        # bucketed off the same first letter the scanner sees on disk.
+        prefix = normalize_prefix(source.name)
+        # `manager.choose` returns a Bucket value object (oze-pat-01); the
+        # worker pipeline only needs the path, so unwrap here.
+        bucket = manager.choose(source, ext_dir, prefix)
+        # oze-scal-06: planning has now consumed every head_cache read this
+        # source needs (resolve_real_extension ran inside preplan). Drop
+        # the entry so the cache RSS tracks the in-flight plan window
+        # rather than the entire file tree on a 1M-file run.
+        if ctx.head_cache is not None:
+            ctx.head_cache.pop(source, None)
+        yield source, bucket.path
+
+
+def _preplan_resolve_collisions(
+    root: Path,
+    files: list[Path],
+    ctx: "SniffContext",
+) -> list[tuple[Path, Path]]:
+    """Pre-pass over `files` (oze-rel-14): if any source file's own path
+    sits on the ancestor chain of a bucket dir that ANY file in the plan
+    needs, rename that source aside now — serially, before any worker is
+    submitted. After this pass every yielded source is at a path that no
+    concurrent worker can race to rename.
+
+    Returns a list of ``(current_source_path, original_ext_dir)`` tuples.
+    The extension is resolved BEFORE any rename so a `.collision<n>` suffix
+    doesn't accidentally re-classify the file (e.g. ``avi`` (no header)
+    renamed to ``avi.collision1`` must still bucket under ``no_extension/``,
+    not ``collision1/``).
+    """
+    # Compute the target ext-dir for every file once; build a set of every
+    # ancestor path that any plan needs to exist as a directory.
+    pairs: list[tuple[Path, Path]] = [
+        (f, root / resolve_real_extension(f, ctx=ctx)) for f in files
+    ]
+    needed_dirs: set[Path] = set()
+    for _, ext_dir in pairs:
+        cur = ext_dir
+        while cur != cur.parent and cur != root:
+            needed_dirs.add(cur)
+            cur = cur.parent
+    rename_map: dict[Path, Path] = {}
+    for source, _ext_dir in pairs:
+        if source not in needed_dirs:
+            continue
+        try:
+            if not source.is_file():
+                continue
+        except OSError:
+            continue
+        try:
+            # oze-rel-19: atomic — re-probes free slot on FileExistsError.
+            candidate = _atomic_rename_to_free_slot(source)
+        except FileNotFoundError:
+            continue   # vanished between our scan and rename — race tolerated
+        logger.warning(
+            "name collision (planning): source %s would block bucket "
+            "ancestor; renamed to %s before any worker starts",
+            source, candidate,
+        )
+        rename_map[source] = candidate
+        # Move the head_cache entry over too so the worker's later
+        # `resolve_real_extension` calls don't re-open the file.
+        if ctx.head_cache is not None and source in ctx.head_cache:
+            ctx.head_cache[candidate] = ctx.head_cache.pop(source)
+    return [(rename_map.get(src, src), ext_dir) for src, ext_dir in pairs]
+
+
+@dataclass
+class _RunStats:
+    """Mutable processed/skipped tally threaded through :func:`_run_moves`."""
+
+    processed: int = 0
+    skipped: int = 0
+
+
+def _drain_futures(
+    futures: dict[Future, Path],
+    stats: _RunStats,
+    preview: bool,
+    head_cache: dict[Path, HeadBytes],
+    block: bool,
+) -> None:
+    """Consume completed futures, log results, and prune the head_cache for
+    finished sources (oze-conc-03 / oze-scal-05). ``block`` True waits for at
+    least one future; otherwise polls without blocking."""
+    done, _ = wait(futures, timeout=None if block else 0,
+                   return_when=FIRST_COMPLETED)
+    for fut in done:
+        source, destination, error = fut.result()
+        del futures[fut]
+        head_cache.pop(source, None)
+        if error:
+            logger.warning(f"Skipped {source}: {error}")
+            stats.skipped += 1
+        else:
+            action = "Preview:" if preview else "Moved"
+            logger.info(f"{action} {source} -> {destination}")
+            stats.processed += 1
+
+
+def _run_moves(
+    plan: Iterator[tuple[Path, Path]],
+    worker: WorkerFn,
+    num_threads: int,
+    preview: bool,
+    total_files: int,
+    head_cache: dict[Path, HeadBytes],
+) -> _RunStats:
+    """Execute stage (oze-cmplx-01): own the thread pool, the bounded-backlog
+    submission loop, drain, and progress logging. Returns the run tally.
+
+    Bounded-outstanding submission (oze-scal-04) keeps at most
+    ``num_threads * SUBMIT_BACKLOG_MULT`` futures in flight. The executor is
+    managed manually so KeyboardInterrupt can cancel pending moves immediately
+    (conc-01) instead of draining them via ``with`` __exit__.
+    """
+    stats = _RunStats()
+    max_outstanding = max(1, num_threads * SUBMIT_BACKLOG_MULT)
+    executor = ThreadPoolExecutor(max_workers=num_threads)
+    futures: dict[Future, Path] = {}
+    last_progress = 0
+    try:
+        for source, bucket_dir in plan:
+            while len(futures) >= max_outstanding:
+                _drain_futures(futures, stats, preview, head_cache, block=True)
+            futures[executor.submit(worker, source, bucket_dir)] = source
+            done_so_far = stats.processed + stats.skipped
+            if (done_so_far - last_progress) >= PROGRESS_EVERY:
+                logger.info("progress: processed %d/%d, skipped %d",
+                            stats.processed, total_files, stats.skipped)
+                last_progress = done_so_far
+        while futures:
+            _drain_futures(futures, stats, preview, head_cache, block=True)
+    except KeyboardInterrupt:
+        executor.shutdown(wait=False, cancel_futures=True)
+        logger.info(f"\nInterrupted. Processed {stats.processed} file(s), "
+                    f"skipped {stats.skipped} file(s).")
+        raise SystemExit(1) from None
+    finally:
+        executor.shutdown(wait=False)
+    return stats
+
+
+def _log_run_stats(head_cache: dict[Path, HeadBytes], manager: BucketManager) -> None:
+    """End-of-run debug line with cache + bucket counters (oze-obs-03)."""
+    logger.debug(
+        "stats: head_cache_entries=%d unreadable=%d "
+        "new_bucket_allocated=%d bucket_reused=%d buckets_full=%d",
+        len(head_cache),
+        sum(1 for v in head_cache.values() if isinstance(v, _Unreadable)),
+        manager.stats["new_bucket_allocated"],
+        manager.stats["bucket_reused"],
+        manager.stats["buckets_full"],
+    )
+
+
+def organize(
+    root: str | Path,
+    preview: bool = False,
+    verbose: bool = False,
+    num_threads: int = 3,
+    sniff: bool = True,
+    extra_zip_family: frozenset[str] = frozenset(),
+    bucket_manager: BucketManager | None = None,
+    head_cache: dict[Path, HeadBytes] | None = None,
+    prune_empty: bool = False,
+) -> None:
+    """Organize files under the root path into extension-based buckets.
+
+    If ``preview`` is True, the script prints move actions without performing them.
+    If ``sniff`` is True (default), the file's header bytes are inspected and the
+    detected real type wins over the declared extension (``mypdf.doc`` → ``pdf/``).
+    ``extra_zip_family`` extends the ZIP container family (oze-rel-07) so newly
+    arrived zip-based formats (``.usdz``, ``.crx``, …) are not bucketed under
+    ``zip/`` by mistake. Handles KeyboardInterrupt gracefully by printing a
+    summary and exiting.
+
+    Architecture (oze-decl-01 / oze-arch-01 / oze-arch-02): the body is a thin
+    pipeline — *scan* (with shared head-bytes cache, oze-perf-04) → *plan*
+    (``plan_moves`` over a :class:`BucketManager`) → *execute* (closures
+    returned by :func:`make_worker` submitted to a thread pool). The pipeline
+    stays streaming: plans are issued one at a time, never buffered.
+    """
+    if not isinstance(num_threads, int) or isinstance(num_threads, bool) or num_threads < 1:
+        raise ValueError(f"num_threads must be a positive integer (>=1), got {num_threads!r}")
+    root = resolve_root(root)
+    if verbose:
+        logger.info(f"Organizing files in: {root}")
+    # oze-decl-02: accept caller-provided pipeline state so tests / alternate
+    # runners can pre-seed or assert against it. Defaults preserve the
+    # original behaviour for the CLI entry point.
+    if head_cache is None:
+        head_cache = {}
+    ctx = SniffContext(sniff=sniff, head_cache=head_cache,
+                       extra_zip_family=extra_zip_family)
+    files = list_files(
+        root,
+        skip_paths={Path(__file__).resolve()},
+        verbose=verbose,
+        ctx=ctx,
+    )
+
+    if not files and (preview or verbose):
+        logger.info(f"No files to organize under {root} (already bucketed or empty).")
+        return
+
+    manager = bucket_manager if bucket_manager is not None else BucketManager(root=root)
+    plan = plan_moves(root, sorted(files), manager, ctx=ctx)
+    stats = _run_moves(
+        plan,
+        worker=make_worker(preview),
+        num_threads=num_threads,
+        preview=preview,
+        total_files=len(files),
+        head_cache=head_cache,
+    )
+    if verbose or preview or stats.processed > 0 or stats.skipped > 0:
+        logger.info(
+            f"Finished. Processed {stats.processed} file(s), "
+            f"skipped {stats.skipped} file(s)."
+        )
+    _log_run_stats(head_cache, manager)
+
+    if prune_empty:
+        if preview:
+            # Preview mode never touches the filesystem during planning; honour
+            # that contract here too — count what *would* be removed without
+            # mutating the tree.
+            count = _count_prunable_dirs(root)
+            if verbose or count > 0:
+                logger.info("Preview: would remove %d empty directory/ies under %s", count, root)
+        else:
+            count = prune_empty_dirs(root, verbose=verbose)
+            if verbose or count > 0:
+                logger.info("Pruned %d empty directory/ies under %s", count, root)
+
+
+def _count_prunable_dirs(root: Path) -> int:
+    """Dry-run companion to :func:`prune_empty_dirs` used by ``--preview``.
+
+    Walks the same post-order, tracks which directories would be removed by
+    simulating the cascade (a parent becomes prunable once all its children
+    were marked prunable), and returns the count. Pure read-only — no
+    ``rmdir``. Symlinks are entries (never pruned, never followed).
+    """
+    would_remove: set[Path] = set()
+
+    def _mark_if_prunable(current: Path) -> None:
+        if _dir_is_prunable(current, would_remove):
+            would_remove.add(current)
+
+    _walk_prunable_dirs(root, _mark_if_prunable, "_count_prunable_dirs")
+    return len(would_remove)
+
+
+def _dir_is_prunable(current: Path, would_remove: set[Path]) -> bool:
+    """True iff every entry in ``current`` is a subdirectory already marked in
+    ``would_remove`` (oze-dup-01). Files / symlinks of any kind / unreadable
+    entries make it non-empty."""
+    try:
+        with os.scandir(current) as it:
+            for entry in it:
+                if entry.is_symlink():
+                    return False
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    return False
+                if not is_dir or Path(entry.path) not in would_remove:
+                    return False
+    except OSError:
+        return False
+    return True
+
+
+def _positive_int(value: str) -> int:
+    """argparse `type=` validator (oze-test-04): accept only positive
+    integers. Replaces the bare ``type=int`` on ``--threads`` so
+    ``--threads 0`` / ``--threads -3`` surface a clean usage error at
+    parse time instead of a cryptic ``ThreadPoolExecutor(max_workers=0)``
+    crash deep inside the run."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}")
+    if n < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive integer (>=1), got {n}")
+    return n
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Return the argument parser used by the script."""
+    parser = argparse.ArgumentParser(
+        description='Organize files by extension into bucketed subdirectories.'
+    )
+    parser.add_argument(
+        'root',
+        nargs='?',
+        help='Root folder to scan and reorganize.',
+    )
+    parser.add_argument(
+        '--preview',
+        '-n',
+        action='store_true',
+        help='Show planned moves without applying them.',
+    )
+    parser.add_argument(
+        '--verbose',
+        '-v',
+        action='store_true',
+        help='Enable verbose output.',
+    )
+    parser.add_argument(
+        '--threads',
+        '-j',
+        type=_positive_int,
+        default=3,
+        help='Number of worker threads (positive int, default: 3).',
+    )
+    parser.add_argument(
+        '--no-sniff',
+        dest='sniff',
+        action='store_false',
+        help='Disable file-header type detection; bucket strictly by filename extension.',
+    )
+    parser.add_argument(
+        '--extra-zip-family',
+        dest='extra_zip_family',
+        default='',
+        help=(
+            'Comma-separated extensions to treat as ZIP-family containers '
+            '(e.g. "usdz,crx,xpi"). Files of these extensions whose header is '
+            'PK\\x03\\x04 stay under their declared extension instead of being '
+            'bucketed under zip/.'
+        ),
+    )
+    parser.add_argument(
+        '--prune-empty-dirs',
+        dest='prune_empty',
+        action='store_true',
+        help=(
+            'After moving files into buckets, recursively remove every empty '
+            'directory under the root. Root itself is preserved. Symlinks are '
+            'treated as entries: a symlinked directory is never pruned and a '
+            'directory containing only symlinks is NOT considered empty.'
+        ),
+    )
+    parser.set_defaults(sniff=True, prune_empty=False)
+    return parser
+
+
+_EXTRA_ZIP_FAMILY_MAX_LEN = 16
+_EXTRA_ZIP_FAMILY_VALID = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def _parse_extra_zip_family(raw: str) -> frozenset[str]:
+    """Split a ``--extra-zip-family`` CSV into a normalised frozenset.
+
+    Lowercased and stripped of dots/whitespace so ``"USDZ, .crx"`` and
+    ``"usdz,crx"`` produce the same set. Empty/blank entries are dropped.
+
+    oze-sec-03: each item is validated AFTER normalisation. The set is
+    only used for membership tests today, so no exploit exists, but
+    defence-in-depth rejects items longer than
+    ``_EXTRA_ZIP_FAMILY_MAX_LEN`` chars or containing anything outside
+    ``[a-z0-9]`` (path separators, NUL, control chars, Unicode).
+
+    oze-obs-01: a dropped item is non-fatal (a hard raise would block the
+    whole run on a single typo) but is logged at WARNING so a malformed
+    ``--extra-zip-family`` entry doesn't vanish without a trace."""
+    if not raw:
+        return frozenset()
+    out: set[str] = set()
+    for item in raw.split(','):
+        normalised = item.strip().lstrip('.').lower()
+        if not normalised:
+            continue
+        if len(normalised) > _EXTRA_ZIP_FAMILY_MAX_LEN or any(
+                ch not in _EXTRA_ZIP_FAMILY_VALID for ch in normalised):
+            logger.warning(
+                "ignoring invalid --extra-zip-family item %r "
+                "(must be 1..%d chars of [a-z0-9])",
+                item, _EXTRA_ZIP_FAMILY_MAX_LEN)
+            continue
+        out.add(normalised)
+    return frozenset(out)
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments and return the parsed namespace."""
+    return build_parser().parse_args()
+
+
+def main() -> None:
+    """Entry point for script execution."""
+    parser = build_parser()
+    args = parser.parse_args()
+    # oze-dup-08: single basicConfig call. The previous code configured
+    # logging twice — once with INFO when `args.root is None` (help
+    # path) and again with the computed level on the normal path. The
+    # second call was silently dropped because basicConfig is a no-op
+    # after the first invocation, so the help path ended up at INFO
+    # regardless of `--verbose`. One call, computed level, no surprise.
+    if args.root is None:
+        log_level = logging.INFO
+    elif args.verbose or args.preview:
+        # --preview is a dry run whose whole point is to show planned
+        # moves, so it always logs at INFO even without --verbose.
+        log_level = logging.INFO
+    else:
+        log_level = logging.WARNING
+    logging.basicConfig(level=log_level, format='%(message)s')
+    if args.root is None:
+        parser.print_help()
+        raise SystemExit(0)
+    try:
+        root = resolve_root(args.root)
+    except (ValueError, TypeError, FileNotFoundError) as exc:
+        raise SystemExit(str(exc)) from exc
+    try:
+        organize(
+            root,
+            preview=args.preview,
+            verbose=args.verbose,
+            num_threads=args.threads,
+            sniff=args.sniff,
+            extra_zip_family=_parse_extra_zip_family(args.extra_zip_family),
+            prune_empty=args.prune_empty,
+        )
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == '__main__':  # pragma: no cover
+    main()
