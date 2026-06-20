@@ -34,8 +34,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-perf-01 | open | med | dedupl_numpy.py:36-41 — `hash_idx = line_starts[:,None] + np.arange(32)` materializes an (n_lines,32) int64 index array plus a contiguous copy (~8x the hash bytes), and never validates line length so a short final line reads past its newline. Slice with stride or validate uniform width. |
 dnv3-perf-01 | open | high | deduplicate-by-namev3.py:69-75 — `cdist` builds a full N×N matrix (~900MB at N=30k, O(N²) memory) with no guard; large inputs OOM. Add an N threshold that falls back to bucketed iteration, or chunk the matrix. | scalability
-hr-perf-01 | open | med | hash-recursive-ai5.py:763,872 — `stage1_paths` and `rep` are two separate O(N×aliases) passes over candidates. Build `rep` only for keys that survive to hashing, or fuse it with the stage1_paths build. | cpu/passes
-hr-perf-02 | open | low | hash-recursive-ai5.py:764,785 — `stage1_bytes`/`stage2_bytes` do a full O(N) sum solely to pick serial-vs-threaded; short-circuit once THREAD_THRESHOLD_BYTES is exceeded. | early-exit
 oze-perf-01 | open | low | organize_by_extension.py:1464 — `plan_moves` validates order via `files != sorted(files)`, a full-copy O(n log n) sort every call that contradicts the streaming claim and duplicates organize()'s own sorted(files) at 1639 (double sort). Validate adjacency cheaply or drop the check. | SOLID/SRP
 oze-perf-02 | open | med | organize_by_extension.py:1508 — `_preplan_resolve_collisions` eagerly builds pairs for ALL files and runs resolve_real_extension on every file before any move, priming head_cache for the whole tree at once and defeating the per-window RSS goal. Process in bounded chunks. |
 
@@ -43,8 +41,6 @@ oze-perf-02 | open | med | organize_by_extension.py:1508 — `_preplan_resolve_c
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-scal-02 | open | low | hash-recursive-ai5.py:856,860 — candidates (sorted list), cand_keys (set), inode_size, and aliases are all live simultaneously at peak. Free inode_size once candidates is computed. | peak-memory
-hr-scal-01 | open | med | hash-recursive-ai5.py:861 — `aliases = {k: v ... if k in cand_keys}` rebuilds the whole dict, briefly doubling the candidate footprint and contradicting the streaming RSS goal. Mutate in place (del non-candidates) or skip non-candidate buckets in index_inodes. | memory
 lq-scal-01 | open | med | link_queue.py:1001 — `_dispatch_immediate` spawns one daemon thread + subprocess per immediate-mode link with NO concurrency cap; a paste of N magnet/file links launches N simultaneous subprocesses. Add a bounded immediate pool / semaphore mirroring worker_count. |
 lq-scal-02 | open | low | link_queue.py:3004 — `_update_link_count` re-parses the entire textarea via _parse_entries on the debounced timer; for very large pastes this is O(lines) on the UI thread each fire. Cache the count from add/paste-normalize or cap parsing. |
 oze-scal-01 | open | med | organize_by_extension.py:1471 — `plan_moves` does list(files) and _preplan_resolve_collisions returns a fully materialized list[tuple] plus a needed_dirs set, so a 1M-file run holds the entire plan in memory despite the iterator return type; the docstring's streaming guarantee is not met. |
@@ -65,8 +61,6 @@ rf-conc-02 | open | low | relocate_folder.py:914 — `_run_verify_pool` calls sh
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cx-02 | open | low | hash-recursive-ai5.py:170-276 — `_WalkIter.__iter__` is a ~100-line method nesting worker()/coordinator()/finally-inflight/stats-merge; worker alone juggles a scanned flag across try/3×except/finally. Promote worker to a module-level function over shared state. | cognitive complexity
-hr-cx-01 | open | med | hash-recursive-ai5.py:806-921 — `find_duplicate_groups` exceeds the cognitive-complexity ceiling: config defaulting, ingest-cap, overflow pruning, rep build, two stage orchestrations, an inline _accept_group closure, and stage2 assembly (~8 decisions + nested closure). Extract candidate-prep (849-872) into a helper. | cognitive complexity ≤10
 ie-cmplx-01 | open | med | import_events.py:88-100 — `parse_llm_events` scans every char calling raw_decode on each `[`/`{` start — O(n) decode attempts over the whole string. Find the first `[`/`{` and decode once, or strip + json.loads. |
 lq-cmplx-02 | open | low | link_queue.py:1360 — `_run_item` is ~120 lines handling shell/exec branch, timeout arming, streaming, hard-deadline wait, and 4 except clauses. Split the shell-vs-exec Popen construction into a `_spawn_proc(item,label)` helper. | cyclomatic>10
 lq-cmplx-01 | open | med | link_queue.py:3305 — `_do_refresh_queue_list` mixes snapshot, diff-delete, diff-insert, number-cache update and overflow-row logic in one ~55-line method (>10 paths). Extract the tree-diff apply into a helper taking (desired, tree). | cyclomatic>10
@@ -77,7 +71,6 @@ rf-cmplx-01 | open | low | relocate_folder.py:1206 — `execute` mixes orchestra
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-dup-01 | open | low | hash-recursive-ai5.py:525-530 — bare `_head_batch`/`_tail_batch` shims duplicate the `_make_*_batch` closure bodies. Define the shims as `_make_head_batch(None)` / `_make_tail_batch(None)`. | DRY
 lq-dup-02 | open | low | link_queue.py:194/4189 — `_template_has_bare_url` and `ProtocolEditor._validate` both re-implement "any m.group(1)=='url' over _PLACEHOLDER_RE"; _validate should call _template_has_bare_url. | DRY
 lq-dup-01 | open | low | link_queue.py:3116/3154/3166 — `_get_sleep`, `_get_failure_sleep`, `_get_max_per_domain` are three near-identical try/int(float(var.get())) getters differing only in clamp+key. Collapse into one parametrized getter. | DRY
 oze-dup-01 | open | med | organize_by_extension.py:1700 — `_count_prunable_dirs` duplicates the root-resolve, symlink-reject, post-order os.walk, and per-dir symlink logic of prune_empty_dirs (1310); the two will drift. Extract one traversal helper parameterized by a remove-vs-mark callback. | SOLID/DRY
@@ -89,7 +82,6 @@ rf-dup-02 | open | low | relocate_folder.py:924 — `_capture_first` duplicates 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-arch-02 | open | low | hash-recursive-ai5.py:100,849 — "no cap" is encoded as `2**31` in RunConfig then reverse-detected via `< 2**31` in the pipeline; the sentinel meaning is split across two classes. Store None or expose an explicit alias_cap_enabled. | leaky abstraction
-hr-arch-03 | open | low | hash-recursive-ai5.py:396-400 — `_hash_file_windows` dispatches on `len(window) == 3` (tuple arity) to support raw tuples vs FileWindow; a stray 4-tuple legacy caller is mis-parsed silently. Normalise inputs to FileWindow at the boundary. | typing/Liskov
 hr-arch-01 | open | med | hash-recursive-ai5.py:869 — `find_duplicate_groups` stashes `config.overflow = overflow` as a hidden side channel to _expand_keys_to_paths; two runs sharing a RunConfig clobber each other and it violates CQS. Thread overflow explicitly through on_group. | hidden coupling/SRP
 ie-arch-02 | open | low | import_events.py:11-16 — module-level constants for model paths/URLs mix configuration with code; no override without editing source. Move to argparse/env vars. |
 ie-arch-01 | open | med | import_events.py:208-221 — hardcoded `target_folder = "./events_data"` and no CLI args though process_folder accepts a param. Add argparse to accept folder + model paths. |
@@ -114,7 +106,6 @@ dnp-rel-01 | open | med | dedupl_numpy.py:22 — mmap is never closed and file `
 dnp-rel-02 | open | med | dedupl_numpy.py:32 — `line_starts[1:] = nl[:-1]+1` assumes the file ends with newline; if the last line has no trailing `\n`, its hash is silently dropped. Handle missing final newline. |
 dnv3-rel-01 | open | med | deduplicate-by-namev3.py:85-88 — with dtype=uint8 and score_cutoff=threshold, above-cutoff cells are clipped to threshold+1; if threshold ≥ 255 the uint8 saturates and the `<= threshold` mask misbehaves. Validate threshold < 255 or widen dtype. |
 hr-rel-05 | open | low | hash-recursive-ai5.py:585 — `if hasattr(exc, "add_note")` is tagged `pragma: no branch - 3.11+` but in-code comments claim 3.10 support where add_note is absent and the branch is taken; the pragma would mask a real branch on 3.10. Drop the pragma or pin the floor to 3.11. | coverage-pragma
-hr-rel-02 | open | med | hash-recursive-ai5.py:872,494-500 — `rep` builds via _readable_rep, which calls os.access on every alias of a hardlink-heavy inode just to pick a representative (O(aliases) syscalls). Cap the probe to the first few aliases. |
 hr-rel-01 | open | high | hash-recursive-ai5.py:884-887 — when on_group is supplied, groups stream out and final_groups stays empty, so a caller that also reads DedupResult.groups silently gets nothing. Make on_group vs batched-groups mutual exclusivity explicit or populate groups regardless. | contract/invariants
 lq-rel-01 | open | med | link_queue.py:1001 — immediate-mode subprocess exit codes are discarded: _run_item returns an int but _dispatch_immediate ignores it, so a failing handler records no failure metric and never triggers cooldown. At minimum _record_metric on non-zero. |
 lq-rel-02 | open | low | link_queue.py:1818 — `_resolve_cwd` docstring says it falls back to the script dir with a warning, but it returns None, making subprocess inherit the PROCESS cwd. Either return _script_dir() or fix the docstring. | doc/behavior mismatch
@@ -139,7 +130,6 @@ rdv3-rel-01 | open | low | remove-deduplv3.py:107 — tiebreaker `max(... (basen
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 cmx-test-01 | open | med | check-mx-domain.py:27 — `has_mx_record` does real DNS resolution with no injection point for the resolver, untestable without network. Inject a resolver factory for unit tests. | test coverage
-hr-test-01 | open | med | hash-recursive-ai5.py:328-335 — the partial-read loop in _read_window_into (kernel returns a short chunk then more) is the stage-2 correctness core but has no test using a fake file returning partial chunks; existing tests only cover full-EOF. Add a short-chunk fake. | branch coverage
 ie-test-01 | open | med | import_events.py — no tests; parse_llm_events (pure, complex char-scan logic) is the highest-value unit-test target and is fully testable without the model. Add tests for malformed/embedded JSON. | test coverage
 lq-test-01 | open | low | link_queue.py:694 — the metrics dict (timeouts/failures/completions) is recorded but never asserted or surfaced; add a headless Dispatcher test that drives a failing item and checks _record_metric increments. |
 mmr-test-01 | open | low | masterclass-mass-rename.py:83 — clean_name is pure and token-heavy but untested; substring-stripping edge cases (mmr-sec-02) would be caught by tests. Add cases for `ams`/`cup`/empty-result. | test coverage
@@ -151,8 +141,6 @@ rf-test-01 | open | med | relocate_folder.py:1130 — atomic_swap / _backup_targ
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnv3-obs-01 | open | low | deduplicate-by-namev3.py:51 — file open errors raise raw tracebacks; no user-facing message unlike remove-deduplv3 which handles OSError. Wrap open and exit cleanly. |
-hr-obs-02 | open | low | hash-recursive-ai5.py:284 — `[ai5] hash failed for {path}: {exc}` lacks a severity tag, so it can't be greped apart from `[ai5] WARNING:` lines. Add a level prefix. | log structure
-hr-obs-01 | open | low | hash-recursive-ai5.py:1170-1172,414-415 — summary `hash_errors=A+B` conflates benign vanished-file ENOENT with real EACCES/EIO; the count is misleading. Split benign-skip from real-error counters. | metric fidelity
 ie-obs-01 | open | low | import_events.py:218 — no logging.basicConfig is configured, so logger.warning/error/exception output is suppressed by default; the script appears silent on errors. Configure logging in __main__. |
 lq-obs-01 | open | med | link_queue.py:719 — self.metrics is incremented by _record_metric but never read, logged, or shown — pure dead observability. Surface counts in _update_status or a periodic log line. | wiring gap
 lq-obs-02 | open | low | link_queue.py:1472 — the [done] exit line is logged per item but run/done lines are not correlated by a per-item id; with many workers interleaving, matching relies on the url field alone. Add a short item id to run/done/error lines. |
