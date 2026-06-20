@@ -77,14 +77,12 @@ rf-cmplx-01 | open | low | relocate_folder.py:1206 — `execute` mixes orchestra
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-dup-01 | open | low | dedupl_numpy.py:13 — dedupl_numpy and remove-deduplv3 parse the same `<hash> <path>` format with divergent rules (fixed offset 26 vs split(None,1)) and can disagree on the same file. Extract a shared record-parsing helper. |
 hr-dup-01 | open | low | hash-recursive-ai5.py:525-530 — bare `_head_batch`/`_tail_batch` shims duplicate the `_make_*_batch` closure bodies. Define the shims as `_make_head_batch(None)` / `_make_tail_batch(None)`. | DRY
 lq-dup-02 | open | low | link_queue.py:194/4189 — `_template_has_bare_url` and `ProtocolEditor._validate` both re-implement "any m.group(1)=='url' over _PLACEHOLDER_RE"; _validate should call _template_has_bare_url. | DRY
 lq-dup-01 | open | low | link_queue.py:3116/3154/3166 — `_get_sleep`, `_get_failure_sleep`, `_get_max_per_domain` are three near-identical try/int(float(var.get())) getters differing only in clamp+key. Collapse into one parametrized getter. | DRY
 oze-dup-01 | open | med | organize_by_extension.py:1700 — `_count_prunable_dirs` duplicates the root-resolve, symlink-reject, post-order os.walk, and per-dir symlink logic of prune_empty_dirs (1310); the two will drift. Extract one traversal helper parameterized by a remove-vs-mark callback. | SOLID/DRY
 rf-dup-01 | open | low | relocate_folder.py:679 — `_OWNERSHIP_WORKERS/_OWNERSHIP_INFLIGHT` and `_VERIFY_WORKERS/_VERIFY_INFLIGHT` (820) duplicate _resolved_jobs/_inflight_cap logic and are dead for the live path (pools use Plan.jobs); they remain only for tests. Delete the constants and update tests to call the helpers. | DRY
 rf-dup-02 | open | low | relocate_folder.py:924 — `_capture_first` duplicates the exception-draining logic inlined in _run_verify_pool's on_done and _collect_chown_error; three near-identical future-exception collectors exist. Consolidate into one collector parametrized by first-only vs count. | DRY
-rdv3-dup-01 | open | low | remove-deduplv3.py:107 — path/basename extraction logic duplicated across the dedup family with different semantics. Consolidate into one module. |
 
 ## architecture/modularity/SOLID
 

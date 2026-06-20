@@ -17,6 +17,10 @@ This file defines the expected behavior and usage model for AI agents working in
 
 ## Rules
 
+- Every script in this project must be **standalone / self-contained**: it runs on its own
+  with no dependency on another file in this repo (no importing a class, function, or
+  constant defined in a sibling script). Shared logic is duplicated in-file, not extracted
+  to a shared module. Third-party / stdlib imports are fine; intra-repo imports are not.
 - Don't assume. Don't hide confusion. Surface tradeoffs and ask the user when unclear.
 - Write the minimum code that solves the problem. Avoid speculative or unneeded changes.
 - Touch only what you must. Clean up only your own mess and leave the workspace cleaner than you found it.
