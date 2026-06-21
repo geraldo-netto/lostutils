@@ -464,6 +464,17 @@ def _parse_iso(value: str) -> Optional[Any]:
     return None
 
 
+def _match_end_to_start(start: Any, end: Any) -> Any:
+    """Coerces end to start's date/datetime kind so VEVENT dtstart/dtend agree."""
+    start_is_dt = isinstance(start, datetime)
+    end_is_dt = isinstance(end, datetime)
+    if start_is_dt and not end_is_dt:
+        return datetime(end.year, end.month, end.day, tzinfo=getattr(start, "tzinfo", None))
+    if not start_is_dt and end_is_dt:
+        return end.date()
+    return end
+
+
 def build_ics(events: List[Dict[str, Any]]) -> bytes:
     """Builds an importable iCalendar document from extracted events."""
     from icalendar import Calendar, Event as IcsEvent
@@ -482,7 +493,7 @@ def build_ics(events: List[Dict[str, Any]]) -> bytes:
         ie.add("dtstart", start)
         end = _parse_iso(e.get("end", "")) if e.get("end") else None
         if end is not None:
-            ie.add("dtend", end)
+            ie.add("dtend", _match_end_to_start(start, end))
         if e.get("location"):
             ie.add("location", e["location"])
         cal.add_component(ie)

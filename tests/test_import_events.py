@@ -366,6 +366,64 @@ def test_build_ics_emits_importable_calendar():
     assert "Bad" not in ics  # unparseable start is skipped
 
 
+def test_match_end_to_start_promotes_date_end_to_datetime():
+    start = datetime(2026, 6, 22, 10, 0)
+    end = date(2026, 6, 23)
+
+    matched = import_events._match_end_to_start(start, end)
+
+    assert isinstance(matched, datetime)
+    assert matched == datetime(2026, 6, 23, 0, 0)
+
+
+def test_match_end_to_start_demotes_datetime_end_to_date():
+    start = date(2026, 6, 22)
+    end = datetime(2026, 6, 23, 18, 0)
+
+    matched = import_events._match_end_to_start(start, end)
+
+    assert type(matched) is date
+    assert matched == date(2026, 6, 23)
+
+
+def test_match_end_to_start_carries_start_tzinfo():
+    start = datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc)
+    end = date(2026, 6, 23)
+
+    matched = import_events._match_end_to_start(start, end)
+
+    assert matched.tzinfo is timezone.utc
+
+
+def test_match_end_to_start_leaves_matching_types():
+    start = datetime(2026, 6, 22, 10, 0)
+    end = datetime(2026, 6, 22, 12, 0)
+    assert import_events._match_end_to_start(start, end) is end
+    sd, ed = date(2026, 6, 22), date(2026, 6, 23)
+    assert import_events._match_end_to_start(sd, ed) is ed
+
+
+def test_build_ics_normalizes_mixed_start_end_types(monkeypatch):
+    pytest.importorskip("icalendar")
+    # Force a date end against a datetime start to exercise normalization.
+    real_parse = import_events._parse_iso
+
+    def fake_parse(value):
+        if value == "END":
+            return date(2026, 6, 23)
+        return real_parse(value)
+
+    monkeypatch.setattr(import_events, "_parse_iso", fake_parse)
+    events = [{"title": "Mix", "start": "2026-06-22T10:00", "end": "END",
+               "location": "", "source": "s", "type": "x"}]
+
+    ics = import_events.build_ics(events).decode("utf-8")
+
+    assert "DTSTART" in ics and "DTEND" in ics
+    # A datetime dtend carries a time component (T...), unlike a bare VALUE=DATE.
+    assert "DTEND;VALUE=DATE:" not in ics
+
+
 def test_parse_iso_accepts_time_without_seconds():
     parsed = import_events._parse_iso("2026-06-22T14:00")
     assert parsed == datetime(2026, 6, 22, 14, 0)
