@@ -39,7 +39,6 @@ oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_co
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-conc-02 | open | low | link_queue.py:1312 — _immediate_depth_warned is set/cleared in _note_immediate_depth (called from _dispatch_immediate) without a lock; concurrent dispatchers can interleave the edge-trigger compare/assign, producing a missed or duplicate backlog notice. Latch the flag under _immediate_lock. | log-only
-lq-conc-01 | open | low | link_queue.py:1720 — _warned_shell_url_templates (a plain set) is read+mutated in _warn_shell_template_trusted on worker threads; concurrent shell-protocol items can double-log and, rarely, race the set's internal resize. Guard with a lock (or reuse _metrics_lock). | shell=True only
 
 ## code complexity
 

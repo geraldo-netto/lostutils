@@ -783,6 +783,9 @@ class Dispatcher:
         self._immediate_depth_warned = False
         # Templates already flagged at runtime for the sec-02 shell+{url} check;
         # warn once per distinct template to avoid log spam.
+        # lq-conc-01: mutated from worker threads in _warn_shell_template_trusted,
+        # so the check-then-add is guarded by _metrics_lock (concurrent shell
+        # items would otherwise double-log or race the set's internal resize).
         self._warned_shell_url_templates: set = set()
 
         # Debounced state persistence (scal-03): hot paths (enqueue, claim,
@@ -1717,9 +1720,10 @@ class Dispatcher:
         config can run arbitrary commands. Surface that once per distinct
         template so an operator notices an unexpected shell protocol without the
         log being spammed on every item that uses it."""
-        if template in self._warned_shell_url_templates:
-            return
-        self._warned_shell_url_templates.add(template)
+        with self._metrics_lock:
+            if template in self._warned_shell_url_templates:
+                return
+            self._warned_shell_url_templates.add(template)
         self._log(
             f"[warn] shell=True template is trusted input (anyone who edits "
             f"the config can run commands): {template}"

@@ -969,6 +969,34 @@ def test_shell_template_trusted_warns_once(headless_dispatcher):
     assert "wget {url_quoted}" in warns[0]
 
 
+def test_shell_template_trusted_warns_once_under_concurrency(headless_dispatcher):
+    # lq-conc-01: _warned_shell_url_templates is mutated from worker threads;
+    # the check-then-add must be atomic so concurrent shell items warn exactly
+    # once per distinct template, never twice.
+    logs = []
+    log_lock = threading.Lock()
+
+    def record(msg):
+        with log_lock:
+            logs.append(msg)
+
+    headless_dispatcher._log = record
+    start = threading.Event()
+
+    def hammer():
+        start.wait()
+        headless_dispatcher._warn_shell_template_trusted("wget {url_quoted}")
+
+    threads = [threading.Thread(target=hammer) for _ in range(20)]
+    for t in threads:
+        t.start()
+    start.set()
+    for t in threads:
+        t.join()
+    warns = [m for m in logs if "trusted input" in m]
+    assert len(warns) == 1
+
+
 def test_run_item_shell_ok_emits_trust_warning_once(app):
     # lq-sec-02: surfaced via the real run path too, once per template.
     item = q("http://a/1", template="echo {url_quoted}", shell=True)
