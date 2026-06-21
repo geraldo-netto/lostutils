@@ -2219,6 +2219,35 @@ class SourceCollisionResolution(unittest.TestCase):
             dest = root / "nowhere" / "deep" / "bucket"
             self.assertIsNone(_oze._find_destination_blocker(dest))
 
+    def test_planning_collision_migrates_head_cache_no_stale(self):
+        # oze-conc-01: when a planning collision renames a source, its
+        # head_cache entry must move to the renamed path — no stale entry
+        # keyed on the original source may survive.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "avi"
+            source.write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
+            cache: dict = {}
+            ctx = _oze.SniffContext(sniff=True, head_cache=cache)
+            _oze.read_head_bytes(source, head_cache=cache)
+            self.assertIn(source, cache)
+            candidate = _oze._resolve_one_planning_collision(
+                source, ctx, preview=False)
+            self.assertIsNotNone(candidate)
+            self.assertNotIn(source, cache)       # no stale entry
+            self.assertIn(candidate, cache)       # migrated
+
+    def test_planning_collision_head_cache_clean_after_full_run(self):
+        # oze-conc-01 end-to-end: after organize() the head_cache holds no
+        # entry under the original (renamed-away) source path.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "avi"
+            source.write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
+            head_cache: dict = {}
+            _oze.organize(root, head_cache=head_cache)
+            self.assertNotIn(source, head_cache)
+
     def test_cross_source_collision_resolved(self):
         # oze-rel-13 + oze-rel-14: cross-source collision is now resolved
         # at planning time (serially) so multi-threaded execution is safe.

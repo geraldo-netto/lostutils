@@ -1517,8 +1517,9 @@ def _resolve_one_planning_collision(
         "ancestor; renamed to %s before any worker starts",
         source, candidate,
     )
-    # Move the head_cache entry over too so the worker's later
-    # `resolve_real_extension` calls don't re-open the file.
+    # oze-conc-01: re-key the head_cache entry from the original source to the
+    # renamed candidate so the worker's later `resolve_real_extension` calls
+    # don't re-open the file AND no stale entry survives under the old key.
     if ctx.head_cache is not None and source in ctx.head_cache:
         ctx.head_cache[candidate] = ctx.head_cache.pop(source)
     return candidate
