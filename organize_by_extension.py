@@ -1124,8 +1124,12 @@ _COLLISION_RETRY_CAP = 1000
 # oze-rel-01: errnos meaning "this filesystem does not support hardlinks"
 # (FAT/exFAT, many SMB/NFS mounts). On any of these the os.link reservation
 # strategy can never succeed, so we switch to the O_CREAT|O_EXCL + os.rename
-# fallback for the rest of the run.
-_LINK_UNSUPPORTED_ERRNOS = frozenset({errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP})
+# fallback. oze-rel-06: EMLINK (source already at its max link count) is the
+# same situation per-file — the link can't be made, so fall back rather than
+# letting a bare OSError abort the whole plan.
+_LINK_UNSUPPORTED_ERRNOS = frozenset({
+    errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP, errno.EMLINK,
+})
 
 
 def _reserve_slot_via_rename(source: Path) -> Path:
@@ -1167,8 +1171,9 @@ def _atomic_rename_to_free_slot(source: Path) -> Path:
     Loops: on `FileExistsError` (slot taken by us or a racing worker) bump
     `n` and retry. Caps at `_COLLISION_RETRY_CAP` overall attempts.
 
-    oze-rel-01: on a filesystem without hardlink support (`os.link` raises
-    EPERM/ENOSYS/EOPNOTSUPP) fall back to the O_CREAT|O_EXCL + os.rename
+    oze-rel-01/oze-rel-06: on a filesystem without hardlink support (`os.link`
+    raises EPERM/ENOSYS/EOPNOTSUPP) or when the source is already at its max
+    link count (EMLINK), fall back to the O_CREAT|O_EXCL + os.rename
     reservation, which works on FAT/exFAT/SMB/NFS."""
     last_exc: OSError | None = None
     for n in range(1, _COLLISION_RETRY_CAP + 1):

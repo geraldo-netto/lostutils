@@ -2627,6 +2627,22 @@ class SourceCollisionResolution(unittest.TestCase):
                 self.assertEqual(taken.read_text(), "PRECIOUS")
                 self.assertEqual(renamed.read_text(), "SOURCE")
 
+    def test_atomic_rename_falls_back_on_emlink(self):
+        # oze-rel-06: EMLINK (source at max link count) falls back to the
+        # rename reservation instead of aborting with a bare OSError.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src"; source.write_text("SOURCE")
+
+            def emlink(a, b):
+                raise OSError(errno.EMLINK, "too many links")
+
+            with patch.object(_oze.os, "link", emlink):
+                renamed = _oze._atomic_rename_to_free_slot(source)
+            self.assertEqual(renamed.name, "src.collision1")
+            self.assertEqual(renamed.read_text(), "SOURCE")
+            self.assertFalse(source.exists())
+
     def test_atomic_rename_fallback_exhausts(self):
         # oze-rel-01: the O_EXCL fallback also caps at _COLLISION_RETRY_CAP.
         import unittest.mock as _m
