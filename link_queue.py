@@ -930,10 +930,18 @@ class Dispatcher:
                 raise
         except Exception as e:
             # Never let a state-save failure interrupt normal flow.
+            msg = f"[warn] could not save queue state: {e}"
+            # lq-obs-01: on the shutdown path stop_event is set, so self._log
+            # (which marshals through _safe_after) is dropped — a save failure
+            # there would vanish silently. Fall back to stderr so the operator
+            # learns the final snapshot did not persist.
+            if self.stop_event.is_set():
+                print(msg, file=sys.stderr)
+                return
             try:
-                self._log(f"[warn] could not save queue state: {e}")
+                self._log(msg)
             except Exception:  # pragma: no cover - defensive: _log itself raised
-                pass  # pragma: no cover - defensive: _log itself raised
+                print(msg, file=sys.stderr)  # pragma: no cover - defensive: _log itself raised
 
     @staticmethod
     def _serialize_item(it: QueueItem) -> dict:

@@ -82,6 +82,5 @@ nm-test-01 | open | low | numero_magicov2.py:35-40 — reduce_to_single_digit re
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 cmx-obs-01 | open | low | check-mx-domain.py:48-52 — distinct failure modes (timeout, NXDOMAIN, no-MX, malformed email) all print "bad: ..."; hard to triage in batch use. Differentiate messages/exit codes per cause. | diagnosability
-lq-obs-01 | open | low | link_queue.py:831-836 — _save_state's outer except logs via self._log, which marshals through _safe_after; once stop_event is set _safe_after early-returns, so a state-save failure on the shutdown path is silently swallowed. Add a stderr fallback for the shutdown path. | silent failure
 mmr-obs-01 | open | low | masterclass-mass-rename.py:107-116 — no summary (renamed/skipped/error counts) and errors raise uncaught aborting mid-batch; only per-rename lines print. Add counters and per-file try/except with a final tally. | ux
 rdv3-obs-01 | open | low | remove-deduplv3.py:101-112 — groups with all-identical paths or a single survivor are silently skipped; no stderr summary of #groups/#files-to-remove. Emit a stderr summary before the rm block for auditability. | audit

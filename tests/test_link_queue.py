@@ -2012,6 +2012,35 @@ def test_save_state_write_error(app, monkeypatch):
     pump(app, 0.1)
 
 
+def test_save_state_failure_on_shutdown_falls_back_to_stderr(
+        headless_dispatcher, monkeypatch, capsys):
+    # lq-obs-01: once stop_event is set, self._log is dropped by _safe_after,
+    # so a save failure on the shutdown path must surface on stderr instead of
+    # vanishing silently.
+    disp = headless_dispatcher
+    logged = []
+    disp._log = logged.append
+    monkeypatch.setattr(link_queue, "_yaml_dump", _raise)
+    disp.stop_event.set()
+    disp._save_state()
+    err = capsys.readouterr().err
+    assert "could not save queue state" in err
+    assert logged == []                       # did NOT route through _log
+
+
+def test_save_state_failure_when_running_uses_log(headless_dispatcher, monkeypatch,
+                                                  capsys):
+    # lq-obs-01: while running (stop_event clear) the failure still goes through
+    # _log, not stderr.
+    disp = headless_dispatcher
+    logged = []
+    disp._log = logged.append
+    monkeypatch.setattr(link_queue, "_yaml_dump", _raise)
+    disp._save_state()
+    assert any("could not save queue state" in m for m in logged)
+    assert "could not save queue state" not in capsys.readouterr().err
+
+
 def test_write_config_errors(app, monkeypatch):
     monkeypatch.setattr(app.config, "save", _raise)
     app._write_config_now()      # except -> _log error
