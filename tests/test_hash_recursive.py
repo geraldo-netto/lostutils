@@ -1047,6 +1047,52 @@ def test_runconfig_negative_hash_error_cap_clamps_to_zero():
     assert cfg.hash_error_verbose_cap == 0
 
 
+# --- hr-cx-01: NO_CAP constant + alias_cap_active property -----------------
+
+def test_no_cap_constant_value():
+    assert hr.NO_CAP == 2**31
+
+
+def test_alias_cap_active_true_for_real_cap():
+    cfg = hr.RunConfig(alias_cap=10)
+    assert cfg.alias_cap_active is True
+
+
+def test_alias_cap_active_false_when_disabled():
+    # alias_cap=0 → NO_CAP sentinel → cap not active.
+    cfg = hr.RunConfig(alias_cap=0)
+    assert cfg.alias_cap_active is False
+    assert cfg.alias_cap == hr.NO_CAP
+
+
+def test_alias_cap_active_default_is_active():
+    cfg = hr.RunConfig()
+    assert cfg.alias_cap_active is True
+
+
+def test_find_duplicate_groups_disabled_cap_skips_ingest_overflow(tmp_path):
+    # hr-cx-01: with the cap disabled, no overflow dict is built and the
+    # alias list is unbounded — exercises the `not alias_cap_active` arm.
+    body = b"z" * 200
+    (tmp_path / "a.bin").write_bytes(body)
+    files = [(f"/synthetic/p{i}", len(body), 1, 100) for i in range(30)]
+    files += [(f"/synthetic/q{i}", len(body), 1, 200) for i in range(30)]
+    cfg = hr.RunConfig(alias_cap=0)   # disabled
+
+    def stub_stage1(candidates, rep, jobs, config):
+        from collections import defaultdict
+        by_head = defaultdict(list)
+        for size, key in candidates:
+            by_head[(size, "fakehead")].append(key)
+        return by_head, {"stage1": len(candidates), "stage1_errors": 0}
+
+    with mock.patch.object(hr, "_stage1_hash", stub_stage1):
+        result = hr.find_duplicate_groups(files, jobs=1, config=cfg)
+    # cap disabled → overflow never populated, all aliases retained.
+    assert cfg.overflow is None
+    assert len(result.aliases[(1, 100)]) == 30
+
+
 # --- hr-test-10: ThirdsStrategy size boundaries ----------------------------
 
 @pytest.mark.parametrize("size", [0, 1, hr.SAMPLE - 1, hr.SAMPLE,

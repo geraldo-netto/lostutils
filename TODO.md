@@ -55,7 +55,6 @@ rf-conc-01 | open | med | relocate_folder.py:907 — _run_verify_pool builds Thr
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cx-01 | open | low | hash-recursive-ai5.py:957 — `config.alias_cap < 2**31` re-implements the "is the cap disabled" sentinel that RunConfig.__init__ (111) encapsulates as the magic 2**31; the sentinel is duplicated in two places. Expose a property like config.alias_cap_active or a named NO_CAP constant. | DRY
 ie-cmplx-01 | open | low | import_events.py:165-174 — _coerce_start merges start/date/time keys with str() fallbacks that can produce strings like "NoneTNone"; the date+time concat assumes both are date/time-shaped. Tighten to validated ISO assembly. | robustness
 lq-cmplx-01 | open | med | link_queue.py:2477-2535 — LinkQueueApp delegates to Dispatcher via BOTH __getattr__ (2477) and ~25 static method re-exports (2511-2535); the dual mechanism is redundant and a method added to Dispatcher silently won't appear in the re-export list. Consolidate on one delegation path. | SOLID
 oze-cmplx-02 | open | low | organize_by_extension.py:1174 — _free_collision_name is no longer used in the live path (superseded by _atomic_rename_to_free_slot) and survives only via tests; its docstring warns it is TOCTOU-unsafe. Remove it and migrate tests, or mark clearly test-only to stop new callers. | superseded shim

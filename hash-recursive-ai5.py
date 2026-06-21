@@ -57,6 +57,11 @@ WALK_FLUSH_THRESHOLD = 1024
 
 DEFAULT_ALIAS_CAP = 1024
 DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
+# hr-cx-01: the single "cap disabled" sentinel. `RunConfig` stores this
+# when the user passes `--alias-cap 0`; `RunConfig.alias_cap_active`
+# tests against it so the magic value is defined and compared in exactly
+# one place instead of being re-derived at every gate.
+NO_CAP = 2**31
 # hr-rel-02: cap the os.access probe in `_readable_rep` — a hardlink-heavy
 # inode with 100k aliases otherwise costs 100k stat syscalls just to pick
 # a representative. The first few aliases are almost always representative
@@ -108,7 +113,7 @@ class RunConfig:
     ) -> None:
         # `alias_cap == 0` means "no cap" — accept the same sentinel
         # the CLI does for back-compat (`--alias-cap 0`).
-        self.alias_cap = alias_cap if alias_cap > 0 else 2**31
+        self.alias_cap = alias_cap if alias_cap > 0 else NO_CAP
         self.hash_error_verbose_cap = max(0, hash_error_verbose_cap)
         self.alias_cap_hits = 0
         self.hash_error_logged = 0
@@ -116,6 +121,14 @@ class RunConfig:
         self.hash_skipped_vanished = 0
         self.overflow = None   # populated by find_duplicate_groups when active
         self._counter_lock = threading.Lock()
+
+    @property
+    def alias_cap_active(self) -> bool:
+        """True when the alias cap is a real bound, False when disabled
+        (hr-cx-01). Single owner of the :data:`NO_CAP` sentinel comparison
+        so callers ask ``config.alias_cap_active`` instead of re-checking
+        ``config.alias_cap < 2**31`` and duplicating the magic value."""
+        return self.alias_cap < NO_CAP
 
 
 class RootError(Exception):
@@ -952,9 +965,9 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         config = RunConfig()
     # hr-decoup-04: thread the alias cap from config into index_inodes
     # and the per-inode overflow counts into the emit stage. Skip the
-    # cap when the user disabled it (`alias_cap` close to 2**31 means
-    # "effectively no cap" per RunConfig's sentinel handling).
-    ingest_cap = config.alias_cap if config.alias_cap < 2**31 else None
+    # cap when the user disabled it (hr-cx-01: `alias_cap_active`
+    # encapsulates the NO_CAP sentinel test).
+    ingest_cap = config.alias_cap if config.alias_cap_active else None
     overflow: "dict[tuple, int] | None" = {} if ingest_cap is not None else None
     aliases, inode_size = index_inodes(
         files, alias_cap=ingest_cap, overflow=overflow)
