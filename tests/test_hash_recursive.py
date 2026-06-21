@@ -1040,6 +1040,23 @@ def test_main_emits_sigint_cancel_warning(tmp_path, monkeypatch, capsys):
     assert "walk cancelled by SIGINT" in err
 
 
+def test_main_immediate_cancel_still_reports_timing(tmp_path, monkeypatch, capsys):
+    # hr-rel-03: even an immediate-cancel walk reaches the timing line
+    # with walk_boundary set (on_walk_done ran when index_inodes drained
+    # the empty iterator). The summary must still print walk_s/hash_s
+    # without a TypeError from the removed `is None` fallback.
+    (tmp_path / "a.bin").write_bytes(b"x")
+
+    def fake_install(ev):
+        ev.set()
+        return None
+    monkeypatch.setattr(hr, "_install_sigint_cancel", fake_install)
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "walk_s=" in err and "hash_s=" in err
+
+
 # ===== rescan: boundary / validation gap tests (hr-test-05..20) ============
 
 # --- hr-test-05/06: _iter_batches boundary inputs --------------------------

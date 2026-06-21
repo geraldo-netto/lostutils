@@ -1241,10 +1241,14 @@ def main():
         walk_stats = walk_iter.stats
         info = result.info
         dup_groups, dup_paths = totals()
-        if walk_boundary[0] is None:   # pragma: no cover - defensive: only fires if find_duplicate_groups raises before index_inodes returns
-            # No work was done (e.g. immediate cancel) — entire run is
-            # walk, zero hash time.
-            walk_boundary[0] = t_end
+        # hr-rel-03: `_mark_walk_done` is invoked unconditionally by
+        # `find_duplicate_groups` the moment `index_inodes` has consumed
+        # the walk — even an immediate-cancel walk still returns an empty
+        # iterator that index_inodes drains. So once this line is reached
+        # (a successful return), `walk_boundary[0]` is always set; the old
+        # `is None` fallback could only have fired had the function raised
+        # before returning, in which case this code never runs at all. The
+        # dead guard + its misleading comment are gone.
         walk_seconds = walk_boundary[0] - t_start
         hash_seconds = t_end - walk_boundary[0]
 
