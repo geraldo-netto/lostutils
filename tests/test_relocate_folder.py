@@ -3114,6 +3114,35 @@ def test_run_streamed_docstring_documents_inflight_abort():
     assert "running" in doc and "cancel" in doc
 
 
+def test_run_streamed_drain_captures_inflight_only_error():
+    # rf-conc-02: low-level _run_streamed — the only failing future is still
+    # inflight at end of submission; the trailing drain calls on_done which
+    # records it even though its abort return is ignored there.
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    release = threading.Event()
+    captured: list = []
+
+    def fail():
+        release.wait(timeout=5)
+        raise RuntimeError("drain-only")
+
+    def on_done(fut):
+        exc = fut.exception()
+        if exc is not None:
+            captured.append(exc)
+        return exc is not None
+
+    def tasks():
+        yield fail
+        release.set()
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        rf._run_streamed(ex.submit, tasks(), 4, on_done)
+    assert len(captured) == 1
+    assert captured[0].args == ("drain-only",)
+
+
 def test_run_streamed_drains_running_futures_after_abort():
     import threading
     from concurrent.futures import ThreadPoolExecutor

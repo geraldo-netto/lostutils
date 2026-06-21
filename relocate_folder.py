@@ -800,7 +800,11 @@ def _run_streamed(
         inflight.add(submit(task))
     # rf-conc-02: drains (and thus joins) every still-inflight future —
     # including running ones — so callers that delete shared state after
-    # this returns never race a worker still touching it.
+    # this returns never race a worker still touching it. `on_done` is
+    # invoked for each drained future, so a first-and-only error that only
+    # surfaces here (every task was still inflight when submission ended,
+    # none completed during the loop) is still recorded by the caller's
+    # `on_done` — even though the drain ignores its abort return.
     for fut in inflight:
         on_done(fut)
 
