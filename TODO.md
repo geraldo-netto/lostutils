@@ -61,7 +61,6 @@ oze-dup-01 | open | low | organize_by_extension.py:710 — back-compat shims exi
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-arch-01 | open | med | import_events.py:52 — module-level mutable globals (_LLM, MODEL_PATH, DEFAULT_TZ) mutated by _apply_config (471-476) make functions non-reentrant and order-dependent (extract_from_ics reads DEFAULT_TZ implicitly). Pass a small config object/params (within this single file, no shared-module extraction). | within-file
 
 ## reliability/correctness
 

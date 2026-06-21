@@ -325,13 +325,46 @@ def test_verify_sha256_passes_on_match(tmp_path):
     assert f.exists()
 
 
-def test_apply_default_tz_attaches_to_naive_datetime(monkeypatch):
-    monkeypatch.setattr(import_events, "DEFAULT_TZ", "UTC")
+def test_apply_default_tz_attaches_to_naive_datetime():
     naive = datetime(2026, 6, 22, 14, 0)
 
-    result = import_events._apply_default_tz(naive)
+    result = import_events._apply_default_tz(naive, "UTC")
 
     assert result.tzinfo is not None
+
+
+def test_apply_default_tz_noop_without_tz():
+    naive = datetime(2026, 6, 22, 14, 0)
+    assert import_events._apply_default_tz(naive, None) is naive
+    assert import_events._apply_default_tz(naive) is naive
+
+
+def test_apply_default_tz_leaves_date_and_aware_untouched():
+    d = date(2026, 6, 22)
+    assert import_events._apply_default_tz(d, "UTC") is d
+    aware = datetime(2026, 6, 22, 14, 0, tzinfo=timezone.utc)
+    assert import_events._apply_default_tz(aware, "Europe/Lisbon") is aware
+
+
+def test_extract_from_ics_applies_default_tz(tmp_path):
+    pytest.importorskip("icalendar")
+    ics = tmp_path / "tz.ics"
+    ics.write_text(ICS_TEMPLATE.format(summary="Naive", location=""), encoding="utf-8")
+
+    events = import_events.extract_from_ics(ics, default_tz="UTC")
+
+    assert events[0]["start"].endswith("+00:00")
+
+
+def test_process_folder_threads_default_tz(tmp_path):
+    pytest.importorskip("icalendar")
+    (tmp_path / "tz.ics").write_text(
+        ICS_TEMPLATE.format(summary="Naive", location=""), encoding="utf-8"
+    )
+
+    events = import_events.process_folder(str(tmp_path), default_tz="UTC")
+
+    assert events[0]["start"].endswith("+00:00")
 
 
 def test_main_writes_json_and_ics(tmp_path, monkeypatch):

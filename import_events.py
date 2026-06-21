@@ -51,9 +51,6 @@ PDF_EXTENSIONS = {".pdf"}
 # file cannot blow the context window.
 MAX_CONTENT_CHARS = 6000
 
-# Optional IANA timezone name applied to naive iCalendar datetimes.
-DEFAULT_TZ: Optional[str] = None
-
 _LLM = None
 logger = logging.getLogger(__name__)
 
@@ -118,19 +115,19 @@ def normalize_event_date(value: Any) -> str:
     return str(value)
 
 
-def _apply_default_tz(value: Any) -> Any:
-    """Attaches DEFAULT_TZ to a naive datetime; leaves dates/aware values as-is."""
-    if DEFAULT_TZ and isinstance(value, datetime) and value.tzinfo is None:
+def _apply_default_tz(value: Any, default_tz: Optional[str] = None) -> Any:
+    """Attaches default_tz to a naive datetime; leaves dates/aware values as-is."""
+    if default_tz and isinstance(value, datetime) and value.tzinfo is None:
         from zoneinfo import ZoneInfo
 
-        return value.replace(tzinfo=ZoneInfo(DEFAULT_TZ))
+        return value.replace(tzinfo=ZoneInfo(default_tz))
     return value
 
 
 # --------------------------------------------------------------------------- #
 # iCalendar extraction
 # --------------------------------------------------------------------------- #
-def extract_from_ics(file_path: Path) -> List[Dict[str, Any]]:
+def extract_from_ics(file_path: Path, default_tz: Optional[str] = None) -> List[Dict[str, Any]]:
     """Extracts events from standard iCalendar files."""
     from icalendar import Calendar
 
@@ -150,8 +147,8 @@ def extract_from_ics(file_path: Path) -> List[Dict[str, Any]]:
             location = component.get("location")
             events.append({
                 "title": str(summary) if summary else "No Title",
-                "start": normalize_event_date(_apply_default_tz(dtstart_obj.dt)),
-                "end": (normalize_event_date(_apply_default_tz(dtend_obj.dt))
+                "start": normalize_event_date(_apply_default_tz(dtstart_obj.dt, default_tz)),
+                "end": (normalize_event_date(_apply_default_tz(dtend_obj.dt, default_tz))
                         if dtend_obj and hasattr(dtend_obj, "dt") else ""),
                 "location": str(location) if location else "",
                 "source": file_path.name,
@@ -351,12 +348,16 @@ def extract_from_pdf(file_path: Path, llm_client: Optional[Any] = None) -> List[
 # --------------------------------------------------------------------------- #
 # Folder scan
 # --------------------------------------------------------------------------- #
-def extract_from_file(file: Path, llm_client: Optional[Any] = None) -> List[Dict[str, Any]]:
+def extract_from_file(
+    file: Path,
+    llm_client: Optional[Any] = None,
+    default_tz: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """Dispatches a single file to the right extractor by its suffix."""
     suffix = file.suffix.lower()
     try:
         if suffix in CALENDAR_EXTENSIONS:
-            return extract_from_ics(file)
+            return extract_from_ics(file, default_tz=default_tz)
         if suffix in TEXT_EXTENSIONS:
             return extract_with_llm(file, is_image=False, llm_client=llm_client)
         if suffix in IMAGE_MIME:
@@ -372,6 +373,7 @@ def process_folder(
     folder_path: str,
     llm_client: Optional[Any] = None,
     recursive: bool = False,
+    default_tz: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Iterates through a folder and extracts event data from every supported file."""
     path = Path(folder_path)
@@ -383,7 +385,9 @@ def process_folder(
     all_events: List[Dict[str, Any]] = []
     for file in sorted(files):
         if file.is_file():
-            all_events.extend(extract_from_file(file, llm_client=llm_client))
+            all_events.extend(
+                extract_from_file(file, llm_client=llm_client, default_tz=default_tz)
+            )
     return all_events
 
 
@@ -493,12 +497,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def _apply_config(args: argparse.Namespace) -> None:
-    global MODEL_PATH, CLIP_PATH, MODEL_SHA256, CLIP_SHA256, DEFAULT_TZ
+    global MODEL_PATH, CLIP_PATH, MODEL_SHA256, CLIP_SHA256
     MODEL_PATH = args.model_path
     CLIP_PATH = args.clip_path
     MODEL_SHA256 = args.model_sha256
     CLIP_SHA256 = args.clip_sha256
-    DEFAULT_TZ = args.timezone
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -512,7 +515,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Created {folder}. Place your files there and run again.")
         return 0
 
-    events = process_folder(str(folder), recursive=args.recursive)
+    events = process_folder(str(folder), recursive=args.recursive, default_tz=args.timezone)
     if not args.no_dedup:
         events = dedupe_events(events)
 
