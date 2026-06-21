@@ -719,12 +719,16 @@ class Dispatcher:
         # Worker-thread lifecycle delegated to WorkerPool (cx-03); the pool runs
         # _worker_loop and is woken via _wake_workers after retirements.
         self._pool = WorkerPool(self._worker_loop, self._wake_workers)
+        # conc-02: immediate-mode items run through a REAL bounded pool — a
+        # work queue consumed by at most `_immediate_pool_size` long-lived
+        # consumer threads. The old model spawned one blocked-on-a-semaphore
+        # thread per item, so a paste of N links grew the thread list to N
+        # before draining. Now the live-thread count is bounded by the pool
+        # size regardless of paste size; excess items wait in the queue.
         self.immediate_threads: list[threading.Thread] = []
         self._immediate_lock = threading.Lock()
-        # scal-01: cap concurrent immediate-mode subprocesses so a paste of N
-        # links doesn't launch N subprocesses at once. Mirrors worker_count
-        # (clamped >= 1); excess runners block on acquire rather than dropping.
-        self._immediate_slots = threading.Semaphore(self._immediate_concurrency())
+        self._immediate_q: "queue.Queue[QueueItem]" = queue.Queue()
+        self._immediate_pool_size = self._immediate_concurrency()
         # Templates already flagged at runtime for the sec-02 shell+{url} check;
         # warn once per distinct template to avoid log spam.
         self._warned_shell_url_templates: set = set()
@@ -1052,37 +1056,52 @@ class Dispatcher:
             return 1
 
     def _run_immediate_item(self, item: QueueItem) -> None:
-        """Immediate-mode runner body: bound concurrency via the semaphore and
-        record a failure metric on a non-zero exit (rel-01) so immediate
-        failures aren't invisible."""
-        self._immediate_slots.acquire()
-        try:
-            exit_code = self._run_item(item, "immediate")
-        finally:
-            self._immediate_slots.release()
+        """Run one immediate item and record a failure/completion metric on its
+        exit (rel-01) so immediate failures aren't invisible."""
+        exit_code = self._run_item(item, "immediate")
         if exit_code != 0:
             self._record_metric("failures")
         else:
             self._record_metric("completions")
 
-    def _dispatch_immediate(self, item: QueueItem) -> None:
-        """Spawn an immediate-mode runner thread. Immediate items are
-        fire-and-forget and intentionally not deduplicated — a user who
-        wanted exactly one fire would have used a queue protocol. Concurrency
-        is bounded to worker_count (scal-01); excess runners block on a
-        semaphore inside the thread rather than launching all at once."""
-        self._log(f"[immediate] {item.protocol}: {item.url}")
-        t = threading.Thread(
-            target=self._run_immediate_item,
-            args=(item,),
-            daemon=True,
-        )
-        with self._immediate_lock:
-            self.immediate_threads = [
-                x for x in self.immediate_threads if x.is_alive()
-            ]
+    def _immediate_consumer(self) -> None:
+        """Bounded-pool consumer (conc-02): pull items off the immediate work
+        queue and run them one at a time. Exits when the queue is idle and the
+        app is stopping, so the pool drains cleanly at shutdown."""
+        while True:
+            try:
+                item = self._immediate_q.get(timeout=0.25)
+            except queue.Empty:
+                if self.stop_event.is_set():
+                    return
+                continue
+            try:
+                self._run_immediate_item(item)
+            finally:
+                self._immediate_q.task_done()
+
+    def _ensure_immediate_pool(self) -> None:
+        """Spawn consumer threads up to `_immediate_pool_size`, reusing live
+        ones (conc-02). Caller holds `_immediate_lock`."""
+        self.immediate_threads = [t for t in self.immediate_threads
+                                  if t.is_alive()]
+        deficit = self._immediate_pool_size - len(self.immediate_threads)
+        for _ in range(max(0, deficit)):
+            t = threading.Thread(target=self._immediate_consumer,
+                                  daemon=True, name="immediate-runner")
             self.immediate_threads.append(t)
-        t.start()
+            t.start()
+
+    def _dispatch_immediate(self, item: QueueItem) -> None:
+        """Hand an immediate-mode item to the bounded pool (conc-02). Immediate
+        items are fire-and-forget and intentionally not deduplicated — a user
+        who wanted exactly one fire would have used a queue protocol. The number
+        of live consumer threads never exceeds `_immediate_pool_size`, so a
+        large paste queues up instead of spawning a thread per link."""
+        self._log(f"[immediate] {item.protocol}: {item.url}")
+        self._immediate_q.put(item)
+        with self._immediate_lock:
+            self._ensure_immediate_pool()
 
     def _enqueue_or_skip_duplicate(self, item: QueueItem, outcome: str) -> str:
         """Append the item to queue_items unless the URL is already pending

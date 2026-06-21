@@ -2097,6 +2097,70 @@ def test_command_timeout_seconds_unparseable_treated_as_off(headless_dispatcher)
     assert headless_dispatcher._command_timeout_seconds() == 0
 
 
+def test_immediate_pool_bounds_live_threads(headless_dispatcher):
+    # lq-conc-02: a large immediate batch must NOT spawn one live thread per
+    # item; the live consumer count is capped at the pool size.
+    disp = headless_dispatcher
+    disp._immediate_pool_size = 2
+    started = threading.Event()
+    release = threading.Event()
+    peak = {"n": 0}
+    active = {"n": 0}
+    lock = threading.Lock()
+
+    def fake_run_item(item, _mode):
+        with lock:
+            active["n"] += 1
+            peak["n"] = max(peak["n"], active["n"])
+        started.set()
+        release.wait(2.0)
+        with lock:
+            active["n"] -= 1
+        return 0
+
+    disp._run_item = fake_run_item
+    for i in range(20):
+        disp._dispatch_immediate(QueueItem(url=f"magnet:?xt={i}", protocol="magnet",
+                                           template="echo {url}", shell=False))
+    assert started.wait(2.0)
+    with disp._immediate_lock:
+        live = sum(1 for t in disp.immediate_threads if t.is_alive())
+    assert live <= 2                      # pool bounded, not 20
+    release.set()
+    disp._immediate_q.join()              # all 20 items processed
+    assert peak["n"] <= 2
+    assert disp.metrics["completions"] == 20
+
+
+def test_immediate_pool_records_failure(headless_dispatcher):
+    # lq-conc-02 / rel-01: a non-zero exit on an immediate item records a
+    # failure metric through the pool runner.
+    disp = headless_dispatcher
+    disp._run_item = lambda item, _mode: 1
+    disp._dispatch_immediate(QueueItem(url="magnet:?xt=1", protocol="magnet",
+                                       template="echo {url}", shell=False))
+    disp._immediate_q.join()
+    assert disp.metrics["failures"] == 1
+
+
+def test_immediate_pool_consumer_exits_on_stop(headless_dispatcher):
+    # lq-conc-02: idle consumers exit once stop_event is set.
+    disp = headless_dispatcher
+    disp._run_item = lambda item, _mode: 0
+    disp._dispatch_immediate(QueueItem(url="magnet:?xt=1", protocol="magnet",
+                                       template="echo {url}", shell=False))
+    disp._immediate_q.join()
+    disp.stop_event.set()
+    end = time.time() + 3.0
+    while time.time() < end:
+        with disp._immediate_lock:
+            if not any(t.is_alive() for t in disp.immediate_threads):
+                break
+        time.sleep(0.05)
+    with disp._immediate_lock:
+        assert not any(t.is_alive() for t in disp.immediate_threads)
+
+
 def test_dispatcher_metrics_record_completion_and_failure(headless_dispatcher):
     headless_dispatcher._record_metric("completions")
     headless_dispatcher._record_metric("failures")
