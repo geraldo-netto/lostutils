@@ -2194,6 +2194,33 @@ class SourceCollisionResolution(unittest.TestCase):
             result = _oze._resolve_source_collision(src, dst)
             self.assertEqual(result, src)   # no rename — no collision
 
+    def test_resolve_source_collision_clears_two_stacked_blockers(self):
+        # oze-rel-03: after clearing one cross-source blocker the probe loop
+        # must re-probe (continue) so a second stacked blocker is also cleared
+        # before ensure_directory runs. Two genuine non-dir blockers can't
+        # stack on a real linear chain, so drive _find_destination_blocker
+        # to surface two distinct blockers then a clear chain.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src.bin"; source.write_text("payload")
+            blk1 = root / "blocker1"; blk1.write_text("b1")
+            blk2 = root / "blocker2"; blk2.write_text("b2")
+            dest = root / "ext" / "a00000"
+            seq = [blk1, blk2, None]
+
+            def fake_blocker(_destination):
+                return seq.pop(0)
+
+            with patch("organize_by_extension._find_destination_blocker",
+                       side_effect=fake_blocker):
+                result = _oze._resolve_source_collision(source, dest)
+            # Cross-source: source returned unchanged, BOTH blockers renamed.
+            self.assertEqual(result, source)
+            self.assertFalse(blk1.exists())
+            self.assertFalse(blk2.exists())
+            self.assertTrue((root / "blocker1.collision1").exists())
+            self.assertTrue((root / "blocker2.collision1").exists())
+
     def test_source_blocks_destination_detection(self):
         # oze-dup-01: the _source_blocks_destination shim is gone; the
         # canonical probe is _find_destination_blocker + identity compare.

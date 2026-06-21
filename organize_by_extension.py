@@ -1072,12 +1072,16 @@ def _resolve_source_collision(source: Path, destination: Path) -> Path:
                 source, destination, candidate,
             )
             return candidate
+        # oze-rel-03: a cross-source blocker was cleared, but a SECOND
+        # non-dir blocker may sit further up the ancestor chain. Re-probe
+        # instead of returning so stacked blockers are all resolved before
+        # ensure_directory runs; otherwise the survivor raises NotADirectoryError.
         logger.warning(
             "name collision: file %s blocks destination ancestor under %s; "
             "renamed to %s so the bucket dir can be created",
             blocker, destination, candidate,
         )
-        return source
+        continue
     # Gave up after 8 retries (extremely unlikely on real workloads).
     logger.warning(
         "name collision retries exhausted for %s -> %s; falling through",
