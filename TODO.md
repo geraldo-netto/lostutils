@@ -22,7 +22,6 @@ rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
-lq-perf-01 | open | low | link_queue.py:3378 — _on_remove_selected and _selected_queue_items each rebuild a full {iid: item} map over the ENTIRE pending queue under the lock on every Delete/right-click regardless of selection size. Cache the iid→url map from the last refresh, or index lazily. | hot path under lock
 
 ## scalability
 

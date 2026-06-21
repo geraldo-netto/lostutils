@@ -303,9 +303,18 @@ class _PendingQueue:
         self.urls: dict = {}          # url -> item (insertion-ordered = FIFO)
         self.by_domain: dict = {}     # domain -> {url: item} (FIFO within)
         self.seq_of: dict = {}        # url -> insertion seq
+        # lq-perf-01: iid -> url index so a Delete / right-click resolves only
+        # the (few) selected tree iids instead of rebuilding a whole-queue
+        # {iid: item} map under the lock on every interaction.
+        self.iids: dict = {}
         self._ordered_values = None
         for it in iterable:
             self.append(it)
+
+    def item_for_iid(self, iid):
+        """Return the QueueItem for a Tk tree iid, or None. O(1)."""
+        url = self.iids.get(iid)
+        return self.urls.get(url) if url is not None else None
 
     # -- mutators -----------------------------------------------------------
     def _invalidate_order_cache(self) -> None:
@@ -325,6 +334,7 @@ class _PendingQueue:
         self.urls[url] = it
         self.by_domain.setdefault(self._domain_fn(it), {})[url] = it
         self.seq_of[url] = self._next_seq
+        self.iids[_queue_iid_for_url(url)] = url
         self._next_seq += 1
         self._invalidate_order_cache()
 
@@ -334,6 +344,7 @@ class _PendingQueue:
             raise ValueError("item not in pending queue")
         del self.urls[url]
         self.seq_of.pop(url, None)
+        self.iids.pop(_queue_iid_for_url(url), None)
         d = self._domain_fn(it)
         bucket = self.by_domain.get(d)
         if bucket is not None:  # pragma: no cover - withdrawn-root Tk early-exit
@@ -346,6 +357,7 @@ class _PendingQueue:
         self.urls.clear()
         self.by_domain.clear()
         self.seq_of.clear()
+        self.iids.clear()
         self._next_seq = 0
         self._invalidate_order_cache()
 
@@ -3487,16 +3499,16 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         sel = self.queue_tree.selection()
         if not sel:
             return
-        # Map the selection back to QueueItem URLs by resolving each pending
-        # iid against the live queue's hashed-iid map (rel-12 — iids are now a
-        # `p:<blake2b>` hash, not `p:<url>`); in-flight rows ("r:<idx>") are
-        # not removable and are dropped. Removing by URL (not by row position)
-        # is immune to the queue being mutated by a worker between paint and
-        # click (rel-01).
+        # Map the selection back to QueueItem URLs via the queue's iid index
+        # (lq-perf-01): only the few selected iids are resolved, not a fresh
+        # whole-queue {iid: url} map built under the lock on every Delete. iids
+        # are a `p:<blake2b>` hash of the URL (rel-12); in-flight rows
+        # ("r:<idx>") aren't in the index and are dropped. Removing by URL (not
+        # row position) is immune to a worker mutating the queue between paint
+        # and click (rel-01).
         with self.queue_lock:
-            iid_to_url = {_queue_iid_for_url(it.url): it.url
-                          for it in self.queue_items}
-        urls = [iid_to_url[iid] for iid in sel if iid in iid_to_url]
+            iids = self.queue_items.iids
+            urls = [iids[iid] for iid in sel if iid in iids]
         removed = self._remove_pending_urls(urls)
 
         self._refresh_queue_list()
@@ -4143,13 +4155,16 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         sel = self.queue_tree.selection()
         if not sel:
             return []
+        # lq-perf-01: resolve only the selected iids — running rows from the
+        # (worker-bounded) current_items map, pending rows via the queue's O(1)
+        # iid index — instead of rebuilding a whole-queue {iid: item} map under
+        # the lock on every right-click.
         with self.queue_lock:
             running = {
                 f"r:{idx}": it for idx, it in self.current_items.items()
                 if it is not None
             }
-            pending = {_queue_iid_for_url(it.url): it
-                       for it in self.queue_items}
+            pending = {iid: self.queue_items.item_for_iid(iid) for iid in sel}
         out = []
         for iid in sel:
             it = running.get(iid) or pending.get(iid)

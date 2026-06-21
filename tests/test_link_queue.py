@@ -485,14 +485,24 @@ def test_pending_queue_ops():
     # dedupe: re-appending an existing url doesn't grow the queue
     pq.append(a)
     assert len(pq) == 3
+    # lq-perf-01: iid index resolves a tree iid back to its item in O(1).
+    iid_a = link_queue._queue_iid_for_url("http://a.com/1")
+    assert pq.iids[iid_a] == "http://a.com/1"
+    assert pq.item_for_iid(iid_a) is a
+    assert pq.item_for_iid("p:nope") is None
     pq.remove(b)                          # O(1) removal by url
     assert "b.com" not in pq.by_domain and b not in pq
+    assert link_queue._queue_iid_for_url("http://b.com/2") not in pq.iids
     assert pq[0] is a and pq[-1] is c     # int index
     assert pq[:1] == [a]                  # slice -> list
     pq[:] = [b]                           # whole-queue slice assign
     assert list(pq) == [b] and pq.urls == {"http://b.com/2": b}
+    # slice-assign rebuilt the iid index too.
+    assert pq.item_for_iid(link_queue._queue_iid_for_url("http://b.com/2")) is b
+    assert iid_a not in pq.iids
     pq.clear()
     assert len(pq) == 0 and not pq.urls and not pq.by_domain and not pq
+    assert not pq.iids
 
 
 def test_pending_queue_setitem_and_eq():
