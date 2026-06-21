@@ -41,6 +41,7 @@ import sys
 import tempfile
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+import contextvars
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
@@ -67,6 +68,28 @@ def with_logger(log: logging.Logger) -> Iterator[logging.Logger]:
         yield log
     finally:
         _log_ctx.reset(token)
+
+
+# rf-test-01: contextvar-backed hash injection. `_verify_content` calls
+# `_hash()` (the active hash function) rather than `_sha256` directly so a
+# test can substitute a hash that blocks a worker mid-stream and exercise the
+# verify-pool race/leak paths (e.g. proving rmtree waits for a still-running
+# hash). Defaults to `_sha256`; override inside `with_hash_fn(...)`.
+_hash_ctx: "ContextVar[Callable[[Path], str]]" = ContextVar("relocate_hash")
+
+
+def _hash() -> "Callable[[Path], str]":
+    return _hash_ctx.get(_sha256)
+
+
+@contextmanager
+def with_hash_fn(fn: "Callable[[Path], str]") -> "Iterator[Callable[[Path], str]]":
+    """Temporarily replace the hash function used by content verification."""
+    token = _hash_ctx.set(fn)
+    try:
+        yield fn
+    finally:
+        _hash_ctx.reset(token)
 
 
 BACKUP_SUFFIX = ".relocate-backup"
@@ -1020,7 +1043,13 @@ def _run_verify_pool(tasks: Iterator[Callable[[], None]], *,
     workers = _resolved_jobs(jobs)
     ex = ThreadPoolExecutor(max_workers=workers)
     try:
-        _run_streamed(ex.submit, tasks, _inflight_cap(workers), on_done)
+        # rf-test-01: run each task under a COPY of the submitting context so
+        # worker threads see the active `_hash` / `_log` contextvars. Without
+        # this, ThreadPoolExecutor workers start with an empty context and the
+        # injectable hash seam (and logger override) would silently fall back
+        # to the module defaults inside the pool.
+        _run_streamed(partial(_submit_in_context, ex), tasks,
+                      _inflight_cap(workers), on_done)
     finally:
         # rf-perf-04: on failure, cancel still-QUEUED futures instead of
         # draining them so the first hash mismatch is visible immediately
@@ -1038,6 +1067,15 @@ def _run_verify_pool(tasks: Iterator[Callable[[], None]], *,
                 dropped[0] + 1,
             )
         raise first_error[0]
+
+
+def _submit_in_context(ex: ThreadPoolExecutor, task: Callable[[], None]
+                       ) -> "Future":
+    """Submit `task` to `ex`, running it under a copy of the current context
+    (rf-test-01) so worker threads inherit the active `_hash` / `_log`
+    contextvars instead of the empty default context."""
+    ctx = contextvars.copy_context()
+    return ex.submit(ctx.run, task)
 
 
 def _verify_dir(src_dir: Path, dst_dir: Path, rel: Path) -> None:
@@ -1126,8 +1164,13 @@ def _verify_content(src_file: Path, dst_file: Path, rel: Path) -> None:
     byte stream and `_sha256` re-stats the file after closing to detect
     post-hoc truncation — a mismatch between the hashed length and the
     final size is reported as a typed error so the operator can rerun.
+
+    rf-test-01: the hash function is taken from `_hash()` (a contextvar,
+    defaulting to `_sha256`) so tests can inject a blocking/instrumented hash
+    to drive the verify-pool race paths.
     """
-    if _sha256(src_file) != _sha256(dst_file):
+    hash_fn = _hash()
+    if hash_fn(src_file) != hash_fn(dst_file):
         raise RuntimeError(f"hash mismatch for {rel} (src={src_file})")
 
 

@@ -87,7 +87,6 @@ dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves 
 lq-test-01 | open | low | link_queue.py:986 — non-Tk core logic (the _batch_dispatch depth-0 flush, _stream_summary milestone, _highest_pct_in compare) is marked `# pragma: no cover - withdrawn-root Tk early-exit` though not Tk-related, hiding untested dispatch/log logic. Test via Dispatcher.headless() and drop the misapplied pragmas. | coverage honesty
 mmr-test-01 | open | low | masterclass-mass-rename.py:83-94 — clean_name has no tests; token-substring stripping and the empty-result edge (mmr-rel-02) are unverified. Add tests including a name that reduces to "". | coverage
 nm-test-01 | open | low | numero_magicov2.py:35-40 — reduce_to_single_digit returns 0 for input 0 but main guards total==0 before calling, so the 0-branch is untested dead-ish path. Add a test or assert the precondition. | coverage
-rf-test-01 | open | med | relocate_folder.py:907 — the verify-pool leak and rmtree-vs-running-threads race are hard to test: there is no seam to pause a worker mid-hash. Make the hash function injectable (param or contextvar like _log) so a test can block a thread inside _sha256 on the error path. |
 
 ## observability
 

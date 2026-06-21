@@ -1425,6 +1425,86 @@ def test_with_logger_swaps_logger_in_safe():
     assert rf._log() is rf.LOG
 
 
+# --- rf-test-01: injectable hash function via contextvar --------------------
+
+def test_with_hash_fn_swaps_hash_used_by_verify_content(tmp_path):
+    src = tmp_path / "a"; src.write_text("hello")
+    dst = tmp_path / "b"; dst.write_text("hello")
+    calls = []
+
+    def fake_hash(p):
+        calls.append(p)
+        return "constant"          # both sides hash equal -> no mismatch
+
+    with rf.with_hash_fn(fake_hash):
+        rf._verify_content(src, dst, Path("rel"))
+    assert len(calls) == 2          # src + dst hashed via the injected fn
+    # outside the context, the default _sha256 is restored.
+    assert rf._hash() is rf._sha256
+
+
+def test_with_hash_fn_resets_on_exception():
+    def fake_hash(p):
+        return "x"
+    try:
+        with rf.with_hash_fn(fake_hash):
+            assert rf._hash() is fake_hash
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    assert rf._hash() is rf._sha256
+
+
+def test_injected_hash_detects_mismatch(tmp_path):
+    src = tmp_path / "a"; src.write_text("data")
+    dst = tmp_path / "b"; dst.write_text("data")
+
+    def per_path_hash(p):
+        return "S" if "/a" in str(p) else "D"   # force a mismatch
+
+    with rf.with_hash_fn(per_path_hash):
+        with pytest.raises(RuntimeError, match="hash mismatch"):
+            rf._verify_content(src, dst, Path("rel"))
+
+
+def test_injected_blocking_hash_is_joined_before_rmtree(tmp_path, monkeypatch):
+    # rf-test-01: the whole point of the seam — a hash that blocks a worker
+    # mid-stream lets us prove _copy_and_verify's rmtree happens only AFTER
+    # the verify pool joined the still-running hash (rf-rel-03 / rf-conc-01).
+    import threading
+    src = tmp_path / "src"; src.mkdir()
+    (src / "slow.txt").write_text("aaaa")
+    (src / "boom.txt").write_text("bbbb")
+    target = tmp_path / "dst" / "src"
+
+    slow_running = threading.Event()
+    slow_finished = threading.Event()
+    rmtree_seen = []
+    real_rmtree = rf.shutil.rmtree
+
+    def blocking_hash(p):
+        if p.name == "slow.txt":
+            slow_running.set()
+            import time
+            time.sleep(0.2)
+            slow_finished.set()
+            return "ok"
+        raise RuntimeError("hash mismatch injected")
+
+    def tracking_rmtree(p, *a, **k):
+        rmtree_seen.append((str(p), slow_finished.is_set()))
+        return real_rmtree(p, *a, **k)
+
+    monkeypatch.setattr(rf.shutil, "rmtree", tracking_rmtree)
+    plan = rf.Plan(source=src, target=target, checksum=True, jobs=2)
+    with rf.with_hash_fn(blocking_hash):
+        with pytest.raises(RuntimeError):
+            rf._copy_and_verify(plan)
+    target_deletes = [done for p, done in rmtree_seen if p == str(target)]
+    assert target_deletes
+    assert all(target_deletes)   # every target rmtree happened post-join
+
+
 def test_with_logger_resets_on_exception():
     class Cap(rf.logging.Logger):
         def __init__(self): super().__init__("cap2")
