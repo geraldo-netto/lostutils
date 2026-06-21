@@ -21,6 +21,7 @@ Tradeoff:
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 
 import numpy as np
@@ -29,7 +30,9 @@ from rapidfuzz.process import cdist
 
 DEFAULT_THRESHOLD = 7
 MAX_THRESHOLD = 254  # uint8 distance matrix caps at 255; stay below to avoid wrap
-REPLACEMENTS = (",", "[", "]", "xxx", "monography")
+REPLACEMENTS = (",", "[", "]")
+WORD_TOKENS = ("xxx", "monography")
+_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, WORD_TOKENS)))
 
 
 def clamp_threshold(threshold):
@@ -47,7 +50,7 @@ def cleanup(entry):
     s = entry.strip().lower()
     for tok in REPLACEMENTS:
         s = s.replace(tok, "")
-    return s
+    return _WORD_RE.sub("", s)
 
 
 def main():

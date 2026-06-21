@@ -85,3 +85,40 @@ def test_main_reports_near_pair(monkeypatch, tmp_path):
 def test_main_empty_file_noop(monkeypatch, tmp_path):
     out = _run_main(monkeypatch, tmp_path, [""], 7)
     assert out == ""
+
+
+# --- dnv3-rel-02: cleanup strips only standalone "xxx"/"monography" ---------
+
+def test_cleanup_strips_standalone_tokens():
+    assert dn.cleanup("xxx monography") == " "
+
+
+def test_cleanup_keeps_words_containing_tokens():
+    assert dn.cleanup("xxxl") == "xxxl"
+    assert dn.cleanup("monographymania") == "monographymania"
+    assert dn.cleanup("amonography") == "amonography"
+
+
+def test_cleanup_strips_token_among_words():
+    assert dn.cleanup("my xxx file") == "my  file"
+
+
+def test_cleanup_basic_replacements_and_case():
+    assert dn.cleanup("  A,[B] ") == "ab"
+
+
+@given(st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=12))
+def test_cleanup_never_strips_token_inside_longer_word(word):
+    # A pure-alpha word longer than a token and containing it as a substring,
+    # but not equal to it, must survive intact (no boundary).
+    for tok in dn.WORD_TOKENS:
+        if tok in word and word != tok:
+            assert dn.cleanup(word) == word
+
+
+@given(st.lists(st.sampled_from(["xxx", "monography", "alpha", "beta"]),
+                min_size=1, max_size=6))
+def test_cleanup_drops_all_standalone_tokens(words):
+    result = dn.cleanup(" ".join(words))
+    for tok in dn.WORD_TOKENS:
+        assert tok not in result.split()
