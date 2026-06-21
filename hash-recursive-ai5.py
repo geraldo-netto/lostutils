@@ -482,22 +482,15 @@ def _hash_file_windows(path, windows, config=None):
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         with os.fdopen(fd, "rb", buffering=0) as f:
             h = blake3.blake3()
-            try:
-                for window in windows:
-                    f.seek(window.offset, window.whence)
-                    if not _read_window_into(
-                            h, f, window.length, window.strict):
-                        # File shrank / partial read in a strict window
-                        # — abort the hash so a truncated window can't
-                        # silently produce a different digest from a
-                        # full re-read (hr-rel-09).
-                        return None
-                return h.hexdigest()
-            finally:
-                # hr-rel-11: discard the hasher explicitly so partial
-                # state from a mid-loop exception can't survive into
-                # later code that re-hashes the same buffer ref.
-                del h
+            for window in windows:
+                f.seek(window.offset, window.whence)
+                if not _read_window_into(
+                        h, f, window.length, window.strict):
+                    # File shrank / partial read in a strict window — abort
+                    # the hash so a truncated window can't silently produce
+                    # a different digest from a full re-read (hr-rel-09).
+                    return None
+            return h.hexdigest()
     except OSError as exc:
         # hr-obs-01 / hr-conc-02: a vanished-after-walk file is a benign
         # skip, not a real error. ENOENT on `os.open` (FileNotFoundError)

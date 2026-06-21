@@ -897,6 +897,29 @@ def test_read_window_into_assembles_short_reads():
     assert h.hexdigest() == expected.hexdigest()
 
 
+def test_hash_file_windows_multi_window_digest_stable(tmp_path):
+    # hr-rel-02: removing the dead `del h` finally must not change the
+    # digest. A multi-window hash equals the same windows fed to a fresh
+    # blake3 by hand.
+    import blake3
+    data = bytes(range(256)) * 64
+    f = tmp_path / "m.bin"; f.write_bytes(data)
+    windows = [hr.FileWindow(0, 100, hr.os.SEEK_SET),
+               hr.FileWindow(50, 80, hr.os.SEEK_SET)]
+    digest = hr._hash_file_windows(str(f), windows)
+
+    expected = blake3.blake3()
+    expected.update(data[0:100])
+    expected.update(data[50:130])
+    assert digest == expected.hexdigest()
+
+
+def test_hash_file_windows_no_del_h_in_source():
+    # hr-rel-02: the dead `del h` safety measure is gone.
+    import inspect
+    assert "del h" not in inspect.getsource(hr._hash_file_windows)
+
+
 def test_hash_file_windows_legacy_3tuple_window(tmp_path):
     # Back-compat: bare 3-tuple windows still work (no `strict` field).
     f = tmp_path / "p.bin"; f.write_bytes(b"hello")
