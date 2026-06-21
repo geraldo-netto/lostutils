@@ -1219,6 +1219,24 @@ def test_queue_rerun(app):
     pump(app, 0.2)
 
 
+def test_queue_rerun_preserves_extra(app):
+    # lq-rel-03: re-running a queued item must carry its mapped flags (extra),
+    # not drop them.
+    stop_bg_workers(app)
+    item = QueueItem(url="http://x/1", protocol="http", template="echo {url}",
+                     shell=False, extra=(("-o", "clip.mp4"),))
+    with app._dispatch_cv:
+        app.queue_items[:] = [item]
+    app._refresh_pending = False
+    app._do_refresh_queue_list()
+    pump(app, 0.1)
+    app.queue_tree.selection_set(*app.queue_tree.get_children())
+    captured = []
+    app.dispatcher._process_link = lambda url, extra=(): captured.append((url, extra))
+    app._on_queue_rerun()
+    assert captured == [("http://x/1", (("-o", "clip.mp4"),))]
+
+
 def test_queue_actions_empty_selection(app):
     app.queue_tree.selection_remove(*app.queue_tree.selection())
     app._on_queue_rerun()

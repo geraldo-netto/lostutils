@@ -4097,7 +4097,9 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             return
         with self._batch_dispatch():
             for it in items:
-                self._process_link(it.url)
+                # lq-rel-03: carry the item's mapped flags through the re-run so
+                # re-queueing doesn't silently drop e.g. ("-o", "clip.mp4").
+                self._process_link(it.url, it.extra)
         self._log(f"[queue] re-queued {len(items)} item(s)")
 
     def _on_queue_copy_url(self) -> None:
