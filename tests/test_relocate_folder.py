@@ -2664,6 +2664,25 @@ def test_main_recover_flag_restores(tmp_path):
     assert not rf._path_taken(backup)
 
 
+def test_main_recover_warns_when_dest_root_supplied(tmp_path, caplog):
+    # rf-rel-03: dest_root is ignored under --recover; emit a warning.
+    source, backup = _make_orphan(tmp_path)
+    import logging
+    with caplog.at_level(logging.WARNING):
+        rc = rf.main(["--recover", str(source), str(tmp_path / "ignored_dest")])
+    assert rc == 0
+    assert source.is_dir()
+    assert any("--recover ignores dest_root" in r.message for r in caplog.records)
+
+
+def test_main_recover_no_warning_without_dest_root(tmp_path, caplog):
+    source, _ = _make_orphan(tmp_path)
+    import logging
+    with caplog.at_level(logging.WARNING):
+        rf.main(["--recover", str(source)])
+    assert not any("ignores dest_root" in r.message for r in caplog.records)
+
+
 def test_main_recover_flag_no_backup_returns_1(tmp_path):
     source = tmp_path / "nope"
     assert rf.main(["--recover", str(source)]) == 1

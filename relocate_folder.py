@@ -1688,6 +1688,14 @@ def main(argv: list[str] | None = None) -> int:
 
 def _run_recover(ns: argparse.Namespace) -> int:
     """Handle `--recover` (rf-rel-01): restore an orphaned backup."""
+    if getattr(ns, "dest_root", None) is not None:
+        # rf-rel-03: --recover only needs <source>; a positional dest_root is
+        # silently dropped. Warn so a typo'd invocation (or a user expecting
+        # the dir to be relocated) isn't surprised by the no-op on dest_root.
+        _log().warning(
+            "--recover ignores dest_root (%s); recovery only restores the "
+            "<source>.relocate-backup directory to <source>", ns.dest_root,
+        )
     source = Path(ns.source).expanduser().absolute()
     try:
         result = recover(source)
