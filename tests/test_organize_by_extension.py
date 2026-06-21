@@ -2573,8 +2573,13 @@ class SourceCollisionResolution(unittest.TestCase):
             import unittest.mock as _m
             with _m.patch.object(_oze, "_COLLISION_RETRY_CAP", 3):
                 with patch.object(_oze.os, "link", always_fail):
-                    with self.assertRaisesRegex(RuntimeError, "unable to atomically"):
-                        _oze._atomic_rename_to_free_slot(source)
+                    # oze-obs-02: exhaustion logs the probed-candidate count.
+                    with self.assertLogs("organize_by_extension",
+                                         level="ERROR") as cm:
+                        with self.assertRaisesRegex(RuntimeError,
+                                                    "unable to atomically"):
+                            _oze._atomic_rename_to_free_slot(source)
+            self.assertTrue(any("probing 3" in m for m in cm.output))
             self.assertTrue(source.exists())  # never destroyed on exhaustion
 
     def test_atomic_rename_to_free_slot_caps_at_limit(self):
@@ -2695,8 +2700,12 @@ class SourceCollisionResolution(unittest.TestCase):
                 for n in range(1, 4):
                     (root / f"src.collision{n}").write_text("taken")
                 with patch.object(_oze.os, "link", no_link):
-                    with self.assertRaisesRegex(RuntimeError, "unable to atomically"):
-                        _oze._atomic_rename_to_free_slot(source)
+                    with self.assertLogs("organize_by_extension",
+                                         level="ERROR") as cm:
+                        with self.assertRaisesRegex(RuntimeError,
+                                                    "unable to atomically"):
+                            _oze._atomic_rename_to_free_slot(source)
+            self.assertTrue(any("probing 3" in m for m in cm.output))
             self.assertTrue(source.exists())
 
     def test_atomic_rename_propagates_unexpected_oserror(self):

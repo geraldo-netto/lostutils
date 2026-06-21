@@ -1132,6 +1132,20 @@ _LINK_UNSUPPORTED_ERRNOS = frozenset({
 })
 
 
+def _raise_collision_exhausted(source: Path, last_exc: OSError | None) -> NoReturn:
+    """Log the probed-candidate count and raise the retry-cap RuntimeError
+    (oze-obs-02) so an exhaustion leaves a trace even when the worker pool
+    converts the exception into a per-file skip tuple."""
+    logger.error(
+        "collision reservation exhausted for %s after probing %d "
+        "`.collisionN` slots", source, _COLLISION_RETRY_CAP,
+    )
+    raise RuntimeError(
+        f"unable to atomically reserve a collision name for {source} "
+        f"after {_COLLISION_RETRY_CAP} attempts"
+    ) from last_exc
+
+
 def _reserve_slot_via_rename(source: Path) -> Path:
     """Fallback reservation for filesystems without hardlink support (oze-rel-01).
 
@@ -1151,10 +1165,7 @@ def _reserve_slot_via_rename(source: Path) -> Path:
         os.close(fd)
         os.rename(source, candidate)
         return candidate
-    raise RuntimeError(
-        f"unable to atomically reserve a collision name for {source} "
-        f"after {_COLLISION_RETRY_CAP} attempts"
-    ) from last_exc
+    _raise_collision_exhausted(source, last_exc)
 
 
 def _unlink_source_or_rollback_candidate(source: Path, candidate: Path) -> None:
@@ -1222,10 +1233,7 @@ def _atomic_rename_to_free_slot(source: Path) -> Path:
             raise
         _unlink_source_or_rollback_candidate(source, candidate)
         return candidate
-    raise RuntimeError(
-        f"unable to atomically reserve a collision name for {source} "
-        f"after {_COLLISION_RETRY_CAP} attempts"
-    ) from last_exc
+    _raise_collision_exhausted(source, last_exc)
 
 
 _TRANSIENT_LINK_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.EAGAIN})
