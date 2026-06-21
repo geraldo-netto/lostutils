@@ -53,7 +53,6 @@ rf-conc-01 | open | low | relocate_folder.py:899 — verify_copy with checksum=F
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-cmplx-02 | open | low | relocate_folder.py:986 — _capture_first and _collect_chown_error are near-duplicate "drain one future's exception into a list" helpers; _capture_first is dead (kept for tests). Drop it or have _collect_chown_error delegate. | SOLID-DRY
 
 ## code duplication
 

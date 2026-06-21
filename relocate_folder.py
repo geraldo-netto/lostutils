@@ -983,17 +983,6 @@ def _run_verify_pool(tasks: Iterator[Callable[[], None]], *,
         raise first_error[0]
 
 
-def _capture_first(fut, sink: list[BaseException]) -> None:
-    """Record `fut`'s exception in `sink` if `sink` is still empty.
-
-    Standalone helper kept for ad-hoc collectors and existing tests;
-    `_run_verify_pool` now uses an inline closure so it can track the
-    dropped-error count (rf-rel-08)."""
-    exc = fut.exception()
-    if exc is not None and not sink:
-        sink.append(exc)
-
-
 def _verify_dir(src_dir: Path, dst_dir: Path, rel: Path) -> None:
     if src_dir.is_symlink() or not dst_dir.is_dir() or dst_dir.is_symlink():
         # rf-obs-02: include absolute src path so log lines are actionable

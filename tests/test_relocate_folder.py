@@ -923,22 +923,22 @@ def test_verify_copy_parallel_propagates_size_mismatch(tmp_path):
         rf.verify_copy(src, dst, checksum=True)
 
 
-def test_capture_first_records_only_first():
+def test_capture_first_helper_removed():
+    # rf-cmplx-02: the dead _capture_first helper was dropped; only
+    # _collect_chown_error remains as the future-exception drainer.
+    assert not hasattr(rf, "_capture_first")
+
+
+def test_collect_chown_error_appends_each_exception():
+    # rf-cmplx-02: the surviving drainer records every exception (the
+    # caller decides first-vs-all), unlike the removed _capture_first.
     from concurrent.futures import Future
     f1: Future = Future(); f1.set_exception(ValueError("a"))
     f2: Future = Future(); f2.set_exception(ValueError("b"))
-    sink: list = []
-    rf._capture_first(f1, sink)
-    rf._capture_first(f2, sink)
-    assert len(sink) == 1 and sink[0].args == ("a",)
-
-
-def test_capture_first_ignores_success():
-    from concurrent.futures import Future
-    f: Future = Future(); f.set_result(None)
-    sink: list = []
-    rf._capture_first(f, sink)
-    assert sink == []
+    errs: list = []
+    rf._collect_chown_error(f1, errs)
+    rf._collect_chown_error(f2, errs)
+    assert [e.args[0] for e in errs] == ["a", "b"]
 
 
 # --- rf-perf-03: lstat cache reused by _group_specials_by_kind -------------
