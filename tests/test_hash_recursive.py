@@ -672,6 +672,37 @@ def test_expand_keys_to_paths_caps_at_alias_cap():
     assert "more" in out[-1]
 
 
+def test_expand_keys_to_paths_extends_only_up_to_remaining_room():
+    # hr-scal-01: a single inode bucket far exceeding the cap must NOT be
+    # fully extended into `out` before slicing — only `cap - len(out)`
+    # paths are taken from the oversized bucket.
+    class TrackingList(list):
+        sliced_with = []
+
+        def __getitem__(self, item):
+            if isinstance(item, slice):
+                TrackingList.sliced_with.append(item.stop)
+            return super().__getitem__(item)
+
+    big_bucket = TrackingList(f"/p/{i}" for i in range(100_000))
+    aliases = {("d", 0): big_bucket}
+    out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=10)
+    assert hr._count_real_paths(out) == 10
+    # The bucket was sliced to the remaining room (10), never extended whole.
+    assert 10 in TrackingList.sliced_with
+
+
+def test_expand_keys_to_paths_room_zero_skips_extend():
+    # hr-scal-01: once `out` is already at the cap, later buckets contribute
+    # nothing to `out` but still count toward the total/sentinel.
+    aliases = {("d", 0): ["/a", "/b"], ("d", 1): ["/c", "/d", "/e"]}
+    out = hr._expand_keys_to_paths([("d", 0), ("d", 1)], aliases, cap=2)
+    assert hr._count_real_paths(out) == 2
+    assert out[:2] == ["/a", "/b"]
+    sentinel = next(p for p in out if isinstance(p, hr._MoreSentinel))
+    assert "3" in str(sentinel)   # 5 total - 2 cap
+
+
 def test_expand_keys_to_paths_under_cap_no_sentinel():
     aliases = {("d", 0): ["/a", "/b"]}
     out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=ALIAS_CAP_LARGE)

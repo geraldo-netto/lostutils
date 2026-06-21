@@ -875,8 +875,12 @@ def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
         total += len(paths)
         if overflow is not None:
             total += overflow.get(key, 0)
-        if len(out) < cap:
-            out.extend(paths)
+        # hr-scal-01: extend only up to the remaining room under `cap` so a
+        # single inode whose bucket far exceeds `cap` never materialises the
+        # whole list before the final slice.
+        room = cap - len(out)
+        if room > 0:
+            out.extend(paths[:room])
     if total > cap:
         if config is not None:
             # hr-conc-06: guard against torn `+= 1` on free-threaded py3.13.
