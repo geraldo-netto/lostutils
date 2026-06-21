@@ -1002,14 +1002,38 @@ def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
     return 1, real_count
 
 
-def _stage1_hash(candidates, rep, jobs, config, cancel_event=None):
+def _retry_head_alias(key, tried, aliases, config):
+    """hr-rel-02: re-hash the head of the next readable alias of `key`
+    after its representative produced a None digest.
+
+    A multi-alias (hardlinked) inode whose representative was deleted or
+    became unreadable between walk and hash — while a sibling alias is
+    still readable — was silently dropped from its group. Probe the
+    remaining aliases (skipping the already-tried `tried` path) and return
+    the first non-None head digest, or None when no sibling is readable."""
+    for alias in aliases.get(key, ()):
+        if alias == tried:
+            continue
+        head = hash_head(alias, config)
+        if head is not None:
+            return head
+    return None
+
+
+def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
+                 aliases=None):
     """Run Stage 1 (head hash) and bucket candidates by ``(size, head)``
     (hr-cx-05).
 
     Returns ``(by_head, info)``. ``info`` carries ``stage1`` and
     ``stage1_errors`` for the run summary. `cancel_event` (hr-conc-01) is
     forwarded to :func:`_run_stage` so a Ctrl-C aborts the head-hash
-    phase between batches."""
+    phase between batches.
+
+    hr-rel-02: when a multi-alias inode's representative head is None and
+    `aliases` is supplied, the next readable alias is retried via
+    :func:`_retry_head_alias` so a deleted/unreadable rep doesn't silently
+    exclude an inode whose siblings are still readable."""
     if not candidates:
         return defaultdict(list), {"stage1": 0, "stage1_errors": 0}
     # hr-perf-01: build the path list and (capped) byte total in one pass
@@ -1026,6 +1050,8 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None):
     by_head: dict = defaultdict(list)
     for size, key in candidates:
         head = head_by_path.get(rep[key])
+        if head is None and aliases is not None and len(aliases.get(key, ())) > 1:
+            head = _retry_head_alias(key, rep[key], aliases, config)
         if head is None:
             continue
         by_head[(size, head)].append(key)
@@ -1192,7 +1218,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
 
     # ---- Stage 1: head hash ----
     by_head, stage1_info = _stage1_hash(
-        candidates, rep, jobs, config, cancel_event)
+        candidates, rep, jobs, config, cancel_event, aliases=aliases)
     stage2_items = _split_stage1_buckets(by_head, rep, _accept_group)
 
     # ---- Stage 2: tail + middle samples for size+head collisions ----

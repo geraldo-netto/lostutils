@@ -1533,7 +1533,7 @@ def test_find_duplicate_groups_disabled_cap_skips_ingest_overflow(tmp_path):
     files += [(f"/synthetic/q{i}", len(body), 1, 200) for i in range(30)]
     cfg = hr.RunConfig(alias_cap=0)   # disabled
 
-    def stub_stage1(candidates, rep, jobs, config, cancel_event=None):
+    def stub_stage1(candidates, rep, jobs, config, cancel_event=None, **kwargs):
         from collections import defaultdict
         by_head = defaultdict(list)
         for size, key in candidates:
@@ -1987,9 +1987,10 @@ def test_find_duplicate_groups_forwards_cancel_to_stages(tmp_path, monkeypatch):
 
     real_stage1 = hr._stage1_hash
 
-    def spy(candidates, rep, jobs, config, cancel_event=None):
+    def spy(candidates, rep, jobs, config, cancel_event=None, **kwargs):
         seen["cancel"] = cancel_event
-        return real_stage1(candidates, rep, jobs, config, cancel_event)
+        return real_stage1(candidates, rep, jobs, config, cancel_event,
+                           **kwargs)
 
     monkeypatch.setattr(hr, "_stage1_hash", spy)
     result = hr.find_duplicate_groups(files, jobs=1, cancel_event=ev)
@@ -2135,7 +2136,7 @@ def test_find_duplicate_groups_uses_ingest_alias_cap_via_result(tmp_path):
     def cb(digest, keys, aliases, overflow):
         captured.append((digest, keys, aliases, overflow))
 
-    def stub_stage1(candidates, rep, jobs, config, cancel_event=None):
+    def stub_stage1(candidates, rep, jobs, config, cancel_event=None, **kwargs):
         from collections import defaultdict
         by_head = defaultdict(list)
         for size, key in candidates:
@@ -2197,3 +2198,117 @@ def test_dedup_result_overflow_field_default_none():
     assert res.overflow is None
     res2 = hr.DedupResult(groups={}, aliases={}, info={}, overflow={("d", 0): 3})
     assert res2.overflow == {("d", 0): 3}
+
+
+# --- hr-rel-02: retry next readable alias when the rep head is None ---------
+
+def _stage1_candidates(size, key):
+    """Single (size, key) candidate list shared by the retry tests."""
+    return [(size, key)]
+
+
+def test_retry_head_alias_skips_tried_and_returns_sibling(monkeypatch):
+    # The representative (tried) is dead; the next alias hashes fine.
+    aliases = {("d", 0): ["/dead", "/live"]}
+    calls = []
+
+    def fake_hash_head(path, config):
+        calls.append(path)
+        return None if path == "/dead" else "GOODHEAD"
+
+    monkeypatch.setattr(hr, "hash_head", fake_hash_head)
+    head = hr._retry_head_alias(("d", 0), "/dead", aliases, None)
+    assert head == "GOODHEAD"
+    assert "/dead" not in calls   # the already-tried rep is skipped
+
+
+def test_retry_head_alias_returns_none_when_no_sibling_readable(monkeypatch):
+    aliases = {("d", 0): ["/dead", "/alsodead"]}
+    monkeypatch.setattr(hr, "hash_head", lambda p, c: None)
+    assert hr._retry_head_alias(("d", 0), "/dead", aliases, None) is None
+
+
+def test_retry_head_alias_unknown_key_returns_none():
+    assert hr._retry_head_alias(("d", 9), "/x", {}, None) is None
+
+
+def test_stage1_hash_retries_alias_when_rep_unreadable(tmp_path):
+    # hr-rel-02 end-to-end at stage 1: rep path is unreadable, but a
+    # hardlinked sibling is readable → the inode is NOT dropped.
+    body = b"head-content"
+    live = tmp_path / "live.bin"
+    live.write_bytes(body)
+    key = ("d", 0)
+    rep = {key: str(tmp_path / "vanished.bin")}    # rep does not exist
+    aliases = {key: [str(tmp_path / "vanished.bin"), str(live)]}
+    by_head, info = hr._stage1_hash(
+        _stage1_candidates(len(body), key), rep, jobs=1, config=None,
+        aliases=aliases)
+    # The inode survived stage 1 via the readable sibling.
+    confirmed = [k for keys in by_head.values() for k in keys]
+    assert confirmed == [key]
+    assert info["stage1"] == 1
+
+
+def test_stage1_hash_no_retry_without_aliases(tmp_path):
+    # Back-compat: no aliases supplied → a None rep head drops the inode.
+    key = ("d", 0)
+    rep = {key: str(tmp_path / "missing.bin")}
+    by_head, _ = hr._stage1_hash(
+        _stage1_candidates(50, key), rep, jobs=1, config=None)
+    assert by_head == {}
+
+
+def test_stage1_hash_no_retry_for_single_alias(tmp_path, monkeypatch):
+    # A single-alias inode whose rep is None must not trigger a retry probe.
+    key = ("d", 0)
+    rep = {key: str(tmp_path / "missing.bin")}
+    aliases = {key: [str(tmp_path / "missing.bin")]}
+    calls = []
+    real = hr._retry_head_alias
+    monkeypatch.setattr(hr, "_retry_head_alias",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    by_head, _ = hr._stage1_hash(
+        _stage1_candidates(50, key), rep, jobs=1, config=None, aliases=aliases)
+    assert by_head == {}
+    assert calls == []   # single alias → no retry attempted
+
+
+def test_find_duplicate_groups_unreadable_rep_still_grouped(tmp_path):
+    # hr-rel-02 full pipeline: two inodes with identical content; each has
+    # a dead rep alias listed first plus a readable sibling. The dead reps
+    # must not cause either inode to be silently excluded — both group.
+    body = b"D" * 400
+    live_a = tmp_path / "a_live.bin"; live_a.write_bytes(body)
+    live_b = tmp_path / "b_live.bin"; live_b.write_bytes(body)
+    files = [
+        (str(tmp_path / "a_dead.bin"), len(body), 1, 100),  # rep, missing
+        (str(live_a), len(body), 1, 100),
+        (str(tmp_path / "b_dead.bin"), len(body), 1, 200),  # rep, missing
+        (str(live_b), len(body), 1, 200),
+    ]
+    result = hr.find_duplicate_groups(files, jobs=1)
+    grouped_keys = [k for keys in result.groups.values() for k in keys]
+    assert sorted(grouped_keys) == [(1, 100), (1, 200)]
+
+
+@given(st.integers(min_value=1, max_value=8),
+       st.integers(min_value=0, max_value=7))
+def test_retry_head_alias_property(n_aliases, live_choice):
+    # Property: with the rep ("/p0") always tried/dead, _retry_head_alias
+    # returns a digest exactly when at least one sibling is readable, and
+    # never probes the tried rep.
+    paths = [f"/p{i}" for i in range(n_aliases + 1)]   # /p0 is the rep
+    aliases = {("d", 0): paths}
+    siblings = paths[1:]
+    readable = siblings[live_choice % len(siblings)] if live_choice % 3 else None
+    probed = []
+
+    def fake(path, config):
+        probed.append(path)
+        return "HD" if path == readable else None
+
+    with mock.patch.object(hr, "hash_head", side_effect=fake):
+        result = hr._retry_head_alias(("d", 0), "/p0", aliases, None)
+    assert "/p0" not in probed
+    assert result == ("HD" if readable is not None else None)
