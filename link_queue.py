@@ -2471,6 +2471,14 @@ class _FacadeMeta(type):
     """
 
     def __getattr__(cls, name: str):
+        # lq-rel-03: restrict delegation to non-dunder names. A typo'd
+        # class-level call (e.g. LinkQueueApp._serialise_item) should raise
+        # AttributeError instead of silently resolving through a delegate, and
+        # foreign introspection (copy/pickle probing __reduce_ex__,
+        # __getstate__, …) must NOT trigger the delegation walk — returning a
+        # Dispatcher/ConfigStore dunder there breaks those protocols.
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
         for src in _FACADE_DELEGATES:
             try:
                 return getattr(src, name)

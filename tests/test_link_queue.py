@@ -309,6 +309,24 @@ def test_config_write_cleans_tmp_on_dump_failure(tmp_path, monkeypatch):
     assert leftovers == []
 
 
+def test_facade_delegates_non_dunder_only():
+    # lq-rel-03: real Dispatcher/ConfigStore helpers still delegate...
+    assert LinkQueueApp._domain_of("https://vimeo.com/x") == "vimeo.com"
+    # ...a typo'd class attr raises instead of silently resolving through a
+    # delegate...
+    with pytest.raises(AttributeError):
+        LinkQueueApp._serialise_item  # noqa: B018 (British misspelling typo)
+    # ...and dunder lookups never trigger the delegation walk, so foreign
+    # introspection (copy/pickle) sees the real (absent) attribute and does
+    # not get a Dispatcher/ConfigStore dunder smuggled in.
+    import copy
+    for name in ("__reduce_ex__", "__getstate__", "__deepcopy__"):
+        with pytest.raises(AttributeError):
+            type(LinkQueueApp).__getattr__(LinkQueueApp, name)
+    # copy of the class object must not blow up via a delegated dunder.
+    assert copy.copy(LinkQueueApp) is LinkQueueApp
+
+
 def test_merge_and_normalize_config():
     cfg = {"protocols": {"http": {"mode": "queue"}}}
     LinkQueueApp._merge_user_config(cfg, {"x": 1, "protocols": {"ftp": {"command": "c"}}})
