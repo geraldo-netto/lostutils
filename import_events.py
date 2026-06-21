@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# Requires Python 3.9+ (uses zoneinfo from the stdlib). ISO timestamps without
+# seconds (e.g. "2026-06-22T14:00") are normalized in _normalize_iso so they
+# parse uniformly across 3.9/3.10 (where datetime.fromisoformat is stricter)
+# and 3.11+; build_ics therefore never silently skips such valid events.
 import os
 import re
 import sys
@@ -405,10 +409,24 @@ def write_events_json(events: List[Dict[str, Any]], output_path: Path) -> None:
         json.dump(events, f, ensure_ascii=False, indent=2)
 
 
+_ISO_NO_SECONDS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})((?:[+-]\d{2}:\d{2}|Z)?)$")
+
+
+def _normalize_iso(value: str) -> str:
+    """Pads a seconds-less 'YYYY-MM-DDThh:mm' so pre-3.11 fromisoformat accepts it."""
+    match = _ISO_NO_SECONDS.match(value)
+    if match:
+        return f"{match.group(1)}:00{match.group(2)}"
+    return value
+
+
 def _parse_iso(value: str) -> Optional[Any]:
+    if not isinstance(value, str):
+        return None
+    normalized = _normalize_iso(value)
     for parser in (datetime.fromisoformat, date.fromisoformat):
         try:
-            return parser(value)
+            return parser(normalized)
         except (ValueError, TypeError):
             continue
     return None

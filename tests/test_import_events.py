@@ -254,6 +254,57 @@ def test_build_ics_emits_importable_calendar():
     assert "Bad" not in ics  # unparseable start is skipped
 
 
+def test_parse_iso_accepts_time_without_seconds():
+    parsed = import_events._parse_iso("2026-06-22T14:00")
+    assert parsed == datetime(2026, 6, 22, 14, 0)
+
+
+def test_parse_iso_accepts_time_without_seconds_with_offset():
+    parsed = import_events._parse_iso("2026-06-22T14:00+02:00")
+    assert parsed is not None
+    assert parsed.utcoffset() is not None
+
+
+def test_parse_iso_date_only_and_full_datetime():
+    # datetime.fromisoformat is tried first, so a bare date yields midnight.
+    assert import_events._parse_iso("2026-06-22") == datetime(2026, 6, 22, 0, 0)
+    assert import_events._parse_iso("2026-06-22T14:00:30") == datetime(2026, 6, 22, 14, 0, 30)
+
+
+def test_parse_iso_rejects_garbage():
+    assert import_events._parse_iso("Unknown") is None
+    assert import_events._parse_iso("") is None
+    assert import_events._parse_iso(None) is None
+
+
+def test_normalize_iso_pads_only_seconds_less_forms():
+    assert import_events._normalize_iso("2026-06-22T14:00") == "2026-06-22T14:00:00"
+    assert import_events._normalize_iso("2026-06-22T14:00Z") == "2026-06-22T14:00:00Z"
+    assert import_events._normalize_iso("2026-06-22T14:00:30") == "2026-06-22T14:00:30"
+    assert import_events._normalize_iso("2026-06-22") == "2026-06-22"
+    assert import_events._normalize_iso("garbage") == "garbage"
+
+
+def test_build_ics_keeps_seconds_less_event():
+    pytest.importorskip("icalendar")
+    events = [{"title": "Sync", "start": "2026-06-22T14:00", "end": "2026-06-22T15:00",
+               "location": "", "source": "s", "type": "Text/LLM"}]
+
+    ics = import_events.build_ics(events).decode("utf-8")
+
+    assert "SUMMARY:Sync" in ics
+
+
+@given(
+    h=st.integers(min_value=0, max_value=23),
+    m=st.integers(min_value=0, max_value=59),
+)
+def test_parse_iso_roundtrips_seconds_less_times(h, m):
+    value = f"2026-06-22T{h:02d}:{m:02d}"
+    parsed = import_events._parse_iso(value)
+    assert parsed == datetime(2026, 6, 22, h, m)
+
+
 def test_verify_sha256_deletes_on_mismatch(tmp_path):
     f = tmp_path / "model.gguf"
     f.write_bytes(b"corrupt")
