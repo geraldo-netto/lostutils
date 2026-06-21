@@ -2225,6 +2225,83 @@ def test_immediate_pool_consumer_exits_on_stop(headless_dispatcher):
         assert not any(t.is_alive() for t in disp.immediate_threads)
 
 
+def test_batch_dispatch_defers_single_save(headless_dispatcher):
+    # lq-rel-04: within a batch, enqueues mark the batch dirty and only ONE
+    # save is requested on exit, not one per item.
+    disp = headless_dispatcher
+    saves = {"n": 0}
+    disp._request_save_state = lambda: saves.__setitem__("n", saves["n"] + 1)
+    with disp._batch_dispatch():
+        for i in range(5):
+            disp._enqueue_or_skip_duplicate(
+                QueueItem(url=f"http://h/{i}", protocol="http",
+                          template="echo {url}", shell=False), "queue")
+        assert disp._batch_save_dirty is True
+        assert saves["n"] == 0                # nothing saved mid-batch
+    assert saves["n"] == 1                    # exactly one deferred save
+    assert disp._batch_dispatch_depth == 0
+    assert disp._batch_save_dirty is False
+
+
+def test_batch_dispatch_nested_depth_balances(headless_dispatcher):
+    # lq-rel-04: nested batches only flush on the outermost exit.
+    disp = headless_dispatcher
+    saves = {"n": 0}
+    disp._request_save_state = lambda: saves.__setitem__("n", saves["n"] + 1)
+    with disp._batch_dispatch():
+        with disp._batch_dispatch():
+            assert disp._batch_dispatch_depth == 2
+            disp._enqueue_or_skip_duplicate(
+                QueueItem(url="http://h/1", protocol="http",
+                          template="echo {url}", shell=False), "queue")
+        assert disp._batch_dispatch_depth == 1
+        assert saves["n"] == 0                # inner exit does not flush
+    assert disp._batch_dispatch_depth == 0
+    assert saves["n"] == 1
+
+
+def test_persist_after_enqueue_outside_batch_saves_immediately(headless_dispatcher):
+    # lq-rel-04: outside a batch, each enqueue requests a (debounced) save.
+    disp = headless_dispatcher
+    saves = {"n": 0}
+    disp._request_save_state = lambda: saves.__setitem__("n", saves["n"] + 1)
+    disp._persist_after_enqueue()
+    assert saves["n"] == 1
+    assert disp._batch_save_dirty is False
+
+
+def test_batch_dispatch_concurrent_enqueues_keep_depth_consistent(headless_dispatcher):
+    # lq-rel-04: concurrent enqueues while a batch is open must not tear the
+    # depth; the batch still flushes exactly once and depth returns to 0.
+    disp = headless_dispatcher
+    saves = {"n": 0}
+    slock = threading.Lock()
+
+    def counting_save():
+        with slock:
+            saves["n"] += 1
+
+    disp._request_save_state = counting_save
+    start = threading.Event()
+
+    def hammer():
+        start.wait(2.0)
+        for i in range(50):
+            disp._enqueue_or_skip_duplicate(
+                QueueItem(url=f"http://t/{i}", protocol="http",
+                          template="echo {url}", shell=False), "queue")
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    with disp._batch_dispatch():
+        start.set()
+        for t in threads:
+            t.join(2.0)
+    assert disp._batch_dispatch_depth == 0
+    assert disp._batch_save_dirty is False
+
+
 def test_dispatcher_metrics_record_completion_and_failure(headless_dispatcher):
     headless_dispatcher._record_metric("completions")
     headless_dispatcher._record_metric("failures")

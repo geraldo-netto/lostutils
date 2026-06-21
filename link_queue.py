@@ -1000,17 +1000,24 @@ class Dispatcher:
         Re-entrant: a nested `with self._batch_dispatch():` does nothing
         until the outermost exits.
         """
-        self._batch_dispatch_depth += 1
+        # lq-rel-04: depth/dirty are read under _dispatch_cv by concurrent
+        # enqueues (_enqueue_or_skip_duplicate / _persist_after_enqueue), so
+        # every mutation here must hold the same lock — otherwise a torn read of
+        # the depth can double-notify or skip the on-exit notify.
+        with self._dispatch_cv:
+            self._batch_dispatch_depth += 1
         try:
             yield
         finally:
-            self._batch_dispatch_depth -= 1
-            if self._batch_dispatch_depth == 0:  # pragma: no cover - withdrawn-root Tk early-exit
-                with self._dispatch_cv:
+            with self._dispatch_cv:
+                self._batch_dispatch_depth -= 1
+                at_root = self._batch_dispatch_depth == 0
+                flush_save = at_root and self._batch_save_dirty
+                if at_root:
                     self._dispatch_cv.notify_all()
-                if self._batch_save_dirty:
                     self._batch_save_dirty = False
-                    self._request_save_state()
+            if flush_save:
+                self._request_save_state()
 
     def _process_link(self, url: str, extra: tuple = ()) -> str:
         """Route one link (with optional mapped flags `extra`). Returns
@@ -1143,11 +1150,17 @@ class Dispatcher:
 
     def _persist_after_enqueue(self) -> None:
         """Request a (debounced) save, or mark the batch save dirty so
-        _batch_dispatch() requests a single write on exit (scal-03)."""
-        if self._batch_dispatch_depth == 0:
+        _batch_dispatch() requests a single write on exit (scal-03).
+
+        lq-rel-04: read the depth and set the dirty flag under _dispatch_cv so
+        this can't race the depth mutation in _batch_dispatch and either lose
+        the deferred save or fire a redundant one."""
+        with self._dispatch_cv:
+            at_root = self._batch_dispatch_depth == 0
+            if not at_root:
+                self._batch_save_dirty = True
+        if at_root:
             self._request_save_state()
-        else:
-            self._batch_save_dirty = True
 
     @staticmethod
     def _extract_protocol(url: str) -> str:
