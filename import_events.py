@@ -521,12 +521,12 @@ def _parse_iso(value: str) -> Optional[Any]:
 
 
 def _match_end_to_start(start: Any, end: Any) -> Any:
-    """Coerces end to start's date/datetime kind so VEVENT dtstart/dtend agree."""
-    start_is_dt = isinstance(start, datetime)
-    end_is_dt = isinstance(end, datetime)
-    if start_is_dt and not end_is_dt:
-        return datetime(end.year, end.month, end.day, tzinfo=getattr(start, "tzinfo", None))
-    if not start_is_dt and end_is_dt:
+    """Coerces end toward start's kind without shrinking an all-day (date) end.
+
+    A date-typed end is kept as a date: turning it into midnight of that day with
+    a timed start would collapse a multi-day span to 00:00, dropping whole days.
+    """
+    if not isinstance(start, datetime) and isinstance(end, datetime):
         return end.date()
     return end
 

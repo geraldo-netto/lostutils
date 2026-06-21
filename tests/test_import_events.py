@@ -453,14 +453,16 @@ def test_build_ics_emits_importable_calendar():
     assert "Bad" not in ics  # unparseable start is skipped
 
 
-def test_match_end_to_start_promotes_date_end_to_datetime():
+def test_match_end_to_start_keeps_date_end_as_date():
+    # An all-day (date) end must NOT collapse to midnight of that day against a
+    # timed start; doing so shrinks a multi-day span. Keep it a date.
     start = datetime(2026, 6, 22, 10, 0)
-    end = date(2026, 6, 23)
+    end = date(2026, 6, 25)
 
     matched = import_events._match_end_to_start(start, end)
 
-    assert isinstance(matched, datetime)
-    assert matched == datetime(2026, 6, 23, 0, 0)
+    assert type(matched) is date
+    assert matched == date(2026, 6, 25)
 
 
 def test_match_end_to_start_demotes_datetime_end_to_date():
@@ -473,13 +475,32 @@ def test_match_end_to_start_demotes_datetime_end_to_date():
     assert matched == date(2026, 6, 23)
 
 
-def test_match_end_to_start_carries_start_tzinfo():
+def test_match_end_to_start_aware_start_keeps_date_end():
+    # A date end stays a date even when the start is timezone-aware.
     start = datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc)
     end = date(2026, 6, 23)
 
     matched = import_events._match_end_to_start(start, end)
 
-    assert matched.tzinfo is timezone.utc
+    assert type(matched) is date
+    assert matched == date(2026, 6, 23)
+
+
+@given(
+    aware=st.booleans(),
+    days=st.integers(min_value=0, max_value=400),
+)
+def test_match_end_to_start_never_expands_date_end(aware, days):
+    # Invariant: a date-typed end is never widened to a datetime (which would
+    # introduce a spurious 00:00 time and shrink an all-day span).
+    tz = timezone.utc if aware else None
+    start = datetime(2026, 1, 1, 9, 0, tzinfo=tz)
+    end = date(2026, 1, 1) + __import__("datetime").timedelta(days=days)
+
+    matched = import_events._match_end_to_start(start, end)
+
+    assert type(matched) is date
+    assert matched == end
 
 
 def test_match_end_to_start_leaves_matching_types():
@@ -490,14 +511,15 @@ def test_match_end_to_start_leaves_matching_types():
     assert import_events._match_end_to_start(sd, ed) is ed
 
 
-def test_build_ics_normalizes_mixed_start_end_types(monkeypatch):
+def test_build_ics_keeps_all_day_end_as_date(monkeypatch):
     pytest.importorskip("icalendar")
-    # Force a date end against a datetime start to exercise normalization.
+    # A date (all-day) end against a timed start must stay an all-day DTEND so a
+    # multi-day span is preserved rather than collapsed to midnight.
     real_parse = import_events._parse_iso
 
     def fake_parse(value):
         if value == "END":
-            return date(2026, 6, 23)
+            return date(2026, 6, 25)
         return real_parse(value)
 
     monkeypatch.setattr(import_events, "_parse_iso", fake_parse)
@@ -507,8 +529,7 @@ def test_build_ics_normalizes_mixed_start_end_types(monkeypatch):
     ics = import_events.build_ics(events).decode("utf-8")
 
     assert "DTSTART" in ics and "DTEND" in ics
-    # A datetime dtend carries a time component (T...), unlike a bare VALUE=DATE.
-    assert "DTEND;VALUE=DATE:" not in ics
+    assert "DTEND;VALUE=DATE:20260625" in ics
 
 
 def test_parse_iso_accepts_time_without_seconds():
