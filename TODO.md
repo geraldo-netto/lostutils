@@ -47,7 +47,6 @@ id | status | effort | description | notes
 lq-conc-01 | open | med | link_queue.py:731 — _immediate_pool_size is computed once in __init__ and never recomputed; _ensure_worker_count/_on_worker_count_changed resize only the queue-worker pool, so changing Workers in Settings has no effect on immediate concurrency until restart, contradicting the docstring. Recompute and call _ensure_immediate_pool() under _immediate_lock on worker-count change. | regression
 lq-conc-02 | open | low | link_queue.py:779 — _flush_save_state's stop_event recheck narrows but doesn't close the shutdown race: a timer past the recheck but not yet in _save_state can write after _shutdown's post-join authoritative snapshot, persisting a stale view. Use a shutting-down flag checked inside _save_state under the timer lock, or join the timer thread. |
 rf-conc-02 | open | low | relocate_folder.py:762 — _run_streamed's trailing drain `for fut in inflight: on_done(fut)` ignores on_done's abort bool; the path where the only failing task surfaces during the final drain (all inflight, none completed during submission) is not exercised by tests. Confirm the drain captures it and add a test. |
-rf-conc-01 | open | low | relocate_folder.py:899 — verify_copy with checksum=False runs ownership tasks sequentially (no pool), so the rmtree-after-join guarantee documented in _copy_and_verify only applies to the checksum path; the comment overstates it. Scope the comment to the checksum branch. |
 
 ## code complexity
 

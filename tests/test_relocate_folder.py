@@ -140,6 +140,26 @@ def test_copy_and_verify_no_verify_warns(caplog):
         assert any("verification disabled" in r.message for r in caplog.records)
 
 
+def test_verify_copy_size_only_branch_uses_no_pool(tmp_path, monkeypatch):
+    # rf-conc-01: with checksum=False verify_copy runs its tasks
+    # sequentially — no ThreadPoolExecutor is constructed, so the
+    # rmtree-vs-read join guarantee in _copy_and_verify's except block
+    # is specific to the checksum branch (no worker thread exists here).
+    src = tmp_path / "src"; _make_tree(src)
+    dst = tmp_path / "dst"
+    rf.copy_tree(src, dst)
+    pool_used = {"n": 0}
+    real_pool = rf.ThreadPoolExecutor
+
+    def counting_pool(*a, **k):
+        pool_used["n"] += 1
+        return real_pool(*a, **k)
+
+    monkeypatch.setattr(rf, "ThreadPoolExecutor", counting_pool)
+    rf.verify_copy(src, dst, checksum=False)
+    assert pool_used["n"] == 0   # size-only verify ran sequentially
+
+
 def test_copy_and_verify_cleans_up_on_verify_failure():
     with TemporaryDirectory() as d:
         root = Path(d)
