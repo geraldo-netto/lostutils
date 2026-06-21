@@ -907,6 +907,53 @@ def test_verify_size_pass_and_fail(tmp_path):
         rf._verify_size(a, c, Path("a"))
 
 
+def test_verify_size_uses_passed_src_size_without_lstatting_src(tmp_path, monkeypatch):
+    # rf-perf-01: when src_size is provided, _verify_size must NOT lstat src.
+    a = tmp_path / "a"   # deliberately never created
+    b = tmp_path / "b"; b.write_text("abc")   # 3 bytes
+    rf._verify_size(a, b, Path("a"), src_size=3)   # no raise, no src lstat
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        rf._verify_size(a, b, Path("a"), src_size=99)
+
+
+def test_iter_verify_tasks_lstats_each_entry_once(tmp_path, monkeypatch):
+    # rf-perf-01: classification issues exactly one lstat per walked entry.
+    src = tmp_path / "s"; src.mkdir()
+    (src / "f.txt").write_text("hi")
+    (src / "d").mkdir()
+    (src / "l").symlink_to("f.txt")
+    dst = tmp_path / "t"
+    rf.copy_tree(src, dst)
+    counts = {"n": 0}
+    real_lstat = rf.os.lstat
+
+    def counting(p):
+        counts["n"] += 1
+        return real_lstat(p)
+
+    monkeypatch.setattr(rf.os, "lstat", counting)
+    tasks = list(rf._iter_verify_tasks(src, dst, checksum=False,
+                                       verify_ownership=False))
+    # 3 entries → one classification lstat each (4th lstat is os.walk
+    # deciding whether to descend the subdir, outside classification). The
+    # old trio of is_symlink/is_file/is_dir would have been far more.
+    assert counts["n"] <= 4
+    assert len(tasks) == 3
+
+
+def test_iter_verify_tasks_skips_entry_when_lstat_fails(tmp_path, monkeypatch):
+    # rf-perf-01: an lstat failure during classification skips the kind task
+    # for that entry (no crash); ownership task still appended if requested.
+    src = tmp_path / "s"; src.mkdir()
+    (src / "f.txt").write_text("hi")
+    dst = tmp_path / "t"
+    rf.copy_tree(src, dst)
+    monkeypatch.setattr(rf.os, "lstat", _raise_os)
+    tasks = list(rf._iter_verify_tasks(src, dst, checksum=False,
+                                       verify_ownership=False))
+    assert tasks == []   # entry classified to no kind, no ownership requested
+
+
 def test_verify_content_pass_and_fail(tmp_path):
     a = tmp_path / "a"; a.write_text("hello")
     b = tmp_path / "b"; b.write_text("hello")

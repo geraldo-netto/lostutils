@@ -939,15 +939,26 @@ def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
 
     Symlink/dir checks are cheap but ride along in the same iterator so the
     walk happens only once. Ownership is appended after the kind-specific
-    check so a missing entry fails with the more useful message first."""
+    check so a missing entry fails with the more useful message first.
+
+    rf-perf-01: each entry is lstat'd ONCE here and classified from
+    `st_mode` (S_ISLNK/S_ISREG/S_ISDIR) instead of the previous
+    `is_symlink()` + `is_file()` + `is_dir()` trio, which issued up to three
+    stat syscalls per entry on large trees. The known src `st_size` is passed
+    into the file check so `_verify_size` skips re-lstat'ing the source."""
     for full in _walk_entries(src):
         rel = full.relative_to(src)
         counterpart = dst / rel
-        if full.is_symlink():
+        try:
+            st = os.lstat(full)
+        except OSError:
+            st = None
+        if st is not None and stat.S_ISLNK(st.st_mode):
             yield partial(_verify_symlink, full, counterpart, rel)
-        elif full.is_file():
-            yield partial(_verify_file, full, counterpart, rel, checksum)
-        elif full.is_dir():
+        elif st is not None and stat.S_ISREG(st.st_mode):
+            yield partial(_verify_file, full, counterpart, rel, checksum,
+                          src_size=st.st_size)
+        elif st is not None and stat.S_ISDIR(st.st_mode):
             yield partial(_verify_dir, full, counterpart, rel)
         if verify_ownership:
             yield partial(_verify_ownership, full, counterpart, rel)
@@ -1062,21 +1073,28 @@ def _verify_symlink(src_link: Path, dst_link: Path, rel: Path) -> None:
             f"{os.readlink(src_link)!r} != {os.readlink(dst_link)!r}")
 
 
-def _verify_file(src_file: Path, dst_file: Path, rel: Path, checksum: bool) -> None:
+def _verify_file(src_file: Path, dst_file: Path, rel: Path, checksum: bool,
+                 *, src_size: int | None = None) -> None:
     """Compose size and (optionally) content verification (rf-cx-01).
 
     Split out so each branch is independently testable and so the parallel
     pool can swap the heavy checksum step in/out without touching the
-    cheap kind check."""
+    cheap kind check.
+
+    rf-perf-01: `src_size` may be supplied by the caller (it already lstat'd
+    `src_file` to classify it) so `_verify_size` doesn't re-stat the source.
+    Direct callers that omit it fall back to a fresh lstat."""
     if dst_file.is_symlink() or not dst_file.is_file():
         raise RuntimeError(f"missing file in copy: {rel} (src={src_file})")
-    _verify_size(src_file, dst_file, rel)
+    _verify_size(src_file, dst_file, rel, src_size=src_size)
     if checksum:
         _verify_content(src_file, dst_file, rel)
 
 
-def _verify_size(src_file: Path, dst_file: Path, rel: Path) -> None:
-    src_size = src_file.lstat().st_size
+def _verify_size(src_file: Path, dst_file: Path, rel: Path,
+                 *, src_size: int | None = None) -> None:
+    if src_size is None:
+        src_size = src_file.lstat().st_size
     dst_size = dst_file.lstat().st_size
     if src_size != dst_size:
         raise RuntimeError(
