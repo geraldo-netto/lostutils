@@ -11,9 +11,11 @@ Wins vs v2:
   * `workers=-1` parallelizes across all cores.
 
 Tradeoff:
-  * Memory is N² bytes (uint8 dtype + score_cutoff clips above-threshold
-    cells to threshold+1). For N≤30 K (~900 MB) this is fine; beyond
-    that, prefer v2's length-bucketed iteration.
+  * A single N×N call costs N² bytes (uint8 dtype + score_cutoff clips
+    above-threshold cells to threshold+1). For N≤30 K (~900 MB) this is
+    fine; beyond that the lower triangle is wasted memory, so for large N
+    we compute the matrix in row blocks (BLOCK_ROWS×N peak) and emit the
+    upper-triangle pairs per block. Output is identical either way.
   * The length pre-filter from v2 isn't needed here — cdist's
     score_cutoff makes its own short-circuit per cell, and the matrix
     walk in numpy is cheap.
@@ -30,6 +32,8 @@ from rapidfuzz.process import cdist
 
 DEFAULT_THRESHOLD = 7
 MAX_THRESHOLD = 254  # uint8 distance matrix caps at 255; stay below to avoid wrap
+BLOCK_THRESHOLD = 4000  # N above which the matrix is computed in row blocks
+BLOCK_ROWS = 2000  # rows per block when row-blocking (peak BLOCK_ROWS×N bytes)
 REPLACEMENTS = (",", "[", "]")
 WORD_TOKENS = ("xxx", "monography")
 _WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, WORD_TOKENS)))
@@ -81,31 +85,45 @@ def main():
     cnts = [c for _, c in items]
     threshold = clamp_threshold(args.threshold)
 
-    matrix = cdist(
-        cleaned_strs, cleaned_strs,
-        scorer=Levenshtein.distance,
-        score_cutoff=threshold,
-        workers=args.workers,
-        dtype=np.uint8,
-    )
-
     write = sys.stdout.write
 
     # Self-collisions (multiple raw lines collapsed to the same cleaned form).
     # cleaned_strs are distinct dict keys, so no two off-diagonal cells are
-    # distance 0; the k=1 mask below also excludes the diagonal, so these
+    # distance 0; emit_pairs keeps only j > i (strict upper triangle), so these
     # i==i reports never overlap with the cross-pair reports.
     for i in range(n):
         if cnts[i] > 1:
             write(f"{cleaned_strs[i]};{cleaned_strs[i]};0\n")
 
-    # Upper-triangle pairs with distance ≤ threshold. cdist clips
-    # above-threshold cells to threshold+1 (255 at the 254 cap, no uint8 wrap),
-    # so the inclusive `<=` mask keeps only genuine within-threshold pairs.
-    mask = np.triu(matrix <= threshold, k=1)
-    rows, cols = np.where(mask)
-    for i, j in zip(rows.tolist(), cols.tolist()):
-        write(f"{cleaned_strs[i]};{cleaned_strs[j]};{int(matrix[i, j])}\n")
+    emit_pairs(cleaned_strs, threshold, args.workers, write)
+
+
+def emit_pairs(cleaned_strs, threshold, workers, write):
+    """Emit upper-triangle pairs with distance ≤ threshold.
+
+    cdist clips above-threshold cells to threshold+1 (255 at the 254 cap, no
+    uint8 wrap), so the inclusive `<=` mask keeps only genuine within-threshold
+    pairs. For large N the matrix is computed in row blocks so peak memory is
+    BLOCK_ROWS×N instead of N²; the emitted pairs are identical to the
+    single-call path.
+    """
+    n = len(cleaned_strs)
+    step = n if n <= BLOCK_THRESHOLD else BLOCK_ROWS
+    for start in range(0, n, step):
+        block = cdist(
+            cleaned_strs[start:start + step], cleaned_strs,
+            scorer=Levenshtein.distance,
+            score_cutoff=threshold,
+            workers=workers,
+            dtype=np.uint8,
+        )
+        mask = block <= threshold
+        for r in range(block.shape[0]):
+            mask[r, :start + r + 1] = False  # keep only j > global row index
+        rows, cols = np.where(mask)
+        for r, j in zip(rows.tolist(), cols.tolist()):
+            i = start + r
+            write(f"{cleaned_strs[i]};{cleaned_strs[j]};{int(block[r, j])}\n")
 
 
 if __name__ == "__main__":

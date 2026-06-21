@@ -211,3 +211,83 @@ def test_matrix_no_zero_distance_off_diagonal(tmp_path_factory, lines, t):
         assert d <= t
         if a != b:
             assert d > 0
+
+
+# --- dnv3-perf-01: row-blocked matrix produces identical output -------------
+
+def _emit(cleaned_strs, threshold, workers=1):
+    out = []
+    dn.emit_pairs(cleaned_strs, threshold, workers, lambda s: out.append(s))
+    return set(out)
+
+
+def test_emit_pairs_blocked_matches_single_call(monkeypatch):
+    strs = ["hello", "hallo", "help", "world", "word", "abc", "abd", "zzzz"]
+    monkeypatch.setattr(dn, "BLOCK_THRESHOLD", 10 ** 9)
+    single = _emit(strs, 3)
+    monkeypatch.setattr(dn, "BLOCK_THRESHOLD", 0)
+    monkeypatch.setattr(dn, "BLOCK_ROWS", 3)
+    blocked = _emit(strs, 3)
+    assert single == blocked
+
+
+def test_emit_pairs_block_size_one(monkeypatch):
+    strs = ["aaa", "aab", "abb", "bbb", "ccc"]
+    monkeypatch.setattr(dn, "BLOCK_THRESHOLD", 10 ** 9)
+    single = _emit(strs, 2)
+    monkeypatch.setattr(dn, "BLOCK_THRESHOLD", 0)
+    monkeypatch.setattr(dn, "BLOCK_ROWS", 1)
+    assert _emit(strs, 2) == single
+
+
+def test_emit_pairs_upper_triangle_only(monkeypatch):
+    strs = ["cat", "car", "can"]
+    monkeypatch.setattr(dn, "BLOCK_THRESHOLD", 0)
+    monkeypatch.setattr(dn, "BLOCK_ROWS", 1)
+    pairs = [tuple(s.rstrip("\n").split(";")[:2]) for s in _emit(strs, 5)]
+    seen = set()
+    for a, b in pairs:
+        assert (b, a) not in seen  # no mirrored duplicate
+        assert a != b  # no diagonal
+        seen.add((a, b))
+
+
+def test_main_large_n_blocked_path(monkeypatch, tmp_path):
+    # Force the blocked path through main() and confirm a known near pair shows.
+    monkeypatch.setattr(dn, "BLOCK_THRESHOLD", 0)
+    monkeypatch.setattr(dn, "BLOCK_ROWS", 2)
+    lines = ["alpha", "alpht", "gamma", "delta", "delts"]
+    out = _run_main(monkeypatch, tmp_path, lines, 2)
+    rows = _parse_rows(out)
+    cross = {(a, b) for a, b, d in rows if a != b}
+    assert ("alpha", "alpht") in cross
+    assert ("delta", "delts") in cross
+
+
+@given(st.lists(st.text(alphabet="abc", min_size=1, max_size=5),
+                min_size=1, max_size=10),
+       st.integers(min_value=0, max_value=6),
+       st.integers(min_value=1, max_value=4))
+def test_emit_pairs_blocking_invariant(lines, t, block_rows):
+    # Property: for any block size the row-blocked emission equals the
+    # single-call emission, with no double-counting.
+    cleaned = []
+    seen = set()
+    for ln in lines:
+        c = dn.cleanup(ln)
+        if c and c not in seen:
+            seen.add(c)
+            cleaned.append(c)
+    if not cleaned:
+        return
+    orig_bt, orig_br = dn.BLOCK_THRESHOLD, dn.BLOCK_ROWS
+    try:
+        dn.BLOCK_THRESHOLD = 10 ** 9
+        single = _emit(cleaned, t)
+        dn.BLOCK_THRESHOLD = 0
+        dn.BLOCK_ROWS = block_rows
+        blocked = _emit(cleaned, t)
+    finally:
+        dn.BLOCK_THRESHOLD, dn.BLOCK_ROWS = orig_bt, orig_br
+    assert single == blocked
+    assert len(blocked) == len(set(blocked))
