@@ -1146,6 +1146,28 @@ class HeadCacheTests(unittest.TestCase):
             # not builtins.open, so it doesn't count).
             self.assertEqual(opens["count"], 1)
 
+    def test_list_files_evicts_bucketed_head_cache_entries(self):
+        # oze-scal-02: an already-bucketed file is never planned, so its
+        # scan-phase head_cache entry is evicted immediately; a file pending a
+        # move keeps its entry so planning still reads it only once.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            bucketed = root / "pdf" / "p00000" / "doc.pdf"
+            bucketed.parent.mkdir(parents=True)
+            bucketed.write_bytes(b"%PDF-1.4\n")
+            # Misplaced: 3-part structure but header (pdf) != ext dir (txt), so
+            # is_bucketed_file sniffs it then reports False -> stays pending.
+            pending = root / "txt" / "t00000" / "doc.pdf"
+            pending.parent.mkdir(parents=True)
+            pending.write_bytes(b"%PDF-1.4\n")
+            head_cache: dict = {}
+            ctx = SniffContext(sniff=True, head_cache=head_cache)
+            files = list_files(root, skip_paths=set(), ctx=ctx)
+            self.assertIn(pending, files)
+            self.assertNotIn(bucketed, files)
+            self.assertNotIn(bucketed, head_cache)
+            self.assertIn(pending, head_cache)
+
 
 class UnreadableSniffTests(unittest.TestCase):
     """oze-rel-06: distinguish unreadable from no-match."""

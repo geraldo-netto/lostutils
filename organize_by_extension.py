@@ -530,6 +530,13 @@ def list_files(
             continue
         if is_bucketed_file(root, path, ctx=ctx):
             already_bucketed += 1
+            # oze-scal-02: an already-bucketed file is dropped from the plan, so
+            # its head-bytes are never re-read in planning. Evict the scan-phase
+            # cache entry now instead of leaving it pinned for the whole run —
+            # peak head_cache no longer holds one HeadBytes per *scanned* file,
+            # only per file still pending a move (drained as moves complete).
+            if ctx.head_cache is not None:
+                ctx.head_cache.pop(path, None)
             continue
         files.append(path)
     if verbose: # Use logger.info for verbose output

@@ -31,7 +31,6 @@ dnv3-perf-01 | open | med | deduplicate-by-namev3.py:113 — each row block reco
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-scal-01 | open | low | import_events.py:81 — _LLM_CACHE keeps every loaded Llama instance for the process lifetime keyed by (model_path, clip_path); multiple distinct model configs in one run accumulate multi-GB models in RAM with no eviction. Cap cache size or evict on config change. |
-oze-scal-02 | open | low | organize_by_extension.py:574 — during scan, list_files→is_bucketed_file→resolve_real_extension populates the shared head_cache for every file in the tree; entries are only popped later, so peak head_cache holds one HeadBytes per scanned file alongside the file list. Consider an LRU-bounded head cache or dropping scan-phase entries the planner re-reads. | peak memory
 oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_collisions materializes list(files) and builds pairs with a resolve_real_extension call for EVERY file up front, priming head_cache for the whole tree before the first move and contradicting the per-window pop and the streaming docstring. Restrict the pre-pass to needed_dirs members, or stream it in windows. | streaming claim vs reality
 
 ## concurrency
