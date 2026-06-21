@@ -780,7 +780,7 @@ def _inflight_cap(workers: int) -> int:
 
 
 def _run_streamed(
-    submit: Callable[[object], "Future"],
+    submit: Callable[..., "Future"],
     tasks: Iterable,
     max_inflight: int,
     on_done: Callable[["Future"], bool],

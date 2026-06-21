@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""
+remove-dedupl v3 — emit shell `rm` commands to delete content-duplicates
+while keeping one survivor. Drop-in for v1/v2 with a few critical fixes:
+
+  * Shell-safe quoting via shlex.quote() — paths with single/double
+    quotes, $, backticks, semicolons, newlines, or any other special
+    char are escaped properly. v2's `f'"{p}"'` was unsafe (a malicious
+    or malformed path with `";rm -rf /;"` in it would be executed).
+  * Encoding-aware: auto-detects BOM (UTF-8, UTF-16 LE/BE, UTF-32 LE/BE)
+    or accepts --encoding to override. Uses errors='surrogateescape'
+    so undecodable bytes survive a round-trip into the output (matches
+    what the kernel already does with filename bytes on Linux).
+  * Stable tiebreaker (longest basename, then lexicographic path) — the
+    same input always nominates the same survivor across runs.
+  * Streams the file; no readlines() into memory.
+  * Errors go to stderr; exit code reflects success.
+
+Format expected: one record per line, `<hash><whitespace><path>`. The
+hash is the first whitespace-separated token; everything after the
+first run of whitespace is treated as the path (so paths may contain
+spaces).
+"""
+from __future__ import annotations
+
+import argparse
+import io
+import shlex
+import sys
+from collections import defaultdict
+
+# Order matters: UTF-32 BOMs share a 2-byte prefix with UTF-16 BOMs,
+# so the 4-byte UTF-32 entries must come first. The mapped codec names
+# (utf-16, utf-32, utf-8-sig) are the BOM-stripping variants — picking
+# utf-16-le/-be would leave the BOM as a U+FEFF in the first line,
+# corrupting the first hash.
+BOM_TABLE = (
+    (b"\x00\x00\xfe\xff", "utf-32"),
+    (b"\xff\xfe\x00\x00", "utf-32"),
+    (b"\xfe\xff",         "utf-16"),
+    (b"\xff\xfe",         "utf-16"),
+    (b"\xef\xbb\xbf",     "utf-8-sig"),
+)
+
+
+def detect_encoding(path):
+    with open(path, "rb") as f:
+        head = f.read(4)
+    for bom, enc in BOM_TABLE:
+        if head.startswith(bom):
+            return enc
+    return "utf-8"
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Emit `rm` commands to clear content-duplicates "
+                    "while keeping the entry with the longest basename.")
+    ap.add_argument("file", help="hash file (one '<hash> <path>' per line)")
+    ap.add_argument("--encoding", default=None,
+                    help="Force encoding (e.g. utf-8, utf-16, gbk, "
+                         "latin-1). Default: BOM-detect → utf-8.")
+    ap.add_argument("--strict", action="store_true",
+                    help="Fail on undecodable bytes (default: "
+                         "surrogateescape).")
+    args = ap.parse_args()
+
+    encoding = args.encoding or detect_encoding(args.file)
+    err_mode = "strict" if args.strict else "surrogateescape"
+
+    # Reconfigure stdout to round-trip surrogateescape bytes losslessly
+    # (matches Linux kernel filename semantics).
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        try:
+            sys.stdout.reconfigure(errors=err_mode)
+        except ValueError:
+            pass  # already configured, or running under unusual stdout
+
+    groups = defaultdict(list)
+    try:
+        with open(args.file, "r", encoding=encoding, errors=err_mode) as f:
+            for raw in f:
+                line = raw.rstrip("\r\n")
+                if not line:
+                    continue
+                # split(None, 1) consumes any leading whitespace AND the
+                # whole gap between hash and path; the path keeps its
+                # interior whitespace (tabs, multiple spaces, etc.).
+                parts = line.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                groups[parts[0]].append(parts[1])
+    except OSError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except UnicodeDecodeError as e:
+        print(f"decode error in {args.file} (encoding={encoding}): {e}\n"
+              f"hint: try --encoding <name> or omit --strict",
+              file=sys.stderr)
+        sys.exit(3)
+
+    out = sys.stdout.write
+    for h, paths in groups.items():
+        if len(paths) < 2:
+            continue
+        # max key: (basename_length, path). Computing basename length via
+        # rfind avoids building a basename string per call (str.rfind +
+        # arithmetic is ~5× faster than os.path.basename).
+        keep = max(paths, key=lambda p: (len(p) - p.rfind("/") - 1, p))
+        to_remove = [p for p in paths if p != keep]
+        if not to_remove:
+            continue
+        quoted = " ".join(shlex.quote(p) for p in to_remove)
+        out(f"# duplicates: {h}\n# saving: {keep}\nrm -f {quoted}\n\n")
+
+
+if __name__ == "__main__":
+    main()

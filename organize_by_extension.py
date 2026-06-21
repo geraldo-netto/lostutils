@@ -713,7 +713,7 @@ def _allocate_new_bucket(
     ext_dir: Path,
     prefix: str,
     index: int,
-    state_cache: dict[Path, Set[str]],
+    state_cache: dict[Path, Set[str] | frozenset[str]],
     indices: list[int],
 ) -> Path:
     """Create the bucket-path entry for `index` (oze-cx-01): seed an empty
@@ -729,7 +729,7 @@ def choose_bucket(
     ext_dir: Path,
     prefix: str,
     filename: str,
-    state_cache: dict[Path, Set[str]],
+    state_cache: dict[Path, Set[str] | frozenset[str]],
     indices: list[int],
 ) -> Path:
     """Choose or create the bucket for `filename`, preferring gaps and
@@ -855,7 +855,7 @@ class BucketManager:
         bucket_path = choose_bucket(
             ext_dir, prefix, source.name, self.state_cache, indices)
         names = self.state_cache[bucket_path]
-        if names is _BUCKET_FULL:  # oze-cx-05: assertion replaced by real raise
+        if not isinstance(names, set):  # _BUCKET_FULL frozenset sentinel (oze-cx-05)
             raise RuntimeError(
                 f"choose_bucket returned full bucket {bucket_path}"
             )

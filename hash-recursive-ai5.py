@@ -206,7 +206,7 @@ class _WalkState(NamedTuple):
     per_worker_stats: list
     jobs: int
     sentinel: object
-    cancel_event: object
+    cancel_event: "threading.Event | None"
 
 
 def _walk_worker(idx, state: "_WalkState") -> None:
@@ -775,7 +775,7 @@ def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None):
         # lookup; `add_note` is also called when available so the
         # default traceback formatter prints the note inline.
         progress = {"hashed": len(out), "total": len(items)}
-        exc.__partial__ = progress
+        setattr(exc, "__partial__", progress)
         note = (
             f"_run_stage failed mid-iteration: {progress['hashed']}/"
             f"{progress['total']} items hashed before the error"
@@ -1432,7 +1432,7 @@ def main():
         # boundary so the per-stage durations remain meaningful.
         walk_iter = iter_threaded_walk(root, args.jobs, cancel_event=cancel_event)
         t_start = time.perf_counter()
-        walk_boundary = [None]
+        walk_boundary: list[float | None] = [None]
 
         def _mark_walk_done():
             walk_boundary[0] = time.perf_counter()
@@ -1458,8 +1458,10 @@ def main():
         # `is None` fallback could only have fired had the function raised
         # before returning, in which case this code never runs at all. The
         # dead guard + its misleading comment are gone.
-        walk_seconds = walk_boundary[0] - t_start
-        hash_seconds = t_end - walk_boundary[0]
+        walk_end = walk_boundary[0]
+        assert walk_end is not None  # set by _mark_walk_done before any return
+        walk_seconds = walk_end - t_start
+        hash_seconds = t_end - walk_end
 
         # hr-scal-04: one-shot warning so the operator knows printed alias
         # lists may be partial.
