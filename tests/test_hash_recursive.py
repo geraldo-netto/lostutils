@@ -1697,6 +1697,35 @@ def test_run_stage_threaded_stops_after_cancel_between_batches(monkeypatch):
     assert 0 < len(out) < len(items)
 
 
+def test_run_stage_windowed_cancel_stops_further_submission(monkeypatch):
+    # hr-scal-03 (achieved by hr-scal-02): once cancel fires, no NEW batches
+    # are submitted past the in-flight window — total batch_fn invocations
+    # stay bounded near the window, not the full batch count.
+    import threading as _t
+    monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0)
+    monkeypatch.setattr(hr, "HASH_BATCH", 1)
+    monkeypatch.setattr(hr, "SUBMIT_WINDOW", 2)
+    jobs = 1
+    window = jobs * hr.SUBMIT_WINDOW
+    ev = _t.Event()
+    calls = {"n": 0}
+    lock = _t.Lock()
+
+    def batch(items):
+        with lock:
+            calls["n"] += 1
+        ev.set()   # cancel as soon as the first batch runs
+        return [(p, p.upper()) for p in items]
+
+    items = [str(i) for i in range(1000)]
+    out, _ = hr._run_stage(
+        items, batch, total_bytes=10**9, jobs=jobs, cancel_event=ev)
+    # Far fewer than 1000 batches ran — submission stopped at the boundary.
+    assert calls["n"] < 1000
+    assert calls["n"] <= window + 1
+    assert 0 < len(out) < 1000
+
+
 def test_find_duplicate_groups_forwards_cancel_to_stages(tmp_path, monkeypatch):
     # hr-conc-01: a pre-set cancel_event means the stage helpers receive it
     # and return early → no groups confirmed even though candidates exist.
