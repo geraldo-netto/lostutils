@@ -61,7 +61,6 @@ rf-cmplx-02 | open | low | relocate_folder.py:986 — _capture_first and _collec
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-dup-02 | open | med | organize_by_extension.py:416 — resolve_real_extension carries a 3-way sentinel-vs-ctx dual API with a ValueError mixing-guard; every live caller already passes ctx=. Collapse to ctx-only (thin deprecated wrapper if external imports need it) to remove the sentinel machinery. | dual API
 
 ## architecture/modularity/SOLID
 

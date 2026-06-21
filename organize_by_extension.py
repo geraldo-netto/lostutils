@@ -390,17 +390,8 @@ class SniffContext:
 _DEFAULT_SNIFF_CTX = SniffContext()
 
 
-_SNIFF_SENTINEL = object()
-
-
-def resolve_real_extension(
-    path: Path,
-    sniff: bool = _SNIFF_SENTINEL,
-    head_cache: dict[Path, HeadBytes] | None = _SNIFF_SENTINEL,
-    extra_zip_family: frozenset[str] = _SNIFF_SENTINEL,
-    ctx: SniffContext | None = None,
-) -> str:
-    """Return the bucket extension for ``path``.
+def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
+    """Return the bucket extension for ``path`` (oze-dup-02).
 
     Header detection **always wins** when it disagrees with the declared
     extension (oze-perf-06): ``mypdf.doc`` → ``pdf``, ``photo.png`` declared as
@@ -409,31 +400,13 @@ def resolve_real_extension(
     container, ``.jpeg`` alias of jpg) are not mismatches and are preserved
     silently.
 
-    Pass ``ctx`` to bundle ``sniff``/``head_cache``/``extra_zip_family``
-    (oze-dup-03). The keyword form is retained for backward-compat callers
-    that pre-date the dataclass.
-
-    oze-arch-05: pass EITHER `ctx` OR the legacy keyword args, not both.
-    Mixing the two silently ignored the keyword side and was a footgun;
-    `ValueError` makes the bug loud.
+    ``ctx`` bundles ``sniff``/``head_cache``/``extra_zip_family``; omit it to
+    use the shared default :data:`_DEFAULT_SNIFF_CTX`. Legacy callers passing
+    those values as standalone keyword args should use
+    :func:`resolve_real_extension_kw` instead.
     """
-    kw_supplied = (
-        sniff is not _SNIFF_SENTINEL
-        or head_cache is not _SNIFF_SENTINEL
-        or extra_zip_family is not _SNIFF_SENTINEL
-    )
-    if ctx is not None and kw_supplied:
-        raise ValueError(
-            "resolve_real_extension: pass either `ctx` OR sniff/head_cache/"
-            "extra_zip_family keywords, not both (oze-arch-05)"
-        )
     if ctx is None:
-        ctx = SniffContext(
-            sniff=True if sniff is _SNIFF_SENTINEL else sniff,
-            head_cache=None if head_cache is _SNIFF_SENTINEL else head_cache,
-            extra_zip_family=(frozenset() if extra_zip_family is _SNIFF_SENTINEL
-                              else extra_zip_family),
-        )
+        ctx = _DEFAULT_SNIFF_CTX
     declared = normalize_extension(path)
     if not ctx.sniff:
         return declared
@@ -453,6 +426,25 @@ def resolve_real_extension(
         path, declared, detected, detected,
     )
     return detected
+
+
+def resolve_real_extension_kw(
+    path: Path,
+    sniff: bool = True,
+    head_cache: dict[Path, HeadBytes] | None = None,
+    extra_zip_family: frozenset[str] = frozenset(),
+) -> str:
+    """Deprecated keyword-arg shim for :func:`resolve_real_extension` (oze-dup-02).
+
+    Bundles the standalone ``sniff``/``head_cache``/``extra_zip_family`` keywords
+    into a :class:`SniffContext` and delegates. New code should build a
+    ``SniffContext`` once and pass ``ctx=`` directly.
+    """
+    return resolve_real_extension(
+        path,
+        ctx=SniffContext(sniff=sniff, head_cache=head_cache,
+                         extra_zip_family=extra_zip_family),
+    )
 
 
 def normalize_prefix(name: str) -> str:

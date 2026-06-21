@@ -54,6 +54,7 @@ from organize_by_extension import (  # noqa: E402 — refactor surface (cx-02/ar
     plan_moves,
     read_head_bytes,
     resolve_real_extension,
+    resolve_real_extension_kw,
 )
 
 
@@ -1115,7 +1116,7 @@ class ExtraZipFamilyTests(unittest.TestCase):
             f.write_bytes(b"PK\x03\x04rest")
             extra = frozenset({"usdz"})
             self.assertEqual(
-                resolve_real_extension(f, extra_zip_family=extra),
+                resolve_real_extension_kw(f, extra_zip_family=extra),
                 "usdz",
             )
 
@@ -2603,20 +2604,56 @@ class WalkScandirHandlesStatError(unittest.TestCase):
                 os.chmod(sub, 0o755)
 
 
-class ResolveRealExtensionRejectsMixedAPI(unittest.TestCase):
-    """oze-arch-05: passing both ctx and legacy kwargs raises ValueError."""
+class ResolveRealExtensionCtxOnly(unittest.TestCase):
+    """oze-dup-02: ctx-only core plus a thin keyword-arg shim."""
 
-    def test_mixed_api_raises(self):
+    def test_ctx_none_uses_default(self):
         with TemporaryDirectory() as d:
-            p = Path(d) / "f.txt"; p.write_text("x")
-            ctx = _oze.SniffContext(sniff=False, head_cache=None,
-                                    extra_zip_family=frozenset())
-            with self.assertRaisesRegex(ValueError, "pass either `ctx`"):
-                _oze.resolve_real_extension(p, sniff=True, ctx=ctx)
-            with self.assertRaisesRegex(ValueError, "pass either `ctx`"):
-                _oze.resolve_real_extension(p, head_cache={}, ctx=ctx)
-            with self.assertRaisesRegex(ValueError, "pass either `ctx`"):
-                _oze.resolve_real_extension(p, extra_zip_family=frozenset({"x"}), ctx=ctx)
+            p = Path(d) / "doc.jpg"; p.write_bytes(b"%PDF-1.4\n")
+            self.assertEqual(_oze.resolve_real_extension(p), "pdf")
+
+    def test_ctx_no_sniff_keeps_declared(self):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "doc.jpg"; p.write_bytes(b"%PDF-1.4\n")
+            ctx = _oze.SniffContext(sniff=False)
+            self.assertEqual(_oze.resolve_real_extension(p, ctx=ctx), "jpg")
+
+    def test_kw_shim_no_sniff(self):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "doc.jpg"; p.write_bytes(b"%PDF-1.4\n")
+            self.assertEqual(
+                _oze.resolve_real_extension_kw(p, sniff=False), "jpg")
+
+    def test_kw_shim_extra_zip_family(self):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "model.usdz"; p.write_bytes(b"PK\x03\x04rest")
+            self.assertEqual(
+                _oze.resolve_real_extension_kw(
+                    p, extra_zip_family=frozenset({"usdz"})),
+                "usdz",
+            )
+
+    def test_kw_shim_head_cache_populated(self):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "a.pdf"; p.write_bytes(b"%PDF-1.4\n")
+            cache: dict = {}
+            _oze.resolve_real_extension_kw(p, head_cache=cache)
+            self.assertIn(p, cache)
+
+    @settings(deadline=None, max_examples=60)
+    @given(ext=st.text(
+        alphabet="abcdefghijklmnopqrstuvwxyz0123456789", min_size=1, max_size=8))
+    def test_ctx_and_kw_agree_no_sniff(self, ext):
+        # oze-dup-02: ctx-only and the kw shim resolve identically; with
+        # sniffing off both return the declared extension verbatim.
+        with TemporaryDirectory() as d:
+            p = Path(d) / f"file.{ext}"
+            p.write_bytes(b"%PDF-1.4\n")
+            ctx = _oze.SniffContext(sniff=False)
+            via_ctx = _oze.resolve_real_extension(p, ctx=ctx)
+            via_kw = _oze.resolve_real_extension_kw(p, sniff=False)
+            self.assertEqual(via_ctx, via_kw)
+            self.assertEqual(via_ctx, ext)
 
 
 class ListFilesStatErrorSkipped(unittest.TestCase):
