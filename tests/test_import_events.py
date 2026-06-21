@@ -55,6 +55,10 @@ def test_normalize_event_date_returns_iso_strings():
     ) == "2026-06-06T09:30:00+00:00"
 
 
+def test_encode_image_dead_code_removed():
+    assert not hasattr(import_events, "encode_image")
+
+
 def test_parse_llm_events_handles_object_and_nested_arrays_in_strings():
     text = 'prefix {"title": "Board [internal]", "start": "2026-06-06"} suffix'
 

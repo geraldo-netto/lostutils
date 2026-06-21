@@ -183,12 +183,6 @@ def extract_from_ics(file_path: Path, default_tz: Optional[str] = None) -> List[
 # --------------------------------------------------------------------------- #
 # LLM extraction
 # --------------------------------------------------------------------------- #
-def encode_image(image_path: Path) -> str:
-    """Encodes an image to base64 for the vision model."""
-    with open(image_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
-
-
 _DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}$")
 _TIME_SHAPE = re.compile(r"\d{2}:\d{2}(:\d{2})?$")
 

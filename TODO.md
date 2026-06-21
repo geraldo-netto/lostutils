@@ -69,7 +69,6 @@ rf-cmplx-02 | open | low | relocate_folder.py:986 — _capture_first and _collec
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-dup-01 | open | low | import_events.py:239-257 — _image_messages_from_bytes/_image_messages duplicate the base64 encode of encode_image, which is now dead/unused. Remove encode_image or route image paths through it. | dead-code
 oze-dup-02 | open | med | organize_by_extension.py:416 — resolve_real_extension carries a 3-way sentinel-vs-ctx dual API with a ValueError mixing-guard; every live caller already passes ctx=. Collapse to ctx-only (thin deprecated wrapper if external imports need it) to remove the sentinel machinery. | dual API
 oze-dup-01 | open | low | organize_by_extension.py:710 — back-compat shims existing_bucket_indices, _detect_iso_bmff_or_riff (267), _source_blocks_destination (1158) are unreferenced by the live pipeline and kept alive only by tests, widening the public surface. Consolidate tests onto the canonical impls and delete the shims. | back-compat surface
 oze-dup-03 | open | low | organize_by_extension.py:1764 — _dir_is_prunable uses os.scandir directly with its own try/except instead of the _safe_scandir contextmanager (309) used elsewhere; the open-coded version logs nothing on OSError. Route through _safe_scandir. |
