@@ -2593,6 +2593,74 @@ class SourceCollisionResolution(unittest.TestCase):
                     _oze._atomic_rename_to_free_slot(src)
             self.assertTrue(src.exists())  # never renamed onto a taken slot
 
+    def test_atomic_rename_falls_back_when_no_hardlink_support(self):
+        # oze-rel-01: os.link raising EPERM (no-hardlink FS) routes to the
+        # O_CREAT|O_EXCL + os.rename reservation fallback.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src"; source.write_text("SOURCE")
+
+            def no_link(a, b):
+                raise OSError(errno.EPERM, "operation not permitted")
+
+            with patch.object(_oze.os, "link", no_link):
+                renamed = _oze._atomic_rename_to_free_slot(source)
+            self.assertEqual(renamed.name, "src.collision1")
+            self.assertEqual(renamed.read_text(), "SOURCE")
+            self.assertFalse(source.exists())
+
+    def test_atomic_rename_fallback_skips_taken_slots(self):
+        # oze-rel-01: fallback path also advances past taken slots without
+        # clobbering them.
+        for code in (errno.ENOSYS, errno.EOPNOTSUPP):
+            with self.subTest(errno=code), TemporaryDirectory() as d:
+                root = Path(d)
+                source = root / "src"; source.write_text("SOURCE")
+                taken = root / "src.collision1"; taken.write_text("PRECIOUS")
+
+                def no_link(a, b, _c=code):
+                    raise OSError(_c, "unsupported")
+
+                with patch.object(_oze.os, "link", no_link):
+                    renamed = _oze._atomic_rename_to_free_slot(source)
+                self.assertEqual(renamed.name, "src.collision2")
+                self.assertEqual(taken.read_text(), "PRECIOUS")
+                self.assertEqual(renamed.read_text(), "SOURCE")
+
+    def test_atomic_rename_fallback_exhausts(self):
+        # oze-rel-01: the O_EXCL fallback also caps at _COLLISION_RETRY_CAP.
+        import unittest.mock as _m
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src"; source.write_text("x")
+
+            def no_link(a, b):
+                raise OSError(errno.EPERM, "unsupported")
+
+            with _m.patch.object(_oze, "_COLLISION_RETRY_CAP", 3):
+                for n in range(1, 4):
+                    (root / f"src.collision{n}").write_text("taken")
+                with patch.object(_oze.os, "link", no_link):
+                    with self.assertRaisesRegex(RuntimeError, "unable to atomically"):
+                        _oze._atomic_rename_to_free_slot(source)
+            self.assertTrue(source.exists())
+
+    def test_atomic_rename_propagates_unexpected_oserror(self):
+        # oze-rel-01: a non-link-unsupported, non-EEXIST OSError (here EROFS,
+        # not handled by oze-rel-06 either) propagates rather than falling back.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src"; source.write_text("x")
+
+            def boom(a, b):
+                raise OSError(errno.EROFS, "read-only")
+
+            with patch.object(_oze.os, "link", boom):
+                with self.assertRaises(OSError) as cm:
+                    _oze._atomic_rename_to_free_slot(source)
+            self.assertEqual(cm.exception.errno, errno.EROFS)
+            self.assertTrue(source.exists())
+
     def test_plan_moves_rejects_unsorted_list(self):
         # oze-decl-02: list inputs must be sorted.
         with TemporaryDirectory() as d:

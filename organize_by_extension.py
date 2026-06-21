@@ -1121,6 +1121,37 @@ def _find_destination_blocker(destination: Path) -> "Path | None":
 
 _COLLISION_RETRY_CAP = 1000
 
+# oze-rel-01: errnos meaning "this filesystem does not support hardlinks"
+# (FAT/exFAT, many SMB/NFS mounts). On any of these the os.link reservation
+# strategy can never succeed, so we switch to the O_CREAT|O_EXCL + os.rename
+# fallback for the rest of the run.
+_LINK_UNSUPPORTED_ERRNOS = frozenset({errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP})
+
+
+def _reserve_slot_via_rename(source: Path) -> Path:
+    """Fallback reservation for filesystems without hardlink support (oze-rel-01).
+
+    Reserves `<name>.collisionN` with ``O_CREAT|O_EXCL`` (atomic no-clobber,
+    raises FileExistsError if taken) then ``os.rename``s the source onto the
+    reserved slot. The rename overwrites the just-created empty placeholder we
+    own, so no sibling worker's data is ever clobbered. Same directory, so the
+    rename never hits EXDEV. Caps at ``_COLLISION_RETRY_CAP`` attempts."""
+    last_exc: OSError | None = None
+    for n in range(1, _COLLISION_RETRY_CAP + 1):
+        candidate = source.with_name(f"{source.name}.collision{n}")
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError as exc:
+            last_exc = exc
+            continue
+        os.close(fd)
+        os.rename(source, candidate)
+        return candidate
+    raise RuntimeError(
+        f"unable to atomically reserve a collision name for {source} "
+        f"after {_COLLISION_RETRY_CAP} attempts"
+    ) from last_exc
+
 
 def _atomic_rename_to_free_slot(source: Path) -> Path:
     """Rename `source` to the first free `<name>.collisionN` slot with
@@ -1134,7 +1165,11 @@ def _atomic_rename_to_free_slot(source: Path) -> Path:
     directory, hence same filesystem) so `os.link` never hits EXDEV.
 
     Loops: on `FileExistsError` (slot taken by us or a racing worker) bump
-    `n` and retry. Caps at `_COLLISION_RETRY_CAP` overall attempts."""
+    `n` and retry. Caps at `_COLLISION_RETRY_CAP` overall attempts.
+
+    oze-rel-01: on a filesystem without hardlink support (`os.link` raises
+    EPERM/ENOSYS/EOPNOTSUPP) fall back to the O_CREAT|O_EXCL + os.rename
+    reservation, which works on FAT/exFAT/SMB/NFS."""
     last_exc: OSError | None = None
     for n in range(1, _COLLISION_RETRY_CAP + 1):
         candidate = source.with_name(f"{source.name}.collision{n}")
@@ -1143,6 +1178,10 @@ def _atomic_rename_to_free_slot(source: Path) -> Path:
         except FileExistsError as exc:
             last_exc = exc
             continue
+        except OSError as exc:
+            if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
+                return _reserve_slot_via_rename(source)
+            raise
         os.unlink(source)
         return candidate
     raise RuntimeError(
