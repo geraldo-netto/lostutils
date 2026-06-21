@@ -2598,3 +2598,46 @@ def test_copy_and_verify_rmtree_after_pool_joined(tmp_path, monkeypatch):
     target_deletes = [done for p, done in rmtree_calls if p == str(target)]
     assert target_deletes  # target was cleaned up
     assert all(target_deletes)  # every target rmtree happened post-join
+
+
+# --- rf-conc-02: in-flight futures on abort documented and drained ---------
+
+def test_run_streamed_docstring_documents_inflight_abort():
+    doc = rf._run_streamed.__doc__ or ""
+    assert "rf-conc-02" in doc
+    assert "running" in doc and "cancel" in doc
+
+
+def test_run_streamed_drains_running_futures_after_abort():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    started = threading.Event()
+    release = threading.Event()
+    completed = []
+
+    def slow():
+        started.set()
+        release.wait(timeout=5)
+        completed.append("slow")
+
+    def fail():
+        started.wait(timeout=5)
+        release.set()
+        completed.append("fail")
+        raise RuntimeError("boom")
+
+    seen = []
+
+    def on_done(fut):
+        exc = fut.exception()  # blocks until the future is done
+        seen.append(exc)
+        return exc is not None
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        rf._run_streamed(ex.submit, iter([slow, fail]), 4, on_done)
+
+    # both in-flight futures were drained (joined) despite the abort signal.
+    assert "slow" in completed
+    assert "fail" in completed
+    assert len(seen) == 2

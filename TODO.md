@@ -43,7 +43,6 @@ oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_co
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-conc-02 | open | low | relocate_folder.py:719 — _run_streamed's trailing `for fut in inflight: on_done(fut)` calls fut.exception(), which blocks per still-running future, so cancel_futures only short-circuits queued (not running) hashes and abort still waits on up to `workers` in-flight hashes. Document or actively cancel/ignore running ones. |
 
 ## code complexity
 

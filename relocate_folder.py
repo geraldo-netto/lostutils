@@ -726,7 +726,25 @@ def _run_streamed(
     `on_done(fut)` is invoked for every completed Future and returns True
     to short-circuit the submission loop (the verify pool aborts on first
     error; the ownership pool never aborts). Streaming preserves the
-    millions-of-entries-without-OOM property (rf-scal-03)."""
+    millions-of-entries-without-OOM property (rf-scal-03).
+
+    In-flight futures on abort (rf-conc-02)
+    ---------------------------------------
+    When `on_done` signals abort, the submission loop stops queueing NEW
+    tasks immediately, but the trailing `for fut in inflight` drain still
+    calls `on_done(fut)` — and `on_done` blocks on `fut.exception()` — for
+    every future already submitted. A `Future` that is *running* (not just
+    queued) cannot be cancelled in Python, so abort waits for up to
+    `max_inflight` (≈ `workers`) of these in-flight tasks to finish.
+
+    This blocking drain is DELIBERATE, not an oversight: the verify pool
+    relies on it (together with `shutdown(wait=True)`) to guarantee no
+    SHA-256 worker is still reading a file when the caller deletes the
+    target tree (rf-conc-01 / rf-rel-03). The cost is bounded: at most
+    `max_inflight` already-started tasks, never the unsubmitted tail. The
+    only way to avoid the wait would be to ignore the in-flight results,
+    which would re-introduce the rmtree-vs-read race; we accept the bounded
+    latency instead."""
     inflight: set = set()
     abort = False
     for task in tasks:
@@ -738,6 +756,9 @@ def _run_streamed(
                 if on_done(fut):
                     abort = True
         inflight.add(submit(task))
+    # rf-conc-02: drains (and thus joins) every still-inflight future —
+    # including running ones — so callers that delete shared state after
+    # this returns never race a worker still touching it.
     for fut in inflight:
         on_done(fut)
 
