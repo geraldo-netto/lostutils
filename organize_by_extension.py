@@ -1482,7 +1482,17 @@ def plan_moves(
         prefix = normalize_prefix(source.name)
         # `manager.choose` returns a Bucket value object (oze-pat-01); the
         # worker pipeline only needs the path, so unwrap here.
-        bucket = manager.choose(source, ext_dir, prefix)
+        #
+        # oze-rel-02: bucket-space exhaustion makes `bucket_name(index > max)`
+        # raise ValueError, and a non-conforming bucket path raises RuntimeError.
+        # Both are per-file planning failures — skip the one file with a warning
+        # instead of letting the exception propagate out of the plan generator
+        # and kill the entire run.
+        try:
+            bucket = manager.choose(source, ext_dir, prefix)
+        except (ValueError, RuntimeError) as exc:
+            logger.warning("Skipped %s: bucket selection failed: %s", source, exc)
+            continue
         # oze-cmplx-01: the head_cache entry for this source is dropped by
         # `_drain_futures` once the move completes; popping it here too was a
         # redundant no-op on the live pipeline. The single drain-side pop keeps

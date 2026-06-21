@@ -983,6 +983,55 @@ class BucketManagerTests(unittest.TestCase):
             self.assertIs(mgr.state_cache[bucket_path], _BUCKET_FULL)
 
 
+class PlanMovesBucketExhaustionTests(unittest.TestCase):
+    """oze-rel-02: a bucket-space exhaustion during planning skips one file
+    rather than killing the whole run."""
+
+    def test_plan_moves_skips_file_on_valueerror(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            ext_dir = root / "txt"
+            ok = root / "ok.txt"; ok.write_bytes(b"x")
+            doomed = root / "doomed.txt"; doomed.write_bytes(b"y")
+            mgr = BucketManager(root=root)
+            # Fill indices 0..3 to capacity and cap the max at 3 so the next
+            # allocation for the 'd' prefix needs index 4 -> ValueError.
+            with patch("organize_by_extension.BUCKET_INDEX_MAX", 3):
+                for i in range(4):
+                    mgr.state_cache[ext_dir / f"d{i:05d}"] = {
+                        f"x{j}.txt" for j in range(500)}
+                mgr.indices_cache[(ext_dir, "d")] = [0, 1, 2, 3]
+                with self.assertLogs("organize_by_extension", level="WARNING") as cm:
+                    plan = list(plan_moves(
+                        root, sorted([doomed, ok]), mgr,
+                        ctx=SniffContext(sniff=False)))
+            planned_sources = {src for src, _ in plan}
+            self.assertIn(ok, planned_sources)
+            self.assertNotIn(doomed, planned_sources)
+            self.assertTrue(any("bucket selection failed" in m for m in cm.output))
+
+    def test_plan_moves_skips_file_on_runtimeerror(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            ok = root / "ok.txt"; ok.write_bytes(b"x")
+            bad = root / "bad.txt"; bad.write_bytes(b"y")
+            mgr = BucketManager(root=root)
+            real_choose = mgr.choose
+
+            def flaky_choose(source, ext_dir, prefix):
+                if source == bad:
+                    raise RuntimeError("boom")
+                return real_choose(source, ext_dir, prefix)
+
+            with patch.object(mgr, "choose", side_effect=flaky_choose):
+                with self.assertLogs("organize_by_extension", level="WARNING"):
+                    plan = list(plan_moves(
+                        root, sorted([bad, ok]), mgr,
+                        ctx=SniffContext(sniff=False)))
+            planned_sources = {src for src, _ in plan}
+            self.assertEqual(planned_sources, {ok})
+
+
 class MakeWorkerTests(unittest.TestCase):
     """oze-arch-01: worker closure short-circuits in preview, moves otherwise."""
 
