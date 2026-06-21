@@ -2545,6 +2545,48 @@ def test_immediate_queue_drops_overflow_with_warning(tmp_path, monkeypatch):
         d.stop_event.set()
 
 
+def test_note_immediate_depth_edge_triggers(headless_dispatcher):
+    # lq-obs-02: a backlog deeper than the pool is surfaced once (edge), and
+    # the flag resets when it drains back so it can fire again later.
+    disp = headless_dispatcher
+    disp.stop_event.set()                    # no consumer drains the queue
+    disp._immediate_pool_size = 1
+    logs = []
+    disp._log = logs.append
+    # Two items > pool size 1 -> over.
+    disp._immediate_q.put(q("magnet:?xt=1", protocol="magnet"))
+    disp._immediate_q.put(q("magnet:?xt=2", protocol="magnet"))
+    disp._note_immediate_depth()
+    disp._note_immediate_depth()             # still over, but no second log
+    backlog = [m for m in logs if "backlog" in m]
+    assert len(backlog) == 1
+    assert "2 waiting" in backlog[0]
+    assert disp._immediate_depth_warned is True
+    # Drain back to <= pool -> flag resets.
+    disp._immediate_q.get()
+    disp._note_immediate_depth()
+    assert disp._immediate_depth_warned is False
+
+
+def test_status_bar_shows_immediate_backlog(app):
+    # lq-obs-02: status bar surfaces the immediate backlog when it exceeds the
+    # pool size.
+    stop_bg_workers(app)
+    # Retire the live immediate consumers so they don't drain the queue.
+    with app.dispatcher._immediate_lock:
+        for c in app.dispatcher._immediate_consumers:
+            c["stop"].set()
+    for t in app.dispatcher.immediate_threads:
+        t.join(timeout=2.0)
+    app.dispatcher._immediate_pool_size = 1
+    app._immediate_q.put(q("magnet:?xt=1", protocol="magnet"))
+    app._immediate_q.put(q("magnet:?xt=2", protocol="magnet"))
+    app._immediate_q.put(q("magnet:?xt=3", protocol="magnet"))
+    app._update_status()
+    pump(app, 0.2)
+    assert "3 immediate waiting" in app.status_var.get()
+
+
 def test_immediate_pool_bounds_live_threads(headless_dispatcher):
     # lq-conc-02: a large immediate batch must NOT spawn one live thread per
     # item; the live consumer count is capped at the pool size.

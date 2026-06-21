@@ -778,6 +778,9 @@ class Dispatcher:
         self._immediate_q: "queue.Queue[QueueItem]" = queue.Queue(
             maxsize=self._immediate_q_maxsize())
         self._immediate_pool_size = self._immediate_concurrency()
+        # lq-obs-02: edge-trigger flag so a deep immediate backlog is surfaced
+        # once (not on every accepted item).
+        self._immediate_depth_warned = False
         # Templates already flagged at runtime for the sec-02 shell+{url} check;
         # warn once per distinct template to avoid log spam.
         self._warned_shell_url_templates: set = set()
@@ -1287,6 +1290,27 @@ class Dispatcher:
             )
             return
         self._log(f"[immediate] {item.protocol}: {item.url}")
+        self._note_immediate_depth()
+
+    def _note_immediate_depth(self) -> None:
+        """lq-obs-02: surface immediate-queue backlog when it exceeds the pool
+        size — otherwise thousands of accepted items sit invisibly in
+        _immediate_q while only `_immediate_pool_size` run. Edge-triggered: log
+        once when depth first crosses above the pool, reset when it drains back
+        at/under it, so a steady backlog doesn't spam the log. Also nudges the
+        status bar so the depth shows there too."""
+        depth = self._immediate_q.qsize()
+        over = depth > self._immediate_pool_size
+        if over and not self._immediate_depth_warned:
+            self._immediate_depth_warned = True
+            self._log(
+                f"[immediate] backlog {depth} waiting > {self._immediate_pool_size} "
+                f"running — items are queued, not lost"
+            )
+            self._update_status()
+        elif not over and self._immediate_depth_warned:
+            self._immediate_depth_warned = False
+            self._update_status()
 
     def _enqueue_or_skip_duplicate(self, item: QueueItem, outcome: str) -> str:
         """Append the item to queue_items unless the URL is already pending
@@ -3465,6 +3489,11 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         else:
             text = f"Idle • {worker_text}"
             state, color = "● IDLE", "#7f8c8d"
+        # lq-obs-02: surface the immediate backlog when it exceeds the pool
+        # size so a saturated bounded pool isn't invisible in the status bar.
+        imm_depth = self._immediate_q.qsize()
+        if imm_depth > self._immediate_pool_size:
+            text = f"{text} • {imm_depth} immediate waiting"
         metrics_text = self._metrics_summary()
         if metrics_text:
             text = f"{text} • {metrics_text}"
