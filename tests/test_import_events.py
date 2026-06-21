@@ -108,6 +108,22 @@ def test_decode_event_payload_nested_braces_in_title():
     assert parsed[0]["title"] == "Release {v2} {final}"
 
 
+def test_decode_event_payload_object_wins_when_before_list():
+    # The earliest valid bracket position wins regardless of which bracket it is.
+    text = '{"title": "First", "start": "2026-06-22"} [later]'
+
+    assert import_events._decode_event_payload(text) == [
+        {"title": "First", "start": "2026-06-22"}
+    ]
+
+
+def test_decode_event_payload_skips_unparseable_earliest_bracket():
+    # The earliest bracket fails to decode; the next one is tried.
+    text = '{not json {"title": "Real", "start": "2026-06-22"}'
+
+    assert import_events._decode_event_payload(text) == []
+
+
 def test_decode_event_payload_object_with_inner_list():
     text = '{"title": "Conf", "tags": ["a", "b"], "start": "2026-06-22"}'
 

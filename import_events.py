@@ -244,10 +244,10 @@ def parse_llm_events(text_output: str, file_path: Path, event_type: str) -> List
 
 
 def _decode_event_payload(clean_json: str) -> List[Any]:
-    """Decodes the first JSON list/object in the text, trying brackets by position."""
+    """Decodes the first JSON list/object in the text, starting at the earliest bracket."""
     decoder = json.JSONDecoder()
-    positions = ((clean_json.find(b), b) for b in ("[", "{"))
-    for idx, _bracket in sorted(p for p in positions if p[0] != -1):
+    starts = sorted(pos for pos in (clean_json.find(b) for b in ("[", "{")) if pos != -1)
+    for idx in starts:
         try:
             parsed, _end = decoder.raw_decode(clean_json[idx:])
         except json.JSONDecodeError:

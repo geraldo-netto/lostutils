@@ -47,7 +47,6 @@ lq-conc-01 | open | low | link_queue.py:1720 — _warned_shell_url_templates (a 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-cmplx-01 | open | low | hash-recursive-ai5.py:71 — NO_CAP = None is now dead after the Optional[int] migration (alias_cap_active uses `is not None`, ingest uses None directly); the "back-compat alias for old importers" equals literal None and gives importers nothing. Remove it (and its comment), or declare it in a documented __all__. | dead code
-ie-cmplx-01 | open | low | import_events.py:249 — _decode_event_payload sorts (pos, bracket) tuples then ignores the bracket; the position ordering only ever picks the earliest of [ or { and the second-bracket branch is dead. Simplify to first-successful-decode at min position. |
 
 ## code duplication
 
