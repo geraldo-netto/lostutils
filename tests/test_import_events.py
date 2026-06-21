@@ -609,13 +609,46 @@ def test_get_llm_threads_config_paths(monkeypatch):
     fake_chat.Llava15ChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
-    monkeypatch.setattr(import_events, "_LLM", None)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", {})
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
 
     cfg = import_events.ModelConfig(model_path="MM.gguf", clip_path="CC.gguf")
     import_events.get_llm(cfg)
 
     assert captured == {"clip": "CC.gguf", "model": "MM.gguf"}
+
+
+def test_get_llm_caches_per_config(monkeypatch):
+    created = []
+
+    class FakeHandler:
+        def __init__(self, clip_model_path):
+            pass
+
+    class FakeLlama:
+        def __init__(self, model_path, chat_handler, n_ctx):
+            created.append(model_path)
+
+    import types
+    fake_llama_cpp = types.ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = FakeLlama
+    fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
+    fake_chat.Llava15ChatHandler = FakeHandler
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", {})
+    monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
+
+    cfg1 = import_events.ModelConfig(model_path="A.gguf", clip_path="ca.gguf")
+    cfg2 = import_events.ModelConfig(model_path="B.gguf", clip_path="cb.gguf")
+
+    first = import_events.get_llm(cfg1)
+    again = import_events.get_llm(cfg1)
+    second = import_events.get_llm(cfg2)
+
+    assert first is again  # same config reuses the cached model
+    assert second is not first  # a different config loads its own model
+    assert created == ["A.gguf", "B.gguf"]
 
 
 def test_main_writes_json_and_ics(tmp_path, monkeypatch):

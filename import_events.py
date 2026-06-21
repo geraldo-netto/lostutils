@@ -72,7 +72,7 @@ PDF_EXTENSIONS = {".pdf"}
 # file cannot blow the context window.
 MAX_CONTENT_CHARS = 6000
 
-_LLM = None
+_LLM_CACHE: Dict[tuple, Any] = {}
 logger = logging.getLogger(__name__)
 
 
@@ -112,21 +112,23 @@ def ensure_models_exist(config: Optional[ModelConfig] = None) -> None:
 
 
 def get_llm(config: Optional[ModelConfig] = None):
-    """Lazily initializes the local LLaVA model from an explicit config."""
-    global _LLM
+    """Lazily initializes the local LLaVA model, caching one instance per config."""
     config = config or ModelConfig()
-    if _LLM is None:
+    key = (config.model_path, config.clip_path)
+    cached = _LLM_CACHE.get(key)
+    if cached is None:
         from llama_cpp import Llama
         from llama_cpp.llama_chat_format import Llava15ChatHandler
 
         ensure_models_exist(config)
         chat_handler = Llava15ChatHandler(clip_model_path=config.clip_path)
-        _LLM = Llama(
+        cached = Llama(
             model_path=config.model_path,
             chat_handler=chat_handler,
             n_ctx=2048,  # Adjust based on your available RAM and content size
         )
-    return _LLM
+        _LLM_CACHE[key] = cached
+    return cached
 
 
 # --------------------------------------------------------------------------- #
