@@ -1484,6 +1484,34 @@ def test_flush_save_state_writes_when_running(headless_dispatcher):
     assert wrote["n"] == 1
 
 
+def test_begin_save_shutdown_blocks_debounced_flush(headless_dispatcher):
+    # lq-conc-02: once _begin_save_shutdown latches the flag, a debounced timer
+    # that fires _flush_save_state must NOT write, even if stop_event is not yet
+    # set — closing the race where a flush lands behind the authoritative
+    # shutdown snapshot.
+    disp = headless_dispatcher
+    wrote = {"n": 0}
+    disp._save_state = lambda: wrote.__setitem__("n", wrote["n"] + 1)
+    disp._begin_save_shutdown()
+    assert disp._shutting_down is True
+    assert disp._save_timer is None
+    disp._flush_save_state()              # the in-flight timer wakes up...
+    assert wrote["n"] == 0                # ...but is blocked by the flag
+
+
+def test_begin_save_shutdown_cancels_armed_timer(headless_dispatcher):
+    # lq-conc-02: an already-armed debounced timer is cancelled by shutdown.
+    disp = headless_dispatcher
+    disp._save_delay = 30
+    disp._request_save_state()
+    assert disp._save_timer is not None
+    armed = disp._save_timer
+    disp._begin_save_shutdown()
+    assert disp._save_timer is None
+    armed.join(timeout=2.0)
+    assert not armed.is_alive()              # cancel woke the timer thread
+
+
 def test_request_save_state_after_stop_is_noop(headless_dispatcher):
     # lq-rel-05 companion: _request_save_state already refuses to arm a timer
     # once stopping, so the surviving guard is the _flush_save_state recheck.

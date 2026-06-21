@@ -39,7 +39,6 @@ oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_co
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-conc-01 | open | med | link_queue.py:731 — _immediate_pool_size is computed once in __init__ and never recomputed; _ensure_worker_count/_on_worker_count_changed resize only the queue-worker pool, so changing Workers in Settings has no effect on immediate concurrency until restart, contradicting the docstring. Recompute and call _ensure_immediate_pool() under _immediate_lock on worker-count change. | regression
-lq-conc-02 | open | low | link_queue.py:779 — _flush_save_state's stop_event recheck narrows but doesn't close the shutdown race: a timer past the recheck but not yet in _save_state can write after _shutdown's post-join authoritative snapshot, persisting a stale view. Use a shutting-down flag checked inside _save_state under the timer lock, or join the timer thread. |
 
 ## code complexity
 

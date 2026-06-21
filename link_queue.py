@@ -760,6 +760,9 @@ class Dispatcher:
         self._save_delay = 1.0
         self._save_timer: "threading.Timer | None" = None
         self._save_timer_lock = threading.Lock()
+        # lq-conc-02: set under _save_timer_lock by _begin_save_shutdown so a
+        # debounced timer can't write behind the shutdown authoritative save.
+        self._shutting_down = False
 
     def _record_metric(self, name: str, amount: int = 1) -> None:
         with self._metrics_lock:
@@ -798,16 +801,30 @@ class Dispatcher:
         timer.start()
 
     def _flush_save_state(self) -> None:
+        # lq-conc-02: the stop recheck AND the _save_state call run together
+        # under _save_timer_lock. A bare stop_event recheck narrowed but did
+        # not close the race: a timer that observed stop_event==False could be
+        # descheduled here and only enter _save_state AFTER _shutdown wrote its
+        # post-join authoritative snapshot, persisting a stale view. Holding the
+        # lock makes _begin_save_shutdown() (which sets _shutting_down under the
+        # same lock) and this flush mutually exclusive, so once shutdown owns
+        # the lock no debounced timer can write behind it.
         with self._save_timer_lock:
             self._save_timer = None
-        # lq-rel-05: a worker-step _request_save_state can win the race against
-        # shutdown and arm a timer between stop_event.set() and
-        # _cancel_save_timer(); when it later fires here, the app may already be
-        # torn down. Re-check stop_event so we don't write post-teardown — the
-        # shutdown path already persists the authoritative final snapshot.
-        if self.stop_event.is_set():
-            return
-        self._save_state()
+            if self.stop_event.is_set() or self._shutting_down:
+                return
+            self._save_state()
+
+    def _begin_save_shutdown(self) -> None:
+        """Block all debounced saves and cancel any armed timer, atomically
+        (lq-conc-02). After this returns, the shutdown path is the only writer
+        of the state file; a timer that already passed its in-lock recheck has
+        finished its _save_state under the lock before this acquires it."""
+        with self._save_timer_lock:
+            self._shutting_down = True
+            t, self._save_timer = self._save_timer, None
+        if t is not None:
+            t.cancel()
 
     def _cancel_save_timer(self) -> None:
         with self._save_timer_lock:
@@ -4229,9 +4246,11 @@ class LinkQueueApp(metaclass=_FacadeMeta):
 
         self.stop_event.set()
         self.pause_event.clear()
-        # Cancel any pending debounced save (scal-03): we just wrote the
-        # latest snapshot above, and the timer must not fire post-teardown.
-        self._cancel_save_timer()
+        # lq-conc-02: latch the shutting-down flag and cancel any pending
+        # debounced save atomically. Past this point no timer can run
+        # _save_state behind the authoritative post-join snapshot below; a
+        # timer mid-flush has already finished under _save_timer_lock.
+        self._begin_save_shutdown()
         with self._dispatch_cv:
             self._dispatch_cv.notify_all()
         self._cancel_tk_poller()
