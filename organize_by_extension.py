@@ -258,26 +258,6 @@ def _family_for(
     return fam.members
 
 
-_CONTAINER_SIGNATURES: tuple[Signature, ...] = (
-    IsoBmffSignature(),
-    RiffSignature(),
-)
-
-
-def _detect_iso_bmff_or_riff(head: bytes) -> str | None:
-    """Return detected label for offset-dependent container formats.
-
-    Thin wrapper around the container `Signature` entries — kept for
-    back-compat with tests / external imports. New code should iterate
-    :data:`SIGNATURES` directly (oze-arch-03).
-    """
-    for sig in _CONTAINER_SIGNATURES:
-        label = sig.matches(head)
-        if label is not None:
-            return label
-    return None
-
-
 class _Unreadable:
     """Singleton sentinel returned by :func:`read_head_bytes` when the file
     can't be opened/read (oze-rel-11). A dedicated class — not a magic byte
@@ -683,9 +663,10 @@ def _scan_bucket_indices(ext_dir: Path) -> dict[str, list[int]]:
     """One-shot scandir of ``ext_dir`` returning ``{prefix: sorted indices}``.
 
     Walks the directory once and partitions every matching bucket name by its
-    first-letter prefix. Replaces the per-(ext_dir, prefix) scandir that
-    :func:`existing_bucket_indices` used to do — for an extension with 26
-    prefixes the same directory was opened 26 times before (oze-perf-05).
+    first-letter prefix. For an extension with 26 prefixes the same directory
+    was previously opened 26 times (oze-perf-05).
+
+    Indices beyond ``BUCKET_INDEX_MAX`` are dropped with a warning (oze-rel-05).
     """
     by_prefix: dict[str, list[int]] = {}
     with _safe_scandir(ext_dir) as entries:
@@ -705,19 +686,6 @@ def _scan_bucket_indices(ext_dir: Path) -> dict[str, list[int]]:
     for indices in by_prefix.values():
         indices.sort()
     return by_prefix
-
-
-def existing_bucket_indices(ext_dir: Path, prefix: str) -> list[int]:
-    """Return sorted bucket indices for a given extension folder and prefix.
-
-    Thin wrapper over :func:`_scan_bucket_indices` (oze-perf-05) — preserved
-    so the legacy `(ext_dir, prefix)` call shape keeps working. Hot callers
-    inside :class:`BucketManager` cache the full map and avoid re-scanning
-    the directory once per prefix.
-
-    Indices beyond ``BUCKET_INDEX_MAX`` are dropped with a warning (oze-rel-05).
-    """
-    return list(_scan_bucket_indices(ext_dir).get(prefix, ()))
 
 
 def bucket_file_names(bucket_path: Path) -> Set[str]:
@@ -1153,19 +1121,6 @@ def _find_destination_blocker(destination: Path) -> "Path | None":
             continue
         return cur
     return None
-
-
-def _source_blocks_destination(source: Path, destination: Path) -> bool:
-    """Back-compat probe (oze-rel-12). True iff `source` itself blocks
-    `destination`. Cross-source blockers are handled by
-    :func:`_find_destination_blocker` directly."""
-    blocker = _find_destination_blocker(destination)
-    if blocker is None:
-        return False
-    try:
-        return blocker.resolve() == source.resolve()
-    except OSError:
-        return False
 
 
 _COLLISION_RETRY_CAP = 1000

@@ -27,7 +27,6 @@ from organize_by_extension import ( # Added for new tests
     is_bucketed_file,
     list_files,
     move_file,
-    existing_bucket_indices,
     bucket_file_names, choose_bucket, BUCKET_SIZE,
     _BUCKET_FULL, _walk_scandir, _find_reusable_bucket,
 )
@@ -486,8 +485,9 @@ class OrganizeByExtensionTest(unittest.TestCase):
             for sub in ("a00000", "a00002", "b00001"):
                 (ext / sub).mkdir(parents=True)
             (ext / "a00003").write_text("not a dir")  # file, ignored
-            self.assertEqual(existing_bucket_indices(ext, "a"), [0, 2])
-            self.assertEqual(existing_bucket_indices(root / "missing", "a"), [])
+            self.assertEqual(_scan_bucket_indices(ext).get("a", []), [0, 2])
+            self.assertEqual(
+                _scan_bucket_indices(root / "missing").get("a", []), [])
 
     def test_bucket_file_names(self):
         """Returns only file names; missing bucket -> empty set; subdirs excluded."""
@@ -741,7 +741,8 @@ class PerfScanTests(unittest.TestCase):
 
     def test_existing_bucket_indices_missing_dir(self):
         with TemporaryDirectory() as d:
-            self.assertEqual(existing_bucket_indices(Path(d) / "nope", "a"), [])
+            self.assertEqual(
+                _scan_bucket_indices(Path(d) / "nope").get("a", []), [])
 
     def test_bucket_file_names_unreadable_returns_empty(self):
         with TemporaryDirectory() as d:
@@ -850,7 +851,7 @@ class PerfScanTests(unittest.TestCase):
             with patch("organize_by_extension.BUCKET_INDEX_MAX", 3):
                 with self.assertLogs("organize_by_extension",
                                      level="WARNING") as cm:
-                    out = existing_bucket_indices(ext, "a")
+                    out = _scan_bucket_indices(ext).get("a", [])
             self.assertEqual(out, [0])
             self.assertTrue(any("out-of-range bucket index" in msg
                                 for msg in cm.output))
@@ -861,7 +862,7 @@ class PerfScanTests(unittest.TestCase):
             ext = Path(d)
             for sub in ("a00000", "a00007"):
                 (ext / sub).mkdir()
-            self.assertEqual(existing_bucket_indices(ext, "a"), [0, 7])
+            self.assertEqual(_scan_bucket_indices(ext).get("a", []), [0, 7])
 
     def test_organize_state_cache_bounded_on_overflow(self):
         # oze-scal-02 end-to-end: across a BUCKET_SIZE+5-file run, no Set entry
@@ -2140,17 +2141,27 @@ class SignaturesRegistryConsistent(unittest.TestCase):
         self.assertEqual(magic_count, len(_oze.MAGIC_SIGNATURES))
 
 
-class DetectIsoBmffOrRiffBackCompat(unittest.TestCase):
-    """Cover the back-compat shim — still iterates _CONTAINER_SIGNATURES."""
+class ContainerSignaturesInRegistry(unittest.TestCase):
+    """oze-dup-01: the deleted _detect_iso_bmff_or_riff shim is replaced by
+    iterating the canonical container detectors inside SIGNATURES."""
+
+    def _detect(self, head):
+        for sig in _oze.SIGNATURES:
+            label = sig.matches(head)
+            if label is not None and isinstance(
+                sig, (_oze.IsoBmffSignature, _oze.RiffSignature)
+            ):
+                return label
+        return None
 
     def test_iso_bmff_match(self):
-        self.assertEqual(_oze._detect_iso_bmff_or_riff(b"....ftypisom"), "mp4")
+        self.assertEqual(self._detect(b"....ftypisom"), "mp4")
 
     def test_riff_match(self):
-        self.assertEqual(_oze._detect_iso_bmff_or_riff(b"RIFF....WAVE"), "wav")
+        self.assertEqual(self._detect(b"RIFF....WAVE"), "wav")
 
     def test_returns_none_on_miss(self):
-        self.assertIsNone(_oze._detect_iso_bmff_or_riff(b"random payload"))
+        self.assertIsNone(self._detect(b"random payload"))
 
 
 # --- oze-rel-12: source-name collision with destination ancestor -----------
@@ -2183,18 +2194,21 @@ class SourceCollisionResolution(unittest.TestCase):
             self.assertEqual(result, src)   # no rename — no collision
 
     def test_source_blocks_destination_detection(self):
+        # oze-dup-01: the _source_blocks_destination shim is gone; the
+        # canonical probe is _find_destination_blocker + identity compare.
         with TemporaryDirectory() as d:
             root = Path(d)
             src = root / "avi"; src.write_bytes(b"data")
             dest = root / "avi" / "a00000"
-            self.assertTrue(_oze._source_blocks_destination(src, dest))
+            blocker = _oze._find_destination_blocker(dest)
+            self.assertEqual(blocker.resolve(), src.resolve())
 
     def test_source_blocks_destination_false_when_separate(self):
         with TemporaryDirectory() as d:
             root = Path(d)
             src = root / "real.txt"; src.write_text("data")
             dest = root / "txt" / "a00000"
-            self.assertFalse(_oze._source_blocks_destination(src, dest))
+            self.assertIsNone(_oze._find_destination_blocker(dest))
 
     def test_source_blocks_destination_oserror_returns_false(self, ):
         with TemporaryDirectory() as d:
@@ -2202,7 +2216,7 @@ class SourceCollisionResolution(unittest.TestCase):
             src = root / "x"; src.write_text("a")
             # Provide a destination whose ancestors don't exist — no collision.
             dest = root / "nowhere" / "deep" / "bucket"
-            self.assertFalse(_oze._source_blocks_destination(src, dest))
+            self.assertIsNone(_oze._find_destination_blocker(dest))
 
     def test_cross_source_collision_resolved(self):
         # oze-rel-13 + oze-rel-14: cross-source collision is now resolved
@@ -2308,20 +2322,6 @@ class SourceCollisionResolution(unittest.TestCase):
 
             with patch.object(_oze.Path, "lstat", boom):
                 self.assertIsNone(_oze._find_destination_blocker(dest))
-
-    def test_source_blocks_destination_resolve_oserror_returns_false(self):
-        # L1030-1031: blocker.resolve() OSError -> False.
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            source = root / "src"; source.write_text("data")
-            blocker = root / "ext"; blocker.write_text("blocker")
-            dest = root / "ext" / "bucket"
-
-            def boom_resolve(self, strict=False):
-                raise OSError("denied")
-
-            with patch.object(_oze.Path, "resolve", boom_resolve):
-                self.assertFalse(_oze._source_blocks_destination(source, dest))
 
     def test_resolve_source_collision_raises_on_permission_error(self):
         # oze-rel-17: EACCES / EROFS / EISDIR / EBUSY propagate instead of
