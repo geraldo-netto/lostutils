@@ -1652,6 +1652,19 @@ def _drain_futures(
             stats.processed += 1
 
 
+def _maybe_log_progress(
+    stats: _RunStats, total_files: int, progress: dict[str, int]
+) -> None:
+    """Emit the periodic ``progress:`` line once every ``PROGRESS_EVERY``
+    completed items (oze-obs-01). ``progress["last"]`` tracks the count at the
+    previous emission so submit-loop and drain-loop calls share one cadence."""
+    done_so_far = stats.processed + stats.skipped
+    if (done_so_far - progress["last"]) >= PROGRESS_EVERY:
+        logger.info("progress: processed %d/%d, skipped %d",
+                    stats.processed, total_files, stats.skipped)
+        progress["last"] = done_so_far
+
+
 def _run_moves(
     plan: Iterator[tuple[Path, Path]],
     worker: WorkerFn,
@@ -1672,19 +1685,21 @@ def _run_moves(
     max_outstanding = max(1, num_threads * SUBMIT_BACKLOG_MULT)
     executor = ThreadPoolExecutor(max_workers=num_threads)
     futures: dict[Future, Path] = {}
-    last_progress = 0
+    progress = {"last": 0}
     try:
         for source, bucket_dir in plan:
             while len(futures) >= max_outstanding:
                 _drain_futures(futures, stats, preview, head_cache)
+                _maybe_log_progress(stats, total_files, progress)
             futures[executor.submit(worker, source, bucket_dir)] = source
-            done_so_far = stats.processed + stats.skipped
-            if (done_so_far - last_progress) >= PROGRESS_EVERY:
-                logger.info("progress: processed %d/%d, skipped %d",
-                            stats.processed, total_files, stats.skipped)
-                last_progress = done_so_far
+            _maybe_log_progress(stats, total_files, progress)
+        # oze-obs-01: also evaluate PROGRESS_EVERY while draining the tail, so
+        # a run whose last >PROGRESS_EVERY files finish after the plan iterator
+        # is exhausted still emits progress instead of going silent until the
+        # summary.
         while futures:
             _drain_futures(futures, stats, preview, head_cache)
+            _maybe_log_progress(stats, total_files, progress)
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         logger.info(f"\nInterrupted. Processed {stats.processed} file(s), "

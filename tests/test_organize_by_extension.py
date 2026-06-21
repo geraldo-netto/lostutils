@@ -2796,6 +2796,24 @@ class SourceCollisionResolution(unittest.TestCase):
                 assert any("progress: processed" in m for m in msgs), msgs
 
 
+    def test_progress_line_fires_during_drain_phase(self):
+        # oze-obs-01: with fewer files than the outstanding-futures cap, the
+        # submit loop never drains, so every completion happens in the final
+        # drain loop — progress must still fire there.
+        import unittest.mock as _m
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            # 4 files <= num_threads*SUBMIT_BACKLOG_MULT (1*4) so the submit
+            # loop submits all without ever draining.
+            for i in range(4):
+                (root / f"f{i}.txt").write_text(str(i))
+            with _m.patch.object(_oze, "PROGRESS_EVERY", 2):
+                with _m.patch.object(_oze.logger, "info") as info_log:
+                    _oze.organize(root, verbose=False, num_threads=1)
+                msgs = [str(c.args[0]) if c.args else ""
+                        for c in info_log.call_args_list]
+            self.assertTrue(any("progress: processed" in m for m in msgs), msgs)
+
     def test_bucket_manager_counters_populated(self):
         # oze-obs-01: stats counters incremented as buckets are allocated/reused.
         with TemporaryDirectory() as d:
