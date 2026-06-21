@@ -196,7 +196,9 @@ def _coerce_start(event: Dict[str, Any]) -> str:
     clock = event.get("time")
     if day and clock and _DATE_SHAPE.match(str(day)) and _TIME_SHAPE.match(str(clock)):
         return f"{day}T{clock}"
-    return str(day or clock or "Unknown")
+    if day:
+        return str(day)
+    return "Unknown"
 
 
 def parse_llm_events(text_output: str, file_path: Path, event_type: str) -> List[Dict[str, Any]]:

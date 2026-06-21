@@ -170,9 +170,18 @@ def test_coerce_start_does_not_build_garbage_strings():
     assert import_events._coerce_start({}) == "Unknown"
 
 
-def test_coerce_start_falls_back_to_single_present_field():
+def test_coerce_start_falls_back_to_date_only():
     assert import_events._coerce_start({"date": "2026-06-22"}) == "2026-06-22"
-    assert import_events._coerce_start({"time": "14:00"}) == "14:00"
+
+
+def test_coerce_start_drops_time_only_event():
+    # A time with no date is not a usable calendar start; drop it cleanly so
+    # build_ics skips it rather than emitting an unparseable bare time.
+    assert import_events._coerce_start({"time": "14:00"}) == "Unknown"
+    assert import_events._coerce_start({"time": "noon"}) == "Unknown"
+    assert import_events._parse_iso(
+        import_events._coerce_start({"time": "14:00"})
+    ) is None
 
 
 @given(
@@ -192,9 +201,12 @@ def test_coerce_start_never_emits_none_token(day, clock, start):
     result = import_events._coerce_start(event)
 
     assert isinstance(result, str)
-    # Result must be one of the inputs, a validated date+time join, or "Unknown".
+    # A time without a date is never surfaced as a bare time (unparseable).
+    if not start and not day:
+        assert result == "Unknown"
+    # Result must be the start, a date, a validated date+time join, or "Unknown".
     joined = f"{day}T{clock}" if (day and clock) else None
-    candidates = {str(start), str(day), str(clock), "Unknown"}
+    candidates = {str(start), str(day), "Unknown"}
     if joined is not None:
         candidates.add(joined)
     assert result in candidates
