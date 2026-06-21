@@ -1470,6 +1470,9 @@ def main():
                 f"size_collision_inodes={f(info['candidates'])} "
                 f"hashed_stage1={f(info['stage1'])} "
                 f"hashed_stage2={f(info['stage2'])} "
+                # hr-obs-01: surface stage-2 short-read/shrink skips so they
+                # aren't invisible — they were computed but never printed.
+                f"hashed_stage2_skipped={f(info['stage2_skipped'])} "
                 f"dup_groups={f(dup_groups)} "
                 f"dup_paths={f(dup_paths)} "
                 f"walk_errors={f(walk_stats['dir_errors'])}+"

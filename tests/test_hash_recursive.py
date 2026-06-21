@@ -892,6 +892,41 @@ def test_hash_file_windows_non_strict_short_read_does_not_tick_shrank(tmp_path):
     assert cfg.hash_skipped_shrank == 0
 
 
+def test_main_summary_surfaces_stage2_skipped(tmp_path, monkeypatch, capsys):
+    # hr-obs-01: stage2_skipped must appear in the summary. Force two big
+    # files through stage 2 with every tail dropped so the counter is > 0.
+    big = b"q" * (hr.HEAD_TAIL_THRESHOLD + 200)
+    (tmp_path / "a.bin").write_bytes(big)
+    (tmp_path / "b.bin").write_bytes(big)
+    real_run = hr._run_stage
+    seen = {"n": 0}
+
+    def stub(items, fn, total, jobs, cancel_event=None):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return real_run(items, fn, total, jobs)
+        return ({p: None for _s, p in items}, 0)
+
+    monkeypatch.setattr(hr, "_run_stage", stub)
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "hashed_stage2_skipped=" in err
+    # Both big files were dropped at stage 2 -> skipped >= 2.
+    import re
+    m = re.search(r"hashed_stage2_skipped=(\d+)", err)
+    assert m and int(m.group(1)) >= 2
+
+
+def test_main_summary_stage2_skipped_zero_when_clean(tmp_path, monkeypatch, capsys):
+    # hr-obs-01: the field is present even when nothing was skipped.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "hashed_stage2_skipped=0" in err
+
+
 def test_main_summary_surfaces_hash_shrank(tmp_path, monkeypatch, capsys):
     # hr-rel-01: the shrank counter is visible in the end-of-run summary.
     (tmp_path / "a.bin").write_bytes(b"x")
