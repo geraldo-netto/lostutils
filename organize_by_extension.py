@@ -392,9 +392,7 @@ def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
     silently.
 
     ``ctx`` bundles ``sniff``/``head_cache``/``extra_zip_family``; omit it to
-    use the shared default :data:`_DEFAULT_SNIFF_CTX`. Legacy callers passing
-    those values as standalone keyword args should use
-    :func:`resolve_real_extension_kw` instead.
+    use the shared default :data:`_DEFAULT_SNIFF_CTX`.
     """
     if ctx is None:
         ctx = _DEFAULT_SNIFF_CTX
@@ -417,25 +415,6 @@ def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
         path, declared, detected, detected,
     )
     return detected
-
-
-def resolve_real_extension_kw(
-    path: Path,
-    sniff: bool = True,
-    head_cache: dict[Path, HeadBytes] | None = None,
-    extra_zip_family: frozenset[str] = frozenset(),
-) -> str:
-    """Deprecated keyword-arg shim for :func:`resolve_real_extension` (oze-dup-02).
-
-    Bundles the standalone ``sniff``/``head_cache``/``extra_zip_family`` keywords
-    into a :class:`SniffContext` and delegates. New code should build a
-    ``SniffContext`` once and pass ``ctx=`` directly.
-    """
-    return resolve_real_extension(
-        path,
-        ctx=SniffContext(sniff=sniff, head_cache=head_cache,
-                         extra_zip_family=extra_zip_family),
-    )
 
 
 def normalize_prefix(name: str) -> str:
@@ -470,9 +449,6 @@ def bucket_name(prefix: str, index: int) -> str:
 def is_bucketed_file(
     root: Path,
     path: Path,
-    sniff: bool = True,
-    head_cache: dict[Path, HeadBytes] | None = None,
-    extra_zip_family: frozenset[str] = frozenset(),
     ctx: SniffContext | None = None,
 ) -> bool:
     """Determine if a file is already inside a valid bucket structure.
@@ -481,8 +457,7 @@ def is_bucketed_file(
     When sniffing is enabled the bucket directory is compared against the
     header-resolved extension, so a file already sitting under its true type
     (e.g. ``pdf/p00000/mypdf.doc``) is recognised as bucketed and not moved.
-    Pass ``ctx`` to share head-bytes / extra-family settings (oze-dup-03);
-    keyword args are kept for back-compat.
+    Pass ``ctx`` to share head-bytes / extra-family settings (oze-dup-03).
     """
     try:
         relative = path.relative_to(root)
@@ -499,8 +474,7 @@ def is_bucketed_file(
         return False
 
     if ctx is None:
-        ctx = SniffContext(sniff=sniff, head_cache=head_cache,
-                           extra_zip_family=extra_zip_family)
+        ctx = _DEFAULT_SNIFF_CTX
 
     # Under "header always wins" (oze-perf-06) we cannot trust the declared
     # extension to confirm placement — a real PDF sitting under doc/d00000/
@@ -514,9 +488,6 @@ def list_files(
     root: Path,
     skip_paths: Iterable[Path],
     verbose: bool = False,
-    sniff: bool = True,
-    head_cache: dict[Path, HeadBytes] | None = None,
-    extra_zip_family: frozenset[str] = frozenset(),
     ctx: SniffContext | None = None,
 ) -> list[Path]:
     """Return all files under the root, excluding skipped paths and bucketed outputs.
@@ -528,12 +499,10 @@ def list_files(
     (oze-perf-02).
 
     Pass a single :class:`SniffContext` ``ctx`` (oze-dup-03) to share
-    head-bytes / extra-zip-family / sniff toggle with downstream stages;
-    the keyword form is kept for back-compat.
+    head-bytes / extra-zip-family / sniff toggle with downstream stages.
     """
     if ctx is None:
-        ctx = SniffContext(sniff=sniff, head_cache=head_cache,
-                           extra_zip_family=extra_zip_family)
+        ctx = _DEFAULT_SNIFF_CTX
     skip = {str(p) for p in skip_paths}   # O(1) membership; compare on path string (oze-perf-01)
     files: list[Path] = []
     already_bucketed = 0
@@ -1461,9 +1430,6 @@ def plan_moves(
     root: Path,
     files: Iterable[Path],
     manager: BucketManager,
-    sniff: bool = True,
-    head_cache: dict[Path, HeadBytes] | None = None,
-    extra_zip_family: frozenset[str] = frozenset(),
     ctx: SniffContext | None = None,
     preview: bool = False,
 ) -> Iterator[tuple[Path, Path]]:
@@ -1491,8 +1457,7 @@ def plan_moves(
     full plan in memory (oze-scal-01).
     """
     if ctx is None:
-        ctx = SniffContext(sniff=sniff, head_cache=head_cache,
-                           extra_zip_family=extra_zip_family)
+        ctx = _DEFAULT_SNIFF_CTX
     # oze-decl-02: enforce the docstring contract. Sorted-list inputs are
     # required for deterministic plans; iterators are accepted (we have
     # no way to assert order without consuming first).

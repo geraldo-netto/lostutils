@@ -50,7 +50,6 @@ hr-cmplx-01 | open | low | hash-recursive-ai5.py:71 — NO_CAP = None is now dea
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-dup-01 | open | low | import_events.py:324 — the `global _extraction_failures; _extraction_failures += 1; logger.exception(...)` block is duplicated verbatim in _run_llm and extract_from_file. Extract a single in-file _record_failure(file, exc) helper. | within-file
-oze-dup-01 | open | med | organize_by_extension.py:431 — the "removed back-compat shims" is contradicted: resolve_real_extension_kw plus standalone sniff/head_cache/extra_zip_family keyword params on is_bucketed_file/list_files/plan_moves still exist alongside the SniffContext ctx path, each rebuilding a SniffContext when ctx is None. Drop the keyword forms now that ctx is threaded end-to-end. | dead parallel API
 
 ## architecture/modularity/SOLID
 
