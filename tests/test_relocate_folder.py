@@ -2579,6 +2579,16 @@ def test_recover_restores_backup(tmp_path):
     assert not rf._path_taken(backup)
 
 
+def test_recover_accepts_directory_backup(tmp_path):
+    # rf-rel-02: a genuine directory backup still recovers cleanly past the
+    # new S_ISDIR guard.
+    source, backup = _make_orphan(tmp_path)
+    assert backup.is_dir()
+    msg = rf.recover(source)
+    assert msg.startswith("recovered:")
+    assert source.is_dir()
+
+
 def test_recover_refuses_when_source_exists(tmp_path):
     source, _ = _make_orphan(tmp_path)
     source.mkdir()
