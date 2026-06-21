@@ -651,6 +651,70 @@ def test_get_llm_caches_per_config(monkeypatch):
     assert created == ["A.gguf", "B.gguf"]
 
 
+class _FakePixmap:
+    def __init__(self, dpi):
+        self.dpi = dpi
+
+    def tobytes(self, fmt):
+        return f"{fmt}:{self.dpi}".encode("utf-8")
+
+
+class _FakePage:
+    def get_pixmap(self, dpi=None):
+        return _FakePixmap(dpi)
+
+
+class _FakeDoc:
+    def __init__(self, pages):
+        self._pages = [_FakePage() for _ in range(pages)]
+
+    def __iter__(self):
+        return iter(self._pages)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _install_fake_fitz(monkeypatch, pages):
+    import types
+    fake = types.ModuleType("fitz")
+    fake.open = lambda path: _FakeDoc(pages)
+    monkeypatch.setitem(__import__("sys").modules, "fitz", fake)
+
+
+def test_pdf_to_images_caps_page_count(monkeypatch):
+    _install_fake_fitz(monkeypatch, pages=50)
+
+    images = import_events._pdf_to_images(Path("big.pdf"))
+
+    assert len(images) == import_events.PDF_VISION_MAX_PAGES
+
+
+def test_pdf_to_images_uses_configured_dpi(monkeypatch):
+    _install_fake_fitz(monkeypatch, pages=1)
+
+    images = import_events._pdf_to_images(Path("one.pdf"))
+
+    assert images == [f"png:{import_events.PDF_VISION_DPI}".encode("utf-8")]
+
+
+def test_pdf_to_images_returns_empty_without_pymupdf(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def blocked(name, *a, **k):
+        if name == "fitz":
+            raise ImportError("no pymupdf")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+
+    assert import_events._pdf_to_images(Path("x.pdf")) == []
+
+
 class RaisingLlm:
     def create_chat_completion(self, messages):
         raise RuntimeError("model OOM")

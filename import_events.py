@@ -72,6 +72,12 @@ PDF_EXTENSIONS = {".pdf"}
 # file cannot blow the context window.
 MAX_CONTENT_CHARS = 6000
 
+# Scanned-PDF vision fallback: render at most this many pages, at this DPI.
+# The page cap bounds time/memory on large scans; 150 DPI is legible enough for
+# vision OCR without the memory blow-up of full-resolution pixmaps.
+PDF_VISION_MAX_PAGES = 5
+PDF_VISION_DPI = 150
+
 _LLM_CACHE: Dict[tuple, Any] = {}
 logger = logging.getLogger(__name__)
 
@@ -364,7 +370,11 @@ def _pdf_to_images(file_path: Path) -> List[bytes]:
     images: List[bytes] = []
     with fitz.open(str(file_path)) as doc:
         for page in doc:
-            images.append(page.get_pixmap().tobytes("png"))
+            if len(images) >= PDF_VISION_MAX_PAGES:
+                logger.info("Capping vision scan of %s at %d pages",
+                            file_path.name, PDF_VISION_MAX_PAGES)
+                break
+            images.append(page.get_pixmap(dpi=PDF_VISION_DPI).tobytes("png"))
     return images
 
 
