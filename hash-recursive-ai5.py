@@ -25,6 +25,7 @@ while staying bounded (max ~2.13 MiB read per file, regardless of size).
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import queue
 import signal
@@ -67,6 +68,12 @@ NO_CAP = 2**31
 # a representative. The first few aliases are almost always representative
 # of readability; fall back to the first alias if none in the window passes.
 _REP_PROBE_LIMIT = 8
+# hr-conc-02: errno values that mean "the file recorded at walk time is
+# gone" — ENOENT (deleted) and ESTALE (NFS handle invalidated). Raised
+# both on `os.open` (as FileNotFoundError, errno ENOENT) and mid-read
+# when a sibling thread / another process removes the file after open.
+# These are benign racy-delete skips, counted apart from real I/O errors.
+_VANISHED_ERRNOS = frozenset({errno.ENOENT, errno.ESTALE})
 
 
 class RunConfig:
@@ -367,6 +374,17 @@ def _log_hash_error(path, exc, config):
         _emit_hash_error_line(path, exc)
 
 
+def _tick_vanished(config) -> None:
+    """Count one benign vanished-file (ENOENT/ESTALE) skip (hr-conc-02).
+
+    No-op without a config (legacy callers). hr-conc-06: guarded by
+    ``config._counter_lock`` so the `+= 1` is deterministic on a
+    free-threaded build."""
+    if config is not None:
+        with config._counter_lock:
+            config.hash_skipped_vanished += 1
+
+
 def _read_window_into(h, f, length: int, strict: bool) -> bool:
     """Read up to `length` bytes from `f` and feed them to hasher `h`
     (hr-rel-09).
@@ -421,12 +439,16 @@ def _hash_file_windows(path, windows, config=None):
     ``config.hash_error_verbose_cap`` lines per run. Without a config,
     legacy unbounded stderr logging is used.
 
-    hr-rel-04: an ENOENT-after-walk (the file vanished between scandir
-    and open) is benign and emitted silently as None. Every other
-    OSError — EACCES, EIO, ENOSPC, EMFILE, … — is data loss in disguise
-    and is surfaced (verbosely or via the suppression counter) so the
-    user can investigate. The return value is None in both cases so the
-    caller's "skip" semantics still hold.
+    hr-rel-04 / hr-conc-02: a vanished-after-walk file is benign and
+    emitted silently as None — counted on ``hash_skipped_vanished``. This
+    covers ENOENT on the open (the file deleted between scandir and open)
+    AND ENOENT/ESTALE raised mid-read (a sibling thread or another process
+    deleted the file, or an NFS handle went stale, after the open
+    succeeded) — the read-path case used to be miscounted as a real hash
+    error. Every other OSError — EACCES, EIO, ENOSPC, EMFILE, … — is data
+    loss in disguise and is surfaced (verbosely or via the suppression
+    counter) so the user can investigate. The return value is None in all
+    cases so the caller's "skip" semantics still hold.
 
     hr-sec-05: the open uses ``O_NOFOLLOW`` so an attacker who swapped
     the regular file recorded at walk time for a symlink between walk
@@ -462,16 +484,18 @@ def _hash_file_windows(path, windows, config=None):
                 # state from a mid-loop exception can't survive into
                 # later code that re-hashes the same buffer ref.
                 del h
-    except FileNotFoundError:
-        # hr-obs-01: a vanished-after-walk file is a benign skip, not a
-        # real error — tick the dedicated counter so the summary can
-        # separate it from EACCES/EIO failures.
-        if config is not None:
-            with config._counter_lock:
-                config.hash_skipped_vanished += 1
-        return None
     except OSError as exc:
-        _log_hash_error(path, exc, config)
+        # hr-obs-01 / hr-conc-02: a vanished-after-walk file is a benign
+        # skip, not a real error. ENOENT on `os.open` (FileNotFoundError)
+        # AND ENOENT/ESTALE raised mid-read (a sibling thread or another
+        # process deleted the file, or an NFS handle went stale, after the
+        # open succeeded) all mean "the file is gone" — route every one of
+        # them to the dedicated vanished counter so the summary separates
+        # racy deletes from EACCES/EIO failures worth investigating.
+        if exc.errno in _VANISHED_ERRNOS:
+            _tick_vanished(config)
+        else:
+            _log_hash_error(path, exc, config)
         return None
 
 

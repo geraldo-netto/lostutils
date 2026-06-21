@@ -424,6 +424,72 @@ def test_hash_file_windows_other_oserror_warns(monkeypatch, capsys):
     assert "hash failed" in err and "EACCES" in err
 
 
+# --- hr-conc-02: ENOENT/ESTALE mid-read counts as vanished, not error ------
+
+def test_tick_vanished_increments_counter():
+    cfg = hr.RunConfig()
+    hr._tick_vanished(cfg)
+    hr._tick_vanished(cfg)
+    assert cfg.hash_skipped_vanished == 2
+
+
+def test_tick_vanished_no_config_is_noop():
+    hr._tick_vanished(None)   # must not raise
+
+
+def test_hash_file_windows_open_enoent_counts_vanished(tmp_path):
+    # hr-conc-02 regression: ENOENT on the open (FileNotFoundError) still
+    # routes to the vanished counter, not the error log.
+    cfg = hr.RunConfig()
+    out = hr._hash_file_windows(
+        str(tmp_path / "gone.bin"), [(0, 10, hr.os.SEEK_SET)], config=cfg)
+    assert out is None
+    assert cfg.hash_skipped_vanished == 1
+
+
+@pytest.mark.parametrize("err_no", [hr.errno.ENOENT, hr.errno.ESTALE])
+def test_hash_file_windows_midread_vanish_counts_vanished(
+        tmp_path, monkeypatch, capsys, err_no):
+    # hr-conc-02: a file deleted AFTER open raises OSError(ENOENT/ESTALE)
+    # inside the read loop — must be counted as vanished, silently.
+    f = tmp_path / "a.bin"; f.write_bytes(b"x" * 100)
+    cfg = hr.RunConfig()
+
+    def vanish(*a, **k):
+        raise OSError(err_no, "vanished mid-read")
+
+    monkeypatch.setattr(hr, "_read_window_into", vanish)
+    out = hr._hash_file_windows(str(f), [(0, 10, hr.os.SEEK_SET)], config=cfg)
+    assert out is None
+    assert cfg.hash_skipped_vanished == 1
+    assert cfg.hash_error_logged == 0
+    assert capsys.readouterr().err == ""   # benign skip, no warning
+
+
+def test_hash_file_windows_midread_eio_counts_real_error(
+        tmp_path, monkeypatch, capsys):
+    # hr-conc-02: a genuine I/O error mid-read (EIO) is NOT vanished — it
+    # surfaces via the bounded error log and the error counter.
+    f = tmp_path / "a.bin"; f.write_bytes(b"x" * 100)
+    cfg = hr.RunConfig()
+
+    def boom(*a, **k):
+        raise OSError(hr.errno.EIO, "disk on fire")
+
+    monkeypatch.setattr(hr, "_read_window_into", boom)
+    out = hr._hash_file_windows(str(f), [(0, 10, hr.os.SEEK_SET)], config=cfg)
+    assert out is None
+    assert cfg.hash_skipped_vanished == 0
+    assert cfg.hash_error_logged == 1
+    assert "hash failed" in capsys.readouterr().err
+
+
+def test_vanished_errnos_contains_enoent_and_estale():
+    assert hr.errno.ENOENT in hr._VANISHED_ERRNOS
+    assert hr.errno.ESTALE in hr._VANISHED_ERRNOS
+    assert hr.errno.EIO not in hr._VANISHED_ERRNOS
+
+
 # --- hr-rel-06: sample windows never read past EOF --------------------------
 
 def test_hash_tail_and_samples_clamps_windows(tmp_path):
