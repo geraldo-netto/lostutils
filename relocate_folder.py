@@ -906,8 +906,22 @@ def _run_verify_pool(tasks: Iterator[Callable[[], None]], *,
     """Drive `tasks` through `_run_streamed` over a bounded
     ThreadPoolExecutor (rf-perf-02 / rf-arch-06).
 
-    Aborts submission on the first failure but still drains inflight
-    futures so background SHA-256 work doesn't leak past the function.
+    Error-path join (rf-rel-02): submission aborts on the first failing
+    future, but the function does NOT return while hash work is still
+    running. Two independent mechanisms cooperate:
+
+      * `_run_streamed` invokes `on_done` over the inflight set, which
+        blocks on `fut.exception()` for each currently-tracked future;
+      * the `finally` then calls `ex.shutdown(wait=True, cancel_futures=…)`,
+        which cancels still-QUEUED tasks (so a TB-scale tree's first
+        mismatch surfaces immediately) yet BLOCKS until the already-RUNNING
+        worker threads finish.
+
+    The earlier docstring claimed inflight futures were "drained" while the
+    shutdown was actually `wait=False`, leaving running SHA-256 threads
+    detached past the return; the wording and the call now match (rf-rel-02
+    / rf-conc-01).
+
     Secondary errors are counted, not silently dropped (rf-rel-08): the
     re-raise is annotated with `verify pool raised N errors total;
     re-raising first` so an operator who fixes the first divergence

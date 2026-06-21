@@ -2521,3 +2521,39 @@ def test_run_verify_pool_joins_running_threads_on_abort():
     # rf-conc-01: shutdown(wait=True) means the running task is joined before
     # the function returns — no detached thread survives the abort.
     assert finished.is_set()
+
+
+# --- rf-rel-02: verify pool error path joins + honest docstring ------------
+
+def test_run_verify_pool_docstring_describes_join():
+    doc = rf._run_verify_pool.__doc__ or ""
+    assert "wait=True" in doc
+    assert "rf-rel-02" in doc
+
+
+def test_run_verify_pool_error_path_no_detached_threads():
+    import threading
+    before = set(threading.enumerate())
+    running_done = threading.Event()
+    started = threading.Event()
+    go = threading.Event()
+
+    def slow():
+        started.set()
+        go.wait(timeout=5)
+        running_done.set()
+
+    def fail():
+        started.wait(timeout=5)
+        go.set()
+        raise RuntimeError("diverged")
+
+    with pytest.raises(RuntimeError, match="diverged"):
+        rf._run_verify_pool(iter([slow, fail]), jobs=2)
+
+    assert running_done.is_set()
+    # no worker thread from this pool is left alive after return.
+    leaked = [t for t in threading.enumerate()
+              if t not in before and t.is_alive()
+              and "ThreadPoolExecutor" in t.name]
+    assert not leaked
