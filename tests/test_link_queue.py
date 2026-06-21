@@ -81,6 +81,16 @@ def pump_until(app, cond, timeout=8.0):
     return cond()
 
 
+def _spin_until(cond, timeout=5.0):
+    """Poll `cond` without a Tk event loop (for headless Dispatcher tests)."""
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.005)
+    return cond()
+
+
 def stop_bg_workers(app):
     """Retire the workers spun up at construction so a test can own the
     queue without a background thread stealing items."""
@@ -467,6 +477,93 @@ def test_save_state_persists_immediate_backlog(tmp_path, monkeypatch):
         urls = [link_queue._decode_state_field(e, "url", "")
                 for e in data["immediate"]]
         assert urls == ["magnet:?xt=1", "file:///x"]
+    finally:
+        d.stop_event.set()
+
+
+def test_save_state_persists_inflight_immediate_item(tmp_path, monkeypatch):
+    # lq-rel-01: an immediate item pulled off the queue and running on a
+    # consumer is persisted (ahead of the still-queued backlog) so a restart
+    # retries it instead of losing it.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_worker_count"] = 1
+    d = link_queue.Dispatcher.headless(cfg)
+    started = threading.Event()
+    release = threading.Event()
+
+    def block_run(item, _mode):
+        started.set()
+        release.wait(5.0)
+        return 0
+
+    d._run_item = block_run
+    try:
+        d._dispatch_immediate(q("magnet:?running", protocol="magnet"))
+        d._dispatch_immediate(q("magnet:?queued", protocol="magnet"))
+        assert started.wait(5.0), "consumer never started the in-flight item"
+        # Give the in-flight slot a moment to publish.
+        assert _spin_until(lambda: any(
+            it is not None for it in d._immediate_current.values()))
+        d._save_state()
+        with open(link_queue.STATE_FILE, encoding="utf-8") as fh:
+            data = link_queue._yaml_load(fh)
+        urls = [link_queue._decode_state_field(e, "url", "")
+                for e in data["immediate"]]
+        assert "magnet:?running" in urls
+        assert "magnet:?queued" in urls
+        # in-flight serialized first
+        assert urls.index("magnet:?running") < urls.index("magnet:?queued")
+    finally:
+        release.set()
+        d.stop_event.set()
+
+
+def test_inflight_immediate_slot_cleared_after_run(tmp_path, monkeypatch):
+    # lq-rel-01: the per-consumer in-flight slot is cleared once the item
+    # finishes, so a later save doesn't persist a completed item.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_worker_count"] = 1
+    d = link_queue.Dispatcher.headless(cfg)
+    ran = []
+    d._run_item = lambda item, _mode: (ran.append(item.url), 0)[1]
+    try:
+        d._dispatch_immediate(q("magnet:?done", protocol="magnet"))
+        assert _spin_until(lambda: "magnet:?done" in ran)
+        assert _spin_until(lambda: all(
+            it is None for it in d._immediate_current.values()))
+    finally:
+        d.stop_event.set()
+
+
+@hyp_settings(max_examples=40, deadline=None)
+@given(
+    n_inflight=st.integers(min_value=0, max_value=4),
+    n_backlog=st.integers(min_value=0, max_value=6),
+)
+def test_save_state_immediate_inflight_then_backlog_property(
+        tmp_path_factory, n_inflight, n_backlog):
+    # lq-rel-01 property: the serialized "immediate" bucket is exactly the
+    # in-flight items (in slot order) followed by the queued backlog, for any
+    # mix of counts, and nothing is dropped.
+    tmp = tmp_path_factory.mktemp("rel01")
+    d = link_queue.Dispatcher.headless()
+    d.state_path = str(tmp / "s.yaml")
+    d.stop_event.set()                       # no consumer drains/mutates slots
+    try:
+        inflight_urls = [f"magnet:?run{i}" for i in range(n_inflight)]
+        backlog_urls = [f"magnet:?q{i}" for i in range(n_backlog)]
+        for i, u in enumerate(inflight_urls):
+            d._immediate_current[i] = q(u, protocol="magnet")
+        for u in backlog_urls:
+            d._immediate_q.put(q(u, protocol="magnet"))
+        d._save_state()
+        with open(d.state_path, encoding="utf-8") as fh:
+            data = link_queue._yaml_load(fh)
+        urls = [link_queue._decode_state_field(e, "url", "")
+                for e in data["immediate"]]
+        assert urls == inflight_urls + backlog_urls
     finally:
         d.stop_event.set()
 

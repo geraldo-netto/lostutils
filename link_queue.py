@@ -771,6 +771,14 @@ class Dispatcher:
         # resize can retire surplus consumers; the source of truth is a list of
         # {thread, stop} dicts. `immediate_threads` is a back-compat property.
         self._immediate_consumers: list[dict] = []
+        # lq-rel-01: per-consumer slot for the immediate item currently running
+        # (mirrors current_items for queue workers). In-flight immediate items
+        # are pulled off _immediate_q and run in _run_immediate_item; without
+        # this slot they were tracked nowhere and lost on shutdown. Keyed by a
+        # monotonic consumer id, guarded by _immediate_lock, and folded into the
+        # serialized "immediate" state bucket so a restart re-enqueues them.
+        self._immediate_current: dict[int, QueueItem | None] = {}
+        self._immediate_consumer_seq = 0
         self._immediate_lock = threading.Lock()
         # lq-scal-01: bound the immediate work queue so a large paste can't pin
         # an unbounded number of QueueItems in RAM. Overflow is dropped-with-
@@ -893,14 +901,21 @@ class Dispatcher:
                     self._serialize_item(it)
                     for it in self.current_items.values() if it is not None
                 ]
-            # lq-rel-01: snapshot the immediate work-queue backlog too. Before
-            # the bounded pool, immediate items had dedicated threads so no
-            # backlog could exist; now an unprocessed backlog was silently lost
-            # on shutdown. Read the underlying deque under the queue's own mutex
-            # so we don't consume items a consumer may still be about to run.
+            # lq-rel-01: snapshot the immediate work-queue backlog AND the items
+            # currently in flight on a consumer. Before the bounded pool,
+            # immediate items had dedicated threads so no backlog could exist;
+            # now an unprocessed backlog (and, since this fix, an in-flight item
+            # pulled off the queue but not yet finished) was silently lost on
+            # shutdown. In-flight items are persisted FIRST so a restart retries
+            # them ahead of the still-queued backlog. Read the deque under the
+            # queue's own mutex so we don't consume items a consumer may still
+            # be about to run; read the in-flight slots under _immediate_lock.
+            with self._immediate_lock:
+                inflight = [it for it in self._immediate_current.values()
+                            if it is not None]
             with self._immediate_q.mutex:
-                immediate = [self._serialize_item(it)
-                             for it in list(self._immediate_q.queue)]
+                backlog = list(self._immediate_q.queue)
+            immediate = [self._serialize_item(it) for it in inflight + backlog]
             # Use a tempfile in the same directory as STATE_FILE so the
             # final os.replace() stays on the same filesystem and is atomic.
             # The unique name prevents two concurrent writers from both
@@ -1220,12 +1235,16 @@ class Dispatcher:
         else:
             self._record_metric("completions")
 
-    def _immediate_consumer(self, stop_self: threading.Event) -> None:
+    def _immediate_consumer(self, cid: int, stop_self: threading.Event) -> None:
         """Bounded-pool consumer (conc-02): pull items off the immediate work
         queue and run them one at a time. Exits when the queue is idle and the
         app is stopping, OR when its own `stop_self` event is set by a downward
         resize (lq-rel-02), so a shrunk pool actually retires surplus consumers
-        instead of leaking them until shutdown."""
+        instead of leaking them until shutdown.
+
+        lq-rel-01: while an item runs it is published in `_immediate_current[cid]`
+        so a shutdown snapshot can persist it (and a restart re-enqueue it)
+        instead of losing it."""
         while True:
             if stop_self.is_set():
                 return
@@ -1235,9 +1254,13 @@ class Dispatcher:
                 if self.stop_event.is_set():
                     return
                 continue
+            with self._immediate_lock:
+                self._immediate_current[cid] = item
             try:
                 self._run_immediate_item(item)
             finally:
+                with self._immediate_lock:
+                    self._immediate_current[cid] = None
                 self._immediate_q.task_done()
 
     def _ensure_immediate_pool(self) -> None:
@@ -1247,16 +1270,24 @@ class Dispatcher:
         consumers to retire via their per-thread stop event."""
         self._immediate_consumers = [
             c for c in self._immediate_consumers if c["thread"].is_alive()]
+        # lq-rel-01: drop in-flight slots for consumers that have died so the
+        # dict can't grow unboundedly over a long churn session.
+        alive_ids = {c["idx"] for c in self._immediate_consumers}
+        self._immediate_current = {
+            cid: it for cid, it in self._immediate_current.items()
+            if cid in alive_ids}
         live = [c for c in self._immediate_consumers if not c["stop"].is_set()]
         delta = self._immediate_pool_size - len(live)
         if delta > 0:
             for _ in range(delta):
+                self._immediate_consumer_seq += 1
+                cid = self._immediate_consumer_seq
                 stop_self = threading.Event()
                 t = threading.Thread(
-                    target=self._immediate_consumer, args=(stop_self,),
-                    daemon=True, name="immediate-runner")
+                    target=self._immediate_consumer, args=(cid, stop_self),
+                    daemon=True, name=f"immediate-runner-{cid}")
                 self._immediate_consumers.append(
-                    {"thread": t, "stop": stop_self})
+                    {"idx": cid, "thread": t, "stop": stop_self})
                 t.start()
         elif delta < 0:
             for c in live[delta:]:   # retire the surplus tail
