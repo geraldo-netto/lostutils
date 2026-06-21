@@ -899,7 +899,8 @@ def test_alias_cap_zero_disables_cap(tmp_path, monkeypatch):
     captured = _patch_runconfig_capture(monkeypatch)
     monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path), "--alias-cap", "0"])
     hr.main()
-    assert captured["cfg"].alias_cap > 1_000_000_000   # effectively no cap
+    assert captured["cfg"].alias_cap is None   # no cap
+    assert captured["cfg"].alias_cap_active is False
 
 
 def test_alias_cap_warning_logged_at_end_of_run(tmp_path, monkeypatch, capsys):
@@ -1163,12 +1164,14 @@ def test_expand_keys_to_paths_negative_cap_behaves_like_zero():
 
 def test_runconfig_negative_alias_cap_clamps_to_unbounded():
     cfg = hr.RunConfig(alias_cap=-5)
-    assert cfg.alias_cap >= 2**31
+    assert cfg.alias_cap is None
+    assert cfg.alias_cap_active is False
 
 
 def test_runconfig_zero_alias_cap_clamps_to_unbounded():
     cfg = hr.RunConfig(alias_cap=0)
-    assert cfg.alias_cap >= 2**31
+    assert cfg.alias_cap is None
+    assert cfg.alias_cap_active is False
 
 
 def test_runconfig_negative_hash_error_cap_clamps_to_zero():
@@ -1179,7 +1182,22 @@ def test_runconfig_negative_hash_error_cap_clamps_to_zero():
 # --- hr-cx-01: NO_CAP constant + alias_cap_active property -----------------
 
 def test_no_cap_constant_value():
-    assert hr.NO_CAP == 2**31
+    # hr-cmplx-01: the disabled state is now None, not a magic 2**31.
+    assert hr.NO_CAP is None
+
+
+def test_legitimate_cap_of_two_pow_31_is_honored():
+    # hr-cmplx-01 regression: a cap of exactly 2**31 must be a REAL cap,
+    # not silently treated as "disabled" (the old sentinel bug).
+    cfg = hr.RunConfig(alias_cap=2**31)
+    assert cfg.alias_cap == 2**31
+    assert cfg.alias_cap_active is True
+
+
+def test_cap_above_old_sentinel_still_active():
+    cfg = hr.RunConfig(alias_cap=2**31 + 5)
+    assert cfg.alias_cap == 2**31 + 5
+    assert cfg.alias_cap_active is True
 
 
 def test_alias_cap_active_true_for_real_cap():
@@ -1188,15 +1206,26 @@ def test_alias_cap_active_true_for_real_cap():
 
 
 def test_alias_cap_active_false_when_disabled():
-    # alias_cap=0 → NO_CAP sentinel → cap not active.
+    # alias_cap=0 → None (disabled) → cap not active.
     cfg = hr.RunConfig(alias_cap=0)
     assert cfg.alias_cap_active is False
-    assert cfg.alias_cap == hr.NO_CAP
+    assert cfg.alias_cap is None
 
 
 def test_alias_cap_active_default_is_active():
     cfg = hr.RunConfig()
     assert cfg.alias_cap_active is True
+
+
+def test_expand_keys_to_paths_disabled_cap_returns_all_no_sentinel():
+    # hr-cmplx-01: a config with the cap disabled (None) returns every
+    # path with no truncation and no `+N more` sentinel.
+    cfg = hr.RunConfig(alias_cap=0)
+    aliases = {("d", 0): [f"/p/{i}" for i in range(5000)]}
+    out = hr._expand_keys_to_paths([("d", 0)], aliases, config=cfg)
+    assert len(out) == 5000
+    assert not any(isinstance(p, hr._MoreSentinel) for p in out)
+    assert cfg.alias_cap_hits == 0
 
 
 def test_find_duplicate_groups_disabled_cap_skips_ingest_overflow(tmp_path):

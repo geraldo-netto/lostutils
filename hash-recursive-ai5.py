@@ -58,11 +58,11 @@ WALK_FLUSH_THRESHOLD = 1024
 
 DEFAULT_ALIAS_CAP = 1024
 DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
-# hr-cx-01: the single "cap disabled" sentinel. `RunConfig` stores this
-# when the user passes `--alias-cap 0`; `RunConfig.alias_cap_active`
-# tests against it so the magic value is defined and compared in exactly
-# one place instead of being re-derived at every gate.
-NO_CAP = 2**31
+# hr-cmplx-01: the alias cap is stored as Optional[int] — `None` means
+# "no cap". `NO_CAP` is retained only as a back-compat alias for callers
+# that imported the old sentinel; it is no longer used to detect the
+# disabled state (that overloaded a legitimate cap of exactly 2**31).
+NO_CAP = None
 # hr-rel-02: cap the os.access probe in `_readable_rep` — a hardlink-heavy
 # inode with 100k aliases otherwise costs 100k stat syscalls just to pick
 # a representative. The first few aliases are almost always representative
@@ -111,9 +111,10 @@ class RunConfig:
         alias_cap: int = DEFAULT_ALIAS_CAP,
         hash_error_verbose_cap: int = DEFAULT_HASH_ERROR_VERBOSE_CAP,
     ) -> None:
-        # `alias_cap == 0` means "no cap" — accept the same sentinel
-        # the CLI does for back-compat (`--alias-cap 0`).
-        self.alias_cap = alias_cap if alias_cap > 0 else NO_CAP
+        # hr-cmplx-01: `alias_cap <= 0` means "no cap", stored as None so
+        # a legitimate positive cap (including exactly 2**31) is honored
+        # verbatim instead of colliding with a magic sentinel.
+        self.alias_cap = alias_cap if alias_cap > 0 else None
         self.hash_error_verbose_cap = max(0, hash_error_verbose_cap)
         self.alias_cap_hits = 0
         self.hash_error_logged = 0
@@ -124,10 +125,10 @@ class RunConfig:
     @property
     def alias_cap_active(self) -> bool:
         """True when the alias cap is a real bound, False when disabled
-        (hr-cx-01). Single owner of the :data:`NO_CAP` sentinel comparison
-        so callers ask ``config.alias_cap_active`` instead of re-checking
-        ``config.alias_cap < 2**31`` and duplicating the magic value."""
-        return self.alias_cap < NO_CAP
+        (hr-cmplx-01). ``alias_cap`` is ``None`` exactly when disabled, so
+        the check is a single ``is not None`` — no magic value, and a
+        legitimate cap of any positive size (including 2**31) is honored."""
+        return self.alias_cap is not None
 
 
 class RootError(Exception):
@@ -856,11 +857,18 @@ def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
     duplicates."""
     if cap is None:
         cap = config.alias_cap if config is not None else DEFAULT_ALIAS_CAP
+    # hr-cmplx-01: a resolved cap of None means the cap is disabled —
+    # return every path with no truncation and no sentinel.
+    if cap is None:
+        out: list = []
+        for key in keys:
+            out.extend(aliases.get(key, ()))
+        return out
     # hr-arch-01: `overflow` is now passed explicitly by the emit layer
     # (`_emit_one_group` threads it from `on_group`/`emit_groups`). It is
     # no longer smuggled on `config`, so emit correctness no longer
     # silently depends on `_prepare_candidates` having mutated the config.
-    out: list = []
+    out = []
     total = 0
     for key in keys:
         paths = aliases.get(key, ())

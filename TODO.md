@@ -57,7 +57,6 @@ rf-conc-01 | open | low | relocate_folder.py:899 — verify_copy with checksum=F
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cmplx-01 | open | low | hash-recursive-ai5.py:116,130 — the NO_CAP sentinel is set/compared inconsistently: __init__ keeps any positive alias_cap, but alias_cap_active returns alias_cap < NO_CAP, so a legitimate cap of exactly 2**31 is treated as "no cap" and 2**31+5 is kept by __init__ yet reported inactive. Store a dedicated bool/Optional[int] (None = disabled) instead of overloading the magic value. |
 oze-cmplx-01 | open | low | organize_by_extension.py:1599 — _drain_futures pops head_cache[source], but plan_moves already popped that exact key before yielding, so the second pop is always a no-op. Drop one of the two pops (keep the drain-side, remove the plan-side, or document). |
 rf-cmplx-01 | open | low | relocate_folder.py:481 — _format_open_file_warning is annotated holders: list[tuple[int, str, list[Path]]] but the caller passes the now-immutable tuple-of-tuples snapshot.holders; the stale annotation contradicts the immutability invariant. Update to the tuple shape (or Sequence). | SOLID-ISP
 rf-cmplx-02 | open | low | relocate_folder.py:986 — _capture_first and _collect_chown_error are near-duplicate "drain one future's exception into a list" helpers; _capture_first is dead (kept for tests). Drop it or have _collect_chown_error delegate. | SOLID-DRY
