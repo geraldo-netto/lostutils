@@ -122,3 +122,92 @@ def test_cleanup_drops_all_standalone_tokens(words):
     result = dn.cleanup(" ".join(words))
     for tok in dn.WORD_TOKENS:
         assert tok not in result.split()
+
+
+# --- dnv3-rel-01: matrix-mask vs self-collision semantics (no double-count) --
+
+def _parse_rows(out):
+    rows = []
+    for ln in out.splitlines():
+        a, b, d = ln.split(";")
+        rows.append((a, b, int(d)))
+    return rows
+
+
+def test_self_collision_not_double_counted_with_cross_pair(monkeypatch, tmp_path):
+    # "dup" appears twice (self-collision) and is also near "dap" (cross-pair).
+    # The dup;dup;0 self report must appear exactly once and never be emitted
+    # as an off-diagonal pair.
+    out = _run_main(monkeypatch, tmp_path, ["dup", "dup", "dap"], 7)
+    rows = _parse_rows(out)
+    assert rows.count(("dup", "dup", 0)) == 1
+    # No distance-0 row between two *distinct* cleaned strings.
+    assert all(d != 0 for a, b, d in rows if a != b)
+
+
+def test_no_zero_distance_between_distinct_strings(monkeypatch, tmp_path):
+    out = _run_main(monkeypatch, tmp_path, ["abc", "abd", "xyz"], 7)
+    for a, b, d in _parse_rows(out):
+        if a != b:
+            assert d > 0
+
+
+def test_distinct_buckets_never_distance_zero(monkeypatch, tmp_path):
+    # Three raw forms collapsing to two distinct cleaned buckets; the shared
+    # bucket self-reports, the distinct buckets are never a 0-distance pair.
+    out = _run_main(monkeypatch, tmp_path, ["same", "same", "other"], 7)
+    rows = _parse_rows(out)
+    assert ("same", "same", 0) in rows
+    assert all(not (a != b and d == 0) for a, b, d in rows)
+
+
+def test_threshold_at_cap_excludes_clipped_cells(monkeypatch, tmp_path):
+    # At the 254 cap, an above-threshold cell is clipped to 255; with strings
+    # whose distance exceeds 254 no pair must be reported (no uint8 wrap to 0).
+    lines = ["a" * 1, "z" * 260]
+    out = _run_main(monkeypatch, tmp_path, lines, dn.MAX_THRESHOLD)
+    cross = [(a, b, d) for a, b, d in _parse_rows(out) if a != b]
+    assert cross == []
+
+
+def test_pair_emitted_only_in_upper_triangle(monkeypatch, tmp_path):
+    # A near pair must be reported exactly once (upper triangle, k=1), not
+    # mirrored as both (i,j) and (j,i).
+    out = _run_main(monkeypatch, tmp_path, ["hello", "hallo"], 7)
+    cross = [(a, b) for a, b, d in _parse_rows(out) if a != b]
+    assert len(cross) == 1
+    a, b = cross[0]
+    assert (b, a) not in cross
+
+
+def _run_main_isolated(tmp_path_factory, lines, threshold):
+    import contextlib
+    import io
+
+    d = tmp_path_factory.mktemp("dn")
+    f = d / "in.txt"
+    f.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    argv = ["prog", str(f), "-t", str(threshold), "-w", "1"]
+    buf = io.StringIO()
+    old_argv = dn.sys.argv
+    dn.sys.argv = argv
+    try:
+        with contextlib.redirect_stdout(buf):
+            dn.main()
+    finally:
+        dn.sys.argv = old_argv
+    return buf.getvalue()
+
+
+@given(st.lists(st.text(alphabet="abcde", min_size=1, max_size=6),
+                min_size=1, max_size=8),
+       st.integers(min_value=0, max_value=dn.MAX_THRESHOLD))
+def test_matrix_no_zero_distance_off_diagonal(tmp_path_factory, lines, t):
+    # Property: across arbitrary inputs/thresholds, distinct cleaned strings
+    # are never reported at distance 0, and clipped cells never wrap below the
+    # threshold (every reported distance is within the threshold).
+    out = _run_main_isolated(tmp_path_factory, lines, t)
+    for a, b, d in _parse_rows(out):
+        assert d <= t
+        if a != b:
+            assert d > 0

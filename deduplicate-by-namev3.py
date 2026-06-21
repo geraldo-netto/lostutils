@@ -92,11 +92,16 @@ def main():
     write = sys.stdout.write
 
     # Self-collisions (multiple raw lines collapsed to the same cleaned form).
+    # cleaned_strs are distinct dict keys, so no two off-diagonal cells are
+    # distance 0; the k=1 mask below also excludes the diagonal, so these
+    # i==i reports never overlap with the cross-pair reports.
     for i in range(n):
         if cnts[i] > 1:
             write(f"{cleaned_strs[i]};{cleaned_strs[i]};0\n")
 
-    # Upper-triangle pairs with distance ≤ threshold.
+    # Upper-triangle pairs with distance ≤ threshold. cdist clips
+    # above-threshold cells to threshold+1 (255 at the 254 cap, no uint8 wrap),
+    # so the inclusive `<=` mask keeps only genuine within-threshold pairs.
     mask = np.triu(matrix <= threshold, k=1)
     rows, cols = np.where(mask)
     for i, j in zip(rows.tolist(), cols.tolist()):
