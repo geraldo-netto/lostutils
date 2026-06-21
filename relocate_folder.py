@@ -1356,12 +1356,20 @@ def atomic_swap(source: Path, target: Path) -> None:
     abrupt process death skips the rollback.
 
     Delegates the rename-aside / restore-or-clean lifecycle to
-    `_backup_target`."""
+    `_backup_target`.
+
+    rf-sec-02: the source's uid/gid are captured BEFORE `_backup_target` moves
+    the real dir aside (afterwards `source` no longer exists to stat), so the
+    replacement symlink can be lchown'd to the original owner. When run as root
+    migrating a user-owned dir this keeps the symlink owned by the user instead
+    of root."""
+    src_st = os.lstat(source)
     with _backup_target(source):
-        _create_symlink(source, target)
+        _create_symlink(source, target, owner=(src_st.st_uid, src_st.st_gid))
 
 
-def _create_symlink(link: Path, target: Path) -> None:
+def _create_symlink(link: Path, target: Path, *,
+                    owner: "tuple[int, int] | None" = None) -> None:
     """Create `link -> target` atomically (rf-sec-01).
 
     Symlink is staged inside a freshly-mkdtemp'd directory beside `link` so
@@ -1406,8 +1414,24 @@ def _create_symlink(link: Path, target: Path) -> None:
                 f"(an unexpected file/symlink is already there)"
             )
         os.rename(tmp, link)
+        if owner is not None:
+            # rf-sec-02: lchown the symlink itself (not its target) to the
+            # captured source owner so a root-run migration doesn't leave a
+            # root-owned symlink in a user's tree.
+            _chown_symlink_to_owner(link, owner)
     finally:
         _cleanup_staging(staging)
+
+
+def _chown_symlink_to_owner(link: Path, owner: tuple[int, int]) -> None:
+    """lchown `link` to `owner` (rf-sec-02). A non-root caller can't change
+    ownership; that EPERM is benign (the symlink already belongs to the caller),
+    so it's logged and absorbed rather than aborting the completed swap."""
+    uid, gid = owner
+    _swallow_or_warn(
+        f"lchown symlink {link} to uid={uid} gid={gid}",
+        os.chown, link, uid, gid, follow_symlinks=False,
+    )
 
 
 def _cleanup_staging(staging: Path) -> None:

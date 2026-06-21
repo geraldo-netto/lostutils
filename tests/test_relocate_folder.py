@@ -863,6 +863,36 @@ def test_create_symlink_refuses_preexisting_symlink(tmp_path):
     assert os.readlink(link) == str(elsewhere)   # not clobbered
 
 
+def test_create_symlink_lchowns_link_to_owner(tmp_path, monkeypatch):
+    # rf-sec-02: when an owner is supplied, the finished symlink is lchown'd
+    # (follow_symlinks=False) to that uid/gid.
+    link = tmp_path / "the-link"
+    target = tmp_path / "target"; target.mkdir()
+    calls = []
+    real_chown = rf.os.chown
+
+    def spy(path, uid, gid, *, follow_symlinks=True):
+        calls.append((Path(path), uid, gid, follow_symlinks))
+        # don't actually chown (would need root); emulate success.
+
+    monkeypatch.setattr(rf.os, "chown", spy)
+    rf._create_symlink(link, target, owner=(4242, 4243))
+    assert link.is_symlink()
+    assert (link, 4242, 4243, False) in calls
+    real_chown  # silence linters; not used
+
+
+def test_create_symlink_no_owner_skips_chown(tmp_path, monkeypatch):
+    link = tmp_path / "the-link"
+    target = tmp_path / "target"; target.mkdir()
+    calls = []
+    monkeypatch.setattr(rf.os, "chown",
+                        lambda *a, **k: calls.append((a, k)))
+    rf._create_symlink(link, target)  # no owner
+    assert calls == []
+    assert link.is_symlink()
+
+
 def test_create_symlink_cleans_staging_when_symlink_fails(tmp_path, monkeypatch):
     link = tmp_path / "the-link"
     target = tmp_path / "target"; target.mkdir()
