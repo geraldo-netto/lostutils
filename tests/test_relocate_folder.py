@@ -162,17 +162,22 @@ def test_verify_copy_size_only_branch_uses_no_pool(tmp_path, monkeypatch):
     assert pool_used["n"] == 0   # size-only verify ran sequentially
 
 
-def test_copy_and_verify_cleans_up_on_verify_failure():
+def test_copy_and_verify_cleans_up_on_verify_failure(caplog):
     with TemporaryDirectory() as d:
         root = Path(d)
         src = root / "s"
         _make_tree(src)
         target = root / "t"
         plan = rf.Plan(source=src, target=target, verify=True)
-        with mock.patch.object(rf, "verify_copy", side_effect=RuntimeError("boom")):
-            with pytest.raises(RuntimeError):
-                rf._copy_and_verify(plan)
+        import logging
+        with caplog.at_level(logging.WARNING, logger="relocate"):
+            with mock.patch.object(rf, "verify_copy", side_effect=RuntimeError("boom")):
+                with pytest.raises(RuntimeError):
+                    rf._copy_and_verify(plan)
         assert not target.exists()                            # rolled back
+        # rf-rel-06: the destruction of the partial target is logged.
+        assert any("after verification failed" in r.message
+                   and str(target) in r.message for r in caplog.records)
 
 
 # --- integration: full migrate, content-verified by default -----------------

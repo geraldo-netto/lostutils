@@ -1531,6 +1531,16 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
         # size-only / ownership branch (checksum=False) runs its tasks
         # sequentially with no pool, so there is no worker thread to race in
         # the first place.
+        #
+        # rf-rel-06: log the destruction. A transient verify failure otherwise
+        # silently wipes a half-good target with no audit trail (unlike the
+        # copy_tree cleanup path, which logs rmtree failures). The operator
+        # needs to know the partial copy is gone before re-running.
+        _log().warning(
+            "removing target %s after verification failed; the partial copy "
+            "has been deleted and the source is untouched — re-run to retry",
+            plan.target,
+        )
         shutil.rmtree(plan.target, ignore_errors=True)
         raise
 
