@@ -203,7 +203,7 @@ def test_validate_source_branches(tmp_path):
 
 
 def test_already_migrated_variants(tmp_path):
-    target = tmp_path / "t"; target.mkdir()
+    target = tmp_path / "t"; target.mkdir(); (target / "x").write_text("d")
     src_dir = tmp_path / "src"; src_dir.mkdir()
     assert rf.already_migrated(src_dir, target) is False   # not a symlink
     src_dir.rmdir()
@@ -211,6 +211,7 @@ def test_already_migrated_variants(tmp_path):
     assert rf.already_migrated(src_dir, target) is True    # absolute -> target
     src_dir.unlink()
     relative_target = tmp_path / "u"; relative_target.mkdir()
+    (relative_target / "x").write_text("d")
     src_dir.symlink_to("u")                                # relative
     assert rf.already_migrated(src_dir, relative_target) is True
     other = tmp_path / "other"; other.mkdir()
@@ -1094,7 +1095,7 @@ def test_execute_logs_dry_run_state(tmp_path, caplog):
 
 def test_execute_logs_already_migrated_state(tmp_path, caplog):
     src = tmp_path / "src"
-    target = tmp_path / "real"; target.mkdir()
+    target = tmp_path / "real"; target.mkdir(); (target / "x").write_text("d")
     src.symlink_to(target)
     plan = rf.Plan(source=src, target=target)
     caplog.set_level("DEBUG", logger="relocate")
@@ -1202,7 +1203,7 @@ def test_verify_symlink_missing_in_dst(tmp_path):
 
 
 def test_already_migrated_with_relative_resolves(tmp_path):
-    target = tmp_path / "t"; target.mkdir()
+    target = tmp_path / "t"; target.mkdir(); (target / "x").write_text("d")
     link = tmp_path / "l"; link.symlink_to("t")
     assert rf.already_migrated(link, target) is True
 
@@ -1236,6 +1237,7 @@ def test_check_no_open_files_raises_when_holders(tmp_path, monkeypatch):
 def test_already_migrated_symlink_shapes(tmp_path, scenario):
     target = tmp_path / "real_target"
     target.mkdir()
+    (target / "content").write_text("data")  # rf-rel-04: target must be non-empty
     src = tmp_path / "src"
 
     if scenario == "absolute_match":
@@ -2330,3 +2332,58 @@ def test_atomic_swap_still_performs_swap(tmp_path):
     assert source.is_symlink()
     assert os.readlink(source) == str(target)
     assert not rf._path_taken(source.with_name(source.name + rf.BACKUP_SUFFIX))
+
+
+# --- rf-rel-04: already_migrated requires a non-empty target dir ------------
+
+def test_already_migrated_false_when_target_missing(tmp_path):
+    target = tmp_path / "gone"  # never created
+    src = tmp_path / "src"
+    src.symlink_to(target)
+    assert rf.already_migrated(src, target) is False
+
+
+def test_already_migrated_false_when_target_empty(tmp_path):
+    target = tmp_path / "t"; target.mkdir()  # exists but empty
+    src = tmp_path / "src"; src.symlink_to(target)
+    assert rf.already_migrated(src, target) is False
+
+
+def test_already_migrated_true_when_target_nonempty(tmp_path):
+    target = tmp_path / "t"; target.mkdir()
+    (target / "data").write_text("payload")
+    src = tmp_path / "src"; src.symlink_to(target)
+    assert rf.already_migrated(src, target) is True
+
+
+def test_already_migrated_false_when_target_is_file(tmp_path):
+    target = tmp_path / "t"; target.write_text("not a dir")
+    src = tmp_path / "src"; src.symlink_to(target)
+    assert rf.already_migrated(src, target) is False
+
+
+def test_target_has_content_oserror(tmp_path, monkeypatch):
+    target = tmp_path / "t"; target.mkdir(); (target / "x").write_text("d")
+    monkeypatch.setattr(rf.os, "scandir", _raise_os)
+    assert rf._target_has_content(target) is False
+
+
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    names=st.lists(
+        st.text(alphabet="abcdefghijklmnop_-.", min_size=1, max_size=8),
+        max_size=5, unique=True,
+    )
+)
+def test_target_has_content_matches_dir_population(tmp_path_factory, names):
+    target = tmp_path_factory.mktemp("tgt")
+    for n in names:
+        if n in (".", ".."):
+            continue
+        (target / n).write_text("x")
+    expected = any(n not in (".", "..") for n in names)
+    assert rf._target_has_content(target) is expected

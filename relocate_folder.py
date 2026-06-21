@@ -274,7 +274,14 @@ def already_migrated(source: Path, target: Path) -> bool:
     if not link_target.is_absolute():
         link_target = source.parent / link_target
     try:
-        return link_target.resolve(strict=False) == target.resolve(strict=False)
+        if link_target.resolve(strict=False) != target.resolve(strict=False):
+            return False
+        # rf-rel-04: a stale or hand-made symlink can resolve equal to the
+        # computed target while the target itself is missing or empty. Treating
+        # that as "migrated" would skip the copy and silently strand the source
+        # data. Only declare migration done when the target exists and holds
+        # content.
+        return _target_has_content(target)
     except PermissionError as exc:
         # rf-rel-10: silently returning False on EACCES would let a
         # misconfigured (chmod 0o000) target look like "not migrated"
@@ -290,6 +297,22 @@ def already_migrated(source: Path, target: Path) -> bool:
         # `Path.resolve` raises RuntimeError on symlink loops (rf-test-02);
         # treat the loop as "not migrated" so the caller can validate the
         # source and fail with a typed error instead of crashing.
+        return False
+
+
+def _target_has_content(target: Path) -> bool:
+    """True iff `target` is an existing directory with at least one entry
+    (rf-rel-04).
+
+    A non-existent target, a non-directory, or an empty directory all mean the
+    symlink is stale/hand-made rather than the product of a real migration, so
+    the copy must still run."""
+    try:
+        if not target.is_dir() or target.is_symlink():
+            return False
+        with os.scandir(target) as it:
+            return any(True for _ in it)
+    except OSError:
         return False
 
 
