@@ -762,7 +762,10 @@ class Dispatcher:
         # thread per item, so a paste of N links grew the thread list to N
         # before draining. Now the live-thread count is bounded by the pool
         # size regardless of paste size; excess items wait in the queue.
-        self.immediate_threads: list[threading.Thread] = []
+        # lq-rel-02: each consumer carries its own stop Event so a downward
+        # resize can retire surplus consumers; the source of truth is a list of
+        # {thread, stop} dicts. `immediate_threads` is a back-compat property.
+        self._immediate_consumers: list[dict] = []
         self._immediate_lock = threading.Lock()
         self._immediate_q: "queue.Queue[QueueItem]" = queue.Queue()
         self._immediate_pool_size = self._immediate_concurrency()
@@ -1143,11 +1146,15 @@ class Dispatcher:
         else:
             self._record_metric("completions")
 
-    def _immediate_consumer(self) -> None:
+    def _immediate_consumer(self, stop_self: threading.Event) -> None:
         """Bounded-pool consumer (conc-02): pull items off the immediate work
         queue and run them one at a time. Exits when the queue is idle and the
-        app is stopping, so the pool drains cleanly at shutdown."""
+        app is stopping, OR when its own `stop_self` event is set by a downward
+        resize (lq-rel-02), so a shrunk pool actually retires surplus consumers
+        instead of leaking them until shutdown."""
         while True:
+            if stop_self.is_set():
+                return
             try:
                 item = self._immediate_q.get(timeout=0.25)
             except queue.Empty:
@@ -1160,16 +1167,33 @@ class Dispatcher:
                 self._immediate_q.task_done()
 
     def _ensure_immediate_pool(self) -> None:
-        """Spawn consumer threads up to `_immediate_pool_size`, reusing live
-        ones (conc-02). Caller holds `_immediate_lock`."""
-        self.immediate_threads = [t for t in self.immediate_threads
-                                  if t.is_alive()]
-        deficit = self._immediate_pool_size - len(self.immediate_threads)
-        for _ in range(max(0, deficit)):
-            t = threading.Thread(target=self._immediate_consumer,
-                                  daemon=True, name="immediate-runner")
-            self.immediate_threads.append(t)
-            t.start()
+        """Align the live consumer pool to `_immediate_pool_size` (conc-02 /
+        lq-rel-02). Caller holds `_immediate_lock`. Dead consumers are purged;
+        a deficit spawns new ones; a surplus signals the highest-indexed live
+        consumers to retire via their per-thread stop event."""
+        self._immediate_consumers = [
+            c for c in self._immediate_consumers if c["thread"].is_alive()]
+        live = [c for c in self._immediate_consumers if not c["stop"].is_set()]
+        delta = self._immediate_pool_size - len(live)
+        if delta > 0:
+            for _ in range(delta):
+                stop_self = threading.Event()
+                t = threading.Thread(
+                    target=self._immediate_consumer, args=(stop_self,),
+                    daemon=True, name="immediate-runner")
+                self._immediate_consumers.append(
+                    {"thread": t, "stop": stop_self})
+                t.start()
+        elif delta < 0:
+            for c in live[delta:]:   # retire the surplus tail
+                c["stop"].set()
+
+    @property
+    def immediate_threads(self) -> "list[threading.Thread]":
+        """Live consumer threads (back-compat read surface for tests/callers
+        that inspected the old plain list). Retired-but-not-yet-exited threads
+        still appear until they actually die."""
+        return [c["thread"] for c in self._immediate_consumers]
 
     def _resize_immediate_pool(self) -> None:
         """Recompute `_immediate_pool_size` from config and (re)align the live

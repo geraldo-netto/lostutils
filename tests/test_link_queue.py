@@ -2401,6 +2401,30 @@ def test_ensure_worker_count_resizes_immediate_pool(headless_dispatcher):
     assert len([t for t in disp.immediate_threads if t.is_alive()]) == 3
 
 
+def test_downward_resize_retires_surplus_consumers(headless_dispatcher):
+    # lq-rel-02: a downward immediate-pool resize signals surplus consumers via
+    # their per-thread stop event so they actually exit, instead of leaking
+    # until shutdown.
+    disp = headless_dispatcher
+    disp.config["immediate_worker_count"] = 4
+    disp._resize_immediate_pool()
+    assert len([t for t in disp.immediate_threads if t.is_alive()]) == 4
+    disp.config["immediate_worker_count"] = 1
+    disp._resize_immediate_pool()
+    # Surplus consumers were signalled; wait for them to wind down.
+    end = time.time() + 3.0
+    while time.time() < end:
+        live = len([t for t in disp.immediate_threads if t.is_alive()])
+        if live == 1:
+            break
+        time.sleep(0.05)
+    assert len([t for t in disp.immediate_threads if t.is_alive()]) == 1
+    # And the one survivor is still usable: a subsequent upward resize regrows.
+    disp.config["immediate_worker_count"] = 3
+    disp._resize_immediate_pool()
+    assert len([t for t in disp.immediate_threads if t.is_alive()]) == 3
+
+
 def test_immediate_pool_bounds_live_threads(headless_dispatcher):
     # lq-conc-02: a large immediate batch must NOT spawn one live thread per
     # item; the live consumer count is capped at the pool size.
