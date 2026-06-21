@@ -1674,6 +1674,27 @@ class PruneEmptyDirsTests(unittest.TestCase):
             with patch("organize_by_extension.os.scandir", side_effect=picky_scandir):
                 self.assertEqual(_count_prunable_dirs(root), 0)
 
+    def test_dir_is_prunable_unreadable_logs_and_not_prunable(self):
+        """oze-dup-03: an unreadable directory routes through _safe_scandir,
+        logs at debug, and is reported non-prunable."""
+        from organize_by_extension import _dir_is_prunable
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            target = root / "locked"
+            target.mkdir()
+            real_scandir = os.scandir
+
+            def picky_scandir(p):
+                if str(p).endswith("locked"):
+                    raise OSError(errno.EACCES, "denied", str(p))
+                return real_scandir(p)
+
+            with self.assertLogs("organize_by_extension", level="DEBUG") as cm:
+                with patch("organize_by_extension.os.scandir",
+                           side_effect=picky_scandir):
+                    self.assertFalse(_dir_is_prunable(target, set()))
+            self.assertTrue(any("scandir failed" in m for m in cm.output))
+
     def test_count_prunable_symlink_inside_blocks_parent(self):
         """A symlink inside a directory marks the parent as non-empty for the
         dry-run counter exactly as it does for the live pruner."""

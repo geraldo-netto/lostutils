@@ -1765,20 +1765,23 @@ def _count_prunable_dirs(root: Path) -> int:
 def _dir_is_prunable(current: Path, would_remove: set[Path]) -> bool:
     """True iff every entry in ``current`` is a subdirectory already marked in
     ``would_remove`` (oze-dup-01). Files / symlinks of any kind / unreadable
-    entries make it non-empty."""
-    try:
-        with os.scandir(current) as it:
-            for entry in it:
-                if entry.is_symlink():
-                    return False
-                try:
-                    is_dir = entry.is_dir(follow_symlinks=False)
-                except OSError:
-                    return False
-                if not is_dir or Path(entry.path) not in would_remove:
-                    return False
-    except OSError:
-        return False
+    entries make it non-empty. Routes through :func:`_safe_scandir`
+    (oze-dup-03) so an unreadable directory is logged at debug instead of
+    being silently swallowed by an open-coded ``try``. An unreadable directory
+    (``_safe_scandir`` yields the empty tuple) is treated as non-empty so it is
+    never marked prunable."""
+    with _safe_scandir(current) as it:
+        if isinstance(it, tuple):
+            return False
+        for entry in it:
+            if entry.is_symlink():
+                return False
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                return False
+            if not is_dir or Path(entry.path) not in would_remove:
+                return False
     return True
 
 
