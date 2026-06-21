@@ -2135,15 +2135,6 @@ class SourceCollisionResolution(unittest.TestCase):
             dest = root / "txt" / "a00000"
             self.assertFalse(_oze._source_blocks_destination(src, dest))
 
-    def test_free_collision_name_skips_taken_slots(self):
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            src = root / "x"
-            (root / "x.collision1").write_text("taken")
-            (root / "x.collision2").write_text("taken")
-            free = _oze._free_collision_name(src)
-            self.assertEqual(free.name, "x.collision3")
-
     def test_source_blocks_destination_oserror_returns_false(self, ):
         with TemporaryDirectory() as d:
             root = Path(d)
@@ -2358,19 +2349,21 @@ class SourceCollisionResolution(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "unable to atomically"):
                         _oze._atomic_rename_to_free_slot(source)
 
-    def test_free_collision_name_caps_at_limit(self):
-        # oze-rel-16: cap retries to avoid infinite loops.
+    def test_atomic_rename_to_free_slot_caps_at_limit(self):
+        # oze-rel-16 / oze-cmplx-02: cap retries to avoid infinite loops.
+        # Migrated from the removed _free_collision_name: pre-fill every
+        # slot so the atomic variant exhausts its budget and raises.
         with TemporaryDirectory() as d:
             root = Path(d)
             src = root / "x"
-            # Patch the cap down so the test runs fast.
+            src.write_text("data")
             import unittest.mock as _m
             with _m.patch.object(_oze, "_COLLISION_RETRY_CAP", 3):
-                # Pre-fill all 3 slots so the function exhausts.
                 for n in range(1, 4):
                     (root / f"x.collision{n}").write_text("taken")
-                with self.assertRaisesRegex(RuntimeError, "unable to find free"):
-                    _oze._free_collision_name(src)
+                with self.assertRaisesRegex(RuntimeError, "unable to atomically"):
+                    _oze._atomic_rename_to_free_slot(src)
+            self.assertTrue(src.exists())  # never renamed onto a taken slot
 
     def test_plan_moves_rejects_unsorted_list(self):
         # oze-decl-02: list inputs must be sorted.

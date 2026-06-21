@@ -1171,44 +1171,13 @@ def _source_blocks_destination(source: Path, destination: Path) -> bool:
 _COLLISION_RETRY_CAP = 1000
 
 
-def _free_collision_name(source: Path) -> Path:
-    """First free `<name>.collision<n>` sibling of `source` (oze-rel-16).
-
-    Caps the search at `_COLLISION_RETRY_CAP` slots so an adversarial
-    filesystem with pre-existing `.collision1` … `.collisionN` siblings
-    can't hang the planner indefinitely.
-
-    NOTE (oze-rel-19): the returned path is a SUGGESTION, not an atomic
-    reservation. Between `exists()` here and the caller's actual rename,
-    a sibling process can create the same name (TOCTOU). Callers MUST
-    wrap their `os.rename` in `try/except FileExistsError` and retry
-    via :func:`_atomic_rename_to_free_slot` rather than trusting this
-    path is still free."""
-    prefix = f"{source.name}.collision"
-    taken = set()
-    with os.scandir(source.parent) as entries:
-        for entry in entries:
-            if not entry.name.startswith(prefix):
-                continue
-            suffix = entry.name[len(prefix):]
-            if suffix.isdigit():
-                taken.add(int(suffix))
-    for n in range(1, _COLLISION_RETRY_CAP + 1):
-        if n not in taken:
-            return source.with_name(f"{source.name}.collision{n}")
-    raise RuntimeError(
-        f"unable to find free collision name for {source} "
-        f"after {_COLLISION_RETRY_CAP} attempts"
-    )
-
-
 def _atomic_rename_to_free_slot(source: Path) -> Path:
-    """Rename `source` to the first free `<name>.collisionN` slot,
-    closing the TOCTOU window in `_free_collision_name` (oze-rel-19).
+    """Rename `source` to the first free `<name>.collisionN` slot with
+    no-clobber, TOCTOU-safe semantics (oze-rel-19).
 
-    Loops: pick a suggested free name, try `os.rename(source, candidate)`,
-    on `FileExistsError` (someone else grabbed that slot) bump `n` and
-    retry. Caps at `_COLLISION_RETRY_CAP` overall attempts."""
+    Loops: try `os.rename(source, candidate)`, on `FileExistsError`
+    (someone else grabbed that slot) bump `n` and retry. Caps at
+    `_COLLISION_RETRY_CAP` overall attempts."""
     last_exc: OSError | None = None
     for n in range(1, _COLLISION_RETRY_CAP + 1):
         candidate = source.with_name(f"{source.name}.collision{n}")
