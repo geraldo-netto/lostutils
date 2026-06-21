@@ -2219,6 +2219,48 @@ class SourceCollisionResolution(unittest.TestCase):
             dest = root / "nowhere" / "deep" / "bucket"
             self.assertIsNone(_oze._find_destination_blocker(dest))
 
+    def test_planning_collision_symlink_source_not_renamed(self):
+        # oze-rel-04: a symlink source must not be classified as a regular
+        # file (is_file() follows links); _resolve_one_planning_collision
+        # uses lstat + S_ISREG and returns None for the symlink.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            real = root / "target.bin"; real.write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
+            link = root / "avi"
+            os.symlink(real, link)
+            ctx = _oze.SniffContext(sniff=True, head_cache={})
+            result = _oze._resolve_one_planning_collision(
+                link, ctx, preview=False)
+            self.assertIsNone(result)
+            self.assertTrue(link.is_symlink())   # untouched
+
+    def test_planning_collision_missing_source_returns_none(self):
+        # oze-rel-04: lexists() False -> None without touching the FS.
+        with TemporaryDirectory() as d:
+            ctx = _oze.SniffContext(sniff=True, head_cache={})
+            missing = Path(d) / "gone"
+            self.assertIsNone(
+                _oze._resolve_one_planning_collision(missing, ctx, preview=False))
+
+    @settings(deadline=None, max_examples=40)
+    @given(name=st.text(
+        alphabet="abcdefghijklmnopqrstuvwxyz._-0123456789", min_size=1, max_size=12))
+    def test_planning_collision_symlink_fuzz_never_renamed(self, name):
+        # oze-rel-04 property: regardless of the (link) name, a symlink source
+        # is never renamed and the call never raises.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            real = root / "real_target.bin"
+            real.write_bytes(b"%PDF-1.4\n")
+            link = root / name
+            if link.exists() or link.is_symlink() or link == real:
+                return
+            os.symlink(real, link)
+            ctx = _oze.SniffContext(sniff=True, head_cache={})
+            self.assertIsNone(
+                _oze._resolve_one_planning_collision(link, ctx, preview=False))
+            self.assertTrue(link.is_symlink())
+
     def test_planning_collision_migrates_head_cache_no_stale(self):
         # oze-conc-01: when a planning collision renames a source, its
         # head_cache entry must move to the renamed path — no stale entry
@@ -2793,30 +2835,30 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             self.assertFalse(any(".collision" in p for p in after))
             self.assertFalse((root / "avi").is_dir())
 
-    def test_preplan_skips_oserror_on_is_file(self):
-        # File needs to be in needed_dirs (i.e. be a blocker) for the
-        # is_file branch to be exercised at all. Use the avi-collision setup.
+    def test_preplan_skips_oserror_on_lstat(self):
+        # oze-rel-04: classification is now via os.lstat; an OSError there
+        # (e.g. EACCES) skips the rename and leaves the path unchanged.
         with TemporaryDirectory() as d:
             root = Path(d)
             (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             ctx = _oze.SniffContext(sniff=True, head_cache={},
                                     extra_zip_family=frozenset())
 
-            calls = {"n": 0}
-            real_is_file = _oze.Path.is_file
+            real_lstat = os.lstat
 
-            def maybe_boom(self):
-                # Raise once when the preplan probes the avi blocker
-                if self.name == "avi" and calls["n"] == 0:
-                    calls["n"] = 1
+            def boom(p, *a, **kw):
+                if str(p).endswith("/avi"):
                     raise PermissionError("EACCES")
-                return real_is_file(self)
+                return real_lstat(p, *a, **kw)
 
-            with patch.object(_oze.Path, "is_file", maybe_boom):
-                result = _oze._preplan_resolve_collisions(
-                    root, [root / "avi"], ctx,
-                )
-            # is_file raised -> skipped rename -> path unchanged.
+            # lexists() shares os.lstat, so force it True and only fail the
+            # direct os.lstat call inside the classifier.
+            with patch("organize_by_extension.os.path.lexists", return_value=True):
+                with patch("organize_by_extension.os.lstat", side_effect=boom):
+                    result = _oze._preplan_resolve_collisions(
+                        root, [root / "avi"], ctx,
+                    )
+            # lstat raised -> skipped rename -> path unchanged.
             self.assertEqual(result[0][0], root / "avi")
 
     def test_preplan_skips_non_blocker_files(self):

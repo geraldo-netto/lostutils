@@ -1492,11 +1492,19 @@ def _resolve_one_planning_collision(
 
     Returns the renamed path, or None when nothing was renamed (source
     vanished, isn't a regular file, or ``preview`` suppresses the rename).
+
+    oze-rel-04: classify via ``lstat`` + ``S_ISREG`` rather than
+    ``Path.is_file()`` (which follows symlinks). plan_moves is public and
+    accepts arbitrary inputs; a symlink-to-regular-file source must not be
+    hardlinked by its target via :func:`_atomic_rename_to_free_slot`.
     """
+    if not os.path.lexists(source):
+        return None
     try:
-        if not source.is_file():
-            return None
+        st = os.lstat(source)
     except OSError:
+        return None
+    if not _stat.S_ISREG(st.st_mode):
         return None
     if preview:
         # oze-rel-01: preview never touches the filesystem — log the
