@@ -1276,9 +1276,42 @@ class Dispatcher:
         immediate_worker_count) in Settings had no effect on immediate
         concurrency until restart. Called whenever the worker / immediate count
         changes; takes `_immediate_lock` itself."""
+        dropped = 0
         with self._immediate_lock:
             self._immediate_pool_size = self._immediate_concurrency()
             self._ensure_immediate_pool()
+            dropped = self._resize_immediate_queue_locked()
+        if dropped:
+            self._log(
+                f"[immediate dropped] {dropped} item(s) lost shrinking the "
+                f"immediate queue cap"
+            )
+
+    def _resize_immediate_queue_locked(self) -> int:
+        """lq-rel-02: re-apply ``immediate_queue_maxsize`` to the live work queue
+        so a config edit takes effect without a restart (mirroring the live pool
+        size). queue.Queue fixes maxsize at construction, so when the configured
+        cap changes we swap in a fresh bounded queue and drain the old one into
+        it. Consumers re-read ``self._immediate_q`` on their next loop, so a swap
+        only costs a blocked consumer one ``get`` timeout. Returns the number of
+        items dropped because the new (smaller) cap couldn't hold them. Caller
+        holds ``_immediate_lock``."""
+        new_max = self._immediate_q_maxsize()
+        old = self._immediate_q
+        if old.maxsize == new_max:
+            return 0
+        new_q: "queue.Queue[QueueItem]" = queue.Queue(maxsize=new_max)
+        dropped = 0
+        with old.mutex:
+            pending = list(old.queue)
+            old.queue.clear()
+        for it in pending:
+            try:
+                new_q.put_nowait(it)
+            except queue.Full:
+                dropped += 1
+        self._immediate_q = new_q
+        return dropped
 
     def _dispatch_immediate(self, item: QueueItem) -> None:
         """Hand an immediate-mode item to the bounded pool (conc-02). Immediate

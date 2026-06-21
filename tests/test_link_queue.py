@@ -2586,6 +2586,146 @@ def test_immediate_q_maxsize_helper(tmp_path, monkeypatch):
         d.stop_event.set()
 
 
+def test_resize_immediate_queue_live_grow_preserves_items(tmp_path, monkeypatch):
+    # lq-rel-02: bumping immediate_queue_maxsize up live swaps in a larger
+    # bounded queue and keeps every pending item.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_queue_maxsize"] = 3
+    d = link_queue.Dispatcher.headless(cfg)
+    d.stop_event.set()                       # no consumers drain
+    try:
+        for i in range(3):
+            d._immediate_q.put(q(f"magnet:?xt={i}", protocol="magnet"))
+        d.config["immediate_queue_maxsize"] = 10
+        with d._immediate_lock:
+            assert d._resize_immediate_queue_locked() == 0
+        assert d._immediate_q.maxsize == 10
+        assert d._immediate_q.qsize() == 3
+        urls = {it.url for it in list(d._immediate_q.queue)}
+        assert urls == {f"magnet:?xt={i}" for i in range(3)}
+    finally:
+        d.stop_event.set()
+
+
+def test_resize_immediate_queue_live_shrink_drops_overflow(tmp_path, monkeypatch):
+    # lq-rel-02: shrinking the cap below the current depth swaps in a smaller
+    # queue, keeps what fits, drops the rest with a warning.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_queue_maxsize"] = 10
+    d = link_queue.Dispatcher.headless(cfg)
+    d.stop_event.set()
+    logs = []
+    d._log = logs.append
+    try:
+        for i in range(8):
+            d._immediate_q.put(q(f"magnet:?xt={i}", protocol="magnet"))
+        d.config["immediate_queue_maxsize"] = 3
+        with d._immediate_lock:
+            assert d._resize_immediate_queue_locked() == 5
+        assert d._immediate_q.maxsize == 3
+        assert d._immediate_q.qsize() == 3
+    finally:
+        d.stop_event.set()
+
+
+def test_resize_immediate_pool_logs_drop_warning(tmp_path, monkeypatch):
+    # lq-rel-02: the pool-level wrapper surfaces an operator-facing warning when
+    # shrinking the cap drops items.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_queue_maxsize"] = 10
+    d = link_queue.Dispatcher.headless(cfg)
+    d.stop_event.set()
+    logs = []
+    d._log = logs.append
+    # Don't spawn consumers that would drain items mid-test.
+    monkeypatch.setattr(d, "_ensure_immediate_pool", lambda: None)
+    try:
+        for i in range(8):
+            d._immediate_q.put(q(f"magnet:?xt={i}", protocol="magnet"))
+        d.config["immediate_queue_maxsize"] = 3
+        d._resize_immediate_pool()
+        drops = [m for m in logs if "shrinking the immediate queue cap" in m]
+        assert drops and "5 item(s) lost" in drops[0]
+    finally:
+        d.stop_event.set()
+
+
+def test_resize_immediate_queue_unchanged_is_noop(tmp_path, monkeypatch):
+    # lq-rel-02: when the cap is unchanged the queue object is not replaced
+    # (no needless swap / no spurious drop warning).
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_queue_maxsize"] = 5
+    d = link_queue.Dispatcher.headless(cfg)
+    d.stop_event.set()
+    logs = []
+    d._log = logs.append
+    try:
+        original = d._immediate_q
+        d._resize_immediate_pool()
+        assert d._immediate_q is original
+        assert not [m for m in logs if "shrinking" in m]
+    finally:
+        d.stop_event.set()
+
+
+def test_resize_immediate_queue_to_unbounded(tmp_path, monkeypatch):
+    # lq-rel-02: setting the cap to 0 (unbounded) live swaps to an unbounded
+    # queue keeping all items.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_queue_maxsize"] = 2
+    d = link_queue.Dispatcher.headless(cfg)
+    d.stop_event.set()
+    try:
+        for i in range(2):
+            d._immediate_q.put(q(f"magnet:?xt={i}", protocol="magnet"))
+        d.config["immediate_queue_maxsize"] = 0
+        with d._immediate_lock:
+            assert d._resize_immediate_queue_locked() == 0
+        assert d._immediate_q.maxsize == 0
+        assert d._immediate_q.qsize() == 2
+    finally:
+        d.stop_event.set()
+
+
+@hyp_settings(max_examples=60, deadline=None)
+@given(
+    initial=st.integers(min_value=1, max_value=20),
+    new_cap=st.integers(min_value=0, max_value=20),
+    n_items=st.integers(min_value=0, max_value=25),
+)
+def test_resize_immediate_queue_property(tmp_path_factory, initial, new_cap, n_items):
+    # lq-rel-02 property: after a live resize, the queue's maxsize matches the
+    # new config, the kept count never exceeds the cap (or all items when
+    # unbounded), and kept + dropped == items present before the resize.
+    tmp = tmp_path_factory.mktemp("rel02")
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_queue_maxsize"] = initial
+    d = link_queue.Dispatcher.headless(cfg)
+    d.state_path = str(tmp / "s.yaml")
+    d.stop_event.set()
+    try:
+        present = min(n_items, initial)
+        for i in range(present):
+            d._immediate_q.put(q(f"magnet:?xt={i}", protocol="magnet"))
+        d.config["immediate_queue_maxsize"] = new_cap
+        with d._immediate_lock:
+            dropped = d._resize_immediate_queue_locked()
+        kept = d._immediate_q.qsize()
+        assert d._immediate_q.maxsize == new_cap
+        if new_cap == 0:
+            assert kept == present and dropped == 0
+        else:
+            assert kept <= new_cap
+        assert kept + dropped == present
+    finally:
+        d.stop_event.set()
+
+
 def test_immediate_queue_drops_overflow_with_warning(tmp_path, monkeypatch):
     # lq-scal-01: once the bounded immediate queue is full, extra items are
     # dropped with a warning instead of pinning unbounded RAM.
