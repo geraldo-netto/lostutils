@@ -69,6 +69,29 @@ def test_parse_llm_events_handles_object_and_nested_arrays_in_strings():
     assert events[0]["type"] == "Text/LLM"
 
 
+def test_decode_event_payload_object_after_stray_open_bracket():
+    # A non-JSON "[" appears before the real top-level object; the object must win.
+    text = 'see [agenda] below: {"title": "Sync", "start": "2026-06-22"}'
+
+    parsed = import_events._decode_event_payload(text)
+
+    assert parsed == [{"title": "Sync", "start": "2026-06-22"}]
+
+
+def test_decode_event_payload_list_before_object():
+    # When a valid list precedes an object, the earliest valid payload wins.
+    text = '[{"title": "A", "start": "2026-06-22"}] then {"title": "B"}'
+
+    parsed = import_events._decode_event_payload(text)
+
+    assert parsed == [{"title": "A", "start": "2026-06-22"}]
+
+
+def test_decode_event_payload_empty_on_garbage():
+    assert import_events._decode_event_payload("no json here") == []
+    assert import_events._decode_event_payload("[broken {also") == []
+
+
 def test_parse_llm_events_folds_separate_date_and_time():
     text = '[{"title": "Sync", "date": "2026-06-22", "time": "14:00"}]'
 
@@ -129,6 +152,29 @@ def test_coerce_start_never_emits_none_token(day, clock, start):
         d, _, t = result.partition("T")
         assert import_events._DATE_SHAPE.match(d)
         assert import_events._TIME_SHAPE.match(t)
+
+
+@given(
+    prefix=st.text(max_size=30),
+    suffix=st.text(max_size=30),
+    title=st.text(max_size=20),
+)
+def test_decode_event_payload_extracts_object_amid_noise(prefix, suffix, title):
+    # Whatever prose surrounds it, a clean top-level object must be recovered.
+    payload = json.dumps({"title": title, "start": "2026-06-22"})
+    text = f"{prefix}{payload}{suffix}"
+
+    parsed = import_events._decode_event_payload(text)
+
+    assert isinstance(parsed, list)
+    if "[" not in prefix and "{" not in prefix:
+        assert parsed == [{"title": title, "start": "2026-06-22"}]
+
+
+@given(text=st.text(max_size=80))
+def test_decode_event_payload_never_raises(text):
+    result = import_events._decode_event_payload(text)
+    assert isinstance(result, list)
 
 
 def test_parse_llm_events_keeps_end_and_location():
