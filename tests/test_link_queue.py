@@ -2372,6 +2372,42 @@ def test_pick_next_item_prunes_empty_by_domain_buckets(app):
     assert "ghost-domain" not in app.queue_items.by_domain
 
 
+def test_facade_class_delegation_dispatcher_and_configstore():
+    # lq-cmplx-01: class-level access delegates to Dispatcher then ConfigStore
+    # via the metaclass, with no hand-maintained static re-export block.
+    assert LinkQueueApp._domain_of("https://www.YouTube.com/x") == "youtube.com"
+    assert LinkQueueApp._extract_protocol("HTTPS://x") == "https"
+    argv = LinkQueueApp._build_argv("echo {url}", "a b", "http")
+    assert argv == ["echo", "a b"]
+    cfg = {"protocols": {"ftp": {"command": "c"}}}
+    LinkQueueApp._normalize_config_schema(cfg)
+    assert cfg["protocols"]["ftp"]["mode"] == "queue"
+    for name in ("_domain_of", "_build_argv", "_split_entry",
+                 "_merge_user_config", "_normalize_config_schema"):
+        assert name not in LinkQueueApp.__dict__
+
+
+def test_facade_class_delegation_unknown_name_raises():
+    # lq-cmplx-01: a genuinely missing name still raises AttributeError.
+    with pytest.raises(AttributeError):
+        LinkQueueApp._definitely_not_a_real_helper  # noqa: B018
+
+
+def test_facade_instance_delegation_configstore_helper(app):
+    # lq-cmplx-01: instance access to a ConfigStore-only helper resolves
+    # through the instance __getattr__ ConfigStore fallback.
+    cfg = {"protocols": {}}
+    app._normalize_config_schema(cfg)
+    assert cfg["default_shell"] is False
+
+
+def test_facade_instance_unknown_name_raises(app):
+    # lq-cmplx-01: an unknown name on an app instance exhausts the dispatcher
+    # and ConfigStore fallbacks and raises a clean AttributeError.
+    with pytest.raises(AttributeError):
+        app._definitely_not_a_real_helper
+
+
 def test_pick_next_item_not_in_static_reexport_block(app):
     # lq-arch-01: the mutating _pick_next_item must NOT be re-exported as a
     # class attribute (which would bind it to the app); it is reached only via

@@ -2368,7 +2368,31 @@ class _SettingsTabs:
                padx=4, pady=(12, 4))
 
 
-class LinkQueueApp:
+# Source classes the LinkQueueApp façade delegates pure/read-only helpers to,
+# tried in order. Dispatcher owns the dispatch/queue/state helpers; ConfigStore
+# owns the path-free config-merge helpers (lq-cmplx-01).
+_FACADE_DELEGATES = (Dispatcher, ConfigStore)
+
+
+class _FacadeMeta(type):
+    """Metaclass that delegates *class-level* attribute access on LinkQueueApp
+    to Dispatcher / ConfigStore (lq-cmplx-01). The instance ``__getattr__``
+    already covers ``app.<name>``; this covers ``LinkQueueApp.<name>`` call
+    sites (and tests) without the parallel block of ~25 static re-exports that
+    silently went stale when a helper was added to Dispatcher. One delegation
+    path, sourced from the same classes, so there is nothing to keep in sync.
+    """
+
+    def __getattr__(cls, name: str):
+        for src in _FACADE_DELEGATES:
+            try:
+                return getattr(src, name)
+            except AttributeError:
+                continue
+        raise AttributeError(name)
+
+
+class LinkQueueApp(metaclass=_FacadeMeta):
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Link Processing Queue")
@@ -2491,6 +2515,13 @@ class LinkQueueApp:
                 return getattr(disp, name)
             except AttributeError:
                 pass
+        # lq-cmplx-01: a pure ConfigStore helper (e.g. _normalize_config_schema)
+        # accessed on the app instance resolves here, mirroring the class-level
+        # delegation in _FacadeMeta so there is a single delegation contract.
+        try:
+            return getattr(ConfigStore, name)
+        except AttributeError:
+            pass
         raise AttributeError(name)
 
     @property
@@ -2506,51 +2537,16 @@ class LinkQueueApp:
         with self.dispatcher._cooldown_lock:
             self.dispatcher._cooldown_until = value
 
-    # Pure helpers relocated to Dispatcher, re-exported on the class so
-    # `LinkQueueApp.<name>(...)` call sites (and tests) keep resolving.
-    _domain_of = staticmethod(Dispatcher._domain_of)
-    _resolve_command = staticmethod(Dispatcher._resolve_command)
-    _extract_protocol = staticmethod(Dispatcher._extract_protocol)
-    _format_duration = staticmethod(Dispatcher._format_duration)
-    _dispatch_wait_remaining = staticmethod(Dispatcher._dispatch_wait_remaining)
-    _serialize_item = staticmethod(Dispatcher._serialize_item)
-    _build_argv = Dispatcher._build_argv          # classmethod bound to Dispatcher
-    _highest_pct_in = Dispatcher._highest_pct_in  # classmethod bound to Dispatcher
-    _load_state_items = Dispatcher._load_state_items  # used by fuzz with a stub self
-    # Read-only dispatch helpers re-exported so call sites that invoke them on
-    # the class (or a LinkQueueApp-subclass stub) keep resolving. They never
-    # mutate state, so running them bound to the app (which proxies state to
-    # the dispatcher) is equivalent to running them on the dispatcher.
-    #
-    # lq-arch-01: _pick_next_item is intentionally NOT re-exported here — it
-    # MUTATES dispatcher bookkeeping (prunes by_domain / _domain_active /
-    # seq_of). Re-exporting it as a class attribute would bind it to the app
-    # on a `LinkQueueApp._pick_next_item(...)` call, mutating the app's proxy
-    # rather than the dispatcher. App instances still reach it via __getattr__,
-    # which returns the dispatcher-bound method, so its side effects land on
-    # the dispatcher where they belong.
-    _resolve_protocol = Dispatcher._resolve_protocol
-    _duplicate_status = Dispatcher._duplicate_status
-    _milestones_crossed = Dispatcher._milestones_crossed
-    _SUMMARY_MILESTONES = Dispatcher._SUMMARY_MILESTONES
-    # Input-line parsing + mapped-flag assembly (prefix-token feature).
-    _extra_argv = staticmethod(Dispatcher._extra_argv)
-    _extra_shell = staticmethod(Dispatcher._extra_shell)
-    _match_prefix = staticmethod(Dispatcher._match_prefix)
-    _token_is_url = Dispatcher._token_is_url   # classmethod bound to Dispatcher
-    _split_entry = Dispatcher._split_entry      # classmethod bound to Dispatcher
-    _parse_entries = Dispatcher._parse_entries  # classmethod bound to Dispatcher
-
-    # -- config -------------------------------------------------------------
-    # Config load/normalize/persist lives in ConfigStore (arch-03). self.config
-    # IS a ConfigStore (a dict with .save()); these methods only add the
-    # Settings-dialog write-gating policy, which is a UI concern.
-
-    # The pure (path-free) config helpers are re-exported so call sites / tests
-    # that invoke them on the class keep resolving. The path-bound load/write
-    # helpers now live on a ConfigStore instance (dec-03), not here.
-    _merge_user_config = staticmethod(ConfigStore._merge_user_config)
-    _normalize_config_schema = staticmethod(ConfigStore._normalize_config_schema)
+    # lq-cmplx-01: the pure Dispatcher/ConfigStore helpers are NOT re-exported
+    # as ~25 static class attributes any more. Class-level call sites
+    # (`LinkQueueApp._domain_of(...)`, `_build_argv`, `_split_entry`, the
+    # path-free config helpers `_merge_user_config` / `_normalize_config_schema`,
+    # …) resolve through `_FacadeMeta.__getattr__`; instance call sites resolve
+    # through the instance `__getattr__` above. A single delegation contract,
+    # so a helper added to Dispatcher/ConfigStore can never go stale against a
+    # hand-maintained re-export list. (Mutating helpers like `_pick_next_item`
+    # are reached the same way; nothing pins them as class attributes, so a
+    # class-level call binds them to their owning class, not the app proxy.)
 
     def _save_config(self) -> None:
         """Persist config to YAML — but if the Settings dialog is open, defer
