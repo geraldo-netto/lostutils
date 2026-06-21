@@ -225,8 +225,15 @@ def _walk_worker(idx, state: "_WalkState") -> None:
             # hr-rel-18: any non-OSError/ValueError escape would leave the
             # consumer hanging on out_q.get(); count + re-raise so the
             # finally still decrements inflight and the coordinator joins.
-            wstats["dir_errors"] += 1
+            # hr-conc-01: re-enqueue `d` (under the same lock that guards
+            # inflight) BEFORE re-raising so the dying worker doesn't drop
+            # the directory's not-yet-scanned subtree — a surviving worker
+            # retries it. The +1 here balances the unconditional -1 in the
+            # finally, so inflight nets the re-enqueued directory.
             scanned = False
+            with state.lock:
+                state.inflight[0] += 1
+                state.pending.put(d)
             raise
         finally:
             if scanned:

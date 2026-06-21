@@ -1641,6 +1641,65 @@ def test_walk_iter_survives_runtime_error_in_scandir(tmp_path, monkeypatch):
     assert done.is_set(), "walk hung — hr-rel-18 BaseException catch broken"
 
 
+# --- hr-conc-01: BaseException in a walk worker re-enqueues the dir -------
+
+def test_walk_worker_requeues_dir_on_base_exception(tmp_path, monkeypatch):
+    # hr-conc-01: a non-OSError/ValueError escape while scanning a directory
+    # must re-enqueue that directory so its subtree isn't silently dropped.
+    # The first scandir of the root raises RuntimeError; a retry succeeds,
+    # so every file under root is still discovered.
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (tmp_path / "top.bin").write_bytes(b"x")
+    for i in range(3):
+        (sub / f"f{i}.bin").write_bytes(b"x")
+
+    real_scandir = hr.os.scandir
+    state = {"raised": False}
+    root_str = str(tmp_path)
+    lock = __import__("threading").Lock()
+
+    def flaky_scandir(path):
+        with lock:
+            if str(path) == root_str and not state["raised"]:
+                state["raised"] = True
+                raise RuntimeError("transient kernel quirk on root")
+        return real_scandir(path)
+
+    monkeypatch.setattr(hr.os, "scandir", flaky_scandir)
+    # Single worker: the same worker that died is gone, but it re-enqueued
+    # root, and... with jobs=2 a surviving worker retries it.
+    results, stats = hr.threaded_walk(tmp_path, 2)
+    names = sorted(Path(p).name for p, *_ in results)
+    # All 4 files recovered despite the first root scan failing.
+    assert names == ["f0.bin", "f1.bin", "f2.bin", "top.bin"]
+    assert stats["files"] == 4
+
+
+def test_walk_worker_deterministic_base_exception_terminates(tmp_path, monkeypatch):
+    # hr-conc-01 safety: even when scanning the root ALWAYS raises a
+    # BaseException (re-enqueue + retry can never succeed), the walk must
+    # still TERMINATE — bounded by the worker count dying off — instead of
+    # looping forever on the re-enqueued directory.
+    (tmp_path / "a.bin").write_bytes(b"x")
+
+    def always_boom(path):
+        raise RuntimeError("permanent failure")
+
+    monkeypatch.setattr(hr.os, "scandir", always_boom)
+    import threading
+    done = threading.Event()
+
+    def run():
+        list(hr.iter_threaded_walk(tmp_path, jobs=3))
+        done.set()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    done.wait(timeout=10)
+    assert done.is_set(), "deterministic BaseException re-enqueue looped forever"
+
+
 # --- hr-conc-01: cancel_event aborts the hash stages between batches ------
 
 def test_cancelled_helper():
