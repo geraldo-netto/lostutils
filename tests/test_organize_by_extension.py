@@ -2194,6 +2194,31 @@ class SourceCollisionResolution(unittest.TestCase):
             result = _oze._resolve_source_collision(src, dst)
             self.assertEqual(result, src)   # no rename — no collision
 
+    def test_move_file_creates_bucket_despite_two_stacked_blockers(self):
+        # oze-test-02: with two stacked regular-file blockers on the
+        # destination ancestor chain, move_file must clear both (via the
+        # oze-rel-03 re-probe), create the bucket dir, and place the file.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "photo.jpg"; source.write_bytes(b"\xff\xd8\xff data")
+            bucket = root / "jpg" / "j00000"
+            blk1 = root / "stack1"; blk1.write_text("b1")
+            blk2 = root / "stack2"; blk2.write_text("b2")
+            seq = [blk1, blk2, None]
+
+            def fake_blocker(_destination):
+                return seq.pop(0)
+
+            with patch("organize_by_extension._find_destination_blocker",
+                       side_effect=fake_blocker):
+                target = _oze.move_file(source, bucket)
+            self.assertTrue(bucket.is_dir())          # bucket created
+            self.assertTrue(target.exists())          # file placed
+            self.assertEqual(target, bucket / "photo.jpg")
+            self.assertFalse(source.exists())         # source moved
+            self.assertFalse(blk1.exists())           # both blockers cleared
+            self.assertFalse(blk2.exists())
+
     def test_resolve_source_collision_clears_two_stacked_blockers(self):
         # oze-rel-03: after clearing one cross-source blocker the probe loop
         # must re-probe (continue) so a second stacked blocker is also cleared
