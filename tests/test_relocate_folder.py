@@ -2492,6 +2492,35 @@ def test_execute_skips_symlink_to_empty_target(tmp_path):
     assert src.is_symlink()
 
 
+# --- rf-test-02: already_migrated False on empty target, execute still skips -
+
+def test_already_migrated_false_but_execute_skips_empty_target(tmp_path):
+    # rf-test-02: source symlinks to a target that exists but is empty.
+    # already_migrated reports False (no content), yet execute must NOT crash
+    # in validate_source — it skips via _symlink_points_at_empty_target.
+    target = tmp_path / "dest" / "src"
+    target.mkdir(parents=True)                 # exists but empty
+    src = tmp_path / "src"; src.symlink_to(target)
+    assert rf.already_migrated(src, target) is False
+    plan = rf.Plan(source=src, target=target)
+    result = rf.execute(plan)                   # would previously raise
+    assert result.startswith("skipped:")
+    assert "empty target" in result
+    # source untouched, target untouched.
+    assert src.is_symlink()
+    assert target.is_dir()
+
+
+def test_already_migrated_empty_target_execute_state_already_migrated(
+        tmp_path, caplog):
+    target = tmp_path / "dest" / "src"; target.mkdir(parents=True)
+    src = tmp_path / "src"; src.symlink_to(target)
+    plan = rf.Plan(source=src, target=target)
+    caplog.set_level("DEBUG", logger="relocate")
+    rf.execute(plan)
+    assert any("state=already_migrated" in r.message for r in caplog.records)
+
+
 def test_target_has_content_oserror(tmp_path, monkeypatch):
     target = tmp_path / "t"; target.mkdir(); (target / "x").write_text("d")
     monkeypatch.setattr(rf.os, "scandir", _raise_os)
