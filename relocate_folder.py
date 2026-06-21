@@ -930,10 +930,15 @@ def _run_verify_pool(tasks: Iterator[Callable[[], None]], *,
     try:
         _run_streamed(ex.submit, tasks, _inflight_cap(workers), on_done)
     finally:
-        # rf-perf-04: on failure, cancel still-queued futures instead of
-        # draining them. The first hash mismatch is visible immediately
+        # rf-perf-04: on failure, cancel still-QUEUED futures instead of
+        # draining them so the first hash mismatch is visible immediately
         # instead of waiting seconds for the rest of a TB-scale tree.
-        ex.shutdown(wait=False, cancel_futures=bool(first_error))
+        # rf-conc-01: but wait=True so the executor joins the already-RUNNING
+        # worker threads deterministically before returning — cancel_futures
+        # only drops queued work, the in-flight hashes are not left detached
+        # past this function. The previous wait=False leaked those threads on
+        # the abort path.
+        ex.shutdown(wait=True, cancel_futures=bool(first_error))
     if first_error:
         if dropped[0]:
             _log().warning(

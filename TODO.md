@@ -44,7 +44,6 @@ oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_co
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 rf-conc-02 | open | low | relocate_folder.py:719 — _run_streamed's trailing `for fut in inflight: on_done(fut)` calls fut.exception(), which blocks per still-running future, so cancel_futures only short-circuits queued (not running) hashes and abort still waits on up to `workers` in-flight hashes. Document or actively cancel/ignore running ones. |
-rf-conc-01 | open | med | relocate_folder.py:907 — _run_verify_pool builds ThreadPoolExecutor outside a `with` and only shutdown(wait=False) in finally, leaking running threads on abort (see rf-rel-02). Use a context manager or shutdown(wait=True) on the abort path. | resource lifecycle
 
 ## code complexity
 

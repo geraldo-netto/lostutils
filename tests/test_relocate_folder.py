@@ -2495,3 +2495,29 @@ def test_recover_roundtrip_property(tmp_path_factory, name):
     assert source.is_dir()
     assert (source / "x").read_text() == "y"
     assert rf._orphaned_backup(source) is None
+
+
+# --- rf-conc-01: verify pool joins running futures deterministically --------
+
+def test_run_verify_pool_joins_running_threads_on_abort():
+    import threading
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def slow_running():
+        started.set()
+        release.wait(timeout=5)
+        finished.set()
+
+    def boom():
+        started.wait(timeout=5)  # ensure the slow task is in-flight first
+        release.set()            # let the slow one proceed to completion
+        raise RuntimeError("verify failure")
+
+    with pytest.raises(RuntimeError, match="verify failure"):
+        rf._run_verify_pool(iter([slow_running, boom]), jobs=2)
+
+    # rf-conc-01: shutdown(wait=True) means the running task is joined before
+    # the function returns — no detached thread survives the abort.
+    assert finished.is_set()
