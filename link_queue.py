@@ -2521,9 +2521,16 @@ class LinkQueueApp:
     # the class (or a LinkQueueApp-subclass stub) keep resolving. They never
     # mutate state, so running them bound to the app (which proxies state to
     # the dispatcher) is equivalent to running them on the dispatcher.
+    #
+    # lq-arch-01: _pick_next_item is intentionally NOT re-exported here — it
+    # MUTATES dispatcher bookkeeping (prunes by_domain / _domain_active /
+    # seq_of). Re-exporting it as a class attribute would bind it to the app
+    # on a `LinkQueueApp._pick_next_item(...)` call, mutating the app's proxy
+    # rather than the dispatcher. App instances still reach it via __getattr__,
+    # which returns the dispatcher-bound method, so its side effects land on
+    # the dispatcher where they belong.
     _resolve_protocol = Dispatcher._resolve_protocol
     _duplicate_status = Dispatcher._duplicate_status
-    _pick_next_item = Dispatcher._pick_next_item
     _milestones_crossed = Dispatcher._milestones_crossed
     _SUMMARY_MILESTONES = Dispatcher._SUMMARY_MILESTONES
     # Input-line parsing + mapped-flag assembly (prefix-token feature).

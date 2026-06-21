@@ -2372,6 +2372,27 @@ def test_pick_next_item_prunes_empty_by_domain_buckets(app):
     assert "ghost-domain" not in app.queue_items.by_domain
 
 
+def test_pick_next_item_not_in_static_reexport_block(app):
+    # lq-arch-01: the mutating _pick_next_item must NOT be re-exported as a
+    # class attribute (which would bind it to the app); it is reached only via
+    # __getattr__ delegation, which binds it to the dispatcher.
+    assert "_pick_next_item" not in LinkQueueApp.__dict__
+    bound = app._pick_next_item
+    assert bound.__self__ is app.dispatcher
+
+
+def test_pick_next_item_via_app_mutates_dispatcher(app):
+    # lq-arch-01: delegation must land side effects on the dispatcher's
+    # bookkeeping, not on the app proxy.
+    stop_bg_workers(app)
+    with app._dispatch_cv:
+        app.queue_items.clear()
+        app.queue_items.by_domain["ghost"] = {}
+        app.queue_items.append(q("http://realhost/1"))
+        app._pick_next_item(0)
+    assert "ghost" not in app.dispatcher.queue_items.by_domain
+
+
 def test_persist_if_changed_returns_false_on_match(app):
     # _persist_if_changed: value == prev -> early return False, no save/log.
     msgs: list[str] = []
