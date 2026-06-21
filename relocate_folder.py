@@ -989,7 +989,11 @@ def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
         counterpart = dst / rel
         try:
             st = os.lstat(full)
-        except OSError:
+        except OSError as exc:
+            # rf-rel-01: a src entry that became unreadable mid-run must NOT be
+            # silently skipped — the copy would be accepted and the source then
+            # deleted. Yield a task that raises so verify_copy fails loudly.
+            yield partial(_verify_unreadable_src, full, rel, exc)
             st = None
         if st is not None and stat.S_ISLNK(st.st_mode):
             yield partial(_verify_symlink, full, counterpart, rel)
@@ -1076,6 +1080,19 @@ def _submit_in_context(ex: ThreadPoolExecutor, task: Callable[[], None]
     contextvars instead of the empty default context."""
     ctx = contextvars.copy_context()
     return ex.submit(ctx.run, task)
+
+
+def _verify_unreadable_src(src_path: Path, rel: Path, exc: OSError) -> None:
+    """Fail verification for a src entry that couldn't be lstat'd (rf-rel-01).
+
+    Classification needs the src mode; when lstat fails we can't say whether the
+    copy is faithful, so verification must not pass. Raising here (rather than
+    skipping the entry) keeps the source from being deleted on a copy we never
+    confirmed."""
+    raise RuntimeError(
+        f"could not stat source entry during verify: {rel} "
+        f"(src={src_path}): {exc}"
+    ) from exc
 
 
 def _verify_dir(src_dir: Path, dst_dir: Path, rel: Path) -> None:

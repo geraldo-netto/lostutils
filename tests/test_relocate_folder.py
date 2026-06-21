@@ -1046,9 +1046,10 @@ def test_iter_verify_tasks_lstats_each_entry_once(tmp_path, monkeypatch):
     assert len(tasks) == 3
 
 
-def test_iter_verify_tasks_skips_entry_when_lstat_fails(tmp_path, monkeypatch):
-    # rf-perf-01: an lstat failure during classification skips the kind task
-    # for that entry (no crash); ownership task still appended if requested.
+def test_iter_verify_tasks_lstat_fail_yields_raising_task(tmp_path, monkeypatch):
+    # rf-rel-01: an lstat failure during classification must NOT silently skip
+    # the entry; a task is yielded that raises so verification fails loudly
+    # instead of accepting an unconfirmed copy.
     src = tmp_path / "s"; src.mkdir()
     (src / "f.txt").write_text("hi")
     dst = tmp_path / "t"
@@ -1056,7 +1057,9 @@ def test_iter_verify_tasks_skips_entry_when_lstat_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(rf.os, "lstat", _raise_os)
     tasks = list(rf._iter_verify_tasks(src, dst, checksum=False,
                                        verify_ownership=False))
-    assert tasks == []   # entry classified to no kind, no ownership requested
+    assert len(tasks) == 1
+    with pytest.raises(RuntimeError, match="could not stat source entry"):
+        tasks[0]()
 
 
 def test_verify_content_pass_and_fail(tmp_path):
