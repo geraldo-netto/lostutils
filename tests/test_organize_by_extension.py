@@ -2627,6 +2627,44 @@ class SourceCollisionResolution(unittest.TestCase):
                 self.assertEqual(taken.read_text(), "PRECIOUS")
                 self.assertEqual(renamed.read_text(), "SOURCE")
 
+    def test_atomic_rename_rolls_back_candidate_on_unlink_failure(self):
+        # oze-rel-02: link succeeds but unlink(source) fails -> the new
+        # candidate link is removed and the original error re-raised, so the
+        # file is not left at both paths.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src"; source.write_text("SOURCE")
+
+            real_unlink = os.unlink
+
+            def boom_unlink(p, *a, **kw):
+                if str(p).endswith("/src"):
+                    raise OSError(errno.EACCES, "denied")
+                return real_unlink(p, *a, **kw)
+
+            with patch("organize_by_extension.os.unlink", side_effect=boom_unlink):
+                with self.assertRaises(OSError) as cm:
+                    _oze._atomic_rename_to_free_slot(source)
+            self.assertEqual(cm.exception.errno, errno.EACCES)
+            self.assertTrue(source.exists())                       # still here
+            self.assertFalse((root / "src.collision1").exists())   # rolled back
+
+    def test_atomic_rename_double_failure_raises_runtime_and_logs(self):
+        # oze-rel-02 / oze-obs-02: both unlink(source) and unlink(candidate)
+        # fail -> RuntimeError naming both, with an error log of the leak.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src"; source.write_text("SOURCE")
+
+            def boom_unlink(p, *a, **kw):
+                raise OSError(errno.EACCES, "denied")
+
+            with patch("organize_by_extension.os.unlink", side_effect=boom_unlink):
+                with self.assertLogs("organize_by_extension", level="ERROR") as cm:
+                    with self.assertRaisesRegex(RuntimeError, "double-link"):
+                        _oze._atomic_rename_to_free_slot(source)
+            self.assertTrue(any("hardlink is leaked" in m for m in cm.output))
+
     def test_atomic_rename_falls_back_on_emlink(self):
         # oze-rel-06: EMLINK (source at max link count) falls back to the
         # rename reservation instead of aborting with a bare OSError.

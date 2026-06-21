@@ -1157,6 +1157,35 @@ def _reserve_slot_via_rename(source: Path) -> Path:
     ) from last_exc
 
 
+def _unlink_source_or_rollback_candidate(source: Path, candidate: Path) -> None:
+    """Remove `source` after a successful reservation link; roll back the new
+    link if the source unlink fails (oze-rel-02).
+
+    Either the source is gone and the candidate survives (success), or the
+    candidate is removed and the original OSError is re-raised (rollback), or a
+    RuntimeError carrying both errnos surfaces so the leaked hardlink is logged
+    and manual cleanup is unmistakable (oze-obs-02)."""
+    try:
+        os.unlink(source)
+        return
+    except OSError as src_exc:
+        try:
+            os.unlink(candidate)
+        except OSError as cand_exc:
+            logger.error(
+                "collision reservation: linked %s -> %s but could not remove "
+                "the source (%s) or roll back the new link (%s); the file is "
+                "left at both paths and a hardlink is leaked — manual cleanup "
+                "required", source, candidate, src_exc, cand_exc,
+            )
+            raise RuntimeError(
+                f"double-link: reserved {candidate} but failed to remove both "
+                f"the source ({src_exc}) and the new link ({cand_exc}); "
+                f"manual cleanup required"
+            ) from src_exc
+        raise
+
+
 def _atomic_rename_to_free_slot(source: Path) -> Path:
     """Rename `source` to the first free `<name>.collisionN` slot with
     no-clobber, TOCTOU-safe semantics (oze-conc-01 / oze-rel-19).
@@ -1174,7 +1203,11 @@ def _atomic_rename_to_free_slot(source: Path) -> Path:
     oze-rel-01/oze-rel-06: on a filesystem without hardlink support (`os.link`
     raises EPERM/ENOSYS/EOPNOTSUPP) or when the source is already at its max
     link count (EMLINK), fall back to the O_CREAT|O_EXCL + os.rename
-    reservation, which works on FAT/exFAT/SMB/NFS."""
+    reservation, which works on FAT/exFAT/SMB/NFS.
+
+    oze-rel-02: if the link succeeds but the source `os.unlink` fails, roll
+    back the just-created candidate and re-raise, so the file is never left at
+    BOTH paths and no hardlink is leaked (mirrors :func:`_unlink_with_rollback`)."""
     last_exc: OSError | None = None
     for n in range(1, _COLLISION_RETRY_CAP + 1):
         candidate = source.with_name(f"{source.name}.collision{n}")
@@ -1187,7 +1220,7 @@ def _atomic_rename_to_free_slot(source: Path) -> Path:
             if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
                 return _reserve_slot_via_rename(source)
             raise
-        os.unlink(source)
+        _unlink_source_or_rollback_candidate(source, candidate)
         return candidate
     raise RuntimeError(
         f"unable to atomically reserve a collision name for {source} "
