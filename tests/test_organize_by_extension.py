@@ -2830,6 +2830,71 @@ class SourceCollisionResolution(unittest.TestCase):
             self.assertNotEqual(result[0][0], root / "avi")
 
 
+class AtomicRenameLinkRegression(unittest.TestCase):
+    """oze-test-01: end-to-end coverage of the os.link reservation branches —
+    no-hardlink FS (oze-rel-01), EMLINK (oze-rel-06), and the
+    link-succeeds/unlink-fails rollback (oze-rel-02). A planning collision (a
+    file named `avi` carrying an AVI/RIFF header forces bucketing under
+    `avi/`, blocking its own ancestor) drives _atomic_rename_to_free_slot."""
+
+    def _seed_collision(self, root):
+        (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
+
+    def test_no_hardlink_fs_does_not_abort_plan(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            self._seed_collision(root)
+
+            def no_link(a, b):
+                raise OSError(errno.EPERM, "operation not permitted")
+
+            with patch.object(_oze.os, "link", no_link):
+                _oze.organize(root, verbose=False)   # must NOT raise
+            # Planning collision resolved via the O_EXCL+rename fallback (the
+            # source no longer occupies its own bucket ancestor); the data is
+            # never lost. The subsequent move is a per-file skip (os.link still
+            # EPERM) rather than a plan abort.
+            self.assertFalse((root / "avi").is_file())
+            survivors = [p for p in root.rglob("avi.collision*") if p.is_file()]
+            self.assertEqual(len(survivors), 1)
+
+    def test_emlink_does_not_abort_plan(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            self._seed_collision(root)
+
+            def emlink(a, b):
+                raise OSError(errno.EMLINK, "too many links")
+
+            with patch.object(_oze.os, "link", emlink):
+                _oze.organize(root, verbose=False)   # must NOT raise
+            self.assertFalse((root / "avi").is_file())
+            survivors = [p for p in root.rglob("avi.collision*") if p.is_file()]
+            self.assertEqual(len(survivors), 1)
+
+    def test_unlink_failure_surfaces_during_planning(self):
+        # oze-rel-02: when the link succeeds but the source unlink fails during
+        # the planning collision pre-pass, the OSError is NOT caught there (only
+        # FileNotFoundError is), so it surfaces — proving the rollback ran and
+        # the file is not left at both paths.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            self._seed_collision(root)
+            real_unlink = os.unlink
+
+            def boom_unlink(p, *a, **kw):
+                if str(p).endswith("/avi"):
+                    raise OSError(errno.EACCES, "denied")
+                return real_unlink(p, *a, **kw)
+
+            with patch("organize_by_extension.os.unlink", side_effect=boom_unlink):
+                with self.assertRaises(OSError):
+                    _oze.organize(root, verbose=False)
+            # Source preserved; the rolled-back candidate link is gone.
+            self.assertTrue((root / "avi").is_file())
+            self.assertFalse((root / "avi.collision1").exists())
+
+
 class WalkScandirHandlesStatError(unittest.TestCase):
     """oze-conc-04: stat() OSError on a DirEntry is skipped silently."""
 
