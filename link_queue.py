@@ -943,8 +943,10 @@ class Dispatcher:
                     pass
             except Exception:
                 # Best-effort cleanup of the orphaned tmp file.
-                try: os.unlink(tmp)
-                except OSError: pass  # pragma: no cover - best-effort tmp cleanup on state save
+                try:
+                    os.unlink(tmp)
+                except OSError:  # pragma: no cover - best-effort tmp cleanup on state save
+                    pass
                 raise
         except Exception as e:
             # Never let a state-save failure interrupt normal flow.

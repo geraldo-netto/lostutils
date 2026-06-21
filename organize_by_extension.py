@@ -181,7 +181,7 @@ MAGIC_SIGNATURES: tuple[tuple[bytes, int, str], ...] = (
 SIGNATURES: tuple[Signature, ...] = (
     IsoBmffSignature(),
     RiffSignature(),
-    *(MagicSignature(s, o, l) for s, o, l in MAGIC_SIGNATURES),
+    *(MagicSignature(sig, off, label) for sig, off, label in MAGIC_SIGNATURES),
 )
 
 

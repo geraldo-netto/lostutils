@@ -43,10 +43,10 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import contextvars
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, NamedTuple, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 LOG = logging.getLogger("relocate")
 
