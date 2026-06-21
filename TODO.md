@@ -36,7 +36,6 @@ oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_co
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-conc-01 | open | med | link_queue.py:731 — _immediate_pool_size is computed once in __init__ and never recomputed; _ensure_worker_count/_on_worker_count_changed resize only the queue-worker pool, so changing Workers in Settings has no effect on immediate concurrency until restart, contradicting the docstring. Recompute and call _ensure_immediate_pool() under _immediate_lock on worker-count change. | regression
 
 ## code complexity
 

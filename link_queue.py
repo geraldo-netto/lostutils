@@ -1171,6 +1171,17 @@ class Dispatcher:
             self.immediate_threads.append(t)
             t.start()
 
+    def _resize_immediate_pool(self) -> None:
+        """Recompute `_immediate_pool_size` from config and (re)align the live
+        consumer pool to it (lq-conc-01). The original code computed the size
+        once in __init__ and never again, so changing Workers (or the new
+        immediate_worker_count) in Settings had no effect on immediate
+        concurrency until restart. Called whenever the worker / immediate count
+        changes; takes `_immediate_lock` itself."""
+        with self._immediate_lock:
+            self._immediate_pool_size = self._immediate_concurrency()
+            self._ensure_immediate_pool()
+
     def _dispatch_immediate(self, item: QueueItem) -> None:
         """Hand an immediate-mode item to the bounded pool (conc-02). Immediate
         items are fire-and-forget and intentionally not deduplicated — a user
@@ -1739,6 +1750,10 @@ class Dispatcher:
         if int(self.config.get("worker_count", 1)) != target:
             self.config["worker_count"] = target
             self._save_config()
+        # lq-conc-01: changing Workers also re-sizes the immediate pool, which
+        # by default follows worker_count (arch-01). Without this, immediate
+        # concurrency stayed pinned at its __init__ value until restart.
+        self._resize_immediate_pool()
         self._update_status()
 
 

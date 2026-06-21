@@ -2375,6 +2375,32 @@ except ImportError:  # pragma: no cover - hypothesis always installed in CI
     pass
 
 
+def test_resize_immediate_pool_recomputes_size(headless_dispatcher):
+    # lq-conc-01: changing the (immediate) worker count must recompute
+    # _immediate_pool_size and grow the live consumer pool — the resize used
+    # to be unwired, leaving immediate concurrency pinned until restart.
+    disp = headless_dispatcher
+    disp.config["worker_count"] = 1
+    disp.config["immediate_worker_count"] = 0
+    disp._resize_immediate_pool()
+    assert disp._immediate_pool_size == 1
+    assert len([t for t in disp.immediate_threads if t.is_alive()]) == 1
+    disp.config["immediate_worker_count"] = 4
+    disp._resize_immediate_pool()
+    assert disp._immediate_pool_size == 4
+    assert len([t for t in disp.immediate_threads if t.is_alive()]) == 4
+
+
+def test_ensure_worker_count_resizes_immediate_pool(headless_dispatcher):
+    # lq-conc-01: the public worker-count entry point drives the immediate
+    # resize (immediate pool follows worker_count by default — arch-01).
+    disp = headless_dispatcher
+    disp.config["immediate_worker_count"] = 0
+    disp._ensure_worker_count(3)
+    assert disp._immediate_pool_size == 3
+    assert len([t for t in disp.immediate_threads if t.is_alive()]) == 3
+
+
 def test_immediate_pool_bounds_live_threads(headless_dispatcher):
     # lq-conc-02: a large immediate batch must NOT spawn one live thread per
     # item; the live consumer count is capped at the pool size.
