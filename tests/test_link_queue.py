@@ -280,6 +280,51 @@ def test_merge_and_normalize_config():
     assert cfg["protocols"]["ftp"]["mode"] == "queue"
 
 
+@pytest.mark.parametrize("bad", [None, [], "x", 42, 3.5, ("a",)])
+def test_merge_user_config_non_dict_protocols_kept_default(bad):
+    # lq-rel-01: a non-dict `protocols:` must not overwrite the default dict,
+    # and the merged config must still normalize without crashing.
+    cfg = {"protocols": {"http": {"mode": "queue", "command": "echo {url}",
+                                  "shell": False}}}
+    LinkQueueApp._merge_user_config(cfg, {"protocols": bad, "sleep_between_items": 9})
+    assert isinstance(cfg["protocols"], dict)
+    assert "http" in cfg["protocols"]            # default survived
+    assert cfg["sleep_between_items"] == 9       # other keys still merge
+    LinkQueueApp._normalize_config_schema(cfg)   # must not raise
+    assert cfg["protocols"]["http"]["mode"] == "queue"
+
+
+def test_config_store_load_with_non_dict_protocols(tmp_path, monkeypatch):
+    # lq-rel-01: a hand-edited config with `protocols: null` must not crash
+    # startup (full ConfigStore load path).
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text("protocols: null\nsleep_between_items: 7\n")
+    monkeypatch.setattr(link_queue, "CONFIG_FILE", str(cfg_path))
+    monkeypatch.setattr(link_queue, "LEGACY_CONFIG_FILE", str(tmp_path / "none.json"))
+    store = link_queue.ConfigStore(str(cfg_path), str(tmp_path / "none.json"))
+    assert isinstance(store["protocols"], dict)
+    assert "http" in store["protocols"]
+    assert store["sleep_between_items"] == 7
+
+
+try:
+    from hypothesis import given, settings as hyp_settings, strategies as st
+
+    @hyp_settings(max_examples=60, deadline=None)
+    @given(bad=st.one_of(st.none(), st.integers(), st.floats(allow_nan=False),
+                         st.text(), st.lists(st.integers())))
+    def test_merge_user_config_non_dict_protocols_property(bad):
+        # lq-rel-01 property: for ANY non-dict protocols value, defaults are
+        # preserved and normalize never raises.
+        cfg = {"protocols": {"http": {"mode": "queue", "command": "echo {url}",
+                                      "shell": False}}}
+        LinkQueueApp._merge_user_config(cfg, {"protocols": bad})
+        assert isinstance(cfg["protocols"], dict) and "http" in cfg["protocols"]
+        LinkQueueApp._normalize_config_schema(cfg)
+except ImportError:  # pragma: no cover - hypothesis always installed in CI
+    pass
+
+
 def test_read_user_config_corrupt(tmp_path, monkeypatch):
     monkeypatch.setattr(link_queue, "CONFIG_FILE", str(tmp_path / "cfg.yaml"))
     monkeypatch.setattr(link_queue, "LEGACY_CONFIG_FILE", str(tmp_path / "none.json"))

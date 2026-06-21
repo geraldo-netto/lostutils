@@ -473,9 +473,20 @@ class ConfigStore(dict):
         if not isinstance(user, dict):
             return
         for k, v in user.items():
-            if k == "protocols" and isinstance(v, dict):
+            if k == "protocols":
+                # lq-rel-01: a non-dict `protocols:` (null/list/scalar) must
+                # NOT overwrite the default protocols dict — doing so makes
+                # _normalize_config_schema crash on `cfg["protocols"].items()`
+                # at startup. Skip it so the built-in protocols survive.
+                if not isinstance(v, dict):
+                    print(
+                        f"[warn] config: ignoring non-dict 'protocols' "
+                        f"(got {type(v).__name__}); keeping defaults",
+                        file=sys.stderr,
+                    )
+                    continue
                 for name, pc in v.items():
-                    if isinstance(pc, dict):  # pragma: no cover - withdrawn-root Tk early-exit
+                    if isinstance(pc, dict):
                         cfg["protocols"][name] = dict(pc)
             else:
                 cfg[k] = v
