@@ -226,6 +226,11 @@ DEFAULT_CONFIG = {
                                     # runners, tuned independently of worker_count
                                     # (queue parallelism). 0/empty = follow
                                     # worker_count.
+    "immediate_queue_maxsize": 10000,  # lq-scal-01: cap on items waiting in the
+                                       # immediate work queue. A huge paste of
+                                       # file:/magnet: links is dropped-with-warning
+                                       # past this rather than pinning N QueueItems
+                                       # in RAM. 0 = unbounded.
     "failure_sleep_seconds": 300,   # 5 minutes — global cooldown after a failure
     "command_timeout_seconds": 0,   # scal-04: per-item subprocess wall-time cap;
                                     # 0 = off (wait forever). When > 0, a hung
@@ -767,7 +772,11 @@ class Dispatcher:
         # {thread, stop} dicts. `immediate_threads` is a back-compat property.
         self._immediate_consumers: list[dict] = []
         self._immediate_lock = threading.Lock()
-        self._immediate_q: "queue.Queue[QueueItem]" = queue.Queue()
+        # lq-scal-01: bound the immediate work queue so a large paste can't pin
+        # an unbounded number of QueueItems in RAM. Overflow is dropped-with-
+        # warning in _dispatch_immediate (immediate items are fire-and-forget).
+        self._immediate_q: "queue.Queue[QueueItem]" = queue.Queue(
+            maxsize=self._immediate_q_maxsize())
         self._immediate_pool_size = self._immediate_concurrency()
         # Templates already flagged at runtime for the sec-02 shell+{url} check;
         # warn once per distinct template to avoid log spam.
@@ -1137,6 +1146,16 @@ class Dispatcher:
             except (TypeError, ValueError):
                 return 1
 
+    def _immediate_q_maxsize(self) -> int:
+        """Cap on items waiting in the immediate work queue (lq-scal-01). Read
+        from ``immediate_queue_maxsize``; <= 0 / unparseable means unbounded
+        (queue.Queue treats maxsize <= 0 as infinite)."""
+        try:
+            n = int(self.config.get("immediate_queue_maxsize", 0))
+        except (TypeError, ValueError):
+            return 0
+        return n if n > 0 else 0
+
     def _run_immediate_item(self, item: QueueItem) -> None:
         """Run one immediate item and record a failure/completion metric on its
         exit (rel-01) so immediate failures aren't invisible."""
@@ -1211,11 +1230,22 @@ class Dispatcher:
         items are fire-and-forget and intentionally not deduplicated — a user
         who wanted exactly one fire would have used a queue protocol. The number
         of live consumer threads never exceeds `_immediate_pool_size`, so a
-        large paste queues up instead of spawning a thread per link."""
-        self._log(f"[immediate] {item.protocol}: {item.url}")
-        self._immediate_q.put(item)
+        large paste queues up instead of spawning a thread per link.
+
+        lq-scal-01: the work queue is bounded, so once it is full the item is
+        dropped with a warning rather than pinning unbounded RAM. Spawn the pool
+        FIRST so consumers can be draining while we attempt the put."""
         with self._immediate_lock:
             self._ensure_immediate_pool()
+        try:
+            self._immediate_q.put_nowait(item)
+        except queue.Full:
+            self._log(
+                f"[immediate dropped] {item.protocol}: {item.url} "
+                f"(immediate queue full, maxsize={self._immediate_q.maxsize})"
+            )
+            return
+        self._log(f"[immediate] {item.protocol}: {item.url}")
 
     def _enqueue_or_skip_duplicate(self, item: QueueItem, outcome: str) -> str:
         """Append the item to queue_items unless the URL is already pending

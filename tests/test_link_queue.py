@@ -2425,6 +2425,59 @@ def test_downward_resize_retires_surplus_consumers(headless_dispatcher):
     assert len([t for t in disp.immediate_threads if t.is_alive()]) == 3
 
 
+def test_immediate_q_maxsize_helper(tmp_path, monkeypatch):
+    # lq-scal-01: the maxsize getter clamps non-positive / garbage to 0
+    # (unbounded), positive values pass through.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_queue_maxsize"] = 5
+    d = link_queue.Dispatcher.headless(cfg)
+    try:
+        assert d._immediate_q_maxsize() == 5
+        assert d._immediate_q.maxsize == 5
+        d.config["immediate_queue_maxsize"] = 0
+        assert d._immediate_q_maxsize() == 0
+        d.config["immediate_queue_maxsize"] = -7
+        assert d._immediate_q_maxsize() == 0
+        d.config["immediate_queue_maxsize"] = "junk"
+        assert d._immediate_q_maxsize() == 0
+    finally:
+        d.stop_event.set()
+
+
+def test_immediate_queue_drops_overflow_with_warning(tmp_path, monkeypatch):
+    # lq-scal-01: once the bounded immediate queue is full, extra items are
+    # dropped with a warning instead of pinning unbounded RAM.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_queue_maxsize"] = 3
+    cfg["immediate_worker_count"] = 1
+    d = link_queue.Dispatcher.headless(cfg)
+    logs = []
+    d._log = logs.append
+    release = threading.Event()
+
+    def block_run(item, _mode):
+        release.wait(3.0)
+        return 0
+
+    d._run_item = block_run
+    try:
+        # One item gets picked up by the single consumer and blocks; the queue
+        # (maxsize 3) then fills, and further puts are dropped.
+        for i in range(20):
+            d._dispatch_immediate(QueueItem(url=f"magnet:?xt={i}",
+                                            protocol="magnet",
+                                            template="echo {url}", shell=False))
+        assert d._immediate_q.qsize() <= 3
+        drops = [m for m in logs if "immediate dropped" in m]
+        assert drops, "expected at least one drop warning"
+        assert "immediate queue full" in drops[0]
+    finally:
+        release.set()
+        d.stop_event.set()
+
+
 def test_immediate_pool_bounds_live_threads(headless_dispatcher):
     # lq-conc-02: a large immediate batch must NOT spawn one live thread per
     # item; the live consumer count is capped at the pool size.
