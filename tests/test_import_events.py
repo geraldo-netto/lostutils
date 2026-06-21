@@ -651,6 +651,63 @@ def test_get_llm_caches_per_config(monkeypatch):
     assert created == ["A.gguf", "B.gguf"]
 
 
+class RaisingLlm:
+    def create_chat_completion(self, messages):
+        raise RuntimeError("model OOM")
+
+
+def test_run_llm_counts_failures(tmp_path):
+    import_events.reset_extraction_failures()
+    src = tmp_path / "x.txt"
+    src.write_text("content", encoding="utf-8")
+
+    events = import_events.extract_with_llm(src, llm_client=RaisingLlm())
+
+    assert events == []
+    assert import_events.extraction_failure_count() == 1
+
+
+def test_extract_from_file_counts_non_llm_failures(tmp_path, monkeypatch):
+    import_events.reset_extraction_failures()
+    ics = tmp_path / "bad.ics"
+    ics.write_text("data", encoding="utf-8")
+    monkeypatch.setattr(
+        import_events, "extract_from_ics",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")),
+    )
+
+    events = import_events.extract_from_file(ics)
+
+    assert events == []
+    assert import_events.extraction_failure_count() == 1
+
+
+def test_main_exits_nonzero_on_extraction_failure(tmp_path, monkeypatch):
+    (tmp_path / "event.txt").write_text("Launch tomorrow", encoding="utf-8")
+    out = tmp_path / "out.json"
+    monkeypatch.setattr(import_events, "get_llm", lambda config=None: RaisingLlm())
+
+    rc = import_events.main([str(tmp_path), "-o", str(out)])
+
+    assert rc == 1
+    assert json.loads(out.read_text(encoding="utf-8")) == []
+
+
+def test_main_resets_failures_between_runs(tmp_path, monkeypatch):
+    import_events._extraction_failures = 99  # simulate a prior failed run
+    (tmp_path / "event.txt").write_text("Launch", encoding="utf-8")
+    out = tmp_path / "out.json"
+    monkeypatch.setattr(
+        import_events, "get_llm",
+        lambda config=None: FakeLlm('[{"title": "Launch", "start": "2026-06-06"}]'),
+    )
+
+    rc = import_events.main([str(tmp_path), "-o", str(out)])
+
+    assert rc == 0
+    assert import_events.extraction_failure_count() == 0
+
+
 def test_main_writes_json_and_ics(tmp_path, monkeypatch):
     pytest.importorskip("icalendar")
     (tmp_path / "event.txt").write_text("Launch tomorrow", encoding="utf-8")

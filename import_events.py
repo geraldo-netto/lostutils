@@ -75,6 +75,19 @@ MAX_CONTENT_CHARS = 6000
 _LLM_CACHE: Dict[tuple, Any] = {}
 logger = logging.getLogger(__name__)
 
+# Counts files whose extraction raised; main() exits non-zero when > 0 so a run
+# that logged errors per file is not mistaken for a clean "0 events" result.
+_extraction_failures = 0
+
+
+def reset_extraction_failures() -> None:
+    global _extraction_failures
+    _extraction_failures = 0
+
+
+def extraction_failure_count() -> int:
+    return _extraction_failures
+
 
 # --------------------------------------------------------------------------- #
 # Model bootstrap
@@ -302,6 +315,8 @@ def _run_llm(
         text_output = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         return parse_llm_events(text_output, file_path, event_type)
     except Exception as e:
+        global _extraction_failures
+        _extraction_failures += 1
         logger.exception("LLM Error processing %s: %s", file_path.name, e)
         return []
 
@@ -393,6 +408,8 @@ def extract_from_file(
         if suffix in PDF_EXTENSIONS:
             return extract_from_pdf(file, llm_client=llm_client, model_config=model_config)
     except Exception as e:
+        global _extraction_failures
+        _extraction_failures += 1
         logger.exception("Could not extract events from %s: %s", file.name, e)
     return []
 
@@ -542,6 +559,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = parse_args(argv)
     model_config = ModelConfig.from_args(args)
+    reset_extraction_failures()
 
     folder = Path(args.directory)
     if not folder.exists():
@@ -563,6 +581,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     for event in events:
         location = f" @ {event['location']}" if event.get("location") else ""
         print(f"[{event['start']}] {event['title']}{location} (Source: {event['source']})")
+
+    failures = extraction_failure_count()
+    if failures:
+        logger.error("%d file(s) failed extraction; results may be incomplete.", failures)
+        return 1
     return 0
 
 
