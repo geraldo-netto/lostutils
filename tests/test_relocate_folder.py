@@ -2432,6 +2432,66 @@ def test_already_migrated_false_when_target_is_file(tmp_path):
     assert rf.already_migrated(src, target) is False
 
 
+# --- rf-rel-01: symlink -> empty target is a distinct skip, not a crash -----
+
+def test_symlink_points_at_empty_target_true(tmp_path):
+    target = tmp_path / "t"; target.mkdir()        # exists, empty
+    src = tmp_path / "src"; src.symlink_to(target)
+    assert rf._symlink_points_at_empty_target(src, target) is True
+
+
+def test_symlink_points_at_empty_target_relative(tmp_path):
+    target = tmp_path / "t"; target.mkdir()        # empty
+    src = tmp_path / "src"; src.symlink_to("t")     # relative link
+    assert rf._symlink_points_at_empty_target(src, target) is True
+
+
+def test_symlink_points_at_empty_target_false_when_nonempty(tmp_path):
+    target = tmp_path / "t"; target.mkdir()
+    (target / "x").write_text("d")
+    src = tmp_path / "src"; src.symlink_to(target)
+    assert rf._symlink_points_at_empty_target(src, target) is False
+
+
+def test_symlink_points_at_empty_target_false_not_symlink(tmp_path):
+    target = tmp_path / "t"; target.mkdir()
+    real = tmp_path / "src"; real.mkdir()
+    assert rf._symlink_points_at_empty_target(real, target) is False
+
+
+def test_symlink_points_at_empty_target_false_when_missing(tmp_path):
+    target = tmp_path / "gone"
+    src = tmp_path / "src"; src.symlink_to(target)
+    assert rf._symlink_points_at_empty_target(src, target) is False
+
+
+def test_symlink_points_at_empty_target_false_different_target(tmp_path):
+    target = tmp_path / "t"; target.mkdir()
+    other = tmp_path / "o"; other.mkdir()
+    src = tmp_path / "src"; src.symlink_to(other)
+    assert rf._symlink_points_at_empty_target(src, target) is False
+
+
+def test_symlink_points_at_empty_target_oserror(tmp_path, monkeypatch):
+    target = tmp_path / "t"; target.mkdir()
+    src = tmp_path / "src"; src.symlink_to(target)
+    monkeypatch.setattr(rf.os, "scandir", _raise_os)
+    assert rf._symlink_points_at_empty_target(src, target) is False
+
+
+def test_execute_skips_symlink_to_empty_target(tmp_path):
+    # rf-rel-01 regression: prior migration completed, target later emptied.
+    # execute() must skip with a distinct message, not crash in validate_source.
+    target = tmp_path / "dest" / "src"
+    target.mkdir(parents=True)            # exists but empty
+    src = tmp_path / "src"; src.symlink_to(target)
+    plan = rf.Plan(source=src, target=target)
+    result = rf.execute(plan)
+    assert result.startswith("skipped:")
+    assert "empty target" in result
+    assert src.is_symlink()
+
+
 def test_target_has_content_oserror(tmp_path, monkeypatch):
     target = tmp_path / "t"; target.mkdir(); (target / "x").write_text("d")
     monkeypatch.setattr(rf.os, "scandir", _raise_os)

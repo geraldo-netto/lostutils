@@ -300,6 +300,32 @@ def already_migrated(source: Path, target: Path) -> bool:
         return False
 
 
+def _symlink_points_at_empty_target(source: Path, target: Path) -> bool:
+    """True when `source` is a symlink that resolves to the computed `target`
+    and `target` is an existing-but-empty directory (rf-rel-01).
+
+    This is the regression shape from rf-rel-04: a prior migration completed,
+    the symlink is correct, but the target was later emptied. `already_migrated`
+    returns False for it (no content), and the old code then crashed in
+    `validate_source` with "source is already a symlink". The orchestrator uses
+    this predicate to emit a distinct "already migrated (empty target)" skip
+    instead of crashing on a legitimately-migrated directory."""
+    if not source.is_symlink():
+        return False
+    link_target = Path(os.readlink(source))
+    if not link_target.is_absolute():
+        link_target = source.parent / link_target
+    try:
+        if link_target.resolve(strict=False) != target.resolve(strict=False):
+            return False
+        if not target.is_dir() or target.is_symlink():
+            return False
+        with os.scandir(target) as it:
+            return not any(True for _ in it)
+    except (OSError, RuntimeError):
+        return False
+
+
 def _target_has_content(target: Path) -> bool:
     """True iff `target` is an existing directory with at least one entry
     (rf-rel-04).
@@ -1338,6 +1364,13 @@ def execute(plan: Plan) -> str:
         if already_migrated(plan.source, plan.target):
             _advance(MigrationState.ALREADY_MIGRATED)
             return f"skipped: {plan.source} already symlinks to {plan.target}"
+        if _symlink_points_at_empty_target(plan.source, plan.target):
+            # rf-rel-01: the symlink is correct but the target was later
+            # emptied. validate_source would crash with "already a symlink";
+            # treat it as a legitimately-migrated dir and skip instead.
+            _advance(MigrationState.ALREADY_MIGRATED)
+            return (f"skipped: {plan.source} already symlinks to {plan.target} "
+                    f"(already migrated, empty target)")
         orphan = _orphaned_backup(plan.source)
         if orphan is not None:
             # rf-rel-01: a killed swap left the dir at the backup name with the
