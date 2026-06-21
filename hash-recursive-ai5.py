@@ -668,6 +668,11 @@ def index_inodes(files, alias_cap=None, overflow=None):
     """Group walk results by inode: returns (aliases[(dev,ino)] -> [paths],
     inode_size[(dev,ino)] -> size). Hardlinks share one inode entry.
 
+    hr-rel-01: when several aliases of one inode report DIFFERENT sizes
+    (a stat race during the walk), the FIRST observed size wins — the
+    map is stable regardless of walk ordering instead of silently
+    inheriting whichever alias the walk saw last.
+
     `files` may be any iterable of ``(path, size, dev, ino)`` tuples,
     including the streaming iterator from :func:`iter_threaded_walk`
     (hr-scal-05). The iterable is consumed exactly once.
@@ -689,7 +694,15 @@ def index_inodes(files, alias_cap=None, overflow=None):
             bucket.append(path)
         elif overflow is not None:
             overflow[key] = overflow.get(key, 0) + 1
-        inode_size[key] = size
+        # hr-rel-01: first-writer-wins via setdefault. Two walk entries
+        # for the same (dev, ino) should report the same size, but a stat
+        # race (file written between the two scandir hits) can disagree.
+        # Last-writer-wins silently let the inode inherit whichever size
+        # the walk happened to see last, which then drives the CAP / 2*CAP
+        # stage gating and the stage-2 sample offsets. Pinning the first
+        # observed size makes the choice deterministic regardless of walk
+        # ordering.
+        inode_size.setdefault(key, size)
     return aliases, inode_size
 
 

@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 import pytest
+from hypothesis import given, strategies as st
 
 _PATH = Path(__file__).resolve().parent.parent / "hash-recursive-ai5.py"
 _spec = importlib.util.spec_from_file_location("hash_recursive_ai5", _PATH)
@@ -65,6 +66,48 @@ def test_index_inodes_groups_hardlinks():
     assert sorted(aliases[(1, 100)]) == ["/a", "/b"]   # two aliases, one inode
     assert aliases[(1, 200)] == ["/c"]
     assert inode_size == {(1, 100): 10, (1, 200): 20}
+
+
+def test_index_inodes_size_first_writer_wins_on_stat_race():
+    # hr-rel-01: two aliases of one inode disagree on size (stat race).
+    # First observed size must win deterministically, not last.
+    files = [("/a", 10, 1, 100), ("/b", 999, 1, 100)]
+    _, inode_size = hr.index_inodes(files)
+    assert inode_size[(1, 100)] == 10   # first writer, not 999
+
+
+def test_index_inodes_size_first_writer_wins_reversed_order():
+    # Order-independence: flipping input order flips which size "would"
+    # be last, but setdefault still keeps the first one seen.
+    files = [("/b", 999, 1, 100), ("/a", 10, 1, 100)]
+    _, inode_size = hr.index_inodes(files)
+    assert inode_size[(1, 100)] == 999   # first seen in THIS ordering
+
+
+def test_index_inodes_consistent_sizes_unaffected():
+    files = [("/a", 10, 1, 100), ("/b", 10, 1, 100)]
+    _, inode_size = hr.index_inodes(files)
+    assert inode_size[(1, 100)] == 10
+
+
+@given(st.lists(
+    st.tuples(
+        st.integers(min_value=0, max_value=5),   # dev
+        st.integers(min_value=0, max_value=5),   # ino
+        st.integers(min_value=0, max_value=10**9),  # size
+    ),
+    min_size=1, max_size=50))
+def test_index_inodes_size_is_first_observed_property(entries):
+    # hr-rel-01 property: for every inode key, inode_size holds the size
+    # of the FIRST entry seen for that key in input order — regardless of
+    # later disagreeing sizes.
+    files = [(f"/p{i}", size, dev, ino)
+             for i, (dev, ino, size) in enumerate(entries)]
+    _, inode_size = hr.index_inodes(files)
+    first_seen: dict = {}
+    for _p, size, dev, ino in files:
+        first_seen.setdefault((dev, ino), size)
+    assert inode_size == first_seen
 
 
 def test_size_collision_candidates_filters_and_sorts():
