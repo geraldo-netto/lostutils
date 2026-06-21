@@ -8,6 +8,8 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import relocate_folder as rf
@@ -1314,6 +1316,39 @@ def test_copy_tree_progress_cb_called_per_file(tmp_path):
     assert last[0] == last[1]
 
 
+def test_copy_tree_progress_done_matches_src_total_with_symlink(tmp_path):
+    # rf-rel-05: a tree containing a symlink must still finish with
+    # done == total. _src_total_bytes counts regular files only and the
+    # tracking copy_function must account the same bytes (os.stat for the
+    # followed target, never the link's own lstat size).
+    src = tmp_path / "s"; src.mkdir()
+    (src / "real.txt").write_bytes(b"x" * 4096)
+    (src / "link").symlink_to("real.txt")
+    dst = tmp_path / "t"
+    expected_total = rf._src_total_bytes(src)
+    calls = []
+    rf.copy_tree(src, dst, progress_cb=lambda d, t: calls.append((d, t)))
+    last = calls[-1]
+    assert last[0] == last[1] == expected_total
+
+
+@settings(max_examples=30, deadline=None)
+@given(sizes=st.lists(st.integers(min_value=0, max_value=2000),
+                      min_size=1, max_size=6))
+def test_copy_tree_progress_done_equals_total_property(tmp_path_factory, sizes):
+    # rf-rel-05: for any set of regular files, the final progress `done`
+    # equals the `total` derived from _src_total_bytes — no drift.
+    src = tmp_path_factory.mktemp("s") / "tree"
+    src.mkdir()
+    for i, n in enumerate(sizes):
+        (src / f"f{i}.bin").write_bytes(b"a" * n)
+    dst = src.parent / "dst"
+    expected = rf._src_total_bytes(src)
+    calls = []
+    rf.copy_tree(src, dst, progress_cb=lambda d, t: calls.append((d, t)))
+    assert calls[-1][0] == calls[-1][1] == expected
+
+
 def test_copy_tree_progress_cb_swallows_user_exception(tmp_path):
     src = tmp_path / "s"; src.mkdir()
     (src / "f.txt").write_text("x")
@@ -2401,10 +2436,6 @@ def test_target_has_content_oserror(tmp_path, monkeypatch):
     target = tmp_path / "t"; target.mkdir(); (target / "x").write_text("d")
     monkeypatch.setattr(rf.os, "scandir", _raise_os)
     assert rf._target_has_content(target) is False
-
-
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
 
 @settings(max_examples=60, deadline=None)

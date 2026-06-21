@@ -537,7 +537,12 @@ def copy_tree(src: Path, dst: Path, *,
         def tracking_copy2(s, d, *, follow_symlinks=True):
             result = shutil.copy2(s, d, follow_symlinks=follow_symlinks)
             try:
-                done[0] += os.lstat(s).st_size
+                # rf-rel-05: account the bytes actually copied. When the copy
+                # followed a symlink (follow_symlinks=True) the relevant size
+                # is the target's (os.stat), not the link's (os.lstat) — using
+                # lstat would let `done` diverge from the progress total.
+                stat_fn = os.stat if follow_symlinks else os.lstat
+                done[0] += stat_fn(s).st_size
             except OSError:
                 pass
             try:
