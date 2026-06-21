@@ -356,7 +356,7 @@ class _PendingQueue:
         self.iids.pop(_queue_iid_for_url(url), None)
         d = self._domain_fn(it)
         bucket = self.by_domain.get(d)
-        if bucket is not None:  # pragma: no cover - withdrawn-root Tk early-exit
+        if bucket is not None:
             bucket.pop(url, None)
             if not bucket:
                 del self.by_domain[d]
@@ -1587,7 +1587,7 @@ class Dispatcher:
                 first_line_logged = True
                 continue
             crossed = self._milestones_crossed(line, milestones_logged)
-            if crossed:  # pragma: no cover - withdrawn-root Tk early-exit
+            if crossed:
                 milestones_logged.update(crossed)
                 self._log(prefix + line)
 
@@ -1617,7 +1617,7 @@ class Dispatcher:
                 pct = int(m.group(1))
             except ValueError:  # pragma: no cover - ValueError parsing nonint env
                 continue  # pragma: no cover - continue after parse failure
-            if pct > highest:  # pragma: no cover - withdrawn-root Tk early-exit
+            if pct > highest:
                 highest = pct
         return highest
 

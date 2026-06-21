@@ -235,6 +235,23 @@ def test_format_duration():
 def test_highest_pct_and_milestones():
     assert LinkQueueApp._highest_pct_in("dl 100.25% done") == 100
     assert LinkQueueApp._highest_pct_in("no percent") == -1
+    # lq-test-01: the pct>highest compare (formerly pragma'd) takes its True
+    # branch when a later percentage on the line is larger than an earlier one.
+    assert LinkQueueApp._highest_pct_in("10% then 75% then 30%") == 75
+
+
+def test_stream_summary_logs_first_line_and_milestones(headless_dispatcher):
+    # lq-test-01: exercise _stream_summary's milestone branch (formerly hidden
+    # behind a misapplied Tk pragma) via the headless dispatcher — no Tk.
+    logs = []
+    headless_dispatcher._log = logs.append
+    headless_dispatcher.config["log_verbosity"] = "summary"
+    lines = ["starting download", "  5% ...", " 30% ...", " 80% ...", "done"]
+    headless_dispatcher._stream_summary(iter(lines), "[t] ")
+    # First line always logged; then each crossed milestone line.
+    assert logs[0] == "[t] starting download"
+    joined = "\n".join(logs)
+    assert "30%" in joined and "80%" in joined
 
 
 def test_dispatch_wait_remaining():
