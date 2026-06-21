@@ -1365,6 +1365,41 @@ def test_on_close_full_shutdown(app):
     assert app.stop_event.is_set()
 
 
+def test_shutdown_saves_state_again_after_join(app):
+    # lq-conc-01: _shutdown must save state once more AFTER joining workers so
+    # a transition that lands between the pre-stop save and the join is
+    # persisted, not lost.
+    stop_bg_workers(app)
+    calls = {"n": 0}
+    real_save = app.dispatcher._save_state
+
+    def counting_save():
+        calls["n"] += 1
+        # Simulate a late worker transition arriving after the first save but
+        # before the threads have joined: mutate the queue between saves.
+        if calls["n"] == 1:
+            with app._dispatch_cv:
+                app.queue_items.append(q("http://late/1"))
+        real_save()
+
+    app.dispatcher._save_state = counting_save
+    app._shutdown(timeout=1.0)
+    assert calls["n"] >= 2                       # pre-stop AND post-join save
+    in_flight, pending = app.dispatcher._load_state_items()
+    assert "http://late/1" in [it.url for it in pending]
+
+
+def test_shutdown_post_join_save_persists_settled_queue(app):
+    # lq-conc-01: the post-join save is authoritative — the on-disk state after
+    # shutdown matches the final in-memory queue.
+    stop_bg_workers(app)
+    with app._dispatch_cv:
+        app.queue_items[:] = [q("http://keep/1"), q("http://keep/2")]
+    app._shutdown(timeout=1.0)
+    _, pending = app.dispatcher._load_state_items()
+    assert [it.url for it in pending] == ["http://keep/1", "http://keep/2"]
+
+
 def test_text_editing_menu_commands(app):
     menu = next(w for w in app.url_text.winfo_children()
                 if isinstance(w, tk.Menu))

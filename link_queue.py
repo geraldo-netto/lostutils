@@ -4173,6 +4173,13 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         self._join_threads(self._snapshot_worker_threads(), deadline)
         self._join_threads(self._snapshot_immediate_threads(), deadline)
 
+        # lq-conc-01: the pre-stop snapshot above can miss transitions a worker
+        # made between that save and observing stop_event (a claim/completion
+        # that mutated queue_items/current_items). Now that every worker has
+        # joined, nothing else can touch the queue, so re-save the settled
+        # state. This is the authoritative snapshot a restart resumes from.
+        self._safe_save_state_on_shutdown()
+
         # Stop the log writer: it drains any queued lines and closes the file
         # (obs-01/rel-05/cx-06). LogSink.stop() joins, so the file is flushed
         # before we return.
