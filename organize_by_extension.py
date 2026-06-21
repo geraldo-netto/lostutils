@@ -1382,7 +1382,10 @@ def resolve_root(root: str | Path | None) -> Path:
     if not isinstance(root, (str, Path)):
         raise TypeError('root must be a path or string')
 
-    resolved = Path(root) # Path.resolve() canonicalizes the path, resolving '..' components.
+    # No canonicalization here: the is_dir() check and FileNotFoundError
+    # message run against the raw path (oze-rel-05). Canonicalization with
+    # `.resolve()` happens below once existence is confirmed.
+    resolved = Path(root)
 
     if not resolved.is_dir():
         raise FileNotFoundError(f'Error: root folder does not exist: {resolved}')
