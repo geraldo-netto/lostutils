@@ -302,17 +302,30 @@ class _WalkIter:
         coord_thread = threading.Thread(target=coordinator, daemon=True)
         coord_thread.start()
 
-        while True:
-            item = state.out_q.get()
-            if item is SENTINEL_OUT:
-                break
-            yield item
-
-        # Ensure per_worker_stats are stable (all workers have exited)
-        # before merging into the visible `self.stats`.
-        coord_thread.join()
-        for k in self.stats:
-            self.stats[k] = sum(w[k] for w in per_worker_stats)
+        stream_ended = False
+        try:
+            while True:
+                item = state.out_q.get()
+                if item is SENTINEL_OUT:
+                    stream_ended = True
+                    break
+                yield item
+        finally:
+            # hr-rel-02: a consumer (e.g. `index_inodes` driving the hash
+            # pipeline) that abandons this generator mid-walk — because
+            # hashing raised — triggers GeneratorExit here. Without this
+            # finally the coordinator was never joined, the daemon walk
+            # workers kept scandir-ing the rest of the tree, and
+            # `self.stats` stayed zeroed so the caller's except path read
+            # stale counters. Drive the walk to completion (workers
+            # self-terminate once `pending` drains, posting SENTINEL_OUT),
+            # join the coordinator, then finalise stats — always.
+            if not stream_ended:
+                while state.out_q.get() is not SENTINEL_OUT:
+                    pass
+            coord_thread.join()
+            for k in self.stats:
+                self.stats[k] = sum(w[k] for w in per_worker_stats)
 
 
 def _emit_hash_error_line(path, exc) -> None:
@@ -687,7 +700,28 @@ def index_inodes(files, alias_cap=None, overflow=None):
     care about the worst-case alias count."""
     aliases = defaultdict(list)
     inode_size = {}
-    for path, size, dev, ino in files:
+    # hr-rel-02: consume via an explicit iterator and close it in the
+    # finally. If a later pipeline stage raises, the caller still holds a
+    # reference to `files`, so the generator would NOT be GC-collected
+    # promptly — its `__iter__` finally (which joins the walk coordinator
+    # and finalises `.stats`) would never run, leaving daemon walk threads
+    # scandir-ing and `.stats` zeroed. Closing here makes that
+    # finalisation deterministic the moment ingest unwinds.
+    it = iter(files)
+    try:
+        _ingest(it, aliases, inode_size, alias_cap, overflow)
+    finally:
+        close = getattr(it, "close", None)
+        if close is not None:
+            close()
+    return aliases, inode_size
+
+
+def _ingest(it, aliases, inode_size, alias_cap, overflow) -> None:
+    """Drain walk entries into `aliases`/`inode_size`/`overflow`
+    (hr-rel-01 / hr-rel-02). Extracted so :func:`index_inodes` can wrap
+    the consume in a try/finally that closes the source iterator."""
+    for path, size, dev, ino in it:
         key = (dev, ino)
         bucket = aliases[key]
         if alias_cap is None or len(bucket) < alias_cap:
@@ -703,7 +737,6 @@ def index_inodes(files, alias_cap=None, overflow=None):
         # observed size makes the choice deterministic regardless of walk
         # ordering.
         inode_size.setdefault(key, size)
-    return aliases, inode_size
 
 
 def size_collision_candidates(inode_size):

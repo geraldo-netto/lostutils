@@ -1439,6 +1439,80 @@ def test_walk_iter_survives_runtime_error_in_scandir(tmp_path, monkeypatch):
     assert done.is_set(), "walk hung — hr-rel-18 BaseException catch broken"
 
 
+# --- hr-rel-02: walk is finalized even when the pipeline raises -----------
+
+def test_find_duplicate_groups_finalizes_walk_stats_on_hash_error(tmp_path, monkeypatch):
+    # hr-rel-02: hashing raises AFTER the walk is consumed; walk_iter.stats
+    # must still be finalized (not stale zeros) and threads joined.
+    for i in range(6):
+        (tmp_path / f"f{i}.bin").write_bytes(b"x")
+    walk = hr.iter_threaded_walk(tmp_path, jobs=2)
+
+    def boom(*a, **k):
+        raise RuntimeError("hash blew up")
+
+    monkeypatch.setattr(hr, "_stage1_hash", boom)
+    # Files are all same size+content → they become size-collision
+    # candidates → stage1 runs → boom.
+    with pytest.raises(RuntimeError, match="hash blew up"):
+        hr.find_duplicate_groups(walk, jobs=2)
+    # Walk fully drained before hashing → stats are real, not zeroed.
+    assert walk.stats["files"] == 6
+
+
+def test_walk_iter_finalizes_stats_when_consumer_abandons(tmp_path):
+    # hr-rel-02: a consumer that stops iterating early (GeneratorExit on
+    # close) still drives the walk to completion and finalizes stats via
+    # the generator's finally block.
+    for i in range(8):
+        (tmp_path / f"f{i}.bin").write_bytes(b"x")
+    walk = hr.iter_threaded_walk(tmp_path, jobs=2)
+    gen = iter(walk)
+    first = next(gen)          # consume just one entry
+    assert first is not None
+    gen.close()                # abandon mid-walk → finally drains + joins
+    # stats finalized despite early abandonment.
+    assert walk.stats["files"] == 8
+
+
+def test_index_inodes_closes_source_iterator_on_error():
+    # hr-rel-02: index_inodes closes its source iterator if ingest raises,
+    # so a generator-backed walk gets its finally (join + stats) run.
+    closed = {"v": False}
+
+    def gen():
+        try:
+            yield ("/a", 10, 1, 100)
+            yield ("not-a-4-tuple",)   # unpack raises ValueError
+        finally:
+            closed["v"] = True
+
+    with pytest.raises(ValueError):
+        hr.index_inodes(gen())
+    assert closed["v"] is True
+
+
+def test_index_inodes_closes_source_iterator_on_success():
+    closed = {"v": False}
+
+    def gen():
+        try:
+            yield ("/a", 10, 1, 100)
+        finally:
+            closed["v"] = True
+
+    aliases, inode_size = hr.index_inodes(gen())
+    assert aliases[(1, 100)] == ["/a"]
+    assert closed["v"] is True
+
+
+def test_index_inodes_plain_list_has_no_close():
+    # A list iterator has no .close(); index_inodes must not blow up.
+    files = [("/a", 10, 1, 100), ("/b", 10, 1, 100)]
+    aliases, _ = hr.index_inodes(files)
+    assert len(aliases[(1, 100)]) == 2
+
+
 # --- hr-scal-06: index_inodes alias_cap at ingest -------------------------
 
 def test_index_inodes_caps_aliases_with_overflow_count():
