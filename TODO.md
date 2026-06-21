@@ -53,7 +53,6 @@ rf-conc-01 | open | low | relocate_folder.py:899 — verify_copy with checksum=F
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-cmplx-01 | open | low | relocate_folder.py:481 — _format_open_file_warning is annotated holders: list[tuple[int, str, list[Path]]] but the caller passes the now-immutable tuple-of-tuples snapshot.holders; the stale annotation contradicts the immutability invariant. Update to the tuple shape (or Sequence). | SOLID-ISP
 rf-cmplx-02 | open | low | relocate_folder.py:986 — _capture_first and _collect_chown_error are near-duplicate "drain one future's exception into a list" helpers; _capture_first is dead (kept for tests). Drop it or have _collect_chown_error delegate. | SOLID-DRY
 
 ## code duplication

@@ -373,6 +373,21 @@ def test_format_open_file_warning_truncates():
     assert "and 5 more" in msg
 
 
+def test_format_open_file_warning_accepts_immutable_snapshot_shape():
+    # rf-cmplx-01: callers pass the immutable tuple-of-tuples snapshot.holders;
+    # the annotation/contract must accept that exact shape.
+    holders = tuple(
+        (i, f"app{i}", (Path(f"/x/{i}"),)) for i in range(3)
+    )
+    snap = rf.OpenFileSnapshot(holders=holders, stale_pids=0)
+    msg = rf._format_open_file_warning(snap.holders, Path("/src"))
+    assert "3 process(es)" in msg
+    raw = rf._format_open_file_warning.__annotations__["holders"]
+    # The annotation no longer claims a mutable `list[...]` shape.
+    assert "list" not in raw
+    assert "Sequence" in raw
+
+
 def test_main_success_and_failure(tmp_path, monkeypatch):
     src = tmp_path / "cache"; _make_tree(src)
     dst_root = tmp_path / "dest"

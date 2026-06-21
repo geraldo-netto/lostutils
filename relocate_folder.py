@@ -45,7 +45,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, NamedTuple
+from typing import Callable, Iterable, Iterator, NamedTuple, Sequence
 
 LOG = logging.getLogger("relocate")
 
@@ -478,7 +478,7 @@ def _check_no_open_files(source: Path) -> None:
 
 
 def _format_open_file_warning(
-    holders: list[tuple[int, str, list[Path]]], source: Path,
+    holders: "Sequence[tuple[int, str, Sequence[Path]]]", source: Path,
 ) -> str:
     lines = [
         f"refusing to migrate: {len(holders)} process(es) have files "
