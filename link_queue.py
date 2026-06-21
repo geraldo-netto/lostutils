@@ -1517,6 +1517,7 @@ class Dispatcher:
                 f" {template}  url={url}"
             )
             return None
+        self._warn_shell_template_trusted(template)
         resolved = self._resolve_command(template, url, protocol)
         if item.extra:
             resolved += " " + self._extra_shell(item.extra)  # pragma: no cover - extra-shell concat branch with non-falsy extra
@@ -1525,6 +1526,21 @@ class Dispatcher:
             resolved, shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, cwd=cwd,
+        )
+
+    def _warn_shell_template_trusted(self, template: str) -> None:
+        """lq-sec-02: a shell=True template that passes the bare-{url} refusal
+        (e.g. one using {url_quoted}) is still handed verbatim to /bin/sh -c, so
+        the template body itself is trusted input — anyone who can edit the
+        config can run arbitrary commands. Surface that once per distinct
+        template so an operator notices an unexpected shell protocol without the
+        log being spammed on every item that uses it."""
+        if template in self._warned_shell_url_templates:
+            return
+        self._warned_shell_url_templates.add(template)
+        self._log(
+            f"[warn] shell=True template is trusted input (anyone who edits "
+            f"the config can run commands): {template}"
         )
 
     def _spawn_exec_proc(self, item: QueueItem, label: str, cwd, cwd_note: str):

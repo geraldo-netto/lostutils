@@ -828,6 +828,30 @@ def test_run_item_shell_rejects_bare_url(app):
     assert "refusing shell=True" in log
 
 
+def test_shell_template_trusted_warns_once(headless_dispatcher):
+    # lq-sec-02: a shell=True template (even the safe {url_quoted} form) is run
+    # through /bin/sh -c, so its body is trusted input. Warn once per distinct
+    # template, not on every item.
+    logs = []
+    headless_dispatcher._log = logs.append
+    headless_dispatcher._warn_shell_template_trusted("wget {url_quoted}")
+    headless_dispatcher._warn_shell_template_trusted("wget {url_quoted}")
+    headless_dispatcher._warn_shell_template_trusted("curl {url_quoted}")
+    warns = [m for m in logs if "trusted input" in m]
+    assert len(warns) == 2
+    assert "wget {url_quoted}" in warns[0]
+
+
+def test_run_item_shell_ok_emits_trust_warning_once(app):
+    # lq-sec-02: surfaced via the real run path too, once per template.
+    item = q("http://a/1", template="echo {url_quoted}", shell=True)
+    assert app._run_item(item, "t") == 0
+    assert app._run_item(item, "t") == 0
+    pump(app, 0.2)
+    log = app.log_text.get("1.0", "end-1c")
+    assert log.count("trusted input") == 1
+
+
 def test_run_item_empty_command(app):
     assert app._run_item(q("http://a/1", template="   "), "t") == -1
 
