@@ -824,6 +824,41 @@ def test_safe_propagates_unexpected_exception():
         rf._safe("noop", lambda: (_ for _ in ()).throw(ValueError("oops")))
 
 
+# --- rf-test-01 / rf-sec-02: atomic_swap chowns the replacement symlink ------
+
+def test_atomic_swap_lchowns_symlink_to_source_owner(tmp_path, monkeypatch):
+    # rf-test-01: the replacement symlink is lchown'd to the SOURCE's uid/gid
+    # captured before the source is renamed aside. Spy os.chown so the test
+    # works without root.
+    source = tmp_path / "src"; source.mkdir()
+    (source / "payload").write_text("x")
+    target = tmp_path / "dest" / "src"
+    target.parent.mkdir(parents=True)
+    src_st = os.lstat(source)
+    calls = []
+    monkeypatch.setattr(
+        rf.os, "chown",
+        lambda path, uid, gid, *, follow_symlinks=True:
+            calls.append((Path(path), uid, gid, follow_symlinks)),
+    )
+    rf.atomic_swap(source, target)
+    assert source.is_symlink()
+    assert (source, src_st.st_uid, src_st.st_gid, False) in calls
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="needs root to chown to another uid")
+def test_atomic_swap_real_lchown_as_root(tmp_path):
+    # rf-test-01: real end-to-end ownership check when running as root.
+    source = tmp_path / "src"; source.mkdir()
+    (source / "payload").write_text("x")
+    os.chown(source, 1, 1, follow_symlinks=False)
+    target = tmp_path / "dest" / "src"
+    target.parent.mkdir(parents=True)
+    rf.atomic_swap(source, target)
+    st = os.lstat(source)
+    assert (st.st_uid, st.st_gid) == (1, 1)
+
+
 # --- rf-sec-01: _create_symlink uses staging dir ---------------------------
 
 def test_create_symlink_atomic_with_staging(tmp_path):
