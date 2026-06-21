@@ -630,6 +630,27 @@ class ReliabilityFixesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_root(long_path)
 
+    def test_resolve_root_rejects_short_input_that_resolves_long(self):
+        # oze-rel-02: a short input that expands past ROOT_MAX_LENGTH via
+        # symlinks / `..` must be rejected at the RESOLVED path, not slip
+        # through because str(root) was short pre-resolution.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            long_target = Path("/" + "b" * (ROOT_MAX_LENGTH + 5))
+
+            def fake_resolve(self, strict=False):
+                return long_target
+
+            with patch.object(_oze.Path, "resolve", fake_resolve):
+                with self.assertRaisesRegex(ValueError, "resolved root path"):
+                    resolve_root(root)
+
+    def test_resolve_root_accepts_short_resolved_path(self):
+        # oze-rel-02 happy path: a normal short path still resolves cleanly.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            self.assertEqual(resolve_root(root), root.resolve())
+
 
 class PerfScanTests(unittest.TestCase):
     """oze-perf-02 / oze-perf-03 / oze-scal-02."""

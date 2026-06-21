@@ -1387,7 +1387,15 @@ def resolve_root(root: str | Path | None) -> Path:
     if not resolved.is_dir():
         raise FileNotFoundError(f'Error: root folder does not exist: {resolved}')
 
-    return resolved.resolve()
+    # oze-rel-02: re-apply the length guard to the RESOLVED path. A short
+    # input can expand past ROOT_MAX_LENGTH via symlinks / `..`, bypassing
+    # the pre-resolution check above.
+    canonical = resolved.resolve()
+    if len(str(canonical)) > ROOT_MAX_LENGTH:
+        raise ValueError(
+            f'resolved root path must be at most {ROOT_MAX_LENGTH} characters'
+        )
+    return canonical
 
 
 MoveResult = tuple[Path, Path, Exception | None]
