@@ -705,6 +705,71 @@ def test_find_open_file_holders_doc_mentions_snapshot_limitation():
     assert "SNAPSHOT" in rf.find_open_file_holders.__doc__
 
 
+def test_copy_tree_skips_space_check_when_disabled(tmp_path, monkeypatch):
+    # rf-perf-02: check_space=False skips both _src_total_bytes and
+    # _check_disk_space (no walk for the precheck).
+    src = tmp_path / "src"; src.mkdir()
+    (src / "a.bin").write_bytes(b"x" * 4096)
+    called = {"space": 0, "total": 0}
+    monkeypatch.setattr(rf, "_check_disk_space",
+                        lambda *a, **k: called.__setitem__("space", called["space"] + 1))
+    real_total = rf._src_total_bytes
+    monkeypatch.setattr(rf, "_src_total_bytes",
+                        lambda s: (called.__setitem__("total", called["total"] + 1), real_total(s))[1])
+    rf.copy_tree(src, tmp_path / "dst", check_space=False)
+    assert called["space"] == 0
+    assert called["total"] == 0          # no precheck walk
+    assert (tmp_path / "dst" / "a.bin").exists()
+
+
+def test_copy_tree_no_space_check_ignores_low_space(tmp_path, monkeypatch):
+    # rf-perf-02: even with a tiny reported free space, check_space=False
+    # proceeds (the precheck that would have raised is skipped).
+    src = tmp_path / "src"; src.mkdir()
+    (src / "a.bin").write_bytes(b"x" * 4096)
+
+    class _DU:
+        free = 1
+
+    monkeypatch.setattr(rf.shutil, "disk_usage", lambda p: _DU())
+    rf.copy_tree(src, tmp_path / "dst", check_space=False)   # no raise
+    assert (tmp_path / "dst" / "a.bin").exists()
+
+
+def test_copy_tree_space_check_still_needs_total_for_progress(tmp_path, monkeypatch):
+    # rf-perf-02: when check_space=False but a progress_cb is supplied, the
+    # byte total is still computed so the callback gets a real total.
+    src = tmp_path / "src"; src.mkdir()
+    (src / "a.bin").write_bytes(b"x" * 100)
+    calls = []
+    rf.copy_tree(src, tmp_path / "dst", check_space=False,
+                 progress_cb=lambda d, t: calls.append((d, t)))
+    assert calls and calls[-1][1] == 100   # total still reflects real bytes
+
+
+def test_parse_args_no_space_check_flag():
+    plan = rf.parse_args(["/x", "/y"])
+    assert plan.check_space is True
+    plan2 = rf.parse_args(["/x", "/y", "--no-space-check"])
+    assert plan2.check_space is False
+
+
+def test_execute_honours_no_space_check(tmp_path, monkeypatch):
+    # rf-perf-02: plan.check_space=False flows into copy_tree via execute.
+    src = tmp_path / "src"; _make_tree(src)
+    seen = {}
+    real_copy = rf.copy_tree
+
+    def spy_copy(s, d, **kw):
+        seen.update(kw)
+        return real_copy(s, d, **kw)
+
+    monkeypatch.setattr(rf, "copy_tree", spy_copy)
+    plan = rf.Plan(source=src, target=tmp_path / "dst" / "src", check_space=False)
+    rf.execute(plan)
+    assert seen.get("check_space") is False
+
+
 def test_copy_tree_disk_space_precheck_blocks(tmp_path, monkeypatch):
     src = tmp_path / "src"; src.mkdir()
     (src / "a.bin").write_bytes(b"x" * 4096)

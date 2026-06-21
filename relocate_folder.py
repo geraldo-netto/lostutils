@@ -153,6 +153,7 @@ class Plan:
     verify_ownership: bool = False  # rf-rel-04: also compare mode/uid/gid in verify_copy
     strict_cross_device: bool = False  # rf-sec-03: refuse same-fs migrations (default warn)
     jobs: int | None = None  # rf-scal-02: pool width override; None = _default_worker_count()
+    check_space: bool = True  # rf-perf-02: pre-copy disk-space walk; False skips it
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Plan":
@@ -179,6 +180,7 @@ class Plan:
             verify_ownership=getattr(args, "verify_ownership", False),
             strict_cross_device=getattr(args, "strict_cross_device", False),
             jobs=getattr(args, "jobs", None),
+            check_space=not getattr(args, "no_space_check", False),
         )
 
 
@@ -529,6 +531,7 @@ def copy_tree(src: Path, dst: Path, *,
               mode_cache: dict[Path, int] | None = None,
               jobs: int | None = None,
               progress_cb: "Callable[[int, int], None] | None" = None,
+              check_space: bool = True,
               ) -> list[Path]:
     """Copy src -> dst recursively, skipping non-regular files. Returns
     skipped paths.
@@ -542,17 +545,25 @@ def copy_tree(src: Path, dst: Path, *,
     each completed file copy when supplied. Total bytes are computed up
     front via `_src_total_bytes`. The cb is wrapped in a copy_function
     shim around `shutil.copy2` so per-file accounting needs no walk of
-    its own."""
+    its own.
+
+    rf-perf-02: `check_space=False` skips the pre-copy disk-space walk
+    (`_src_total_bytes` + `_check_disk_space`). On a multi-TB tree that
+    full lstat walk is itself expensive and merely duplicates the walk
+    `shutil.copytree` does anyway; an ENOSPC mid-copy still triggers the
+    same cleanup. The walk is also skipped entirely when neither the
+    precheck nor a `progress_cb` needs the byte total."""
     if _path_taken(dst):
         raise FileExistsError(f"target already exists: {dst}")
-    # rf-rel-14: compute total bytes ONCE and share between the precheck
-    # and (when present) the progress callback — previously the tree was
-    # walked twice when `progress_cb` was set, and the second walk could
-    # see a different size from the first if the tree grew between
-    # calls. Single walk also tightens the precheck/copy window so a
-    # mid-precheck growth has less time to invalidate the result.
-    src_total = _src_total_bytes(src)
-    _check_disk_space(src, dst, total_bytes=src_total)
+    # rf-rel-14 / rf-perf-02: compute total bytes ONCE and share between the
+    # precheck and (when present) the progress callback. The walk runs only
+    # when something needs the total: the disk-space precheck (unless
+    # disabled) or a progress callback. Otherwise it's skipped outright.
+    src_total = 0
+    if check_space or progress_cb is not None:
+        src_total = _src_total_bytes(src)
+    if check_space:
+        _check_disk_space(src, dst, total_bytes=src_total)
     skipped: list[Path] = []
     cache = mode_cache if mode_cache is not None else {}
     copy_function = shutil.copy2
@@ -1554,7 +1565,8 @@ def _device_mount_point(path: Path) -> "str | None":
 
 def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | None = None) -> None:
     mode_cache: dict[Path, int] = {}
-    skipped = copy_tree(plan.source, plan.target, mode_cache=mode_cache, jobs=plan.jobs)
+    skipped = copy_tree(plan.source, plan.target, mode_cache=mode_cache,
+                        jobs=plan.jobs, check_space=plan.check_space)
     if on_state is not None:
         on_state(MigrationState.COPIED)  # rf-ddd-02: data on disk, pre-verify
     try:
@@ -1695,6 +1707,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--jobs", "-j", type=int, default=None,
                    help="rf-scal-02: pool width for ownership + verify "
                         "(default: min(32, cpu_count+4))")
+    p.add_argument("--no-space-check", action="store_true",
+                   help="rf-perf-02: skip the pre-copy disk-space walk (saves "
+                        "a full tree lstat on very large trees; an ENOSPC "
+                        "mid-copy is still handled with cleanup)")
     return p
 
 

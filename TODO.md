@@ -28,7 +28,6 @@ id | status | effort | description | notes
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
 lq-perf-02 | open | low | link_queue.py:2099 — self._fh_size += len(text.encode("utf-8")) re-encodes every flushed batch just to count rotation bytes; on high-volume verbose logging this doubles encoding work. Track size via f.tell() after write. | log sink
 lq-perf-01 | open | low | link_queue.py:3378 — _on_remove_selected and _selected_queue_items each rebuild a full {iid: item} map over the ENTIRE pending queue under the lock on every Delete/right-click regardless of selection size. Cache the iid→url map from the last refresh, or index lazily. | hot path under lock
-rf-perf-02 | open | low | relocate_folder.py:506 — copy_tree always walks the full tree via _src_total_bytes (disk-space precheck) before shutil.copytree walks again. Allow disabling/sampling the precheck for very large trees. |
 
 ## scalability
 
