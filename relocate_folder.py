@@ -1421,6 +1421,32 @@ def execute(plan: Plan) -> str:
         # made post-mortem log scans hard.
         _log().info("migration state=%s source=%s target=%s",
                     state.value, plan.source, plan.target)
+        if state is MigrationState.FAILED:
+            _log_failed_hint(plan)
+
+
+def _log_failed_hint(plan: Plan) -> None:
+    """On a FAILED migration, point the operator at the recovery surface
+    (rf-obs-01).
+
+    The terminal `state=failed` line says *that* it failed but not whether the
+    source is intact or was renamed to `<name>.relocate-backup`. If the swap
+    died after renaming the source aside, an orphaned backup exists — surface
+    its path and the `--recover` hint so the operator can act without grepping
+    the filesystem."""
+    backup = plan.source.with_name(plan.source.name + BACKUP_SUFFIX)
+    if _orphaned_backup(plan.source) is not None:
+        _log().warning(
+            "failed after the source was renamed aside: the original is at %s "
+            "and %s is missing — re-run with --recover to restore it",
+            backup, plan.source,
+        )
+    else:
+        _log().info(
+            "failed with source %s left intact (no orphaned backup at %s); "
+            "any partial target was cleaned up",
+            plan.source, backup,
+        )
 
 
 def _nearest_existing_dir(start: Path) -> Path | None:

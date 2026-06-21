@@ -1127,6 +1127,38 @@ def test_execute_logs_failure_state(tmp_path, caplog):
     assert any("state=failed" in r.message for r in caplog.records)
 
 
+def test_execute_failed_logs_source_intact_hint(tmp_path, caplog):
+    # rf-obs-01: a FAILED run with the source still present logs an
+    # "source left intact" hint mentioning the (absent) backup path.
+    plan = rf.Plan(source=tmp_path / "nope", target=tmp_path / "dst" / "nope")
+    import logging
+    with caplog.at_level(logging.INFO, logger="relocate"):
+        with pytest.raises(FileNotFoundError):
+            rf.execute(plan)
+    assert any("left intact" in r.message for r in caplog.records)
+
+
+def test_execute_failed_logs_recover_hint_when_orphan(tmp_path, caplog):
+    # rf-obs-01: a FAILED run where the source was renamed aside (orphaned
+    # backup present) logs the backup path and the --recover hint.
+    source, backup = _make_orphan(tmp_path)
+    plan = rf.Plan(source=source, target=tmp_path / "dest" / "mydir")
+    import logging
+    with caplog.at_level(logging.WARNING, logger="relocate"):
+        with pytest.raises(FileNotFoundError):
+            rf.execute(plan)
+    assert any("renamed aside" in r.message and "--recover" in r.message
+               and str(backup) in r.message for r in caplog.records)
+
+
+def test_log_failed_hint_intact_branch(tmp_path, caplog):
+    plan = rf.Plan(source=tmp_path / "x", target=tmp_path / "y")
+    import logging
+    with caplog.at_level(logging.INFO, logger="relocate"):
+        rf._log_failed_hint(plan)
+    assert any("left intact" in r.message for r in caplog.records)
+
+
 def test_execute_logs_dry_run_state(tmp_path, caplog):
     src = tmp_path / "src"; _make_tree(src)
     plan = rf.Plan(source=src, target=tmp_path / "d" / "src", dry_run=True)
