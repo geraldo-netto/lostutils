@@ -917,6 +917,24 @@ def test_create_symlink_lchowns_link_to_owner(tmp_path, monkeypatch):
     real_chown  # silence linters; not used
 
 
+def test_create_symlink_chowns_staging_dir_to_owner(tmp_path, monkeypatch):
+    # rf-sec-03: the mkdtemp'd staging dir is chowned to the source owner so a
+    # root-run leaves no root-owned .relocate-stage-* in the user's tree.
+    link = tmp_path / "the-link"
+    target = tmp_path / "target"; target.mkdir()
+    chowned = []
+    monkeypatch.setattr(
+        rf.os, "chown",
+        lambda path, uid, gid, *, follow_symlinks=True:
+            chowned.append((Path(path), uid, gid)),
+    )
+    rf._create_symlink(link, target, owner=(4242, 4243))
+    staging_chowns = [c for c in chowned
+                      if c[0].name.startswith(rf.STAGING_PREFIX)]
+    assert staging_chowns == [(staging_chowns[0][0], 4242, 4243)]
+    assert link.is_symlink()
+
+
 def test_create_symlink_no_owner_skips_chown(tmp_path, monkeypatch):
     link = tmp_path / "the-link"
     target = tmp_path / "target"; target.mkdir()

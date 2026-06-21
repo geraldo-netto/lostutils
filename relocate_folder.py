@@ -1398,6 +1398,12 @@ def _create_symlink(link: Path, target: Path, *,
             f"link parent not writable: {parent} "
             f"(needs +w +x for the relocate stage-dir)"
         ) from exc
+    if owner is not None:
+        # rf-sec-03: as root the mkdtemp'd (mode 0700) staging dir is otherwise
+        # root-owned — it momentarily blocks the real user and, on a cleanup
+        # failure, leaks a root-owned .relocate-stage-* in the user's tree.
+        # chown it to the source owner so any leftover belongs to the user.
+        _chown_to_owner(staging, owner)
     try:
         tmp = staging / link.name
         os.symlink(target, tmp)
@@ -1418,19 +1424,21 @@ def _create_symlink(link: Path, target: Path, *,
             # rf-sec-02: lchown the symlink itself (not its target) to the
             # captured source owner so a root-run migration doesn't leave a
             # root-owned symlink in a user's tree.
-            _chown_symlink_to_owner(link, owner)
+            _chown_to_owner(link, owner)
     finally:
         _cleanup_staging(staging)
 
 
-def _chown_symlink_to_owner(link: Path, owner: tuple[int, int]) -> None:
-    """lchown `link` to `owner` (rf-sec-02). A non-root caller can't change
-    ownership; that EPERM is benign (the symlink already belongs to the caller),
-    so it's logged and absorbed rather than aborting the completed swap."""
+def _chown_to_owner(path: Path, owner: tuple[int, int]) -> None:
+    """lchown `path` to `owner` (rf-sec-02 / rf-sec-03). Used for the
+    replacement symlink and the staging dir. A non-root caller can't change
+    ownership; that EPERM is benign (the entry already belongs to the caller),
+    so it's logged and absorbed rather than aborting the completed swap.
+    `follow_symlinks=False` so a symlink is chowned itself, not its target."""
     uid, gid = owner
     _swallow_or_warn(
-        f"lchown symlink {link} to uid={uid} gid={gid}",
-        os.chown, link, uid, gid, follow_symlinks=False,
+        f"lchown {path} to uid={uid} gid={gid}",
+        os.chown, path, uid, gid, follow_symlinks=False,
     )
 
 
