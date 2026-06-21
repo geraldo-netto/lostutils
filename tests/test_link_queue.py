@@ -270,6 +270,45 @@ def test_legacy_json_migration(tmp_path, monkeypatch):
     assert os.path.exists(cfg_file)                    # migration wrote the YAML
 
 
+def test_config_file_written_0600(tmp_path, monkeypatch):
+    # lq-sec-01: the config holds command templates + log_file; it must not be
+    # world/group-readable. ConfigStore.save() (and first-run write) go through
+    # _write_config_file, which atomically renames a 0o600 tempfile into place.
+    import stat
+    monkeypatch.setattr(link_queue, "CONFIG_FILE", str(tmp_path / "cfg.yaml"))
+    monkeypatch.setattr(link_queue, "LEGACY_CONFIG_FILE", str(tmp_path / "cfg.json"))
+    cfg_file = link_queue.CONFIG_FILE
+    store = link_queue.ConfigStore(cfg_file, link_queue.LEGACY_CONFIG_FILE)
+    assert os.path.exists(cfg_file)
+    mode = stat.S_IMODE(os.stat(cfg_file).st_mode)
+    assert mode == 0o600, oct(mode)
+    # A subsequent save() keeps the tight perms and leaves no .tmp residue.
+    store["sleep_between_items"] = 11
+    store.save()
+    assert stat.S_IMODE(os.stat(cfg_file).st_mode) == 0o600
+    leftovers = [n for n in os.listdir(tmp_path) if n.endswith(".tmp")]
+    assert leftovers == []
+    with open(cfg_file) as f:
+        assert link_queue._yaml_load(f)["sleep_between_items"] == 11
+
+
+def test_config_write_cleans_tmp_on_dump_failure(tmp_path, monkeypatch):
+    # lq-sec-01: a YAML-dump failure must not leave an orphaned tempfile.
+    monkeypatch.setattr(link_queue, "CONFIG_FILE", str(tmp_path / "cfg.yaml"))
+    monkeypatch.setattr(link_queue, "LEGACY_CONFIG_FILE", str(tmp_path / "cfg.json"))
+    store = link_queue.ConfigStore(link_queue.CONFIG_FILE,
+                                   link_queue.LEGACY_CONFIG_FILE)
+
+    def boom(*a, **k):
+        raise RuntimeError("dump exploded")
+
+    monkeypatch.setattr(link_queue, "_yaml_dump", boom)
+    with pytest.raises(RuntimeError):
+        store._write_config_file(dict(store))
+    leftovers = [n for n in os.listdir(tmp_path) if n.endswith(".tmp")]
+    assert leftovers == []
+
+
 def test_merge_and_normalize_config():
     cfg = {"protocols": {"http": {"mode": "queue"}}}
     LinkQueueApp._merge_user_config(cfg, {"x": 1, "protocols": {"ftp": {"command": "c"}}})

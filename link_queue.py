@@ -538,13 +538,34 @@ class ConfigStore(dict):
                   file=sys.stderr)
 
     def _write_config_file(self, cfg: dict) -> None:
-        with open(self.config_file, "w", encoding="utf-8") as f:
-            _yaml_dump(
-                cfg, f,
-                default_flow_style=False,
-                sort_keys=False,
-                allow_unicode=True,
-            )
+        # lq-sec-01: the config holds command templates and the log_file path;
+        # writing it with the default umask (often 0o644) leaks those to other
+        # users on the host. Write a 0o600 tempfile in the same directory and
+        # atomically rename it into place so a reader never sees a partial or
+        # world-readable file.
+        d = os.path.dirname(self.config_file) or "."
+        base = os.path.basename(self.config_file)
+        fd, tmp = tempfile.mkstemp(prefix=base + ".", suffix=".tmp", dir=d)
+        try:
+            os.chmod(tmp, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                _yaml_dump(
+                    cfg, f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                    allow_unicode=True,
+                )
+            os.replace(tmp, self.config_file)
+            try:
+                os.chmod(self.config_file, 0o600)
+            except OSError:
+                pass
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 # ---------------------------------------------------------------------------
