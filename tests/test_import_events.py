@@ -275,6 +275,39 @@ def test_process_folder_handles_images_with_various_formats(tmp_path):
     assert all(e["type"] == "Image/Vision" for e in events)
 
 
+def test_process_folder_skips_symlinked_files(tmp_path):
+    real = tmp_path / "real.txt"
+    real.write_text("Launch party", encoding="utf-8")
+    link = tmp_path / "link.txt"
+    link.symlink_to(real)
+    seen = []
+
+    class TrackingLlm(FakeLlm):
+        def create_chat_completion(self, messages):
+            seen.append(messages)
+            return super().create_chat_completion(messages)
+
+    events = import_events.process_folder(str(tmp_path), llm_client=TrackingLlm())
+
+    # Only the real file is processed; the symlink is skipped, not read twice.
+    assert len(seen) == 1
+    assert [e["source"] for e in events] == ["real.txt"]
+
+
+def test_process_folder_skips_symlink_to_outside_file(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("sensitive", encoding="utf-8")
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    (scan / "evil.txt").symlink_to(secret)
+
+    events = import_events.process_folder(str(scan), llm_client=FakeLlm())
+
+    assert events == []
+
+
 def test_process_folder_recursive(tmp_path):
     sub = tmp_path / "nested"
     sub.mkdir()

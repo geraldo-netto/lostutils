@@ -440,6 +440,9 @@ def process_folder(
     files = path.rglob("*") if recursive else path.iterdir()
     all_events: List[Dict[str, Any]] = []
     for file in sorted(files):
+        if file.is_symlink():
+            logger.warning("Skipping symlink %s", file)
+            continue
         if file.is_file():
             all_events.extend(
                 extract_from_file(file, llm_client=llm_client, default_tz=default_tz,
