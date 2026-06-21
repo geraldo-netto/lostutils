@@ -2642,6 +2642,35 @@ def test_note_immediate_depth_edge_triggers(headless_dispatcher):
     assert disp._immediate_depth_warned is False
 
 
+def test_note_immediate_depth_latches_under_concurrency(headless_dispatcher):
+    # lq-conc-02: many dispatchers calling _note_immediate_depth on the same
+    # over-pool backlog must produce exactly one backlog notice — the
+    # edge-trigger compare/assign is latched under _immediate_lock.
+    disp = headless_dispatcher
+    disp.stop_event.set()                    # no consumer drains the queue
+    disp._immediate_pool_size = 1
+    logs = []
+    log_lock = threading.Lock()
+    disp._log = lambda m: (log_lock.acquire(), logs.append(m), log_lock.release())
+    disp._immediate_q.put(q("magnet:?xt=1", protocol="magnet"))
+    disp._immediate_q.put(q("magnet:?xt=2", protocol="magnet"))
+    start = threading.Event()
+
+    def hammer():
+        start.wait()
+        disp._note_immediate_depth()
+
+    threads = [threading.Thread(target=hammer) for _ in range(20)]
+    for t in threads:
+        t.start()
+    start.set()
+    for t in threads:
+        t.join()
+    backlog = [m for m in logs if "backlog" in m]
+    assert len(backlog) == 1
+    assert disp._immediate_depth_warned is True
+
+
 def test_status_bar_shows_immediate_backlog(app):
     # lq-obs-02: status bar surfaces the immediate backlog when it exceeds the
     # pool size.

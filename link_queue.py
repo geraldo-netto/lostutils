@@ -1311,16 +1311,27 @@ class Dispatcher:
         at/under it, so a steady backlog doesn't spam the log. Also nudges the
         status bar so the depth shows there too."""
         depth = self._immediate_q.qsize()
-        over = depth > self._immediate_pool_size
-        if over and not self._immediate_depth_warned:
-            self._immediate_depth_warned = True
+        # lq-conc-02: latch the edge-trigger flag under _immediate_lock so two
+        # dispatchers can't interleave the compare/assign and produce a missed
+        # or duplicate backlog notice. The flag's transition decides who logs;
+        # the _log/_update_status callbacks run outside the lock.
+        with self._immediate_lock:
+            over = depth > self._immediate_pool_size
+            if over and not self._immediate_depth_warned:
+                self._immediate_depth_warned = True
+                transition = "over"
+            elif not over and self._immediate_depth_warned:
+                self._immediate_depth_warned = False
+                transition = "under"
+            else:
+                transition = None
+        if transition == "over":
             self._log(
                 f"[immediate] backlog {depth} waiting > {self._immediate_pool_size} "
                 f"running — items are queued, not lost"
             )
             self._update_status()
-        elif not over and self._immediate_depth_warned:
-            self._immediate_depth_warned = False
+        elif transition == "under":
             self._update_status()
 
     def _enqueue_or_skip_duplicate(self, item: QueueItem, outcome: str) -> str:
