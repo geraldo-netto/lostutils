@@ -34,7 +34,7 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from typing import NamedTuple
 
 import blake3
@@ -46,6 +46,12 @@ HEAD_TAIL_THRESHOLD = CAP      # at-or-below this, the head IS the full file
 # their first CAP bytes but differ in the tail would be reported as duplicates
 # falsely — hr-rel-03.)
 HASH_BATCH = 64
+# hr-scal-02: the threaded stage keeps at most ``jobs * SUBMIT_WINDOW``
+# batch futures in flight at once (a sliding window) instead of submitting
+# every batch up front. 2 keeps every worker fed (one running + one queued)
+# while bounding peak memory to ~2*jobs batch lists + futures regardless of
+# how many candidates the stage holds.
+SUBMIT_WINDOW = 2
 # BLAKE3 is ~3 GB/s/thread on modern x86. Below this much candidate
 # work, ThreadPoolExecutor setup + per-task overhead exceeds the gain.
 THREAD_THRESHOLD_BYTES = 32 * 1024 * 1024
@@ -650,42 +656,91 @@ def _cancelled(cancel_event) -> bool:
     return cancel_event is not None and cancel_event.is_set()
 
 
+def _collect_batch(batch, out) -> int:
+    """Fold one ``[(path, digest), ...]`` batch into ``out``; return the
+    number of None digests (hash failures) in it (hr-scal-02)."""
+    errors = 0
+    for p, d in batch:
+        out[p] = d
+        if d is None:
+            errors += 1
+    return errors
+
+
+def _fill_window(ex, batch_fn, batches, inflight, window, cancel_event) -> bool:
+    """Submit batches until ``inflight`` reaches ``window`` or the batch
+    iterator is exhausted (hr-scal-02). Returns True when no more batches
+    will ever be submitted — either the iterator drained or the cancel
+    event fired (hr-scal-03), so the caller stops replenishing."""
+    while len(inflight) < window:
+        if _cancelled(cancel_event):
+            return True
+        try:
+            inflight.add(ex.submit(batch_fn, next(batches)))
+        except StopIteration:
+            return True
+    return False
+
+
+def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event) -> int:
+    """Threaded hash dispatch with BOUNDED submission (hr-scal-02).
+
+    At most ``jobs * SUBMIT_WINDOW`` batch futures are kept in flight at
+    once via a sliding window: submit until the window is full, drain the
+    completed ones into ``out``, then replenish. Batch lists and future
+    objects are therefore bounded by the window — a 10M-candidate stage no
+    longer pins every batch + future up front, so the streaming claim
+    holds.
+
+    hr-scal-03: replenishment stops the instant ``cancel_event`` is set, so
+    a Ctrl-C schedules no new work past the current batch boundary; only
+    the ≤ window in-flight batches finish before the pool drains. Returns
+    the running hash-failure count."""
+    errors = 0
+    window = max(1, jobs) * SUBMIT_WINDOW
+    batches = _iter_batches(items, HASH_BATCH)
+    with ThreadPoolExecutor(max_workers=jobs) as ex:
+        inflight: set = set()
+        exhausted = _fill_window(
+            ex, batch_fn, batches, inflight, window, cancel_event)
+        while inflight:
+            done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
+            for fut in done:
+                errors += _collect_batch(fut.result(), out)
+            if not exhausted:
+                exhausted = _fill_window(
+                    ex, batch_fn, batches, inflight, window, cancel_event)
+    return errors
+
+
 def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None):
     """Dispatch a hash stage either serially or via ThreadPoolExecutor,
     depending on total work. Returns (digest_by_path, error_count).
 
     Stage 2 on huge trees streams batches lazily through `_iter_batches`
-    (hr-perf-04) so the executor consumes them as workers free up
-    instead of seeing the full slice list upfront.
+    (hr-perf-04) and the threaded path bounds submission to a sliding
+    window of ``jobs * SUBMIT_WINDOW`` futures (hr-scal-02) so peak memory
+    tracks the window, not the whole candidate list.
 
-    hr-conc-01: `cancel_event` (the SIGINT cooperative-cancel flag) is
-    checked between batches. Once set, no further batches are dispatched
-    and the partial ``out`` collected so far is returned — so a Ctrl-C
-    during a long hash phase takes effect at the next batch boundary
-    instead of being ignored until a second Ctrl-C."""
+    hr-conc-01 / hr-scal-03: `cancel_event` (the SIGINT cooperative-cancel
+    flag) is checked between batches in BOTH the serial path and the
+    windowed submit loop. Once set, no further batches are dispatched —
+    only the ≤ window already-running batches finish — and the partial
+    ``out`` collected so far is returned, so a Ctrl-C during a long hash
+    phase takes effect at the next batch boundary instead of waiting for
+    every queued batch."""
     out = {}
     errors = 0
     if total_bytes < THREAD_THRESHOLD_BYTES:
         if _cancelled(cancel_event):
             return out, errors
-        for p, d in batch_fn(items):
-            out[p] = d
-            if d is None:
-                errors += 1
-        return out, errors
+        return out, _collect_batch(batch_fn(items), out)
     # hr-rel-13: wrap the pool loop in try/finally so a mid-iteration
     # exception (e.g. `batch_fn` raises) doesn't return a silently
     # partial `out` dict to the caller.
     try:
-        with ThreadPoolExecutor(max_workers=jobs) as ex:
-            for batch in ex.map(batch_fn, _iter_batches(items, HASH_BATCH)):
-                for p, d in batch:
-                    out[p] = d
-                    if d is None:
-                        errors += 1
-                # hr-conc-01: stop pulling new batches once cancelled.
-                if _cancelled(cancel_event):
-                    break
+        errors = _run_stage_windowed(
+            items, batch_fn, jobs, out, cancel_event)
     except Exception as exc:
         # hr-rel-14: surface partial progress on EVERY Python (3.10 and
         # 3.11+). `__partial__` is set unconditionally so 3.10 callers

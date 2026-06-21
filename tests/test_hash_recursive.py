@@ -247,6 +247,82 @@ def test_run_stage_threaded_branch(monkeypatch):
     assert errors == 1
 
 
+def test_run_stage_windowed_bounds_inflight_submission(monkeypatch):
+    # hr-scal-02: the threaded path must NOT submit every batch up front.
+    # Track concurrent in-flight batch_fn calls and assert the peak never
+    # exceeds jobs * SUBMIT_WINDOW even with far more batches than the
+    # window.
+    import threading as _t
+    monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0)
+    monkeypatch.setattr(hr, "HASH_BATCH", 1)
+    monkeypatch.setattr(hr, "SUBMIT_WINDOW", 2)
+    jobs = 2
+    window = jobs * hr.SUBMIT_WINDOW
+
+    lock = _t.Lock()
+    state = {"cur": 0, "peak": 0}
+    gate = _t.Event()
+
+    def batch(items):
+        with lock:
+            state["cur"] += 1
+            state["peak"] = max(state["peak"], state["cur"])
+        # Hold briefly so several batches overlap and the peak is real.
+        gate.wait(timeout=0.05)
+        with lock:
+            state["cur"] -= 1
+        return [(p, p.upper()) for p in items]
+
+    items = [str(i) for i in range(50)]
+    out, errors = hr._run_stage(items, batch, total_bytes=10**9, jobs=jobs)
+    gate.set()
+    assert errors == 0
+    assert out == {str(i): str(i).upper() for i in range(50)}
+    # Never more than the window submitted/running at once.
+    assert state["peak"] <= window
+
+
+def test_run_stage_windowed_collects_all_and_counts_errors(monkeypatch):
+    # hr-scal-02: correctness across many batches — every result lands in
+    # `out` and None digests count as errors regardless of window size.
+    monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0)
+    monkeypatch.setattr(hr, "HASH_BATCH", 3)
+    monkeypatch.setattr(hr, "SUBMIT_WINDOW", 2)
+    items = [f"/p/{i}" for i in range(100)]
+
+    def batch(b):
+        return [(p, None if p.endswith("0") else p.upper()) for p in b]
+
+    out, errors = hr._run_stage(items, batch, total_bytes=10**9, jobs=3)
+    assert len(out) == 100
+    # paths ending in 0: /p/0,10,20,...,90 => 10 of them
+    assert errors == 10
+
+
+@given(n=st.integers(min_value=0, max_value=300),
+       jobs=st.integers(min_value=1, max_value=4),
+       hash_batch=st.integers(min_value=1, max_value=8),
+       window=st.integers(min_value=1, max_value=4))
+def test_run_stage_windowed_property_all_results(n, jobs, hash_batch, window):
+    # hr-scal-02 property: the windowed dispatch returns exactly one entry
+    # per item, no losses or duplicates, for any window / batch / job mix.
+    old_t, old_b, old_w = (hr.THREAD_THRESHOLD_BYTES, hr.HASH_BATCH,
+                           hr.SUBMIT_WINDOW)
+    hr.THREAD_THRESHOLD_BYTES = 0
+    hr.HASH_BATCH = hash_batch
+    hr.SUBMIT_WINDOW = window
+    try:
+        items = [f"/x/{i}" for i in range(n)]
+        out, errors = hr._run_stage(
+            items, lambda b: [(p, p.upper()) for p in b],
+            total_bytes=10**9, jobs=jobs)
+        assert out == {f"/x/{i}": f"/X/{i}" for i in range(n)}
+        assert errors == 0
+    finally:
+        (hr.THREAD_THRESHOLD_BYTES, hr.HASH_BATCH,
+         hr.SUBMIT_WINDOW) = old_t, old_b, old_w
+
+
 def test_main_smoke(monkeypatch, capsys):
     with TemporaryDirectory() as d:
         root = Path(d)
