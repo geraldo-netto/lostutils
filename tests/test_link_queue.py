@@ -565,6 +565,21 @@ def test_log_sink_circular_rotation(app, tmp_path, monkeypatch):
     assert "B" in open(path, encoding="utf-8").read()
 
 
+def test_log_sink_size_tracks_byte_offset(app, tmp_path):
+    # lq-perf-02: _fh_size is taken from f.tell() (byte offset) after flush,
+    # so it matches the on-disk byte size even for multibyte UTF-8 content
+    # (where len(str) != len(bytes)) without re-encoding each batch.
+    path = str(tmp_path / "u.log")
+    app.config["log_file"] = path
+    line = "café—ünïcödé\n"          # multibyte: byte length > char length
+    app._flush_log_batch([line])
+    on_disk = os.path.getsize(path)
+    assert app._log_fh_size == on_disk
+    assert on_disk == len(line.encode("utf-8"))
+    app._flush_log_batch(["more\n"])
+    assert app._log_fh_size == os.path.getsize(path)
+
+
 def test_log_sink_rotation_replace_error(app, tmp_path, monkeypatch):
     monkeypatch.setattr(link_queue, "LOG_SINK_MAX_BYTES", 50)
     monkeypatch.setattr(link_queue.os, "replace", _raise_os)  # rename fails

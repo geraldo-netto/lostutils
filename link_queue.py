@@ -2200,7 +2200,11 @@ class LogSink:
             try:
                 self._fh.write(text)
                 self._fh.flush()
-                self._fh_size += len(text.encode("utf-8"))
+                # lq-perf-02: read the byte offset back from the stream instead
+                # of re-encoding `text` to UTF-8 just to count its length. After
+                # flush() on an append-mode text file, tell() is the file's byte
+                # size, so rotation tracking stays exact with no second encode.
+                self._fh_size = self._fh.tell()
             except Exception:
                 self._close_locked()
                 return
