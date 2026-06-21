@@ -196,6 +196,48 @@ def test_write_events_json_roundtrips(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8")) == events
 
 
+ICS_TEMPLATE = (
+    "BEGIN:VCALENDAR\r\n"
+    "VERSION:2.0\r\n"
+    "PRODID:-//test//EN\r\n"
+    "BEGIN:VEVENT\r\n"
+    "UID:1@test\r\n"
+    "DTSTART:20260622T100000\r\n"
+    "DTEND:20260622T110000\r\n"
+    "SUMMARY:{summary}\r\n"
+    "LOCATION:{location}\r\n"
+    "END:VEVENT\r\n"
+    "END:VCALENDAR\r\n"
+)
+
+
+def test_extract_from_ics_reads_utf8(tmp_path):
+    pytest.importorskip("icalendar")
+    ics = tmp_path / "u.ics"
+    ics.write_text(ICS_TEMPLATE.format(summary="Café", location="Açores"),
+                   encoding="utf-8")
+
+    events = import_events.extract_from_ics(ics)
+
+    assert events[0]["title"] == "Café"
+    assert events[0]["location"] == "Açores"
+    assert events[0]["type"] == "ICS"
+
+
+def test_extract_from_ics_reads_non_utf8_without_dropping(tmp_path):
+    pytest.importorskip("icalendar")
+    ics = tmp_path / "latin1.ics"
+    # Latin-1 bytes would raise UnicodeDecodeError under a hard utf-8 decode.
+    ics.write_bytes(
+        ICS_TEMPLATE.format(summary="Café", location="").encode("latin-1")
+    )
+
+    events = import_events.extract_from_ics(ics)
+
+    assert len(events) == 1
+    assert "Caf" in events[0]["title"]
+
+
 def test_build_ics_emits_importable_calendar():
     pytest.importorskip("icalendar")
     events = [

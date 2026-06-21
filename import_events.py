@@ -132,7 +132,9 @@ def extract_from_ics(file_path: Path) -> List[Dict[str, Any]]:
 
     events: List[Dict[str, Any]] = []
     with open(file_path, "rb") as f:
-        gcal = Calendar.from_ical(f.read().decode("utf-8"))
+        # Pass raw bytes; icalendar sniffs the encoding itself, so latin-1 /
+        # other non-UTF-8 ICS files are not silently dropped on a decode error.
+        gcal = Calendar.from_ical(f.read())
         for component in gcal.walk():
             if component.name != "VEVENT":
                 continue
