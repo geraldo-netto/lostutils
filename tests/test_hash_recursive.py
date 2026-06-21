@@ -564,7 +564,7 @@ def test_find_duplicate_groups_skips_unread_head(monkeypatch, tmp_path):
     a = tmp_path / "a.bin"; a.write_bytes(b"x" * 100)
     b = tmp_path / "b.bin"; b.write_bytes(b"x" * 100)
 
-    def stub(items, fn, total, jobs):
+    def stub(items, fn, total, jobs, cancel_event=None):
         # items here is a list of paths (strings); map all to None.
         return ({p: None for p in items}, 0)
 
@@ -660,7 +660,7 @@ def test_find_duplicate_groups_skips_failed_tail(tmp_path, monkeypatch):
     real_run_stage = hr._run_stage
     call_n = {"n": 0}
 
-    def stub(items, fn, total, jobs):
+    def stub(items, fn, total, jobs, cancel_event=None):
         call_n["n"] += 1
         if call_n["n"] == 1:
             # Stage 1: real head hashes (so paths share head).
@@ -917,7 +917,7 @@ def test_find_duplicate_groups_info_includes_stage2_skipped(tmp_path, monkeypatc
     real_run = hr._run_stage
     seen = {"n": 0}
 
-    def stub(items, fn, total, jobs):
+    def stub(items, fn, total, jobs, cancel_event=None):
         seen["n"] += 1
         if seen["n"] == 1:
             return real_run(items, fn, total, jobs)
@@ -1142,7 +1142,7 @@ def test_find_duplicate_groups_disabled_cap_skips_ingest_overflow(tmp_path):
     files += [(f"/synthetic/q{i}", len(body), 1, 200) for i in range(30)]
     cfg = hr.RunConfig(alias_cap=0)   # disabled
 
-    def stub_stage1(candidates, rep, jobs, config):
+    def stub_stage1(candidates, rep, jobs, config, cancel_event=None):
         from collections import defaultdict
         by_head = defaultdict(list)
         for size, key in candidates:
@@ -1439,6 +1439,103 @@ def test_walk_iter_survives_runtime_error_in_scandir(tmp_path, monkeypatch):
     assert done.is_set(), "walk hung — hr-rel-18 BaseException catch broken"
 
 
+# --- hr-conc-01: cancel_event aborts the hash stages between batches ------
+
+def test_cancelled_helper():
+    import threading as _t
+    assert hr._cancelled(None) is False
+    ev = _t.Event()
+    assert hr._cancelled(ev) is False
+    ev.set()
+    assert hr._cancelled(ev) is True
+
+
+def test_run_stage_serial_skips_work_when_precancelled():
+    import threading as _t
+    ev = _t.Event(); ev.set()
+    called = {"n": 0}
+
+    def batch(items):
+        called["n"] += 1
+        return [(p, p) for p in items]
+
+    out, errors = hr._run_stage(
+        ["a", "b"], batch, total_bytes=1, jobs=1, cancel_event=ev)
+    assert out == {} and errors == 0
+    assert called["n"] == 0   # batch_fn never invoked
+
+
+def test_run_stage_serial_runs_when_not_cancelled():
+    import threading as _t
+    ev = _t.Event()   # unset
+    out, _ = hr._run_stage(
+        ["a"], lambda b: [(p, p.upper()) for p in b],
+        total_bytes=1, jobs=1, cancel_event=ev)
+    assert out == {"a": "A"}
+
+
+def test_run_stage_threaded_stops_after_cancel_between_batches(monkeypatch):
+    # hr-conc-01: in the threaded branch, once cancel fires the loop stops
+    # consuming further batches and returns the partial result.
+    import threading as _t
+    monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0)
+    monkeypatch.setattr(hr, "HASH_BATCH", 1)
+    ev = _t.Event()
+
+    def batch(items):
+        # Set the cancel after the first batch is produced.
+        result = [(p, p.upper()) for p in items]
+        ev.set()
+        return result
+
+    items = ["a", "b", "c", "d"]
+    out, _ = hr._run_stage(
+        items, batch, total_bytes=10**9, jobs=1, cancel_event=ev)
+    # The loop breaks after the first consumed batch → fewer than all 4.
+    assert 0 < len(out) < len(items)
+
+
+def test_find_duplicate_groups_forwards_cancel_to_stages(tmp_path, monkeypatch):
+    # hr-conc-01: a pre-set cancel_event means the stage helpers receive it
+    # and return early → no groups confirmed even though candidates exist.
+    import threading as _t
+    body = b"q" * 200
+    a = tmp_path / "a.bin"; a.write_bytes(body)
+    b = tmp_path / "b.bin"; b.write_bytes(body)
+    files = [(str(a), len(body), 1, 100), (str(b), len(body), 1, 101)]
+    ev = _t.Event(); ev.set()
+    seen = {}
+
+    real_stage1 = hr._stage1_hash
+
+    def spy(candidates, rep, jobs, config, cancel_event=None):
+        seen["cancel"] = cancel_event
+        return real_stage1(candidates, rep, jobs, config, cancel_event)
+
+    monkeypatch.setattr(hr, "_stage1_hash", spy)
+    result = hr.find_duplicate_groups(files, jobs=1, cancel_event=ev)
+    assert seen["cancel"] is ev
+    # Stage1 was cancelled → head hashes empty → no candidates confirmed.
+    assert result.groups == {}
+
+
+def test_main_cancel_during_hash_takes_effect(tmp_path, monkeypatch, capsys):
+    # hr-conc-01 end-to-end: cancel_event set before hashing → stages
+    # abort, run completes, summary shows the SIGINT partial warning.
+    body = b"z" * 300
+    (tmp_path / "a.bin").write_bytes(body)
+    (tmp_path / "b.bin").write_bytes(body)
+
+    def fake_install(ev):
+        ev.set()
+        return None
+    monkeypatch.setattr(hr, "_install_sigint_cancel", fake_install)
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "walk cancelled by SIGINT" in err
+
+
 # --- hr-rel-02: walk is finalized even when the pipeline raises -----------
 
 def test_find_duplicate_groups_finalizes_walk_stats_on_hash_error(tmp_path, monkeypatch):
@@ -1559,7 +1656,7 @@ def test_find_duplicate_groups_uses_ingest_alias_cap_via_result(tmp_path):
     def cb(digest, keys, aliases, overflow):
         captured.append((digest, keys, aliases, overflow))
 
-    def stub_stage1(candidates, rep, jobs, config):
+    def stub_stage1(candidates, rep, jobs, config, cancel_event=None):
         from collections import defaultdict
         by_head = defaultdict(list)
         for size, key in candidates:

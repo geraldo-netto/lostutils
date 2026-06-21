@@ -619,16 +619,30 @@ def _capped_byte_total(sizes) -> int:
     return total
 
 
-def _run_stage(items, batch_fn, total_bytes, jobs):
+def _cancelled(cancel_event) -> bool:
+    """True when `cancel_event` is a set :class:`threading.Event`
+    (hr-conc-01). ``None`` (no cancel wired) is never cancelled."""
+    return cancel_event is not None and cancel_event.is_set()
+
+
+def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None):
     """Dispatch a hash stage either serially or via ThreadPoolExecutor,
     depending on total work. Returns (digest_by_path, error_count).
 
     Stage 2 on huge trees streams batches lazily through `_iter_batches`
     (hr-perf-04) so the executor consumes them as workers free up
-    instead of seeing the full slice list upfront."""
+    instead of seeing the full slice list upfront.
+
+    hr-conc-01: `cancel_event` (the SIGINT cooperative-cancel flag) is
+    checked between batches. Once set, no further batches are dispatched
+    and the partial ``out`` collected so far is returned — so a Ctrl-C
+    during a long hash phase takes effect at the next batch boundary
+    instead of being ignored until a second Ctrl-C."""
     out = {}
     errors = 0
     if total_bytes < THREAD_THRESHOLD_BYTES:
+        if _cancelled(cancel_event):
+            return out, errors
         for p, d in batch_fn(items):
             out[p] = d
             if d is None:
@@ -644,6 +658,9 @@ def _run_stage(items, batch_fn, total_bytes, jobs):
                     out[p] = d
                     if d is None:
                         errors += 1
+                # hr-conc-01: stop pulling new batches once cancelled.
+                if _cancelled(cancel_event):
+                    break
     except Exception as exc:
         # hr-rel-14: surface partial progress on EVERY Python (3.10 and
         # 3.11+). `__partial__` is set unconditionally so 3.10 callers
@@ -867,12 +884,14 @@ def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
     return 1, real_count
 
 
-def _stage1_hash(candidates, rep, jobs, config):
+def _stage1_hash(candidates, rep, jobs, config, cancel_event=None):
     """Run Stage 1 (head hash) and bucket candidates by ``(size, head)``
     (hr-cx-05).
 
     Returns ``(by_head, info)``. ``info`` carries ``stage1`` and
-    ``stage1_errors`` for the run summary."""
+    ``stage1_errors`` for the run summary. `cancel_event` (hr-conc-01) is
+    forwarded to :func:`_run_stage` so a Ctrl-C aborts the head-hash
+    phase between batches."""
     if not candidates:
         return defaultdict(list), {"stage1": 0, "stage1_errors": 0}
     # hr-perf-01: build the path list and (capped) byte total in one pass
@@ -884,7 +903,8 @@ def _stage1_hash(candidates, rep, jobs, config):
         if stage1_bytes < THREAD_THRESHOLD_BYTES:
             stage1_bytes += min(size, CAP)
     head_by_path, errors = _run_stage(
-        stage1_paths, _make_head_batch(config), stage1_bytes, jobs)
+        stage1_paths, _make_head_batch(config), stage1_bytes, jobs,
+        cancel_event=cancel_event)
     by_head: dict = defaultdict(list)
     for size, key in candidates:
         head = head_by_path.get(rep[key])
@@ -894,13 +914,15 @@ def _stage1_hash(candidates, rep, jobs, config):
     return by_head, {"stage1": len(stage1_paths), "stage1_errors": errors}
 
 
-def _stage2_hash(stage2_items, jobs, config):
+def _stage2_hash(stage2_items, jobs, config, cancel_event=None):
     """Run Stage 2 (tail + middle samples) and regroup by
     ``(head, tail)`` (hr-cx-05).
 
     Returns ``(regrouped, info)``. ``regrouped`` maps ``(head, tail) ->
     [keys]`` for digest-confirmed duplicate groups; ``info`` carries
-    ``stage2``, ``stage2_errors``, and ``stage2_skipped`` (hr-rel-10)."""
+    ``stage2``, ``stage2_errors``, and ``stage2_skipped`` (hr-rel-10).
+    `cancel_event` (hr-conc-01) is forwarded to :func:`_run_stage` so a
+    Ctrl-C aborts the tail-hash phase between batches."""
     if not stage2_items:
         return {}, {"stage2": 0, "stage2_errors": 0, "stage2_skipped": 0}
     stage2_bytes = _capped_byte_total(
@@ -908,7 +930,8 @@ def _stage2_hash(stage2_items, jobs, config):
     # `_run_stage` consumes the legacy (size, path) shape; project for it.
     tail_by_path, errors = _run_stage(
         [(s, p) for s, p, _h, _k in stage2_items],
-        _make_tail_batch(config), stage2_bytes, jobs)
+        _make_tail_batch(config), stage2_bytes, jobs,
+        cancel_event=cancel_event)
     regrouped: dict = {}
     skipped = 0
     for _s, path, head, key in stage2_items:
@@ -971,7 +994,7 @@ def _split_stage1_buckets(by_head, rep, accept_group):
 
 
 def find_duplicate_groups(files, jobs, on_group=None, config=None,
-                          on_walk_done=None):
+                          on_walk_done=None, cancel_event=None):
     """Run the dedup pipeline on walk results (hr-arch-01).
 
     `files` may be a list OR an iterator (hr-scal-05). When called with
@@ -1001,6 +1024,12 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     `on_walk_done()` (hr-scal-05): optional callback invoked the instant
     the inode index has been built — lets :func:`main` split walk-time
     from hash-time without holding a `files` list across both phases.
+
+    `cancel_event` (hr-conc-01): the SIGINT cooperative-cancel flag, the
+    same one the walk workers consult. Forwarded into both hash stages so
+    a Ctrl-C during a long stage-1/stage-2 phase stops dispatching new
+    batches at the next batch boundary instead of being ignored until a
+    second Ctrl-C. Already-confirmed groups stay in the partial result.
 
     Ingest-time alias cap (hr-decoup-04): when ``config.alias_cap`` is
     set to a meaningful (non-sentinel) value, the per-inode path list
@@ -1044,11 +1073,13 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
             final_groups.setdefault(digest_key, []).extend(keys)
 
     # ---- Stage 1: head hash ----
-    by_head, stage1_info = _stage1_hash(candidates, rep, jobs, config)
+    by_head, stage1_info = _stage1_hash(
+        candidates, rep, jobs, config, cancel_event)
     stage2_items = _split_stage1_buckets(by_head, rep, _accept_group)
 
     # ---- Stage 2: tail + middle samples for size+head collisions ----
-    regrouped, stage2_info = _stage2_hash(stage2_items, jobs, config)
+    regrouped, stage2_info = _stage2_hash(
+        stage2_items, jobs, config, cancel_event)
     for combined, keys in regrouped.items():
         if len(keys) >= 2:
             _accept_group(combined, keys)
@@ -1269,6 +1300,7 @@ def main():
         result = find_duplicate_groups(
             walk_iter, args.jobs,
             on_group=on_group, config=config, on_walk_done=_mark_walk_done,
+            cancel_event=cancel_event,
         )
         t_end = time.perf_counter()
         walk_stats = walk_iter.stats
