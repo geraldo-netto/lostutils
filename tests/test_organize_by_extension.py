@@ -2392,6 +2392,42 @@ class SourceCollisionResolution(unittest.TestCase):
             plan = list(_oze.plan_moves(root, iter([root / "a.txt"]), mgr))
             self.assertEqual(len(plan), 1)
 
+    def test_drain_futures_consumes_completed(self):
+        # oze-cmplx-01: _drain_futures now always blocks for one result
+        # (the dead `block` param was removed). Feed it a real completed
+        # future and assert the tally + head_cache pruning happen.
+        from concurrent.futures import ThreadPoolExecutor
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            src = root / "f.txt"
+            src.write_text("x")
+            stats = _oze._RunStats()
+            head_cache = {src: b"x"}
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(lambda: (src, root / "dst", None))
+                futures = {fut: src}
+                _oze._drain_futures(futures, stats, preview=False,
+                                    head_cache=head_cache)
+            self.assertEqual(futures, {})
+            self.assertEqual(stats.processed, 1)
+            self.assertNotIn(src, head_cache)
+
+    def test_drain_futures_counts_errors(self):
+        # oze-cmplx-01: a worker error tuple bumps `skipped`, not `processed`.
+        from concurrent.futures import ThreadPoolExecutor
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            src = root / "f.txt"
+            stats = _oze._RunStats()
+            head_cache: dict = {}
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(lambda: (src, root / "dst", OSError("boom")))
+                futures = {fut: src}
+                _oze._drain_futures(futures, stats, preview=False,
+                                    head_cache=head_cache)
+            self.assertEqual(stats.skipped, 1)
+            self.assertEqual(stats.processed, 0)
+
     def test_progress_line_fires_at_threshold(self, ):
         # oze-obs-02: progress line every PROGRESS_EVERY items. Patch the
         # threshold low so the test stays fast.

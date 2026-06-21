@@ -1573,13 +1573,10 @@ def _drain_futures(
     stats: _RunStats,
     preview: bool,
     head_cache: dict[Path, HeadBytes],
-    block: bool,
 ) -> None:
-    """Consume completed futures, log results, and prune the head_cache for
-    finished sources (oze-conc-03 / oze-scal-05). ``block`` True waits for at
-    least one future; otherwise polls without blocking."""
-    done, _ = wait(futures, timeout=None if block else 0,
-                   return_when=FIRST_COMPLETED)
+    """Block until at least one future completes, then log results and prune
+    the head_cache for finished sources (oze-conc-03 / oze-scal-05)."""
+    done, _ = wait(futures, return_when=FIRST_COMPLETED)
     for fut in done:
         source, destination, error = fut.result()
         del futures[fut]
@@ -1617,7 +1614,7 @@ def _run_moves(
     try:
         for source, bucket_dir in plan:
             while len(futures) >= max_outstanding:
-                _drain_futures(futures, stats, preview, head_cache, block=True)
+                _drain_futures(futures, stats, preview, head_cache)
             futures[executor.submit(worker, source, bucket_dir)] = source
             done_so_far = stats.processed + stats.skipped
             if (done_so_far - last_progress) >= PROGRESS_EVERY:
@@ -1625,7 +1622,7 @@ def _run_moves(
                             stats.processed, total_files, stats.skipped)
                 last_progress = done_so_far
         while futures:
-            _drain_futures(futures, stats, preview, head_cache, block=True)
+            _drain_futures(futures, stats, preview, head_cache)
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         logger.info(f"\nInterrupted. Processed {stats.processed} file(s), "

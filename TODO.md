@@ -53,7 +53,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-cmplx-01 | open | low | import_events.py:165-174 — _coerce_start merges start/date/time keys with str() fallbacks that can produce strings like "NoneTNone"; the date+time concat assumes both are date/time-shaped. Tighten to validated ISO assembly. | robustness
 oze-cmplx-02 | open | low | organize_by_extension.py:1174 — _free_collision_name is no longer used in the live path (superseded by _atomic_rename_to_free_slot) and survives only via tests; its docstring warns it is TOCTOU-unsafe. Remove it and migrate tests, or mark clearly test-only to stop new callers. | superseded shim
-oze-cmplx-01 | open | low | organize_by_extension.py:1581 — _drain_futures's `block` parameter is dead: both call sites (1620,1628) pass block=True, so the timeout=0 non-blocking branch is never exercised. Drop the parameter and the branch, or add the intended non-blocking caller. | unused param
 
 ## code duplication
 
