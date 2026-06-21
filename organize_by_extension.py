@@ -231,15 +231,6 @@ _FAMILY_BY_DETECTED: dict[str, ContainerFamily] = {
     fam.detected_label: fam for fam in CONTAINER_FAMILIES
 }
 
-# Legacy aliases — preserved for back-compat with external imports / tests that
-# referenced the per-family frozensets directly. New code should query through
-# :func:`_family_for` or iterate :data:`CONTAINER_FAMILIES`.
-ZIP_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["zip"].members
-OLE2_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["ole2"].members
-ISO_BMFF_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["mp4"].members
-MP3_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["mp3"].members
-GZIP_FAMILY: frozenset[str] = _FAMILY_BY_DETECTED["gz"].members
-
 
 def _family_for(
     detected_label: str,
