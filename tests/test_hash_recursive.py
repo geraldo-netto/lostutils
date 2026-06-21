@@ -108,7 +108,8 @@ def test_find_duplicate_groups_stage1_and_stage2():
         _write(root / "uniq.bin", b"unique-content-xyz")
 
         files, _ = hr.threaded_walk(root, 2)
-        final_groups, aliases, info = hr.find_duplicate_groups(files, 2)
+        result = hr.find_duplicate_groups(files, 2)
+        final_groups, aliases, info = result.groups, result.aliases, result.info
         out = []
         groups, paths = hr.emit_groups(final_groups, aliases, out.append)
 
@@ -134,7 +135,8 @@ def test_no_false_dup_for_files_between_cap_and_2cap():
         (root / "x1.bin").write_bytes(a)
         (root / "x2.bin").write_bytes(b)
         files, _ = hr.threaded_walk(root, 2)
-        final_groups, aliases, info = hr.find_duplicate_groups(files, 2)
+        result = hr.find_duplicate_groups(files, 2)
+        final_groups, aliases = result.groups, result.aliases
         # different content -> NOT in the same final group
         for keys in final_groups.values():
             paths = [p for k in keys for p in aliases[k]]
@@ -149,7 +151,8 @@ def test_find_duplicate_groups_no_candidates():
         root = Path(d)
         _write(root / "only.bin", b"x")
         files, _ = hr.threaded_walk(root, 1)
-        final_groups, aliases, info = hr.find_duplicate_groups(files, 1)
+        result = hr.find_duplicate_groups(files, 1)
+        final_groups, info = result.groups, result.info
         assert final_groups == {} and info["candidates"] == 0
 
 
@@ -596,8 +599,8 @@ def test_find_duplicate_groups_streaming_callback(tmp_path):
     files = [(str(a), len(big), 1, 100), (str(b), len(big), 1, 101)]
     captured = []
 
-    def on_group(digest_key, keys, aliases):
-        captured.append((digest_key, keys, aliases))
+    def on_group(digest_key, keys, aliases, overflow):
+        captured.append((digest_key, keys, aliases, overflow))
 
     result = hr.find_duplicate_groups(files, jobs=1, on_group=on_group)
     # Streaming branch: result.groups stays empty since cb consumes them.
@@ -1089,7 +1092,8 @@ def test_find_duplicate_groups_disabled_cap_skips_ingest_overflow(tmp_path):
     with mock.patch.object(hr, "_stage1_hash", stub_stage1):
         result = hr.find_duplicate_groups(files, jobs=1, config=cfg)
     # cap disabled → overflow never populated, all aliases retained.
-    assert cfg.overflow is None
+    # hr-arch-01: overflow is returned on the result, not stashed on config.
+    assert result.overflow is None
     assert len(result.aliases[(1, 100)]) == 30
 
 
@@ -1254,7 +1258,7 @@ def test_find_duplicate_groups_on_group_raises_propagates(tmp_path):
     b = tmp_path / "b.bin"; b.write_bytes(body)
     files = [(str(a), len(body), 1, 100), (str(b), len(body), 1, 101)]
 
-    def bad_cb(digest, keys, aliases):
+    def bad_cb(digest, keys, aliases, overflow):
         raise RuntimeError("callback failure")
 
     with pytest.raises(RuntimeError, match="callback failure"):
@@ -1404,11 +1408,12 @@ def test_expand_keys_to_paths_includes_overflow_in_total():
 
 # ===== hr-decoup-04: alias_cap plumbed through main pipeline ============
 
-def test_find_duplicate_groups_uses_ingest_alias_cap_via_config(tmp_path):
-    # Construct a scenario where the same inode has many hardlinks; with
-    # a small alias_cap, the ingest stage drops paths past the cap and
-    # records them as overflow. Emit-side `+N more` reflects the real
-    # total via config.overflow plumbing.
+def test_find_duplicate_groups_uses_ingest_alias_cap_via_result(tmp_path):
+    # hr-arch-01: the same inode has many hardlinks; with a small
+    # alias_cap the ingest stage drops paths past the cap and records
+    # them as overflow. The overflow dict is returned EXPLICITLY on the
+    # DedupResult AND handed to the on_group callback as its 4th arg —
+    # never smuggled on config.
     body = b"shared body" * 200
     (tmp_path / "a.bin").write_bytes(body)
     files = [(f"/synthetic/p{i}", len(body), 1, 100) for i in range(20)]
@@ -1417,10 +1422,8 @@ def test_find_duplicate_groups_uses_ingest_alias_cap_via_config(tmp_path):
     cfg = hr.RunConfig(alias_cap=5)   # small cap → ingest drops
     captured = []
 
-    def cb(digest, keys, aliases):
-        captured.append((digest, keys, aliases))
-    # Skip actual hashing — fake the stage1 to confirm both inodes.
-    real_stage1 = hr._stage1_hash
+    def cb(digest, keys, aliases, overflow):
+        captured.append((digest, keys, aliases, overflow))
 
     def stub_stage1(candidates, rep, jobs, config):
         from collections import defaultdict
@@ -1428,29 +1431,59 @@ def test_find_duplicate_groups_uses_ingest_alias_cap_via_config(tmp_path):
         for size, key in candidates:
             by_head[(size, "fakehead")].append(key)
         return by_head, {"stage1": len(candidates), "stage1_errors": 0}
-    import unittest.mock as mock
     with mock.patch.object(hr, "_stage1_hash", stub_stage1):
         result = hr.find_duplicate_groups(files, jobs=1, on_group=cb, config=cfg)
     # Each inode had 20 paths but cap=5 limits storage to 5.
-    # Overflow on each = 15. Sentinel total = (5 + 15) per inode × 2
-    # inodes = 40 paths total, cap=5, sentinel says "+35 more".
+    # Overflow on each = 15.
     assert result.info["inodes"] >= 2
-    # Verify config.overflow was populated.
-    assert cfg.overflow is not None
-    assert all(v == 15 for v in cfg.overflow.values())
+    # hr-arch-01: overflow is on the result, NOT on config.
+    assert not hasattr(cfg, "overflow")
+    assert result.overflow is not None
+    assert all(v == 15 for v in result.overflow.values())
+    # The callback received the SAME overflow dict explicitly.
+    assert captured and all(c[3] is result.overflow for c in captured)
 
 
-def test_run_config_overflow_attr_defaults_none():
+def test_run_config_has_no_overflow_attr():
+    # hr-arch-01: the overflow side-channel slot is gone from RunConfig.
     cfg = hr.RunConfig()
-    assert cfg.overflow is None
+    assert not hasattr(cfg, "overflow")
+    with pytest.raises(AttributeError):
+        cfg.overflow = {("d", 0): 1}   # __slots__ rejects it
 
 
-def test_expand_keys_to_paths_reads_overflow_from_config():
+def test_expand_keys_to_paths_takes_overflow_explicitly():
+    # hr-arch-01: overflow is an explicit kwarg, never read off config.
     cfg = hr.RunConfig(alias_cap=5)
-    cfg.overflow = {("d", 0): 100}
     aliases = {("d", 0): ["/a", "/b"]}
-    out = hr._expand_keys_to_paths([("d", 0)], aliases, config=cfg)
+    out = hr._expand_keys_to_paths(
+        [("d", 0)], aliases, config=cfg, overflow={("d", 0): 100})
     sentinel = next((p for p in out if isinstance(p, hr._MoreSentinel)), None)
     assert sentinel is not None
     # 2 stored + 100 overflow = 102 total. cap=5 → "+97 more".
     assert "97" in str(sentinel)
+
+
+def test_emit_groups_forwards_overflow_to_sentinel():
+    # hr-arch-01: the batched emit path receives overflow explicitly and
+    # the +N more sentinel reflects it.
+    aliases = {("d", 0): ["/a", "/b"], ("d", 1): ["/c"]}
+    final_groups = {"hash": [("d", 0), ("d", 1)]}
+    overflow = {("d", 0): 50}
+    written = []
+    groups, paths = hr.emit_groups(
+        final_groups, aliases, written.append, overflow=overflow)
+    blob = "".join(written)
+    # 3 stored paths + 50 overflow = 53; with default cap (1024) no
+    # sentinel, but the real count includes the overflow-bearing inode.
+    assert groups == 1
+    assert "/a" in blob and "/c" in blob
+
+
+def test_dedup_result_overflow_field_default_none():
+    # hr-arch-01: DedupResult carries overflow; default None for callers
+    # that build it positionally with 3 args.
+    res = hr.DedupResult(groups={}, aliases={}, info={})
+    assert res.overflow is None
+    res2 = hr.DedupResult(groups={}, aliases={}, info={}, overflow={("d", 0): 3})
+    assert res2.overflow == {("d", 0): 3}

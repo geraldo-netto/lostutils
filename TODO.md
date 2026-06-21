@@ -72,7 +72,6 @@ oze-dup-01 | open | low | organize_by_extension.py:710 — back-compat shims exi
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-arch-01 | open | med | hash-recursive-ai5.py:888 — _prepare_candidates mutates config.overflow as a side channel and _expand_keys_to_paths reads it back via getattr(config, "overflow", None); emit correctness silently depends on prepare having run first. Pass overflow explicitly through DedupResult / on_group instead of smuggling it on config. | decoupling
 ie-arch-01 | open | med | import_events.py:52 — module-level mutable globals (_LLM, MODEL_PATH, DEFAULT_TZ) mutated by _apply_config (471-476) make functions non-reentrant and order-dependent (extract_from_ics reads DEFAULT_TZ implicitly). Pass a small config object/params (within this single file, no shared-module extraction). | within-file
 lq-arch-01 | open | low | link_queue.py:2524-2526 — the "read-only dispatch helpers" re-export block includes _pick_next_item, whose own docstring (1683) says it MUTATES dispatcher bookkeeping; re-exporting it as pure on LinkQueueApp invites a call site to run it bound to the app. Remove mutating helpers from the read-only re-export block. | latent bug
 rf-arch-01 | open | low | relocate_folder.py:1130 — atomic_swap is misnamed: only the final os.rename(tmp, link) is atomic; the rename-aside + symlink + backup-delete sequence is not atomic across process death, so the name overpromises kill-safety. Rename to swap_with_backup or prominently document the non-atomic window. | honest naming

@@ -91,13 +91,6 @@ class RunConfig:
         # summary subtracts this counter so the operator can tell a racy
         # delete apart from a permission / I/O failure worth investigating.
         "hash_skipped_vanished",
-        # hr-decoup-04: per-inode overflow counts from index_inodes'
-        # ingest-time alias cap (hr-scal-06). `find_duplicate_groups`
-        # populates this; `_expand_keys_to_paths` reads it via the
-        # emit-side config so the `+N more` sentinel still reports
-        # ingest-elided paths even when the in-memory alias list was
-        # bounded at scan time.
-        "overflow",
         # hr-conc-06: lock for the cross-thread `+= 1` counters above.
         # CPython's GIL makes the bytecode effectively atomic today but
         # py3.13 free-threaded builds drop the GIL and the increments
@@ -119,7 +112,6 @@ class RunConfig:
         self.hash_error_logged = 0
         self.hash_error_suppressed = 0
         self.hash_skipped_vanished = 0
-        self.overflow = None   # populated by find_duplicate_groups when active
         self._counter_lock = threading.Lock()
 
     @property
@@ -720,18 +712,22 @@ def size_collision_candidates(inode_size):
 
 
 class DedupResult(NamedTuple):
-    """Outcome of `find_duplicate_groups` (hr-arch-02).
+    """Outcome of `find_duplicate_groups` (hr-arch-02 / hr-arch-01).
 
-    Replaces the bare 3-tuple return. Inherits NamedTuple's positional
-    unpacking so existing call sites (`groups, aliases, info = result`)
-    compile unchanged, while gaining named attribute access and a typed
-    repr. `aliases` stays on the result for `emit_groups` to expand inode
-    keys back to paths.
+    Provides named attribute access and a typed repr. `aliases` stays on
+    the result for `emit_groups` to expand inode keys back to paths.
+
+    `overflow` (hr-arch-01): the per-inode ingest-elided alias counts
+    (``{(dev, ino): n_elided}``), or ``None`` when the alias cap was
+    disabled. It is returned EXPLICITLY here instead of being smuggled on
+    `config`; a batched caller forwards it to :func:`emit_groups` so the
+    ``+N more`` sentinel still reports the true total.
     """
 
     groups: dict
     aliases: dict
     info: dict
+    overflow: dict | None = None
 
 
 class _MoreSentinel(str):
@@ -760,7 +756,8 @@ def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
     a config is supplied, ``alias_cap_hits`` is incremented on it so
     :func:`main` can emit a one-shot WARNING.
 
-    hr-scal-06: when ``overflow`` is supplied, the per-inode counts of
+    hr-scal-06 / hr-arch-01: when ``overflow`` is supplied (explicitly by
+    the caller — never read off ``config``), the per-inode counts of
     paths elided AT INGEST (by :func:`index_inodes` with `alias_cap`)
     are added to the displayed ``+N more`` so the sentinel still
     reports the real total even though the alias list itself was
@@ -772,11 +769,10 @@ def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
     duplicates."""
     if cap is None:
         cap = config.alias_cap if config is not None else DEFAULT_ALIAS_CAP
-    # hr-decoup-04: pull the overflow dict from config when the caller
-    # didn't pass one explicitly. `find_duplicate_groups` stashes it
-    # there after running `index_inodes(alias_cap=)`.
-    if overflow is None and config is not None:
-        overflow = getattr(config, "overflow", None)
+    # hr-arch-01: `overflow` is now passed explicitly by the emit layer
+    # (`_emit_one_group` threads it from `on_group`/`emit_groups`). It is
+    # no longer smuggled on `config`, so emit correctness no longer
+    # silently depends on `_prepare_candidates` having mutated the config.
     out: list = []
     total = 0
     for key in keys:
@@ -801,7 +797,7 @@ def _count_real_paths(expanded) -> int:
     return sum(1 for p in expanded if not isinstance(p, _MoreSentinel))
 
 
-def _emit_one_group(digest_key, keys, aliases, write, config):
+def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
     """Render a single duplicate group (hr-dup-03).
 
     Shared core of :func:`emit_groups` and the callback returned by
@@ -810,9 +806,13 @@ def _emit_one_group(digest_key, keys, aliases, write, config):
     is ≤ 1, then writes ``"<label> <path>\\n"`` lines joined into one
     ``write()`` call (hr-perf-03).
 
+    `overflow` (hr-arch-01): per-inode ingest-elided counts, passed
+    explicitly from the emit caller so the ``+N more`` sentinel reports
+    the true total without reading it off ``config``.
+
     Returns ``(groups_delta, paths_delta)`` — ``(0, 0)`` for skipped
     groups, ``(1, real_count)`` for emitted ones."""
-    all_paths = _expand_keys_to_paths(keys, aliases, config)
+    all_paths = _expand_keys_to_paths(keys, aliases, config, overflow=overflow)
     real_count = _count_real_paths(all_paths)
     if real_count <= 1:
         return 0, 0
@@ -878,7 +878,7 @@ def _stage2_hash(stage2_items, jobs, config):
     }
 
 
-def _prepare_candidates(aliases, inode_size, overflow, config):
+def _prepare_candidates(aliases, inode_size, overflow):
     """Select size-collision candidates and build the per-inode
     representative map (hr-cx-01).
 
@@ -886,7 +886,10 @@ def _prepare_candidates(aliases, inode_size, overflow, config):
     memory tracks candidates rather than the whole tree (hr-scal-01 /
     hr-scal-02), then picks a readable representative per candidate
     inode (hr-rel-02). Returns ``(candidates, rep)``; `aliases` and
-    `overflow` are mutated in place to retain only candidate keys."""
+    `overflow` are mutated in place to retain only candidate keys.
+
+    hr-arch-01: `overflow` is no longer stashed on `config` — the caller
+    threads it explicitly into the emit layer."""
     candidates = size_collision_candidates(inode_size)
     cand_keys = {key for _, key in candidates}
     # hr-scal-01: drop non-candidate buckets in place so we never briefly
@@ -896,9 +899,6 @@ def _prepare_candidates(aliases, inode_size, overflow, config):
     if overflow is not None:
         for key in [k for k in overflow if k not in cand_keys]:
             del overflow[key]
-        # Stash on config so the emit-side _expand_keys_to_paths can
-        # honour the ingest-elided counts without explicit plumbing.
-        config.overflow = overflow
     rep = {key: _readable_rep(aliases[key]) for _, key in candidates}
     return candidates, rep
 
@@ -934,7 +934,9 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
 
     Returns a :class:`DedupResult` (`.groups` maps digest -> [inode_key,
     ...]; `.aliases` is the per-key path list; `.info` holds the
-    per-stage counters for the summary).
+    per-stage counters for the summary; `.overflow` holds the per-inode
+    ingest-elided alias counts, or ``None`` when the cap was disabled —
+    forward it to :func:`emit_groups` for an accurate ``+N more``).
 
     Hashing is split into helper functions :func:`_stage1_hash` and
     :func:`_stage2_hash` (hr-cx-05) so each piece stays under the
@@ -974,8 +976,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     if on_walk_done is not None:
         on_walk_done()
     n_inodes = len(aliases)
-    candidates, rep = _prepare_candidates(
-        aliases, inode_size, overflow, config)
+    candidates, rep = _prepare_candidates(aliases, inode_size, overflow)
     # hr-scal-02: inode_size is no longer needed once candidates are
     # selected — drop it so it isn't live alongside aliases/rep at peak.
     del inode_size
@@ -986,12 +987,13 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         """Route a confirmed group either to the streaming callback
         (hr-scal-02) or into the accumulator buffer (back-compat).
 
-        hr-decoup-04: the streaming callback receives the alias dict
-        and (when ingest cap is active) the overflow dict so emit-side
-        can include the ingest-time elisions in the `+N more`
-        sentinel."""
+        hr-decoup-04 / hr-arch-01: the streaming callback receives the
+        alias dict and the overflow dict EXPLICITLY (4th arg) — when the
+        ingest cap is active emit-side includes the ingest-time elisions
+        in the `+N more` sentinel without the pipeline mutating
+        ``config``."""
         if on_group is not None:
-            on_group(digest_key, list(keys), aliases)
+            on_group(digest_key, list(keys), aliases, overflow)
         else:
             final_groups.setdefault(digest_key, []).extend(keys)
 
@@ -1011,7 +1013,8 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         **stage1_info,
         **stage2_info,
     }
-    return DedupResult(groups=final_groups, aliases=aliases, info=info)
+    return DedupResult(
+        groups=final_groups, aliases=aliases, info=info, overflow=overflow)
 
 
 def _format_digest(digest) -> str:
@@ -1027,7 +1030,7 @@ def _format_digest(digest) -> str:
     return digest
 
 
-def emit_groups(final_groups, aliases, write, config=None):
+def emit_groups(final_groups, aliases, write, config=None, overflow=None):
     """Expand each duplicate inode group back to all its alias paths and
     write '<digest> <path>' lines. Returns ``(dup_groups, dup_paths)``.
 
@@ -1036,23 +1039,33 @@ def emit_groups(final_groups, aliases, write, config=None):
     the same shape — a bug fix to the emit format lands in one place.
 
     `config` (hr-arch-05): provides the alias cap and accumulates
-    ``alias_cap_hits``. Defaults to a fresh :class:`RunConfig`."""
+    ``alias_cap_hits``. Defaults to a fresh :class:`RunConfig`.
+
+    `overflow` (hr-arch-01): per-inode ingest-elided counts from
+    :attr:`DedupResult.overflow`, passed explicitly so the ``+N more``
+    sentinel reflects the true total. ``None`` (default) means the alias
+    cap was disabled / no paths were elided at ingest."""
     if config is None:
         config = RunConfig()
     dup_groups = 0
     dup_paths = 0
     for digest, keys in final_groups.items():
-        g, p = _emit_one_group(digest, keys, aliases, write, config)
+        g, p = _emit_one_group(digest, keys, aliases, write, config, overflow)
         dup_groups += g
         dup_paths += p
     return dup_groups, dup_paths
 
 
 def emit_groups_streaming(write, config=None):
-    """Build an ``on_group(digest_key, keys, aliases)`` callback that
-    writes each group immediately (hr-scal-02). Pair with
+    """Build an ``on_group(digest_key, keys, aliases, overflow)`` callback
+    that writes each group immediately (hr-scal-02). Pair with
     ``find_duplicate_groups(..., on_group=cb)`` for the streaming
     pipeline.
+
+    hr-arch-01: the callback's 4th parameter ``overflow`` carries the
+    per-inode ingest-elided counts explicitly from the pipeline, so the
+    ``+N more`` sentinel reports the true total without the pipeline
+    smuggling the overflow dict onto ``config``.
 
     Returns ``(cb, totals_fn)`` where ``totals_fn()`` yields
     ``(dup_groups, dup_paths)`` after the pipeline drained — matching
@@ -1075,8 +1088,9 @@ def emit_groups_streaming(write, config=None):
         config = RunConfig()
     state = {"groups": 0, "paths": 0}
 
-    def cb(digest_key, keys, aliases) -> None:
-        g, p = _emit_one_group(digest_key, keys, aliases, write, config)
+    def cb(digest_key, keys, aliases, overflow=None) -> None:
+        g, p = _emit_one_group(
+            digest_key, keys, aliases, write, config, overflow)
         state["groups"] += g
         state["paths"] += p
 
