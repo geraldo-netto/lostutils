@@ -522,6 +522,44 @@ class OrganizeByExtensionTest(unittest.TestCase):
                     move_file(src, dest)
             self.assertTrue(src.exists())
 
+    def test_move_file_falls_back_when_link_unsupported(self):
+        """oze-rel-01: on a no-hardlink filesystem os.link raises EPERM; the
+        move must fall back to the cross-device copy path instead of aborting."""
+        with TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            src = self.make_file(root, "data.txt")
+            src.write_text("payload")
+            dest = root / "bucket"
+            with patch('organize_by_extension.os.link',
+                       side_effect=OSError(errno.EPERM, "no hardlinks")):
+                result = move_file(src, dest)
+            self.assertEqual(result, dest / "data.txt")
+            self.assertEqual((dest / "data.txt").read_text(), "payload")
+            self.assertFalse(src.exists())
+
+    @settings(deadline=None, max_examples=25)
+    @given(code=st.sampled_from([
+        errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP, errno.EMLINK,
+        errno.EXDEV,
+    ]))
+    def test_move_file_falls_back_for_all_fallback_errnos(self, code):
+        """oze-rel-01: every link-unsupported errno (plus EXDEV) routes to the
+        cross-device copy path so the file is delivered, not lost."""
+        self.assertEqual(
+            _oze._LINK_UNSUPPORTED_ERRNOS,
+            frozenset({errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP,
+                       errno.EMLINK}))
+        with TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            src = self.make_file(root, "data.txt")
+            src.write_text("payload")
+            dest = root / "bucket"
+            with patch('organize_by_extension.os.link',
+                       side_effect=OSError(code, "x")):
+                result = move_file(src, dest)
+            self.assertEqual((dest / "data.txt").read_text(), "payload")
+            self.assertFalse(src.exists())
+
     def test_move_file_cross_device_refuses_existing_target(self):
         """Cross-device path honors no-overwrite via O_EXCL reservation."""
         with TemporaryDirectory() as temp_dir_name:

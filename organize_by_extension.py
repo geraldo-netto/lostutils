@@ -962,6 +962,11 @@ def move_file(path: Path, destination: Path) -> Path:
     jittered exponential backoff (oze-perf-07) before we fall through to the
     cross-device copy.
 
+    oze-rel-01: on a filesystem without hardlink support (FAT/exFAT/SMB/NFS)
+    the primary ``os.link`` raises EPERM/ENOSYS/EOPNOTSUPP (and per-file
+    EMLINK). Those ``_LINK_UNSUPPORTED_ERRNOS`` route to the cross-device copy
+    path too, not just EXDEV, so the move falls back instead of aborting.
+
     oze-rel-12: a source whose name collides with an ancestor of the
     destination (e.g. a file literally named ``avi`` whose header pushes it
     under ``<root>/avi/a00000/``) would otherwise blow up `ensure_directory`
@@ -975,7 +980,7 @@ def move_file(path: Path, destination: Path) -> Path:
     try:
         _link_exclusive(path, target)
     except OSError as exc:
-        if exc.errno != errno.EXDEV:
+        if exc.errno != errno.EXDEV and exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
             raise
         _move_cross_device(path, target)
     else:
