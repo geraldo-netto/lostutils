@@ -433,6 +433,73 @@ def test_headless_restore_queue_from_state_requeues_inflight_first(headless_disp
     ]
 
 
+def test_save_state_persists_immediate_backlog(tmp_path, monkeypatch):
+    # lq-rel-01: the immediate work-queue backlog is snapshotted into a third
+    # "immediate" bucket so an unprocessed paste survives shutdown.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    cfg = dict(link_queue.DEFAULT_CONFIG)
+    cfg["immediate_worker_count"] = 1
+    d = link_queue.Dispatcher.headless(cfg)
+    d.stop_event.set()                       # no consumer drains the queue
+    try:
+        d._immediate_q.put(q("magnet:?xt=1", protocol="magnet"))
+        d._immediate_q.put(q("file:///x", protocol="file"))
+        d._save_state()
+        with open(link_queue.STATE_FILE, encoding="utf-8") as fh:
+            data = link_queue._yaml_load(fh)
+        urls = [link_queue._decode_state_field(e, "url", "")
+                for e in data["immediate"]]
+        assert urls == ["magnet:?xt=1", "file:///x"]
+    finally:
+        d.stop_event.set()
+
+
+def test_restore_redispatches_immediate_backlog(tmp_path, monkeypatch):
+    # lq-rel-01: persisted immediate items are re-dispatched on restore.
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    d = link_queue.Dispatcher.headless()
+    try:
+        state = {
+            "queue": [d._serialize_item(q("http://wait/1"))],
+            "immediate": [d._serialize_item(q("magnet:?xt=9", protocol="magnet"))],
+        }
+        with open(link_queue.STATE_FILE, "w", encoding="utf-8") as fh:
+            link_queue._yaml_dump(state, fh, allow_unicode=True)
+        dispatched = []
+        d._dispatch_immediate = dispatched.append
+        d._restore_queue_from_state()
+        assert [it.url for it in dispatched] == ["magnet:?xt=9"]
+        assert [it.url for it in d.queue_items] == ["http://wait/1"]
+    finally:
+        d.stop_event.set()
+
+
+def test_load_immediate_items_backcompat_old_state(tmp_path, monkeypatch):
+    # lq-rel-01: a state file written before the "immediate" bucket existed
+    # must load cleanly (empty immediate list).
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "s.yaml"))
+    d = link_queue.Dispatcher.headless()
+    try:
+        with open(link_queue.STATE_FILE, "w", encoding="utf-8") as fh:
+            link_queue._yaml_dump(
+                {"queue": [d._serialize_item(q("http://a/1"))]}, fh)
+        assert d._load_immediate_items() == []
+        in_flight, pending = d._load_state_items()
+        assert [it.url for it in pending] == ["http://a/1"]
+    finally:
+        d.stop_event.set()
+
+
+def test_load_immediate_items_missing_file(tmp_path, monkeypatch):
+    # lq-rel-01: missing state file -> empty immediate list (no crash).
+    monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "nope.yaml"))
+    d = link_queue.Dispatcher.headless()
+    try:
+        assert d._load_immediate_items() == []
+    finally:
+        d.stop_event.set()
+
+
 def test_state_field_base64_roundtrip(app):
     # A URL with a C1 control char (\x85) is YAML-unsafe -> _serialize_item
     # must base64-wrap it, and _load_state_items must decode it back exactly

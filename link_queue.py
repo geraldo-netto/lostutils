@@ -887,6 +887,14 @@ class Dispatcher:
                     self._serialize_item(it)
                     for it in self.current_items.values() if it is not None
                 ]
+            # lq-rel-01: snapshot the immediate work-queue backlog too. Before
+            # the bounded pool, immediate items had dedicated threads so no
+            # backlog could exist; now an unprocessed backlog was silently lost
+            # on shutdown. Read the underlying deque under the queue's own mutex
+            # so we don't consume items a consumer may still be about to run.
+            with self._immediate_q.mutex:
+                immediate = [self._serialize_item(it)
+                             for it in list(self._immediate_q.queue)]
             # Use a tempfile in the same directory as STATE_FILE so the
             # final os.replace() stays on the same filesystem and is atomic.
             # The unique name prevents two concurrent writers from both
@@ -898,7 +906,8 @@ class Dispatcher:
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     _yaml_dump(
-                        {"queue": pending, "in_flight": in_flight}, f,
+                        {"queue": pending, "in_flight": in_flight,
+                         "immediate": immediate}, f,
                         default_flow_style=False, sort_keys=False,
                         allow_unicode=True,
                     )
@@ -939,6 +948,77 @@ class Dispatcher:
             _encode_state_field(entry, "extra", shlex.join(flat))
         return entry
 
+    def _read_state_dict(self) -> "dict | None":
+        """Read and YAML-parse STATE_FILE, or None on missing/corrupt/non-dict.
+        Shared by _load_state_items and _load_immediate_items (lq-rel-01)."""
+        if not os.path.exists(self.state_path):
+            return None
+        try:
+            with open(self.state_path, "r", encoding="utf-8") as f:
+                data = _yaml_load(f) or {}
+        except Exception as e:
+            print(f"[warn] could not read {self.state_path}: {e}", file=sys.stderr)
+            return None
+        return data if isinstance(data, dict) else None
+
+    @classmethod
+    def _parse_state_list(cls, data: dict, key: str) -> "list[QueueItem]":
+        raw = data.get(key) or []
+        if not isinstance(raw, list):
+            return []
+        out: list[QueueItem] = []
+        dropped = 0
+        for entry in raw:
+            if not isinstance(entry, dict):
+                dropped += 1
+                continue
+            # Decodes both plain keys and the base64 sidecars written
+            # for YAML-unsafe strings (rel-03); back-compatible with
+            # state files written before the sidecar existed.
+            url = _decode_state_field(entry, "url", "")
+            if not url:
+                dropped += 1
+                continue
+            # lq-rel-04: per-entry try/except so one malformed `extra`
+            # field doesn't discard the entire restored queue.
+            try:
+                extra_s = _decode_state_field(entry, "extra", "")
+                extra = ()
+                if extra_s:
+                    flat = shlex.split(extra_s)
+                    extra = tuple((flat[i], flat[i + 1])
+                                  for i in range(0, len(flat) - 1, 2))
+                out.append(QueueItem(
+                    url=url,
+                    protocol=_decode_state_field(entry, "protocol", ""),
+                    template=_decode_state_field(entry, "template", "echo {url}"),
+                    shell=bool(entry.get("shell", False)),
+                    extra=extra,
+                ))
+            except (ValueError, TypeError) as exc:
+                dropped += 1
+                print(
+                    f"[warn] state[{key}] entry {url!r} unparseable "
+                    f"({exc}); dropped, other entries preserved",
+                    file=sys.stderr,
+                )
+        if dropped:
+            print(
+                f"[info] state[{key}]: dropped {dropped} unparseable "
+                f"entries; kept {len(out)}",
+                file=sys.stderr,
+            )
+        return out
+
+    def _load_immediate_items(self) -> "list[QueueItem]":
+        """Read the persisted immediate-queue backlog (lq-rel-01). Returns []
+        for missing/corrupt files and for older state files that predate the
+        "immediate" bucket (back-compatible)."""
+        data = self._read_state_dict()
+        if data is None:
+            return []
+        return self._parse_state_list(data, "immediate")
+
     def _load_state_items(self) -> "tuple[list[QueueItem], list[QueueItem]]":
         """Read STATE_FILE if present and return (in_flight, pending).
 
@@ -946,67 +1026,11 @@ class Dispatcher:
         by an older version that only had the "queue" key still load
         cleanly; in_flight will simply be empty.
         """
-        if not os.path.exists(self.state_path):
+        data = self._read_state_dict()
+        if data is None:
             return ([], [])
-        try:
-            with open(self.state_path, "r", encoding="utf-8") as f:
-                data = _yaml_load(f) or {}
-        except Exception as e:
-            print(f"[warn] could not read {self.state_path}: {e}", file=sys.stderr)
-            return ([], [])
-        if not isinstance(data, dict):
-            return ([], [])
-
-        def parse_list(key: str) -> list[QueueItem]:
-            raw = data.get(key) or []
-            if not isinstance(raw, list):
-                return []
-            out: list[QueueItem] = []
-            dropped = 0
-            for entry in raw:
-                if not isinstance(entry, dict):
-                    dropped += 1
-                    continue
-                # Decodes both plain keys and the base64 sidecars written
-                # for YAML-unsafe strings (rel-03); back-compatible with
-                # state files written before the sidecar existed.
-                url = _decode_state_field(entry, "url", "")
-                if not url:
-                    dropped += 1
-                    continue
-                # lq-rel-04: per-entry try/except so one malformed
-                # `extra` field doesn't discard the entire restored
-                # queue (the older `parse_list`-wide except did that).
-                try:
-                    extra_s = _decode_state_field(entry, "extra", "")
-                    extra = ()
-                    if extra_s:
-                        flat = shlex.split(extra_s)
-                        extra = tuple((flat[i], flat[i + 1])
-                                      for i in range(0, len(flat) - 1, 2))
-                    out.append(QueueItem(
-                        url=url,
-                        protocol=_decode_state_field(entry, "protocol", ""),
-                        template=_decode_state_field(entry, "template", "echo {url}"),
-                        shell=bool(entry.get("shell", False)),
-                        extra=extra,
-                    ))
-                except (ValueError, TypeError) as exc:
-                    dropped += 1
-                    print(
-                        f"[warn] state[{key}] entry {url!r} unparseable "
-                        f"({exc}); dropped, other entries preserved",
-                        file=sys.stderr,
-                    )
-            if dropped:
-                print(
-                    f"[info] state[{key}]: dropped {dropped} unparseable "
-                    f"entries; kept {len(out)}",
-                    file=sys.stderr,
-                )
-            return out
-
-        return (parse_list("in_flight"), parse_list("queue"))
+        return (self._parse_state_list(data, "in_flight"),
+                self._parse_state_list(data, "queue"))
 
     def _restore_queue_from_state(self) -> None:
         """Push any persisted items back onto the queue at startup. Items
@@ -1021,8 +1045,20 @@ class Dispatcher:
         through the protocol config is unnecessary (and would be wrong if
         the user has since edited that protocol)."""
         in_flight, pending = self._load_state_items()
+        # lq-rel-01: re-dispatch any persisted immediate backlog so an
+        # unprocessed paste of file:/magnet: links survives a restart instead
+        # of being silently lost. Done first so consumers can start draining
+        # while the pending queue is restored.
+        immediate = self._load_immediate_items()
+        for it in immediate:
+            self._dispatch_immediate(it)
         items = in_flight + pending  # in-flight retries go FIRST
         if not items:
+            if immediate:
+                self._log(
+                    f"[restored] {len(immediate)} immediate item(s) from "
+                    f"previous session"
+                )
             return
         with self._dispatch_cv:
             for it in items:
@@ -1030,6 +1066,11 @@ class Dispatcher:
             self._dispatch_cv.notify_all()
         self._refresh_queue_list()
         self._update_status()
+        if immediate:
+            self._log(
+                f"[restored] {len(immediate)} immediate item(s) from previous "
+                f"session"
+            )
         if in_flight and pending:
             self._log(
                 f"[restored] {len(in_flight)} in-flight + {len(pending)} "
