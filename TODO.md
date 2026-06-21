@@ -65,7 +65,6 @@ oze-dup-01 | open | low | organize_by_extension.py:710 — back-compat shims exi
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-arch-01 | open | med | import_events.py:52 — module-level mutable globals (_LLM, MODEL_PATH, DEFAULT_TZ) mutated by _apply_config (471-476) make functions non-reentrant and order-dependent (extract_from_ics reads DEFAULT_TZ implicitly). Pass a small config object/params (within this single file, no shared-module extraction). | within-file
-rf-arch-01 | open | low | relocate_folder.py:1130 — atomic_swap is misnamed: only the final os.rename(tmp, link) is atomic; the rename-aside + symlink + backup-delete sequence is not atomic across process death, so the name overpromises kill-safety. Rename to swap_with_backup or prominently document the non-atomic window. | honest naming
 
 ## reliability/correctness
 

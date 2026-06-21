@@ -2310,3 +2310,23 @@ def test_tmplink_suffix_constant_removed():
 def test_staging_prefix_still_present():
     # the live staging mechanism replaced the fixed .relocate-tmp name.
     assert rf.STAGING_PREFIX == ".relocate-stage-"
+
+
+# --- rf-arch-01: atomic_swap honestly documents its non-atomic window -------
+
+def test_atomic_swap_docstring_documents_non_atomic_window():
+    doc = rf.atomic_swap.__doc__ or ""
+    assert "NOT atomic" in doc
+    assert rf.BACKUP_SUFFIX in doc or "relocate-backup" in doc
+
+
+def test_atomic_swap_still_performs_swap(tmp_path):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "f.txt").write_text("data")
+    target = tmp_path / "tgt"
+    target.mkdir()
+    rf.atomic_swap(source, target)
+    assert source.is_symlink()
+    assert os.readlink(source) == str(target)
+    assert not rf._path_taken(source.with_name(source.name + rf.BACKUP_SUFFIX))

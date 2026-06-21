@@ -1127,8 +1127,26 @@ def _backup_target(target: Path) -> Iterator[Path]:
 
 
 def atomic_swap(source: Path, target: Path) -> None:
-    """Replace `source` (a real dir) with a symlink to `target`, with a
-    backup window in between (delegates to `_backup_target`)."""
+    """Replace `source` (a real dir) with a symlink to `target` (rf-arch-01).
+
+    NOT atomic across process death, despite the name. The name is retained
+    only for backward compatibility with existing callers and tests; treat it
+    as `swap_with_backup`.
+
+    The sequence is:
+
+      1. `os.rename(source, source<BACKUP_SUFFIX>)`  — move the real dir aside
+      2. `os.symlink(target, source)`                — only THIS step is atomic
+      3. `shutil.rmtree(backup)`                      — delete the moved-aside dir
+
+    A SIGKILL / power-loss between steps 1 and 2 leaves `source` renamed to
+    `<name>.relocate-backup` with no symlink in place — see rf-rel-01 for the
+    orphaned-backup detection and `--recover` recovery path. The in-`with`
+    failure path (an exception from step 2) rolls the rename back; only an
+    abrupt process death skips the rollback.
+
+    Delegates the rename-aside / restore-or-clean lifecycle to
+    `_backup_target`."""
     with _backup_target(source):
         _create_symlink(source, target)
 
