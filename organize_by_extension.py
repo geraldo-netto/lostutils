@@ -1789,15 +1789,16 @@ def _dir_is_prunable(current: Path, would_remove: set[Path]) -> bool:
     with _safe_scandir(current) as it:
         if isinstance(it, tuple):
             return False
-        for entry in it:
-            if entry.is_symlink():
-                return False
-            try:
-                is_dir = entry.is_dir(follow_symlinks=False)
-            except OSError:
-                return False
-            if not is_dir or Path(entry.path) not in would_remove:
-                return False
+        try:
+            for entry in it:
+                if entry.is_symlink():
+                    return False
+                if not entry.is_dir(follow_symlinks=False):
+                    return False
+                if Path(entry.path) not in would_remove:
+                    return False
+        except OSError:
+            return False
     return True
 
 

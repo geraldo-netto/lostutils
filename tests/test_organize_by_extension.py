@@ -1698,6 +1698,29 @@ class PruneEmptyDirsTests(unittest.TestCase):
                     self.assertFalse(_dir_is_prunable(target, set()))
             self.assertTrue(any("scandir failed" in m for m in cm.output))
 
+    def test_dir_is_prunable_oserror_mid_walk_not_prunable(self):
+        """oze-rel-03: an OSError raised while iterating entries (e.g. an
+        NFS/permission flip mid-walk) is caught and the dir reported
+        non-prunable instead of propagating into --preview."""
+        from organize_by_extension import _dir_is_prunable
+
+        class _Boom:
+            def __enter__(self):
+                def gen():
+                    raise OSError(errno.EIO, "io error")
+                    yield  # pragma: no cover
+                return gen()
+
+            def __exit__(self, *exc):
+                return False
+
+        with TemporaryDirectory() as d:
+            target = Path(d) / "x"
+            target.mkdir()
+            with patch("organize_by_extension._safe_scandir",
+                       return_value=_Boom()):
+                self.assertFalse(_dir_is_prunable(target, set()))
+
     def test_count_prunable_symlink_inside_blocks_parent(self):
         """A symlink inside a directory marks the parent as non-empty for the
         dry-run counter exactly as it does for the live pruner."""
