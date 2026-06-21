@@ -1173,22 +1173,27 @@ _COLLISION_RETRY_CAP = 1000
 
 def _atomic_rename_to_free_slot(source: Path) -> Path:
     """Rename `source` to the first free `<name>.collisionN` slot with
-    no-clobber, TOCTOU-safe semantics (oze-rel-19).
+    no-clobber, TOCTOU-safe semantics (oze-conc-01 / oze-rel-19).
 
-    Loops: try `os.rename(source, candidate)`, on `FileExistsError`
-    (someone else grabbed that slot) bump `n` and retry. Caps at
-    `_COLLISION_RETRY_CAP` overall attempts."""
+    POSIX `os.rename` SILENTLY replaces an existing regular file, so a
+    rename-based reservation could clobber a sibling worker's data. Instead
+    reserve the slot with `os.link(source, candidate)` — link raises
+    `FileExistsError` if `candidate` already exists — then `os.unlink` the
+    source. The candidate is always a sibling of the source (same
+    directory, hence same filesystem) so `os.link` never hits EXDEV.
+
+    Loops: on `FileExistsError` (slot taken by us or a racing worker) bump
+    `n` and retry. Caps at `_COLLISION_RETRY_CAP` overall attempts."""
     last_exc: OSError | None = None
     for n in range(1, _COLLISION_RETRY_CAP + 1):
         candidate = source.with_name(f"{source.name}.collision{n}")
-        if candidate.exists():
-            continue
         try:
-            os.rename(source, candidate)
-            return candidate
+            os.link(source, candidate)
         except FileExistsError as exc:
             last_exc = exc
             continue
+        os.unlink(source)
+        return candidate
     raise RuntimeError(
         f"unable to atomically reserve a collision name for {source} "
         f"after {_COLLISION_RETRY_CAP} attempts"

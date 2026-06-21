@@ -11,6 +11,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from contextlib import redirect_stdout
 
+from hypothesis import given, settings, strategies as st
+
 from organize_by_extension import (
     ROOT_MAX_LENGTH,
     bucket_name,
@@ -2194,32 +2196,32 @@ class SourceCollisionResolution(unittest.TestCase):
             self.assertTrue(any("blocks destination" in m for m in cm.output))
 
     def test_resolve_source_collision_retry_race_skips_vanished_blocker(self, ):
-        # L969-970: rename raises FileNotFoundError -> sibling already moved
+        # oze-conc-01: link raises FileNotFoundError -> sibling already moved
         # the blocker; loop re-probes and either succeeds or exits clean.
         with TemporaryDirectory() as d:
             root = Path(d)
             source = root / "src"; source.write_text("data")
             blocker = root / "ext"; blocker.write_text("blocker")
             dest = root / "ext" / "a00000"
-            real_rename = _oze.os.rename
+            real_link = _oze.os.link
             call_count = {"n": 0}
 
-            def flaky_rename(a, b):
+            def flaky_link(a, b):
                 call_count["n"] += 1
                 if call_count["n"] == 1:
                     # Simulate sibling worker already moved the blocker
                     # by removing it and raising FileNotFoundError.
                     blocker.unlink()
                     raise FileNotFoundError(a)
-                return real_rename(a, b)
+                return real_link(a, b)
 
-            with patch.object(_oze.os, "rename", flaky_rename):
+            with patch.object(_oze.os, "link", flaky_link):
                 result = _oze._resolve_source_collision(source, dest)
             # Loop retried; blocker gone -> returns source unchanged.
             self.assertEqual(result, source)
 
     def test_resolve_source_collision_retries_exhausted(self):
-        # L984-989: 8 retries all race -> falls through with warning.
+        # oze-conc-01: 8 retries all race -> falls through with warning.
         with TemporaryDirectory() as d:
             root = Path(d)
             source = root / "src"; source.write_text("data")
@@ -2230,7 +2232,7 @@ class SourceCollisionResolution(unittest.TestCase):
             def always_fnf(a, b):
                 raise FileNotFoundError(a)
 
-            with patch.object(_oze.os, "rename", always_fnf):
+            with patch.object(_oze.os, "link", always_fnf):
                 with self.assertLogs("organize_by_extension", level="WARNING") as cm:
                     result = _oze._resolve_source_collision(source, dest)
             self.assertEqual(result, source)
@@ -2276,7 +2278,7 @@ class SourceCollisionResolution(unittest.TestCase):
             def deny(a, b):
                 raise err
 
-            with patch.object(_oze.os, "rename", deny):
+            with patch.object(_oze.os, "link", deny):
                 with self.assertRaises(PermissionError):
                     _oze._resolve_source_collision(source, dest)
 
@@ -2289,7 +2291,7 @@ class SourceCollisionResolution(unittest.TestCase):
             blocker = root / "ext"; blocker.write_text("blocker")
             dest = root / "ext" / "a00000"
             calls = {"n": 0}
-            real_rename = _oze.os.rename
+            real_link = _oze.os.link
 
             def flaky(a, b):
                 calls["n"] += 1
@@ -2297,9 +2299,9 @@ class SourceCollisionResolution(unittest.TestCase):
                     exc = OSError("ETXTBSY")
                     exc.errno = 26   # ETXTBSY — not in the permanent list
                     raise exc
-                return real_rename(a, b)
+                return real_link(a, b)
 
-            with patch.object(_oze.os, "rename", flaky):
+            with patch.object(_oze.os, "link", flaky):
                 result = _oze._resolve_source_collision(source, dest)
             self.assertEqual(result, source)
 
@@ -2314,26 +2316,68 @@ class SourceCollisionResolution(unittest.TestCase):
             renamed = _oze._atomic_rename_to_free_slot(source)
             assert renamed.name == "src.collision3"
 
+    def test_atomic_rename_to_free_slot_never_clobbers_existing(self):
+        # oze-conc-01: a pre-existing candidate file MUST NOT be overwritten.
+        # POSIX os.rename would silently replace it; os.link must refuse.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src"; source.write_text("SOURCE")
+            taken = root / "src.collision1"
+            taken.write_text("PRECIOUS")
+            renamed = _oze._atomic_rename_to_free_slot(source)
+            # Pre-existing slot is intact; source landed in the next free slot.
+            self.assertEqual(taken.read_text(), "PRECIOUS")
+            self.assertEqual(renamed.name, "src.collision2")
+            self.assertEqual(renamed.read_text(), "SOURCE")
+            self.assertFalse(source.exists())
+
+    @settings(deadline=None, max_examples=60)
+    @given(taken=st.sets(st.integers(min_value=1, max_value=20)))
+    def test_atomic_rename_lands_at_lowest_free_slot_property(self, taken):
+        # oze-conc-01 property: for any set of pre-existing .collisionN
+        # siblings, the helper lands at the lowest free index, never
+        # overwrites a pre-existing slot, and consumes the source exactly once.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            source = root / "src"
+            source.write_text("SOURCE")
+            contents = {}
+            for n in taken:
+                p = root / f"src.collision{n}"
+                marker = f"taken-{n}"
+                p.write_text(marker)
+                contents[p] = marker
+            expected = 1
+            while expected in taken:
+                expected += 1
+            renamed = _oze._atomic_rename_to_free_slot(source)
+            self.assertEqual(renamed.name, f"src.collision{expected}")
+            self.assertEqual(renamed.read_text(), "SOURCE")
+            self.assertFalse(source.exists())
+            for p, marker in contents.items():
+                self.assertEqual(p.read_text(), marker)
+
     def test_atomic_rename_to_free_slot_handles_race(self):
-        # oze-rel-19: rename loses to a sibling that just created the
+        # oze-conc-01: link loses to a sibling that just created the
         # candidate path; helper bumps n and retries.
         with TemporaryDirectory() as d:
             root = Path(d)
             source = root / "src"; source.write_text("x")
             calls = {"n": 0}
-            real_rename = _oze.os.rename
+            real_link = _oze.os.link
 
             def flaky(a, b):
                 calls["n"] += 1
                 if calls["n"] == 1:
                     # Simulate a sibling grabbing the same candidate slot.
                     raise FileExistsError(b)
-                return real_rename(a, b)
+                return real_link(a, b)
 
-            with patch.object(_oze.os, "rename", flaky):
+            with patch.object(_oze.os, "link", flaky):
                 renamed = _oze._atomic_rename_to_free_slot(source)
             # First attempt was collision1, retry succeeded on collision2.
             assert renamed.name == "src.collision2"
+            assert not source.exists()  # source unlinked after the link
 
     def test_atomic_rename_to_free_slot_exhausts(self):
         with TemporaryDirectory() as d:
@@ -2345,9 +2389,10 @@ class SourceCollisionResolution(unittest.TestCase):
 
             import unittest.mock as _m
             with _m.patch.object(_oze, "_COLLISION_RETRY_CAP", 3):
-                with patch.object(_oze.os, "rename", always_fail):
+                with patch.object(_oze.os, "link", always_fail):
                     with self.assertRaisesRegex(RuntimeError, "unable to atomically"):
                         _oze._atomic_rename_to_free_slot(source)
+            self.assertTrue(source.exists())  # never destroyed on exhaustion
 
     def test_atomic_rename_to_free_slot_caps_at_limit(self):
         # oze-rel-16 / oze-cmplx-02: cap retries to avoid infinite loops.
@@ -2628,7 +2673,7 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             self.assertEqual(result[0][0], root / "ok.txt")
 
     def test_preplan_handles_rename_vanish_race(self):
-        # Force os.rename to raise FileNotFoundError -> continue.
+        # oze-conc-01: force os.link to raise FileNotFoundError -> continue.
         with TemporaryDirectory() as d:
             root = Path(d)
             (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
@@ -2638,11 +2683,11 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             def vanish(a, b):
                 raise FileNotFoundError(a)
 
-            with patch.object(_oze.os, "rename", vanish):
+            with patch.object(_oze.os, "link", vanish):
                 result = _oze._preplan_resolve_collisions(
                     root, [root / "avi"], ctx,
                 )
-            # Rename vanished -> source unchanged in plan.
+            # Link vanished -> source unchanged in plan.
             self.assertEqual(result[0][0], root / "avi")
 
     def test_preplan_skips_directory_blocker(self):
