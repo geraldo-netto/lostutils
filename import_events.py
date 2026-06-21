@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
 import json
 import base64
@@ -162,6 +163,10 @@ def encode_image(image_path: Path) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+_DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}$")
+_TIME_SHAPE = re.compile(r"\d{2}:\d{2}(:\d{2})?$")
+
+
 def _coerce_start(event: Dict[str, Any]) -> str:
     """Folds whatever date/time keys the model returned into one ISO string."""
     start = event.get("start")
@@ -169,7 +174,7 @@ def _coerce_start(event: Dict[str, Any]) -> str:
         return str(start)
     day = event.get("date")
     clock = event.get("time")
-    if day and clock:
+    if day and clock and _DATE_SHAPE.match(str(day)) and _TIME_SHAPE.match(str(clock)):
         return f"{day}T{clock}"
     return str(day or clock or "Unknown")
 

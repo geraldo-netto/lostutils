@@ -5,6 +5,7 @@ from pathlib import Path
 from datetime import date, datetime, timezone
 
 import pytest
+from hypothesis import given, strategies as st
 
 import import_events
 
@@ -70,6 +71,60 @@ def test_parse_llm_events_folds_separate_date_and_time():
     events = import_events.parse_llm_events(text, Path("img.png"), "Image/Vision")
 
     assert events[0]["start"] == "2026-06-22T14:00"
+
+
+def test_coerce_start_prefers_explicit_start():
+    assert import_events._coerce_start({"start": "2026-06-22T14:00"}) == "2026-06-22T14:00"
+
+
+def test_coerce_start_joins_only_well_shaped_date_and_time():
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "14:00"}
+    ) == "2026-06-22T14:00"
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "14:00:30"}
+    ) == "2026-06-22T14:00:30"
+
+
+def test_coerce_start_does_not_build_garbage_strings():
+    # Malformed date/time must not be concatenated into "fooTbar" forms.
+    assert import_events._coerce_start({"date": "next week", "time": "noon"}) == "next week"
+    assert import_events._coerce_start({"date": None, "time": None}) == "Unknown"
+    assert import_events._coerce_start({}) == "Unknown"
+
+
+def test_coerce_start_falls_back_to_single_present_field():
+    assert import_events._coerce_start({"date": "2026-06-22"}) == "2026-06-22"
+    assert import_events._coerce_start({"time": "14:00"}) == "14:00"
+
+
+@given(
+    day=st.one_of(st.none(), st.text(max_size=20)),
+    clock=st.one_of(st.none(), st.text(max_size=20)),
+    start=st.one_of(st.none(), st.text(max_size=20)),
+)
+def test_coerce_start_never_emits_none_token(day, clock, start):
+    event = {}
+    if day is not None:
+        event["date"] = day
+    if clock is not None:
+        event["time"] = clock
+    if start is not None:
+        event["start"] = start
+
+    result = import_events._coerce_start(event)
+
+    assert isinstance(result, str)
+    # Result must be one of the inputs, a validated date+time join, or "Unknown".
+    joined = f"{day}T{clock}" if (day and clock) else None
+    candidates = {str(start), str(day), str(clock), "Unknown"}
+    if joined is not None:
+        candidates.add(joined)
+    assert result in candidates
+    if result == joined:
+        d, _, t = result.partition("T")
+        assert import_events._DATE_SHAPE.match(d)
+        assert import_events._TIME_SHAPE.match(t)
 
 
 def test_parse_llm_events_keeps_end_and_location():

@@ -48,7 +48,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cmplx-01 | open | low | import_events.py:165-174 — _coerce_start merges start/date/time keys with str() fallbacks that can produce strings like "NoneTNone"; the date+time concat assumes both are date/time-shaped. Tighten to validated ISO assembly. | robustness
 
 ## code duplication
 
