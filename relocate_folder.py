@@ -1215,16 +1215,33 @@ def _backup_target(target: Path) -> Iterator[Path]:
         backup is warned but not raised (rf-rel-03).
       * exception inside the `with` -> rename(backup, target) to restore;
         failure to restore is logged with explicit `mv` recovery
-        instructions (rf-rel-05). The original exception is then re-raised."""
+        instructions (rf-rel-05). The original exception is then re-raised.
+
+    rf-sec-03: the backup's (st_dev, st_ino) is captured right after the
+    rename-aside. On a world-writable parent an attacker could swap a
+    symlink/different inode in at the backup name during the `with` body;
+    restoring that onto `target` would silently install attacker-controlled
+    content. Both the restore path and the success rmtree path re-lstat the
+    backup and refuse to act when the identity no longer matches."""
     backup = target.with_name(target.name + BACKUP_SUFFIX)
     if _path_taken(backup):
         raise FileExistsError(
             f"stale backup exists, refusing to overwrite: {backup}"
         )
     os.rename(target, backup)
+    backup_st = os.lstat(backup)
+    backup_id = (backup_st.st_dev, backup_st.st_ino)
     try:
         yield backup
     except Exception:
+        if not _backup_identity_ok(backup, backup_id):
+            _log().error(
+                "atomic_swap failed AND the backup at %s was substituted "
+                "(inode/device changed since it was moved aside); refusing to "
+                "restore it onto %s. Inspect both paths manually.",
+                backup, target,
+            )
+            raise
         try:
             os.rename(backup, target)
         except OSError as restore_exc:
@@ -1235,7 +1252,24 @@ def _backup_target(target: Path) -> Iterator[Path]:
                 target, backup, restore_exc, backup, target,
             )
         raise
+    if not _backup_identity_ok(backup, backup_id):
+        _log().warning(
+            "backup at %s was substituted since it was moved aside "
+            "(inode/device changed); leaving it in place instead of removing "
+            "it — inspect it manually", backup,
+        )
+        return
     _swallow_or_warn(f"remove backup {backup}", shutil.rmtree, backup)
+
+
+def _backup_identity_ok(backup: Path, expected: tuple[int, int]) -> bool:
+    """True when `backup`'s current (st_dev, st_ino) still matches `expected`
+    (rf-sec-03). A vanished or substituted backup returns False."""
+    try:
+        st = os.lstat(backup)
+    except OSError:
+        return False
+    return (st.st_dev, st.st_ino) == expected
 
 
 def atomic_swap(source: Path, target: Path) -> None:

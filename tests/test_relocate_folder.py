@@ -1187,6 +1187,82 @@ def test_backup_target_refuses_stale_backup(tmp_path):
             pass
 
 
+def test_backup_identity_ok_matches_and_mismatches(tmp_path):
+    # rf-sec-03: identity helper compares (st_dev, st_ino).
+    d = tmp_path / "d"; d.mkdir()
+    st = os.lstat(d)
+    assert rf._backup_identity_ok(d, (st.st_dev, st.st_ino)) is True
+    assert rf._backup_identity_ok(d, (st.st_dev, st.st_ino + 1)) is False
+    assert rf._backup_identity_ok(tmp_path / "gone", (0, 0)) is False
+
+
+def _spoof_changing_lstat(monkeypatch, backup_name):
+    # First lstat (identity capture) returns ino=1; later lstats return ino=2,
+    # simulating an inode substitution at the backup name (FS inode reuse makes
+    # a real rmtree+rename unreliable to test directly).
+    real_lstat = rf.os.lstat
+    state = {"n": 0}
+
+    class _ST:
+        def __init__(self, dev, ino): self.st_dev, self.st_ino = dev, ino
+
+    def fake(p):
+        if str(p).endswith(backup_name) and rf.os.path.exists(p):
+            # only spoof once the backup actually exists (post rename-aside),
+            # so the pre-rename _path_taken check sees the real (absent) state.
+            state["n"] += 1
+            return _ST(7, 1 if state["n"] == 1 else 2)
+        return real_lstat(p)
+
+    monkeypatch.setattr(rf.os, "lstat", fake)
+
+
+def test_backup_target_refuses_restore_on_substituted_backup(tmp_path, monkeypatch, caplog):
+    # rf-sec-03: if the backup inode is swapped during the with-body, the
+    # restore path refuses to rename the impostor onto target.
+    t = tmp_path / "target"; t.mkdir()
+    (t / "f").write_text("real")
+    rename_calls = {"n": 0}
+    real_rename = rf.os.rename
+
+    def counting_rename(a, b):
+        rename_calls["n"] += 1
+        return real_rename(a, b)
+
+    monkeypatch.setattr(rf.os, "rename", counting_rename)
+    _spoof_changing_lstat(monkeypatch, t.name + rf.BACKUP_SUFFIX)
+    import logging
+    with caplog.at_level(logging.ERROR, logger="relocate"):
+        with pytest.raises(RuntimeError, match="trigger rollback"):
+            with rf._backup_target(t):
+                raise RuntimeError("trigger rollback")
+    # only the rename-aside happened; no restore rename onto target.
+    assert rename_calls["n"] == 1
+    assert any("was substituted" in r.message for r in caplog.records)
+
+
+def test_backup_target_leaves_substituted_backup_on_success(tmp_path, monkeypatch, caplog):
+    # rf-sec-03: on the success path, a substituted backup is left in place
+    # (not rmtree'd) with a warning.
+    t = tmp_path / "target"; t.mkdir()
+    (t / "f").write_text("real")
+    rmtree_calls = {"n": 0}
+    real_rmtree = rf.shutil.rmtree
+
+    def counting_rmtree(p, *a, **k):
+        rmtree_calls["n"] += 1
+        return real_rmtree(p, *a, **k)
+
+    monkeypatch.setattr(rf.shutil, "rmtree", counting_rmtree)
+    _spoof_changing_lstat(monkeypatch, t.name + rf.BACKUP_SUFFIX)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="relocate"):
+        with rf._backup_target(t):
+            t.mkdir()                       # body re-creates the replacement
+    assert rmtree_calls["n"] == 0           # substituted backup not removed
+    assert any("was substituted" in r.message for r in caplog.records)
+
+
 def test_backup_target_warns_on_rmtree_failure(tmp_path, monkeypatch, caplog):
     t = tmp_path / "target"; t.mkdir()
     (t / "f").write_text("x")
