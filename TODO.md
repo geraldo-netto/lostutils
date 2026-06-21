@@ -14,8 +14,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 cmx-sec-01 | open | low | check-mx-domain.py:43 — `str(argv[0])` passed unvalidated; an email-like string with no `@` raises IndexError caught later, but no length/charset bound means a huge arg reaches the resolver. Validate email shape (regex) before DNS resolution. | input validation
 dnp-sec-01 | open | low | dedupl_numpy.py:21 — `sys.argv[1]` opened with no validation; a non-existent path raises an uncaught FileNotFoundError traceback instead of a clean error. Wrap open in try/except and exit non-zero. | input validation
-ie-sec-01 | open | high | import_events.py:32 — `urlretrieve(url, path_str)` downloads ~4GB model over HTTPS with no checksum/signature verification (MITM or compromised HF repo serves a malicious GGUF executed by llama_cpp). Pin and verify SHA-256 of each file before use. | supply-chain
-ie-sec-02 | open | med | import_events.py:150 — file content from arbitrary folder files is interpolated straight into the LLM user prompt with no size cap; enables prompt-injection and context overflow. Truncate to n_ctx budget and treat content as untrusted. | prompt injection
 lq-sec-03 | open | low | link_queue.py:786 — `_save_state` tmpfile uses mkstemp 0o600 but the dir is only forced 0o700 in `_user_config_dir`, not on the `_script_dir()` (repo-dir) fallback. Document/guard the fallback dir perms. | STRIDE-Info-disclosure
 mmr-sec-02 | open | med | masterclass-mass-rename.py:88 — REMOVE_PATTERN strips substrings anywhere (e.g. `ams`, `bm`, `cup`, `cms`) including inside legitimate words, corrupting unrelated filenames. Anchor tokens to word boundaries and order by length. | reliability
 mmr-sec-01 | open | high | masterclass-mass-rename.py:112-115 — `list_files` returns bare basenames but rename/os.path.exists/os.link operate relative to CWD, so renames target wrong/nonexistent paths unless CWD == argv[1]. Join names with the directory via os.path.join. | path traversal
@@ -52,7 +50,6 @@ rf-conc-02 | open | low | relocate_folder.py:914 — `_run_verify_pool` calls sh
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cmplx-01 | open | med | import_events.py:88-100 — `parse_llm_events` scans every char calling raw_decode on each `[`/`{` start — O(n) decode attempts over the whole string. Find the first `[`/`{` and decode once, or strip + json.loads. |
 rf-cmplx-01 | open | low | relocate_folder.py:1206 — `execute` mixes orchestration, state machine, idempotency, validation ordering, and a finally-logging side effect; the nested _advance/_copy_and_verify callback makes the swap-ordering invariant hard to audit. Extract a linear pipeline of named stages returning MigrationState. | SOLID-SRP
 
 ## code duplication
@@ -68,8 +65,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-arch-02 | open | low | hash-recursive-ai5.py:100,849 — "no cap" is encoded as `2**31` in RunConfig then reverse-detected via `< 2**31` in the pipeline; the sentinel meaning is split across two classes. Store None or expose an explicit alias_cap_enabled. | leaky abstraction
 hr-arch-01 | open | med | hash-recursive-ai5.py:869 — `find_duplicate_groups` stashes `config.overflow = overflow` as a hidden side channel to _expand_keys_to_paths; two runs sharing a RunConfig clobber each other and it violates CQS. Thread overflow explicitly through on_group. | hidden coupling/SRP
-ie-arch-02 | open | low | import_events.py:11-16 — module-level constants for model paths/URLs mix configuration with code; no override without editing source. Move to argparse/env vars. |
-ie-arch-01 | open | med | import_events.py:208-221 — hardcoded `target_folder = "./events_data"` and no CLI args though process_folder accepts a param. Add argparse to accept folder + model paths. |
 lq-arch-02 | open | low | link_queue.py:2411 — LinkQueueApp re-exports ~20 Dispatcher methods as class attrs purely so call sites resolve on the app; combined with __getattr__ proxying this is two overlapping delegation mechanisms. Pick one (prefer __getattr__). | SRP
 mmr-arch-01 | open | low | masterclass-mass-rename.py:73-81 — `list_files` contains dead commented-out os.walk code; recursive intent abandoned. Remove dead code or implement recursion via a flag. |
 rf-arch-02 | open | low | relocate_folder.py:50 — module-global LOG plus ContextVar _log_ctx plus _log() indirection is an ad-hoc DI mechanism for one dependency; every function calls _log() defeating testability gains. Pass logger through Plan or a small context object. | SOLID-DIP
@@ -108,7 +103,6 @@ rdv3-rel-01 | open | low | remove-deduplv3.py:107 — tiebreaker `max(... (basen
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 cmx-test-01 | open | med | check-mx-domain.py:27 — `has_mx_record` does real DNS resolution with no injection point for the resolver, untestable without network. Inject a resolver factory for unit tests. | test coverage
-ie-test-01 | open | med | import_events.py — no tests; parse_llm_events (pure, complex char-scan logic) is the highest-value unit-test target and is fully testable without the model. Add tests for malformed/embedded JSON. | test coverage
 mmr-test-01 | open | low | masterclass-mass-rename.py:83 — clean_name is pure and token-heavy but untested; substring-stripping edge cases (mmr-sec-02) would be caught by tests. Add cases for `ams`/`cup`/empty-result. | test coverage
 rf-test-02 | open | low | relocate_folder.py:515 — tracking_copy2 / progress_cb path is untested and unreachable from the CLI (see rf-obs-01), so the bytes-accounting and exception-swallowing at 523 have no coverage. Add a test driving copy_tree with progress_cb, or remove. |
 rf-test-01 | open | med | relocate_folder.py:1130 — atomic_swap / _backup_target rollback path (rename-back-on-exception, restore-failure logging) has no observable hook and depends on filesystem rename failure; the restore-failure branch (1119) is effectively untestable. Inject a rename fn for fault simulation. |
@@ -118,7 +112,6 @@ rf-test-01 | open | med | relocate_folder.py:1130 — atomic_swap / _backup_targ
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnv3-obs-01 | open | low | deduplicate-by-namev3.py:51 — file open errors raise raw tracebacks; no user-facing message unlike remove-deduplv3 which handles OSError. Wrap open and exit cleanly. |
-ie-obs-01 | open | low | import_events.py:218 — no logging.basicConfig is configured, so logger.warning/error/exception output is suppressed by default; the script appears silent on errors. Configure logging in __main__. |
 mmr-obs-01 | open | low | masterclass-mass-rename.py:113-115 — the rename loop has no per-file error handling; the first FileExistsError/OSError aborts the whole batch, leaving partial renames with no summary. Catch per-file and report a tally. |
 rf-obs-02 | open | low | relocate_folder.py:1243 — execute's finally logs terminal state but FAILED is logged identically whether the failure was validation, copy, verify, or swap; no stage attribution. Record last successful state + failing stage in the log line. |
 rf-obs-01 | open | low | relocate_folder.py:1332 — `_copy_and_verify` accepts a progress_cb but execute never passes one, so the whole progress-reporting machinery is dead in the CLI and a long copy shows no progress. Wire a default logging progress_cb or remove the unused param. |
