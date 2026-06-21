@@ -2654,6 +2654,41 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             # Result is the same path (no rename because it's a directory).
             self.assertEqual(result[0][0], root / "ext")
 
+    def test_preplan_preview_does_not_rename_self_collision(self):
+        # oze-rel-01: in preview, a source that blocks a bucket ancestor
+        # must NOT be renamed on disk; the would-rename is only logged.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            blocker = root / "avi"
+            blocker.write_bytes(b"RIFF\x00\x00\x00\x00AVI ")  # -> avi bucket
+            ctx = _oze.SniffContext(sniff=True, head_cache={},
+                                    extra_zip_family=frozenset())
+            before = sorted(p.name for p in root.iterdir())
+            with self.assertLogs("organize_by_extension", level="INFO") as cm:
+                result = _oze._preplan_resolve_collisions(
+                    root, [blocker], ctx, preview=True,
+                )
+            after = sorted(p.name for p in root.iterdir())
+            self.assertEqual(before, after)        # filesystem untouched
+            self.assertTrue(blocker.exists())      # never renamed
+            self.assertEqual(result[0][0], blocker)  # plan keeps original path
+            self.assertTrue(any("Preview: name collision" in m for m in cm.output))
+
+    def test_organize_preview_self_collision_no_fs_change(self):
+        # oze-rel-01 end-to-end: organize(preview=True) with a source-name /
+        # bucket-ancestor collision performs zero filesystem changes.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
+            (root / "movie.avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
+            before = {str(p.relative_to(root)) for p in root.rglob("*")}
+            _oze.organize(root, preview=True, num_threads=4)
+            after = {str(p.relative_to(root)) for p in root.rglob("*")}
+            self.assertEqual(before, after)
+            # No bucket dirs were created and no .collision files appeared.
+            self.assertFalse(any(".collision" in p for p in after))
+            self.assertFalse((root / "avi").is_dir())
+
     def test_preplan_skips_oserror_on_is_file(self):
         # File needs to be in needed_dirs (i.e. be a blocker) for the
         # is_file branch to be exercised at all. Use the avi-collision setup.

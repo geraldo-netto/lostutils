@@ -1435,6 +1435,7 @@ def plan_moves(
     head_cache: dict[Path, HeadBytes] | None = None,
     extra_zip_family: frozenset[str] = frozenset(),
     ctx: SniffContext | None = None,
+    preview: bool = False,
 ) -> Iterator[tuple[Path, Path]]:
     """Yield ``(source, bucket_dir)`` pairs for every file in ``files`` (oze-decl-01).
 
@@ -1446,6 +1447,10 @@ def plan_moves(
     directories are reserved in the manager's name-set cache as a side effect
     of :meth:`BucketManager.choose` so a later iteration can see the
     reservation (oze-conc-01).
+
+    When ``preview`` is True (oze-rel-01) the collision pre-pass records the
+    would-rename instead of performing it, honouring the "preview never touches
+    the filesystem" contract.
 
     The caller is responsible for ordering — pass ``sorted(files)`` if
     deterministic plans matter; the function asserts the sort to catch
@@ -1469,7 +1474,7 @@ def plan_moves(
     # Returns [(current_source_path, original_ext_dir)] — preplan resolves
     # the extension BEFORE any rename so a `.collision<n>` suffix doesn't
     # accidentally re-classify the file (oze-rel-14).
-    plan_pairs = _preplan_resolve_collisions(root, list(files), ctx)
+    plan_pairs = _preplan_resolve_collisions(root, list(files), ctx, preview=preview)
     for source, ext_dir in plan_pairs:
         # oze-rel-18: use `.name` so dotfiles (`.bashrc` → stem="") and
         # multi-dot names (`archive.tar.gz` → stem="archive.tar") get
@@ -1491,6 +1496,7 @@ def _preplan_resolve_collisions(
     root: Path,
     files: list[Path],
     ctx: "SniffContext",
+    preview: bool = False,
 ) -> list[tuple[Path, Path]]:
     """Pre-pass over `files` (oze-rel-14): if any source file's own path
     sits on the ancestor chain of a bucket dir that ANY file in the plan
@@ -1503,6 +1509,10 @@ def _preplan_resolve_collisions(
     doesn't accidentally re-classify the file (e.g. ``avi`` (no header)
     renamed to ``avi.collision1`` must still bucket under ``no_extension/``,
     not ``collision1/``).
+
+    When ``preview`` is True (oze-rel-01) no rename is performed: the
+    would-rename is logged and the source path is left unchanged in the
+    returned plan, so ``--preview`` never mutates the filesystem.
     """
     # Compute the target ext-dir for every file once; build a set of every
     # ancestor path that any plan needs to exist as a directory.
@@ -1519,27 +1529,51 @@ def _preplan_resolve_collisions(
     for source, _ext_dir in pairs:
         if source not in needed_dirs:
             continue
-        try:
-            if not source.is_file():
-                continue
-        except OSError:
-            continue
-        try:
-            # oze-rel-19: atomic — re-probes free slot on FileExistsError.
-            candidate = _atomic_rename_to_free_slot(source)
-        except FileNotFoundError:
-            continue   # vanished between our scan and rename — race tolerated
-        logger.warning(
-            "name collision (planning): source %s would block bucket "
-            "ancestor; renamed to %s before any worker starts",
-            source, candidate,
-        )
-        rename_map[source] = candidate
-        # Move the head_cache entry over too so the worker's later
-        # `resolve_real_extension` calls don't re-open the file.
-        if ctx.head_cache is not None and source in ctx.head_cache:
-            ctx.head_cache[candidate] = ctx.head_cache.pop(source)
+        candidate = _resolve_one_planning_collision(source, ctx, preview)
+        if candidate is not None:
+            rename_map[source] = candidate
     return [(rename_map.get(src, src), ext_dir) for src, ext_dir in pairs]
+
+
+def _resolve_one_planning_collision(
+    source: Path,
+    ctx: "SniffContext",
+    preview: bool,
+) -> "Path | None":
+    """Resolve one source that blocks a bucket ancestor (oze-rel-14).
+
+    Returns the renamed path, or None when nothing was renamed (source
+    vanished, isn't a regular file, or ``preview`` suppresses the rename).
+    """
+    try:
+        if not source.is_file():
+            return None
+    except OSError:
+        return None
+    if preview:
+        # oze-rel-01: preview never touches the filesystem — log the
+        # would-rename and leave the source in place.
+        logger.info(
+            "Preview: name collision — source %s would be renamed aside "
+            "before placing under its bucket",
+            source,
+        )
+        return None
+    try:
+        # oze-rel-19: atomic — re-probes free slot on FileExistsError.
+        candidate = _atomic_rename_to_free_slot(source)
+    except FileNotFoundError:
+        return None   # vanished between our scan and rename — race tolerated
+    logger.warning(
+        "name collision (planning): source %s would block bucket "
+        "ancestor; renamed to %s before any worker starts",
+        source, candidate,
+    )
+    # Move the head_cache entry over too so the worker's later
+    # `resolve_real_extension` calls don't re-open the file.
+    if ctx.head_cache is not None and source in ctx.head_cache:
+        ctx.head_cache[candidate] = ctx.head_cache.pop(source)
+    return candidate
 
 
 @dataclass
@@ -1679,7 +1713,7 @@ def organize(
         return
 
     manager = bucket_manager if bucket_manager is not None else BucketManager(root=root)
-    plan = plan_moves(root, sorted(files), manager, ctx=ctx)
+    plan = plan_moves(root, sorted(files), manager, ctx=ctx, preview=preview)
     stats = _run_moves(
         plan,
         worker=make_worker(preview),
