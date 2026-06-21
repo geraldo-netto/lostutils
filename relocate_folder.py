@@ -1241,6 +1241,50 @@ def _cleanup_staging(staging: Path) -> None:
         pass
 
 
+# --- kill-safety recovery (rf-rel-01) ---------------------------------------
+
+def _orphaned_backup(source: Path) -> "Path | None":
+    """Return the orphaned `<source>.relocate-backup` path, or None.
+
+    An orphan exists when `atomic_swap` died between `os.rename(source, backup)`
+    and the symlink creation: the real directory now lives at the backup name
+    and `source` itself is gone. Detect that exact shape — source absent (not
+    even a dangling symlink) AND the backup present — so a normal in-progress
+    run (source present) is never misread as a crash."""
+    backup = source.with_name(source.name + BACKUP_SUFFIX)
+    if not _path_taken(source) and _path_taken(backup):
+        return backup
+    return None
+
+
+def _warn_orphaned_backup(backup: Path, source: Path) -> None:
+    _log().warning(
+        "orphaned backup detected: %s exists but %s is missing — a previous "
+        "run was likely killed mid-swap. Re-run with --recover to restore it "
+        "(renames the backup back to the source), or do it manually: "
+        "`mv %s %s`",
+        backup, source, backup, source,
+    )
+
+
+def recover(source: Path) -> str:
+    """Restore an orphaned `<source>.relocate-backup` to `source` (rf-rel-01).
+
+    Returns a single-line status. Raises `FileNotFoundError` when there is
+    nothing to recover and `FileExistsError` when `source` is already present
+    (so recovery never clobbers live data)."""
+    backup = source.with_name(source.name + BACKUP_SUFFIX)
+    if _path_taken(source):
+        raise FileExistsError(
+            f"refusing to recover: {source} already exists; "
+            f"resolve it manually before restoring {backup}"
+        )
+    if not _path_taken(backup):
+        raise FileNotFoundError(f"no orphaned backup to recover at {backup}")
+    os.rename(backup, source)
+    return f"recovered: {backup} -> {source}"
+
+
 # --- orchestration ----------------------------------------------------------
 
 def execute(plan: Plan) -> str:
@@ -1260,6 +1304,12 @@ def execute(plan: Plan) -> str:
         if already_migrated(plan.source, plan.target):
             _advance(MigrationState.ALREADY_MIGRATED)
             return f"skipped: {plan.source} already symlinks to {plan.target}"
+        orphan = _orphaned_backup(plan.source)
+        if orphan is not None:
+            # rf-rel-01: a killed swap left the dir at the backup name with the
+            # source gone. Warn (never auto-mutate) and point at --recover
+            # before validate_source raises a bare FileNotFoundError.
+            _warn_orphaned_backup(orphan, plan.source)
         validate_source(plan.source)
         if not plan.force:
             _check_no_open_files(plan.source)
@@ -1462,7 +1512,13 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Move a directory to another filesystem and symlink it back."
     )
     p.add_argument("source", help="path to the directory to move (e.g. ~/.cache)")
-    p.add_argument("dest_root", help="parent directory on the destination filesystem")
+    p.add_argument("dest_root", nargs="?", default=None,
+                   help="parent directory on the destination filesystem "
+                        "(omit only with --recover)")
+    p.add_argument("--recover", action="store_true",
+                   help="rf-rel-01: restore an orphaned <source>.relocate-backup "
+                        "left by a run killed mid-swap (renames it back to "
+                        "<source>); dest_root is not required")
     p.add_argument("--dry-run", action="store_true",
                    help="show what would happen, do nothing")
     p.add_argument("--no-verify", action="store_true",
@@ -1521,7 +1577,13 @@ def _format_shutil_error(err: shutil.Error, max_lines: int = 10) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    plan = parse_args(argv)
+    ns = parse_namespace(argv)
+    if getattr(ns, "recover", False):
+        return _run_recover(ns)
+    if ns.dest_root is None:
+        _log().error("FAILED: dest_root is required unless --recover is given")
+        return 2
+    plan = Plan.from_args(ns)
     _log().info("plan: source=%s target=%s dry_run=%s verify=%s checksum=%s strict=%s",
                 plan.source, plan.target, plan.dry_run, plan.verify,
                 plan.checksum, plan.strict)
@@ -1530,6 +1592,18 @@ def main(argv: list[str] | None = None) -> int:
     except shutil.Error as exc:
         _log().error("FAILED during copy:\n%s", _format_shutil_error(exc))
         return 1
+    except Exception as exc:
+        _log().error("FAILED: %s", exc)
+        return 1
+    _log().info(result)
+    return 0
+
+
+def _run_recover(ns: argparse.Namespace) -> int:
+    """Handle `--recover` (rf-rel-01): restore an orphaned backup."""
+    source = Path(ns.source).expanduser().absolute()
+    try:
+        result = recover(source)
     except Exception as exc:
         _log().error("FAILED: %s", exc)
         return 1

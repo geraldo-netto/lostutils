@@ -2387,3 +2387,111 @@ def test_target_has_content_matches_dir_population(tmp_path_factory, names):
         (target / n).write_text("x")
     expected = any(n not in (".", "..") for n in names)
     assert rf._target_has_content(target) is expected
+
+
+# --- rf-rel-01: orphaned-backup detection and --recover --------------------
+
+def _make_orphan(tmp_path):
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.mkdir()
+    (backup / "payload").write_text("data")
+    return source, backup
+
+
+def test_orphaned_backup_detected(tmp_path):
+    source, backup = _make_orphan(tmp_path)
+    assert rf._orphaned_backup(source) == backup
+
+
+def test_orphaned_backup_none_when_source_present(tmp_path):
+    source, backup = _make_orphan(tmp_path)
+    source.mkdir()  # source exists → not an orphan shape
+    assert rf._orphaned_backup(source) is None
+
+
+def test_orphaned_backup_none_when_no_backup(tmp_path):
+    source = tmp_path / "mydir"
+    assert rf._orphaned_backup(source) is None
+
+
+def test_recover_restores_backup(tmp_path):
+    source, backup = _make_orphan(tmp_path)
+    msg = rf.recover(source)
+    assert msg.startswith("recovered:")
+    assert source.is_dir()
+    assert (source / "payload").read_text() == "data"
+    assert not rf._path_taken(backup)
+
+
+def test_recover_refuses_when_source_exists(tmp_path):
+    source, _ = _make_orphan(tmp_path)
+    source.mkdir()
+    with pytest.raises(FileExistsError):
+        rf.recover(source)
+
+
+def test_recover_raises_when_nothing_to_recover(tmp_path):
+    source = tmp_path / "nope"
+    with pytest.raises(FileNotFoundError):
+        rf.recover(source)
+
+
+def test_execute_warns_on_orphaned_backup(tmp_path, caplog):
+    source, _ = _make_orphan(tmp_path)
+    plan = rf.Plan(source=source, target=tmp_path / "dest" / "mydir")
+    import logging
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(FileNotFoundError):
+            rf.execute(plan)
+    assert any("orphaned backup detected" in r.message for r in caplog.records)
+    assert any("--recover" in r.message for r in caplog.records)
+
+
+def test_execute_does_not_auto_mutate_on_orphan(tmp_path):
+    source, backup = _make_orphan(tmp_path)
+    plan = rf.Plan(source=source, target=tmp_path / "dest" / "mydir")
+    with pytest.raises(FileNotFoundError):
+        rf.execute(plan)
+    # warn-only: backup must be untouched, source still absent.
+    assert rf._path_taken(backup)
+    assert not rf._path_taken(source)
+
+
+def test_main_recover_flag_restores(tmp_path):
+    source, backup = _make_orphan(tmp_path)
+    rc = rf.main(["--recover", str(source)])
+    assert rc == 0
+    assert source.is_dir()
+    assert not rf._path_taken(backup)
+
+
+def test_main_recover_flag_no_backup_returns_1(tmp_path):
+    source = tmp_path / "nope"
+    assert rf.main(["--recover", str(source)]) == 1
+
+
+def test_main_missing_dest_root_without_recover(tmp_path):
+    assert rf.main([str(tmp_path / "src")]) == 2
+
+
+def test_parser_dest_root_optional_with_recover():
+    ns = rf.parse_namespace(["--recover", "/some/src"])
+    assert ns.recover is True
+    assert ns.dest_root is None
+
+
+@settings(max_examples=40, deadline=None)
+@given(name=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789_-",
+                    min_size=1, max_size=12))
+def test_recover_roundtrip_property(tmp_path_factory, name):
+    base = tmp_path_factory.mktemp("rt")
+    source = base / name
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.mkdir()
+    (backup / "x").write_text("y")
+    assert rf._orphaned_backup(source) == backup
+    rf.recover(source)
+    assert source.is_dir()
+    assert (source / "x").read_text() == "y"
+    assert rf._orphaned_backup(source) is None
