@@ -2602,6 +2602,39 @@ def test_recover_raises_when_nothing_to_recover(tmp_path):
         rf.recover(source)
 
 
+# --- rf-test-03: recover refuses a non-directory backup ---------------------
+
+def test_recover_refuses_regular_file_backup(tmp_path):
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.write_text("not a directory")    # regular file at the backup name
+    with pytest.raises(NotADirectoryError, match="not a directory"):
+        rf.recover(source)
+    # backup is left untouched for manual inspection.
+    assert backup.is_file()
+    assert not rf._path_taken(source)
+
+
+def test_recover_refuses_symlink_backup(tmp_path):
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+    backup.symlink_to(elsewhere)            # symlink (even if to a dir)
+    with pytest.raises(NotADirectoryError, match="not a directory"):
+        rf.recover(source)
+    assert backup.is_symlink()
+    assert not rf._path_taken(source)
+
+
+def test_recover_refuses_dangling_symlink_backup(tmp_path):
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.symlink_to(tmp_path / "missing")  # dangling symlink
+    with pytest.raises(NotADirectoryError, match="not a directory"):
+        rf.recover(source)
+    assert backup.is_symlink()
+
+
 def test_execute_warns_on_orphaned_backup(tmp_path, caplog):
     source, _ = _make_orphan(tmp_path)
     plan = rf.Plan(source=source, target=tmp_path / "dest" / "mydir")

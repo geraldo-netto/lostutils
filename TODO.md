@@ -97,7 +97,6 @@ mmr-test-01 | open | low | masterclass-mass-rename.py:83-94 — clean_name has n
 nm-test-01 | open | low | numero_magicov2.py:35-40 — reduce_to_single_digit returns 0 for input 0 but main guards total==0 before calling, so the 0-branch is untested dead-ish path. Add a test or assert the precondition. | coverage
 rf-test-04 | open | low | relocate_folder.py:762 — no test forces the verify pool's first-and-only error into the trailing _run_streamed drain (all tasks inflight, none completing during submission) to prove the drain captures it (rf-conc-02). |
 rf-test-01 | open | med | relocate_folder.py:907 — the verify-pool leak and rmtree-vs-running-threads race are hard to test: there is no seam to pause a worker mid-hash. Make the hash function injectable (param or contextvar like _log) so a test can block a thread inside _sha256 on the error path. |
-rf-test-03 | open | low | relocate_folder.py:1324 — no test covers recover when <source>.relocate-backup is a non-directory (symlink/regular file); current code blindly renames it into place (rf-rel-02). Add a test asserting recover refuses a non-dir backup. |
 
 ## observability
 
