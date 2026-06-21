@@ -222,6 +222,10 @@ DEFAULT_CONFIG = {
     "seq_of_sweep_gap": _SEQ_OF_SWEEP_GAP,   # lq-decoup-04
     "sleep_between_items": 5,
     "worker_count": 1,
+    "immediate_worker_count": 0,    # lq-arch-01: cap on concurrent immediate-mode
+                                    # runners, tuned independently of worker_count
+                                    # (queue parallelism). 0/empty = follow
+                                    # worker_count.
     "failure_sleep_seconds": 300,   # 5 minutes — global cooldown after a failure
     "command_timeout_seconds": 0,   # scal-04: per-item subprocess wall-time cap;
                                     # 0 = off (wait forever). When > 0, a hung
@@ -1111,13 +1115,24 @@ class Dispatcher:
         return mode, cmd_tpl, shell, mode
 
     def _immediate_concurrency(self) -> int:
-        """Concurrency cap for immediate-mode runners, mirroring the configured
-        worker_count (scal-01). Clamped to >= 1 so a misconfigured 0 still
-        admits one runner at a time."""
+        """Concurrency cap for immediate-mode runners (lq-arch-01). Read from
+        the dedicated ``immediate_worker_count`` key so immediate parallelism is
+        tunable independently of the queue ``worker_count`` (e.g. 1 queue worker
+        + 4 immediate runners). Falls back to ``worker_count`` when the key is
+        absent / empty / 0 so existing configs behave as before. Clamped to >= 1 so a
+        misconfigured 0 still admits one runner at a time."""
+        fallback = self.config.get("worker_count", 1)
+        raw = self.config.get("immediate_worker_count")
+        if raw in (None, "", 0):
+            # Sentinel: follow worker_count (queue parallelism).
+            raw = fallback
         try:
-            return max(1, int(self.config.get("worker_count", 1)))
+            return max(1, int(raw))
         except (TypeError, ValueError):
-            return 1
+            try:
+                return max(1, int(fallback))
+            except (TypeError, ValueError):
+                return 1
 
     def _run_immediate_item(self, item: QueueItem) -> None:
         """Run one immediate item and record a failure/completion metric on its

@@ -52,7 +52,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-arch-01 | open | low | link_queue.py:1063 — _immediate_concurrency reuses worker_count for immediate-pool sizing, conflating queue parallelism with immediate parallelism (can't run 1 queue worker + 4 immediate runners). Add an immediate_worker_count config key defaulting to worker_count. |
 mmr-arch-01 | open | low | masterclass-mass-rename.py:73-81 — list_files returns os.listdir (non-recursive) with a dead commented os.walk block; the renamer can't descend dirs and clean_name is applied to directory names too. Decide recursive vs flat and remove dead code. | dead code / scope
 
 ## reliability/correctness

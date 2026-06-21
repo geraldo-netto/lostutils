@@ -2313,6 +2313,68 @@ def test_command_timeout_seconds_unparseable_treated_as_off(headless_dispatcher)
     assert headless_dispatcher._command_timeout_seconds() == 0
 
 
+def test_immediate_concurrency_falls_back_to_worker_count(headless_dispatcher):
+    # lq-arch-01: with immediate_worker_count unset/0/empty, immediate
+    # parallelism follows worker_count (back-compat).
+    disp = headless_dispatcher
+    disp.config["worker_count"] = 3
+    disp.config["immediate_worker_count"] = 0
+    assert disp._immediate_concurrency() == 3
+    disp.config["immediate_worker_count"] = ""
+    assert disp._immediate_concurrency() == 3
+    del disp.config["immediate_worker_count"]
+    assert disp._immediate_concurrency() == 3
+
+
+def test_immediate_concurrency_independent_of_worker_count(headless_dispatcher):
+    # lq-arch-01: a dedicated immediate_worker_count overrides worker_count, so
+    # 1 queue worker + 4 immediate runners is expressible.
+    disp = headless_dispatcher
+    disp.config["worker_count"] = 1
+    disp.config["immediate_worker_count"] = 4
+    assert disp._immediate_concurrency() == 4
+
+
+def test_immediate_concurrency_clamps_and_tolerates_garbage(headless_dispatcher):
+    # lq-arch-01: a misconfigured 0 still admits one runner; unparseable values
+    # fall back to worker_count, then to 1.
+    disp = headless_dispatcher
+    disp.config["worker_count"] = 2
+    disp.config["immediate_worker_count"] = -5
+    assert disp._immediate_concurrency() == 1
+    disp.config["immediate_worker_count"] = "abc"
+    assert disp._immediate_concurrency() == 2     # falls back to worker_count
+    disp.config["worker_count"] = "xyz"
+    assert disp._immediate_concurrency() == 1     # both unparseable -> 1
+
+
+try:
+    from hypothesis import given as _given_arch, strategies as _st_arch
+    from hypothesis import settings as _hs_arch
+
+    @_hs_arch(max_examples=80, deadline=None)
+    @_given_arch(
+        wc=_st_arch.one_of(_st_arch.integers(-3, 50), _st_arch.text(max_size=4),
+                           _st_arch.none()),
+        iwc=_st_arch.one_of(_st_arch.integers(-3, 50), _st_arch.text(max_size=4),
+                            _st_arch.none()),
+    )
+    def test_immediate_concurrency_property(wc, iwc):
+        # lq-arch-01 property: _immediate_concurrency always returns an int >= 1
+        # for ANY config value pair, never raising.
+        cfg = dict(link_queue.DEFAULT_CONFIG)
+        cfg["worker_count"] = wc
+        cfg["immediate_worker_count"] = iwc
+        disp = link_queue.Dispatcher.headless(cfg)
+        try:
+            n = disp._immediate_concurrency()
+            assert isinstance(n, int) and n >= 1
+        finally:
+            disp.stop_event.set()
+except ImportError:  # pragma: no cover - hypothesis always installed in CI
+    pass
+
+
 def test_immediate_pool_bounds_live_threads(headless_dispatcher):
     # lq-conc-02: a large immediate batch must NOT spawn one live thread per
     # item; the live consumer count is capped at the pool size.
