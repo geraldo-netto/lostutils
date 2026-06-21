@@ -206,6 +206,25 @@ def extract_from_ics(file_path: Path, default_tz: Optional[str] = None) -> List[
 # --------------------------------------------------------------------------- #
 _DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}$")
 _TIME_SHAPE = re.compile(r"\d{2}:\d{2}(:\d{2})?$")
+_LOOSE_TIME = re.compile(r"^\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\s*$", re.IGNORECASE)
+
+
+def _normalize_loose_time(clock: str) -> Optional[str]:
+    """Coerces a loosely-formatted clock (e.g. '2 PM', '2:30pm') into HH:MM."""
+    if _TIME_SHAPE.match(clock):
+        return clock
+    match = _LOOSE_TIME.match(clock)
+    if not match:
+        return None
+    hour = int(match.group(1))
+    if not 1 <= hour <= 12:
+        return None
+    minute = int(match.group(2) or 0)
+    if match.group(3).lower() == "p" and hour != 12:
+        hour += 12
+    elif match.group(3).lower() == "a" and hour == 12:
+        hour = 0
+    return f"{hour:02d}:{minute:02d}"
 
 
 def _coerce_start(event: Dict[str, Any]) -> str:
@@ -215,8 +234,13 @@ def _coerce_start(event: Dict[str, Any]) -> str:
         return str(start)
     day = event.get("date")
     clock = event.get("time")
-    if day and clock and _DATE_SHAPE.match(str(day)) and _TIME_SHAPE.match(str(clock)):
-        return f"{day}T{clock}"
+    if day and _DATE_SHAPE.match(str(day)):
+        if clock:
+            normalized = _normalize_loose_time(str(clock))
+            if normalized:
+                return f"{day}T{normalized}"
+            logger.warning("Dropping unparseable time %r for date %s", clock, day)
+        return str(day)
     if day:
         return str(day)
     return "Unknown"

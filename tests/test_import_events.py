@@ -200,6 +200,43 @@ def test_coerce_start_drops_time_only_event():
     ) is None
 
 
+def test_coerce_start_parses_loose_am_pm_time():
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "2 PM"}
+    ) == "2026-06-22T14:00"
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "2:30pm"}
+    ) == "2026-06-22T14:30"
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "12 AM"}
+    ) == "2026-06-22T00:00"
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "12 PM"}
+    ) == "2026-06-22T12:00"
+
+
+def test_coerce_start_logs_dropped_unparseable_time(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        result = import_events._coerce_start({"date": "2026-06-22", "time": "noonish"})
+
+    assert result == "2026-06-22"
+    assert "Dropping unparseable time" in caplog.text
+
+
+def test_coerce_start_loose_time_join_is_parseable():
+    start = import_events._coerce_start({"date": "2026-06-22", "time": "9 AM"})
+    assert import_events._parse_iso(start) == datetime(2026, 6, 22, 9, 0)
+
+
+def test_normalize_loose_time_rejects_out_of_range():
+    assert import_events._normalize_loose_time("13 PM") is None
+    assert import_events._normalize_loose_time("0 AM") is None
+    assert import_events._normalize_loose_time("garbage") is None
+    assert import_events._normalize_loose_time("14:00") == "14:00"
+
+
 @given(
     day=st.one_of(st.none(), st.text(max_size=20)),
     clock=st.one_of(st.none(), st.text(max_size=20)),
@@ -221,12 +258,13 @@ def test_coerce_start_never_emits_none_token(day, clock, start):
     if not start and not day:
         assert result == "Unknown"
     # Result must be the start, a date, a validated date+time join, or "Unknown".
-    joined = f"{day}T{clock}" if (day and clock) else None
     candidates = {str(start), str(day), "Unknown"}
-    if joined is not None:
-        candidates.add(joined)
+    if day and clock:
+        normalized = import_events._normalize_loose_time(str(clock))
+        if normalized is not None:
+            candidates.add(f"{day}T{normalized}")
     assert result in candidates
-    if result == joined:
+    if "T" in result and result not in (str(start), str(day)):
         d, _, t = result.partition("T")
         assert import_events._DATE_SHAPE.match(d)
         assert import_events._TIME_SHAPE.match(t)
