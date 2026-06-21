@@ -856,6 +856,59 @@ def test_hash_file_windows_strict_short_file_returns_none(tmp_path):
     assert hr._hash_file_windows(str(f), [hr.FileWindow(0, 100, 0, strict=True)]) is None
 
 
+def test_tick_shrank_increments_counter():
+    # hr-rel-01: dedicated counter for strict short-reads.
+    cfg = hr.RunConfig()
+    hr._tick_shrank(cfg)
+    hr._tick_shrank(cfg)
+    assert cfg.hash_skipped_shrank == 2
+
+
+def test_tick_shrank_no_config_is_noop():
+    hr._tick_shrank(None)   # must not raise
+
+
+def test_hash_file_windows_strict_short_read_ticks_shrank(tmp_path, capsys):
+    # hr-rel-01: a strict short read routes through the shrank counter
+    # (NOT the error log, NOT the vanished counter) and stays silent.
+    f = tmp_path / "tiny.bin"; f.write_bytes(b"only9byte")
+    cfg = hr.RunConfig()
+    out = hr._hash_file_windows(
+        str(f), [hr.FileWindow(0, 100, 0, strict=True)], config=cfg)
+    assert out is None
+    assert cfg.hash_skipped_shrank == 1
+    assert cfg.hash_skipped_vanished == 0
+    assert cfg.hash_error_logged == 0
+    assert capsys.readouterr().err == ""   # no spurious stderr trace
+
+
+def test_hash_file_windows_non_strict_short_read_does_not_tick_shrank(tmp_path):
+    # A non-strict short read is the natural EOF case, not a shrink.
+    f = tmp_path / "tiny.bin"; f.write_bytes(b"only9byte")
+    cfg = hr.RunConfig()
+    out = hr._hash_file_windows(
+        str(f), [hr.FileWindow(0, 100, 0, strict=False)], config=cfg)
+    assert out is not None
+    assert cfg.hash_skipped_shrank == 0
+
+
+def test_main_summary_surfaces_hash_shrank(tmp_path, monkeypatch, capsys):
+    # hr-rel-01: the shrank counter is visible in the end-of-run summary.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    real_cls = hr.RunConfig
+
+    class Spy(real_cls):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.hash_skipped_shrank = 4
+
+    monkeypatch.setattr(hr, "RunConfig", Spy)
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "hash_shrank=4" in err
+
+
 def test_hash_file_windows_non_strict_short_file_returns_digest(tmp_path):
     f = tmp_path / "tiny.bin"; f.write_bytes(b"only9byte")
     digest = hr._hash_file_windows(str(f), [hr.FileWindow(0, 100, 0, strict=False)])

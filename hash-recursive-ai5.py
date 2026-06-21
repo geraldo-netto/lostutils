@@ -104,6 +104,13 @@ class RunConfig:
         # summary subtracts this counter so the operator can tell a racy
         # delete apart from a permission / I/O failure worth investigating.
         "hash_skipped_vanished",
+        # hr-rel-01: a strict-window short read (the file was truncated
+        # between walk and hash) yields None just like a real hash error.
+        # Counting it separately here lets the summary subtract it from the
+        # printed hash_errors so a mid-run shrink doesn't masquerade as an
+        # EACCES/EIO failure worth investigating, and the operator still
+        # sees that a file changed under them.
+        "hash_skipped_shrank",
         # hr-conc-06: lock for the cross-thread `+= 1` counters above.
         # CPython's GIL makes the bytecode effectively atomic today but
         # py3.13 free-threaded builds drop the GIL and the increments
@@ -126,6 +133,7 @@ class RunConfig:
         self.hash_error_logged = 0
         self.hash_error_suppressed = 0
         self.hash_skipped_vanished = 0
+        self.hash_skipped_shrank = 0
         self._counter_lock = threading.Lock()
 
     @property
@@ -399,6 +407,18 @@ def _tick_vanished(config) -> None:
             config.hash_skipped_vanished += 1
 
 
+def _tick_shrank(config) -> None:
+    """Count one strict-window short-read (truncated-mid-run) skip
+    (hr-rel-01).
+
+    No-op without a config (legacy callers / tests that hash directly).
+    hr-conc-06: guarded by ``config._counter_lock`` for deterministic
+    counts on a free-threaded build."""
+    if config is not None:
+        with config._counter_lock:
+            config.hash_skipped_shrank += 1
+
+
 def _read_window_into(h, f, length: int, strict: bool) -> bool:
     """Read up to `length` bytes from `f` and feed them to hasher `h`
     (hr-rel-09).
@@ -489,6 +509,11 @@ def _hash_file_windows(path, windows, config=None):
                     # File shrank / partial read in a strict window — abort
                     # the hash so a truncated window can't silently produce
                     # a different digest from a full re-read (hr-rel-09).
+                    # hr-rel-01: tick the dedicated shrank counter so this
+                    # None isn't silently lumped into hash_errors with no
+                    # trace — a file truncated mid-run is observable apart
+                    # from a permission / I/O failure.
+                    _tick_shrank(config)
                     return None
             return h.hexdigest()
     except OSError as exc:
@@ -1451,6 +1476,7 @@ def main():
                 f"{f(walk_stats['entry_errors'])} "
                 f"hash_errors={f(info['stage1_errors'])}+{f(info['stage2_errors'])} "
                 f"hash_skipped={f(config.hash_skipped_vanished)} "
+                f"hash_shrank={f(config.hash_skipped_shrank)} "
                 f"walk_s={walk_seconds:.2f} hash_s={hash_seconds:.2f}",
                 file=sys.stderr,
             )
