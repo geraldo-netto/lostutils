@@ -1062,6 +1062,74 @@ def test_iter_verify_tasks_lstat_fail_yields_raising_task(tmp_path, monkeypatch)
         tasks[0]()
 
 
+def test_verify_copy_raises_when_one_src_entry_unreadable(tmp_path, monkeypatch):
+    # rf-test-02 / rf-rel-01: when os.lstat fails for one src entry during
+    # verification, verify_copy must raise rather than silently pass.
+    src = tmp_path / "s"; src.mkdir()
+    (src / "good.txt").write_text("ok")
+    bad = src / "bad.txt"; bad.write_text("data")
+    dst = tmp_path / "t"
+    rf.copy_tree(src, dst)
+    real_lstat = rf.os.lstat
+
+    def selective(p, *a, **k):
+        if Path(p) == bad:
+            raise PermissionError("became unreadable mid-run")
+        return real_lstat(p, *a, **k)
+
+    monkeypatch.setattr(rf.os, "lstat", selective)
+    with pytest.raises(RuntimeError, match="could not stat source entry"):
+        rf.verify_copy(src, dst, checksum=False)
+
+
+def test_verify_copy_checksum_raises_when_src_entry_unreadable(tmp_path, monkeypatch):
+    # rf-test-02: same guard holds through the parallel checksum pool, not just
+    # the sequential size-only path.
+    src = tmp_path / "s"; src.mkdir()
+    for i in range(6):
+        (src / f"f{i}.txt").write_text(f"content-{i}")
+    bad = src / "f3.txt"
+    dst = tmp_path / "t"
+    rf.copy_tree(src, dst)
+    real_lstat = rf.os.lstat
+
+    def selective(p, *a, **k):
+        if Path(p) == bad:
+            raise PermissionError("became unreadable mid-run")
+        return real_lstat(p, *a, **k)
+
+    monkeypatch.setattr(rf.os, "lstat", selective)
+    with pytest.raises(RuntimeError, match="could not stat source entry"):
+        rf.verify_copy(src, dst, checksum=True)
+
+
+@settings(max_examples=30, deadline=None)
+@given(idx=st.integers(min_value=0, max_value=4))
+def test_verify_copy_unreadable_entry_property(tmp_path_factory, idx):
+    # rf-test-02: for any single unreadable src entry, verify_copy fails closed.
+    base = tmp_path_factory.mktemp("vc")
+    src = base / "s"; src.mkdir()
+    names = [src / f"f{i}.txt" for i in range(5)]
+    for n in names:
+        n.write_text("payload")
+    dst = base / "t"
+    rf.copy_tree(src, dst)
+    bad = names[idx]
+    real_lstat = rf.os.lstat
+
+    def selective(p, *a, **k):
+        if Path(p) == bad:
+            raise OSError("unreadable")
+        return real_lstat(p, *a, **k)
+
+    rf.os.lstat = selective
+    try:
+        with pytest.raises(RuntimeError, match="could not stat source entry"):
+            rf.verify_copy(src, dst, checksum=False)
+    finally:
+        rf.os.lstat = real_lstat
+
+
 def test_verify_content_pass_and_fail(tmp_path):
     a = tmp_path / "a"; a.write_text("hello")
     b = tmp_path / "b"; b.write_text("hello")

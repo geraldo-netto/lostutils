@@ -83,7 +83,6 @@ dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves 
 hr-test-01 | open | med | hash-recursive-ai5.py:234-255 — the BaseException re-enqueue path (root cause of hr-rel-01) is untested: no test makes a worker raise a non-OSError mid-_scan_dir. On a multi-level tree, patch _scan_dir to raise BaseException on one directory and assert all sibling/child regular files are still emitted and stats are finalized non-zero. | regression guard
 mmr-test-01 | open | low | masterclass-mass-rename.py:83-94 — clean_name has no tests; token-substring stripping and the empty-result edge (mmr-rel-02) are unverified. Add tests including a name that reduces to "". | coverage
 nm-test-01 | open | low | numero_magicov2.py:35-40 — reduce_to_single_digit returns 0 for input 0 but main guards total==0 before calling, so the 0-branch is untested dead-ish path. Add a test or assert the precondition. | coverage
-rf-test-02 | open | low | relocate_folder.py:990 — no test covers the st is None branch of _iter_verify_tasks (rf-rel-01): a src entry whose lstat fails should not pass verification. Monkeypatch os.lstat to raise for one path and assert verify_copy raises rather than silently passing. |
 rf-test-01 | open | med | relocate_folder.py:1378 — no test asserts the replacement symlink's ownership after a root-run atomic_swap (rf-sec-02); add a test (skip-if-not-root or monkeypatched os.chown spy) asserting _create_symlink/atomic_swap chowns the link to the source owner. |
 
 ## observability
