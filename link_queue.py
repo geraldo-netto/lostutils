@@ -41,6 +41,7 @@ import tkinter as tk
 from collections import namedtuple
 from datetime import datetime
 from tkinter import messagebox, scrolledtext, ttk
+from typing import Callable, cast
 from urllib.parse import urlparse
 
 try:
@@ -411,7 +412,7 @@ class _PendingQueue:
             other = list(other)
         return list(self.urls.values()) == other
 
-    __hash__ = None
+    __hash__ = None  # type: ignore[assignment]  # unhashable: __eq__ idiom
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +743,7 @@ class Dispatcher:
         # ---- queue + dispatch state (relocated from LinkQueueApp) ----
         # _PendingQueue keeps the url-set + per-domain indexes the picker and
         # dedupe rely on (perf-01/perf-02/scal-01) while still being a list.
-        self.queue_items: list[QueueItem] = _PendingQueue(domain_fn=self._domain_of)
+        self.queue_items: _PendingQueue = _PendingQueue(domain_fn=self._domain_of)
         self.queue_lock = threading.Lock()
         self._dispatch_cv = threading.Condition(self.queue_lock)
         self._domain_active: dict[str, int] = {}
@@ -2079,7 +2080,7 @@ class Dispatcher:
                 continue
             head = next(iter(bucket.values()))   # FIFO head of this domain
             seq = seq_of.get(head.url, 0)
-            if (best is None or active < best_active
+            if (best_active is None or best_seq is None or active < best_active
                     or (active == best_active and seq < best_seq)):
                 best, best_active, best_seq = head, active, seq
         for domain in empty_domains:
@@ -2268,7 +2269,7 @@ class Dispatcher:
 
     _CWD_UNSET = object()
 
-    def _resolve_cwd(self, folder=_CWD_UNSET) -> str | None:
+    def _resolve_cwd(self, folder: "str | object" = _CWD_UNSET) -> str | None:
         """Resolve a configured output-folder value to a subprocess cwd, or
         None when no override should be applied (decoup-01: pure — takes the
         folder value and does no logging, so it is unit-testable in isolation).
@@ -2290,7 +2291,8 @@ class Dispatcher:
         """
         if folder is self._CWD_UNSET:
             folder = self.config.get("output_folder", "")
-        v = (folder or "").strip()
+        folder_str = cast(str, folder)
+        v = (folder_str or "").strip()
         if not v:
             return None
         try:
@@ -2463,6 +2465,8 @@ class LogSink:
 
     def _rotate_locked(self) -> None:
         path = self._fh_path
+        if path is None:  # pragma: no cover - rotate only runs with an open file
+            return
         self._close_locked()
         try:
             os.replace(path, path + ".1")
@@ -2759,6 +2763,13 @@ class _FacadeMeta(type):
 
 
 class LinkQueueApp(metaclass=_FacadeMeta):
+    # Widgets built lazily by _SettingsTabs (assigned via `app.<attr> = ...`)
+    # but read back as `self.<attr>` across the class — declared here so the
+    # type checker resolves the attribute on both the writer and reader side.
+    output_folder_entry: ttk.Entry
+    proto_tree: ttk.Treeview
+    map_tree: ttk.Treeview
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Link Processing Queue")
@@ -2828,7 +2839,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         # against worker-thread increments (rel-02): without it a drop that
         # lands between the read and the reset is silently lost.
         self._dropped_lock = threading.Lock()
-        self._tk_poll_id: object | None = None
+        self._tk_poll_id: str | None = None
 
         self._build_ui()
         self._refresh_protocols_tree()
@@ -3324,6 +3335,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         if self._settings_dialog is None:
             # Race-only: dialog was destroyed somehow. Rebuild.
             self._build_settings_dialog()
+        assert self._settings_dialog is not None  # _build_settings_dialog sets it
         self._settings_dialog.deiconify()
         self._settings_dialog.lift()
         self._settings_dialog_visible = True
@@ -3609,7 +3621,10 @@ class LinkQueueApp(metaclass=_FacadeMeta):
     def _get_sleep(self) -> int:
         return self._get_int_setting(self.sleep_var, "sleep_between_items", 5)
 
-    def _persist_if_changed(self, key, value, prev, log_msg) -> bool:
+    def _persist_if_changed(
+        self, key, value, prev,
+        log_msg: "str | Callable[..., str]",
+    ) -> bool:
         """Persist `value` to `self.config[key]` + save + log iff it differs
         from `prev` (dup-07). Returns True on change. Centralises the
         read/compare/save/log/refresh shape shared by `_apply_int_setting`
@@ -3874,8 +3889,9 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         and a URL like ``https://example.com/path?q={x}`` would silently
         break ``tree.exists(iid)``. A short blake2b hash is collision-safe at
         this scale and stable across re-renders for the same URL."""
-        rows = [(f"r:{idx}", f"▶#{idx}", item, ("running",), "")
-                for idx, item in running]
+        rows: list[tuple[str, str, object, tuple[str, ...], str]] = [
+            (f"r:{idx}", f"▶#{idx}", item, ("running",), "")
+            for idx, item in running]
         for i, item in enumerate(shown, start=1):
             rows.append((_queue_iid_for_url(item.url), str(i), item, (), ""))
         if limit > 0 and total > limit:
@@ -4012,8 +4028,9 @@ class LinkQueueApp(metaclass=_FacadeMeta):
                     widget.mark_set("insert", "1.0")
                     widget.see("insert")
                 else:
-                    widget.select_range(0, "end")
-                    widget.icursor("end")
+                    entry = cast(tk.Entry, widget)  # kind != "text" => Entry/Spinbox
+                    entry.select_range(0, "end")
+                    entry.icursor("end")
             except tk.TclError:  # pragma: no cover - Tk teardown defensive
                 pass
             return "break"
@@ -4053,7 +4070,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             # Disable items that can't apply right now.
             try:
                 has_sel = bool(widget.tag_ranges("sel")) if kind == "text" \
-                    else widget.selection_present()
+                    else cast(tk.Entry, widget).selection_present()
             except (tk.TclError, AttributeError):
                 has_sel = False
             # Read-only widgets refuse paste/cut; detect via 'state'.
@@ -4595,6 +4612,15 @@ class _FormDialog:
     the space above it. Subclasses set their own attributes, call
     super().__init__(root, title, center_and_grab), and implement
     _build_body(frame) (which builds the fields) + _on_save()."""
+
+    # Subclass hooks (ProtocolEditor / MappingEditor override both); declared
+    # here so the type checker resolves them on the base. _FormDialog is never
+    # instantiated directly, so these defaults are never reached at runtime.
+    def _build_body(self, frm) -> None:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def _on_save(self) -> None:  # pragma: no cover - overridden
+        raise NotImplementedError
 
     def __init__(self, root, title, center_and_grab):
         dlg = self.dlg = tk.Toplevel(root)
