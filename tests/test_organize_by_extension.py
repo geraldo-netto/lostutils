@@ -999,6 +999,23 @@ class PlanMovesTests(unittest.TestCase):
             # Reservations recorded in manager.
             self.assertIn(root / "txt" / "a00000", mgr.state_cache)
 
+    def test_plan_moves_keeps_head_cache_until_drain(self):
+        # oze-cmplx-01: plan_moves no longer pops head_cache; the entries are
+        # primed by the scan stage and only the drain side removes them.
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            files = [root / "a.pdf", root / "b.pdf"]
+            for p in files:
+                p.write_bytes(b"%PDF-1.4\n")
+            head_cache: dict = {}
+            ctx = SniffContext(sniff=True, head_cache=head_cache)
+            for p in files:
+                read_head_bytes(p, head_cache=head_cache)
+            mgr = BucketManager(root=root)
+            list(plan_moves(root, sorted(files), mgr, ctx=ctx))
+            for p in files:
+                self.assertIn(p, head_cache)
+
 
 class HeadCacheTests(unittest.TestCase):
     """oze-perf-04: shared head_cache means one read per file."""

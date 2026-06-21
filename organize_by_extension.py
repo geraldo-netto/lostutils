@@ -1486,12 +1486,10 @@ def plan_moves(
         # `manager.choose` returns a Bucket value object (oze-pat-01); the
         # worker pipeline only needs the path, so unwrap here.
         bucket = manager.choose(source, ext_dir, prefix)
-        # oze-scal-06: planning has now consumed every head_cache read this
-        # source needs (resolve_real_extension ran inside preplan). Drop
-        # the entry so the cache RSS tracks the in-flight plan window
-        # rather than the entire file tree on a 1M-file run.
-        if ctx.head_cache is not None:
-            ctx.head_cache.pop(source, None)
+        # oze-cmplx-01: the head_cache entry for this source is dropped by
+        # `_drain_futures` once the move completes; popping it here too was a
+        # redundant no-op on the live pipeline. The single drain-side pop keeps
+        # the cache RSS tracking the in-flight plan window (oze-scal-06).
         yield source, bucket.path
 
 
