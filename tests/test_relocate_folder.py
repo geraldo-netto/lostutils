@@ -3114,6 +3114,43 @@ def test_run_streamed_docstring_documents_inflight_abort():
     assert "running" in doc and "cancel" in doc
 
 
+def test_run_verify_pool_first_error_surfaces_only_in_final_drain():
+    # rf-test-04: prove _run_verify_pool re-raises a first-and-only error that
+    # only surfaces in the trailing _run_streamed drain — the failing task is
+    # still inflight when submission ends (none completed during the loop).
+    import threading
+    release = threading.Event()
+    ran = {"n": 0}
+
+    def slow_fail():
+        ran["n"] += 1
+        release.wait(timeout=5)
+        raise RuntimeError("surfaced in drain")
+
+    # The generator releases the blocked task only after its one task has been
+    # consumed, so the failure cannot complete during submission.
+    def one_task():
+        yield slow_fail
+        release.set()
+
+    with pytest.raises(RuntimeError, match="surfaced in drain"):
+        rf._run_verify_pool(one_task(), jobs=2)
+    assert ran["n"] == 1
+
+
+def test_verify_copy_single_file_error_via_drain(tmp_path):
+    # rf-test-04: end-to-end — a one-file tree whose only file is corrupted
+    # makes the single verify task the only inflight future; its error must
+    # still propagate out of verify_copy via the drain.
+    src = tmp_path / "s"; src.mkdir()
+    (src / "only.txt").write_text("payload")
+    dst = tmp_path / "t"
+    rf.copy_tree(src, dst)
+    (dst / "only.txt").write_text("PAYLOAD")   # same size, different content
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        rf.verify_copy(src, dst, checksum=True)
+
+
 def test_run_streamed_drain_captures_inflight_only_error():
     # rf-conc-02: low-level _run_streamed — the only failing future is still
     # inflight at end of submission; the trailing drain calls on_done which
