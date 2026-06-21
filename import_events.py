@@ -12,11 +12,12 @@ import hashlib
 import logging
 import argparse
 from urllib.request import urlretrieve
+from dataclasses import dataclass
 from datetime import datetime, date
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
-# Path to your local GGUF models.
+# Default paths to the local GGUF models.
 MODEL_PATH = "ggml-model-q4_k.gguf"
 CLIP_PATH = "mmproj-model-f16.gguf"
 
@@ -30,6 +31,26 @@ CLIP_URL = "https://huggingface.co/mys/ggml_llava-v1.5-7b/resolve/main/mmproj-mo
 # with --model-sha256 / --clip-sha256.
 MODEL_SHA256: Optional[str] = None
 CLIP_SHA256: Optional[str] = None
+
+
+@dataclass
+class ModelConfig:
+    """Explicit model-loading config, threaded through extraction instead of globals."""
+    model_path: str = MODEL_PATH
+    clip_path: str = CLIP_PATH
+    model_sha256: Optional[str] = MODEL_SHA256
+    clip_sha256: Optional[str] = CLIP_SHA256
+    model_url: str = MODEL_URL
+    clip_url: str = CLIP_URL
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "ModelConfig":
+        return cls(
+            model_path=args.model_path,
+            clip_path=args.clip_path,
+            model_sha256=args.model_sha256,
+            clip_sha256=args.clip_sha256,
+        )
 
 # Image suffixes the vision model handles, mapped to their MIME type so the
 # data URL is labelled correctly (a PNG sent as image/jpeg confuses some models).
@@ -73,11 +94,12 @@ def _verify_sha256(path: str, expected: Optional[str]) -> None:
         raise ValueError(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
 
 
-def ensure_models_exist() -> None:
+def ensure_models_exist(config: Optional[ModelConfig] = None) -> None:
     """Checks if models exist locally, downloads them if missing, and verifies them."""
+    config = config or ModelConfig()
     models = [
-        (MODEL_PATH, MODEL_URL, MODEL_SHA256),
-        (CLIP_PATH, CLIP_URL, CLIP_SHA256),
+        (config.model_path, config.model_url, config.model_sha256),
+        (config.clip_path, config.clip_url, config.clip_sha256),
     ]
     for path_str, url, expected in models:
         if not Path(path_str).exists():
@@ -89,17 +111,18 @@ def ensure_models_exist() -> None:
         _verify_sha256(path_str, expected)
 
 
-def get_llm():
-    """Lazily initializes the local LLaVA model."""
+def get_llm(config: Optional[ModelConfig] = None):
+    """Lazily initializes the local LLaVA model from an explicit config."""
     global _LLM
+    config = config or ModelConfig()
     if _LLM is None:
         from llama_cpp import Llama
         from llama_cpp.llama_chat_format import Llava15ChatHandler
 
-        ensure_models_exist()
-        chat_handler = Llava15ChatHandler(clip_model_path=CLIP_PATH)
+        ensure_models_exist(config)
+        chat_handler = Llava15ChatHandler(clip_model_path=config.clip_path)
         _LLM = Llama(
-            model_path=MODEL_PATH,
+            model_path=config.model_path,
             chat_handler=chat_handler,
             n_ctx=2048,  # Adjust based on your available RAM and content size
         )
@@ -275,9 +298,10 @@ def _run_llm(
     file_path: Path,
     event_type: str,
     llm_client: Optional[Any],
+    model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
     try:
-        client = get_llm() if llm_client is None else llm_client
+        client = get_llm(model_config) if llm_client is None else llm_client
         response: Any = client.create_chat_completion(messages=messages)
         text_output = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         return parse_llm_events(text_output, file_path, event_type)
@@ -290,6 +314,7 @@ def extract_with_llm(
     file_path: Path,
     is_image: bool = False,
     llm_client: Optional[Any] = None,
+    model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
     """Uses the local LLaVA model to extract events from a text or image file."""
     if is_image:
@@ -298,7 +323,7 @@ def extract_with_llm(
     else:
         messages = _text_messages(_read_text(file_path))
         event_type = "Text/LLM"
-    return _run_llm(messages, file_path, event_type, llm_client)
+    return _run_llm(messages, file_path, event_type, llm_client, model_config)
 
 
 # --------------------------------------------------------------------------- #
@@ -332,16 +357,20 @@ def _pdf_to_images(file_path: Path) -> List[bytes]:
     return images
 
 
-def extract_from_pdf(file_path: Path, llm_client: Optional[Any] = None) -> List[Dict[str, Any]]:
+def extract_from_pdf(
+    file_path: Path,
+    llm_client: Optional[Any] = None,
+    model_config: Optional[ModelConfig] = None,
+) -> List[Dict[str, Any]]:
     """Extracts events from a PDF: parsed text if present, else vision per page."""
     text = _pdf_text(file_path)
     if text.strip():
-        return _run_llm(_text_messages(text), file_path, "PDF", llm_client)
+        return _run_llm(_text_messages(text), file_path, "PDF", llm_client, model_config)
 
     events: List[Dict[str, Any]] = []
     for data in _pdf_to_images(file_path):
         events.extend(_run_llm(_image_messages_from_bytes(data, "image/png"),
-                               file_path, "PDF/Vision", llm_client))
+                               file_path, "PDF/Vision", llm_client, model_config))
     return events
 
 
@@ -352,6 +381,7 @@ def extract_from_file(
     file: Path,
     llm_client: Optional[Any] = None,
     default_tz: Optional[str] = None,
+    model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
     """Dispatches a single file to the right extractor by its suffix."""
     suffix = file.suffix.lower()
@@ -359,11 +389,13 @@ def extract_from_file(
         if suffix in CALENDAR_EXTENSIONS:
             return extract_from_ics(file, default_tz=default_tz)
         if suffix in TEXT_EXTENSIONS:
-            return extract_with_llm(file, is_image=False, llm_client=llm_client)
+            return extract_with_llm(file, is_image=False, llm_client=llm_client,
+                                    model_config=model_config)
         if suffix in IMAGE_MIME:
-            return extract_with_llm(file, is_image=True, llm_client=llm_client)
+            return extract_with_llm(file, is_image=True, llm_client=llm_client,
+                                    model_config=model_config)
         if suffix in PDF_EXTENSIONS:
-            return extract_from_pdf(file, llm_client=llm_client)
+            return extract_from_pdf(file, llm_client=llm_client, model_config=model_config)
     except Exception as e:
         logger.exception("Could not extract events from %s: %s", file.name, e)
     return []
@@ -374,6 +406,7 @@ def process_folder(
     llm_client: Optional[Any] = None,
     recursive: bool = False,
     default_tz: Optional[str] = None,
+    model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
     """Iterates through a folder and extracts event data from every supported file."""
     path = Path(folder_path)
@@ -386,7 +419,8 @@ def process_folder(
     for file in sorted(files):
         if file.is_file():
             all_events.extend(
-                extract_from_file(file, llm_client=llm_client, default_tz=default_tz)
+                extract_from_file(file, llm_client=llm_client, default_tz=default_tz,
+                                  model_config=model_config)
             )
     return all_events
 
@@ -485,29 +519,22 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Keep duplicate events (default: drop same title+start).")
     parser.add_argument("--timezone", default=None,
                         help="IANA timezone (e.g. Europe/Lisbon) for naive iCalendar times.")
-    parser.add_argument("--model-path", default=MODEL_PATH,
+    defaults = ModelConfig()
+    parser.add_argument("--model-path", default=defaults.model_path,
                         help="Path to the local GGUF language model.")
-    parser.add_argument("--clip-path", default=CLIP_PATH,
+    parser.add_argument("--clip-path", default=defaults.clip_path,
                         help="Path to the local GGUF vision (clip) model.")
-    parser.add_argument("--model-sha256", default=MODEL_SHA256,
+    parser.add_argument("--model-sha256", default=defaults.model_sha256,
                         help="Expected SHA-256 of the language model (integrity check).")
-    parser.add_argument("--clip-sha256", default=CLIP_SHA256,
+    parser.add_argument("--clip-sha256", default=defaults.clip_sha256,
                         help="Expected SHA-256 of the vision model (integrity check).")
     return parser.parse_args(argv)
-
-
-def _apply_config(args: argparse.Namespace) -> None:
-    global MODEL_PATH, CLIP_PATH, MODEL_SHA256, CLIP_SHA256
-    MODEL_PATH = args.model_path
-    CLIP_PATH = args.clip_path
-    MODEL_SHA256 = args.model_sha256
-    CLIP_SHA256 = args.clip_sha256
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     args = parse_args(argv)
-    _apply_config(args)
+    model_config = ModelConfig.from_args(args)
 
     folder = Path(args.directory)
     if not folder.exists():
@@ -515,7 +542,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Created {folder}. Place your files there and run again.")
         return 0
 
-    events = process_folder(str(folder), recursive=args.recursive, default_tz=args.timezone)
+    events = process_folder(str(folder), recursive=args.recursive,
+                            default_tz=args.timezone, model_config=model_config)
     if not args.no_dedup:
         events = dedupe_events(events)
 

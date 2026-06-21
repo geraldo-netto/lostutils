@@ -367,13 +367,96 @@ def test_process_folder_threads_default_tz(tmp_path):
     assert events[0]["start"].endswith("+00:00")
 
 
+def test_model_config_from_args_threads_values():
+    args = import_events.parse_args(
+        ["dir", "--model-path", "m.gguf", "--clip-path", "c.gguf",
+         "--model-sha256", "a" * 64, "--clip-sha256", "b" * 64]
+    )
+
+    cfg = import_events.ModelConfig.from_args(args)
+
+    assert cfg.model_path == "m.gguf"
+    assert cfg.clip_path == "c.gguf"
+    assert cfg.model_sha256 == "a" * 64
+    assert cfg.clip_sha256 == "b" * 64
+
+
+def test_model_config_defaults_match_module_constants():
+    cfg = import_events.ModelConfig()
+    assert cfg.model_path == import_events.MODEL_PATH
+    assert cfg.clip_path == import_events.CLIP_PATH
+    assert cfg.model_sha256 == import_events.MODEL_SHA256
+
+
+def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
+    model = tmp_path / "m.gguf"
+    clip = tmp_path / "c.gguf"
+    model.write_bytes(b"m")
+    clip.write_bytes(b"c")
+    calls = []
+    monkeypatch.setattr(import_events, "urlretrieve",
+                        lambda url, path: calls.append((url, path)))
+
+    cfg = import_events.ModelConfig(model_path=str(model), clip_path=str(clip))
+    import_events.ensure_models_exist(cfg)
+
+    assert calls == []  # both exist, nothing downloaded
+
+
+def test_ensure_models_exist_downloads_missing_from_config(tmp_path, monkeypatch):
+    model = tmp_path / "m.gguf"
+    clip = tmp_path / "c.gguf"
+    clip.write_bytes(b"c")
+
+    def fake_retrieve(url, path):
+        Path(path).write_bytes(b"downloaded")
+
+    monkeypatch.setattr(import_events, "urlretrieve", fake_retrieve)
+
+    cfg = import_events.ModelConfig(
+        model_path=str(model), clip_path=str(clip), model_url="http://x", clip_url="http://y"
+    )
+    import_events.ensure_models_exist(cfg)
+
+    assert model.exists()
+
+
+def test_get_llm_threads_config_paths(monkeypatch):
+    captured = {}
+
+    class FakeHandler:
+        def __init__(self, clip_model_path):
+            captured["clip"] = clip_model_path
+
+    class FakeLlama:
+        def __init__(self, model_path, chat_handler, n_ctx):
+            captured["model"] = model_path
+
+    import types
+    fake_llama_cpp = types.ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = FakeLlama
+    fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
+    fake_chat.Llava15ChatHandler = FakeHandler
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
+    monkeypatch.setattr(import_events, "_LLM", None)
+    monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
+
+    cfg = import_events.ModelConfig(model_path="MM.gguf", clip_path="CC.gguf")
+    import_events.get_llm(cfg)
+
+    assert captured == {"clip": "CC.gguf", "model": "MM.gguf"}
+
+
 def test_main_writes_json_and_ics(tmp_path, monkeypatch):
     pytest.importorskip("icalendar")
     (tmp_path / "event.txt").write_text("Launch tomorrow", encoding="utf-8")
     out = tmp_path / "out.json"
     ics = tmp_path / "out.ics"
-    monkeypatch.setattr(import_events, "get_llm",
-                        lambda: FakeLlm('[{"title": "Launch", "start": "2026-06-06"}]'))
+    monkeypatch.setattr(
+        import_events, "get_llm",
+        lambda config=None: FakeLlm('[{"title": "Launch", "start": "2026-06-06"}]'),
+    )
 
     rc = import_events.main([str(tmp_path), "-o", str(out), "--emit-ics", str(ics)])
 
