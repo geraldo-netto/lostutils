@@ -1477,8 +1477,15 @@ def recover(source: Path) -> str:
     # rf-rel-02: a real moved-aside source is a directory (and not a symlink).
     # A dangling symlink or regular file at the backup name was left by a third
     # party, not by atomic_swap — renaming it onto `source` would restore the
-    # wrong thing. Verify the shape via lstat before touching it.
-    backup_mode = os.lstat(backup).st_mode
+    # wrong thing. Verify the shape via lstat before touching it. A TOCTOU
+    # unlink between the `_path_taken` gate above and this lstat surfaces as the
+    # typed "no orphaned backup" message rather than a bare FileNotFoundError.
+    try:
+        backup_mode = os.lstat(backup).st_mode
+    except OSError as exc:
+        raise FileNotFoundError(
+            f"no orphaned backup to recover at {backup}"
+        ) from exc
     if not stat.S_ISDIR(backup_mode) or stat.S_ISLNK(backup_mode):
         raise NotADirectoryError(
             f"refusing to recover: {backup} is not a directory "

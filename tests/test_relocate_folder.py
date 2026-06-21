@@ -3004,6 +3004,30 @@ def test_recover_refuses_dangling_symlink_backup(tmp_path):
     assert backup.is_symlink()
 
 
+# --- rf-rel-02: TOCTOU unlink between gate and lstat -> typed message --------
+
+def test_recover_toctou_unlink_raises_typed(tmp_path, monkeypatch):
+    # rf-rel-02: a backup that vanishes between the _path_taken gate and the
+    # shape-check lstat must surface as the typed "no orphaned backup" message,
+    # not a bare FileNotFoundError from os.lstat.
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.mkdir()
+    real_lstat = rf.os.lstat
+    backup_seen = {"n": 0}
+
+    def vanishing(p, *a, **k):
+        if Path(p) == backup:
+            backup_seen["n"] += 1
+            if backup_seen["n"] >= 2:  # gate passes; shape-check lstat fails
+                raise FileNotFoundError("backup vanished mid-recover")
+        return real_lstat(p, *a, **k)
+
+    monkeypatch.setattr(rf.os, "lstat", vanishing)
+    with pytest.raises(FileNotFoundError, match="no orphaned backup to recover"):
+        rf.recover(source)
+
+
 def test_execute_warns_on_orphaned_backup(tmp_path, caplog):
     source, _ = _make_orphan(tmp_path)
     plan = rf.Plan(source=source, target=tmp_path / "dest" / "mydir")
