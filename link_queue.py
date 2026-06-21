@@ -779,6 +779,13 @@ class Dispatcher:
     def _flush_save_state(self) -> None:
         with self._save_timer_lock:
             self._save_timer = None
+        # lq-rel-05: a worker-step _request_save_state can win the race against
+        # shutdown and arm a timer between stop_event.set() and
+        # _cancel_save_timer(); when it later fires here, the app may already be
+        # torn down. Re-check stop_event so we don't write post-teardown — the
+        # shutdown path already persists the authoritative final snapshot.
+        if self.stop_event.is_set():
+            return
         self._save_state()
 
     def _cancel_save_timer(self) -> None:

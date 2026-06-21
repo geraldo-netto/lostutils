@@ -1365,6 +1365,35 @@ def test_on_close_full_shutdown(app):
     assert app.stop_event.is_set()
 
 
+def test_flush_save_state_skips_write_after_stop(headless_dispatcher):
+    # lq-rel-05: a timer that fires _flush_save_state after stop_event is set
+    # must NOT write — it could land post-teardown.
+    disp = headless_dispatcher
+    wrote = {"n": 0}
+    disp._save_state = lambda: wrote.__setitem__("n", wrote["n"] + 1)
+    disp.stop_event.set()
+    disp._flush_save_state()
+    assert wrote["n"] == 0
+
+
+def test_flush_save_state_writes_when_running(headless_dispatcher):
+    # lq-rel-05: the normal (not-stopping) path still writes.
+    disp = headless_dispatcher
+    wrote = {"n": 0}
+    disp._save_state = lambda: wrote.__setitem__("n", wrote["n"] + 1)
+    disp._flush_save_state()
+    assert wrote["n"] == 1
+
+
+def test_request_save_state_after_stop_is_noop(headless_dispatcher):
+    # lq-rel-05 companion: _request_save_state already refuses to arm a timer
+    # once stopping, so the surviving guard is the _flush_save_state recheck.
+    disp = headless_dispatcher
+    disp.stop_event.set()
+    disp._request_save_state()
+    assert disp._save_timer is None
+
+
 def test_shutdown_saves_state_again_after_join(app):
     # lq-conc-01: _shutdown must save state once more AFTER joining workers so
     # a transition that lands between the pre-stop save and the join is
