@@ -3004,6 +3004,47 @@ def test_recover_refuses_dangling_symlink_backup(tmp_path):
     assert backup.is_symlink()
 
 
+# --- rf-rel-03: recover runs the open-files precheck (with --force parity) ---
+
+def _orphan_holder_snapshot(backup):
+    return rf.OpenFileSnapshot(
+        holders=((4242, "leaker", (backup / "f",)),), stale_pids=0,
+    )
+
+
+def test_recover_refuses_when_open_files(tmp_path, monkeypatch):
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.mkdir()
+    monkeypatch.setattr(rf, "find_open_file_holders",
+                        lambda s: _orphan_holder_snapshot(backup))
+    with pytest.raises(RuntimeError, match="refusing to migrate"):
+        rf.recover(source)
+    # nothing was renamed: backup intact, source still absent.
+    assert backup.is_dir()
+    assert not rf._path_taken(source)
+
+
+def test_recover_force_skips_open_files_check(tmp_path, monkeypatch):
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.mkdir()
+    monkeypatch.setattr(rf, "find_open_file_holders",
+                        lambda s: _orphan_holder_snapshot(backup))
+    msg = rf.recover(source, force=True)
+    assert msg.startswith("recovered:")
+    assert source.is_dir()
+    assert not rf._path_taken(backup)
+
+
+def test_main_recover_force_skips_open_files_check(tmp_path, monkeypatch):
+    source, backup = _make_orphan(tmp_path)
+    monkeypatch.setattr(rf, "find_open_file_holders",
+                        lambda s: _orphan_holder_snapshot(backup))
+    assert rf.main(["--recover", "--force", str(source)]) == 0
+    assert source.is_dir()
+
+
 # --- rf-rel-02: TOCTOU unlink between gate and lstat -> typed message --------
 
 def test_recover_toctou_unlink_raises_typed(tmp_path, monkeypatch):

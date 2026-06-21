@@ -1460,12 +1460,18 @@ def _warn_orphaned_backup(backup: Path, source: Path) -> None:
     )
 
 
-def recover(source: Path) -> str:
+def recover(source: Path, *, force: bool = False) -> str:
     """Restore an orphaned `<source>.relocate-backup` to `source` (rf-rel-01).
 
     Returns a single-line status. Raises `FileNotFoundError` when there is
     nothing to recover and `FileExistsError` when `source` is already present
-    (so recovery never clobbers live data)."""
+    (so recovery never clobbers live data).
+
+    rf-rel-03: unlike `execute`, recovery is a one-rename restore with no copy,
+    so the open-files concern is narrower — but a process still holding an FD
+    under the backup keeps the old inode after the rename, exactly as in a
+    migration. The open-files precheck therefore runs on the backup for `--force`
+    parity with `execute`; pass `force=True` to skip it."""
     backup = source.with_name(source.name + BACKUP_SUFFIX)
     if _path_taken(source):
         raise FileExistsError(
@@ -1492,6 +1498,8 @@ def recover(source: Path) -> str:
             f"(it may be a symlink or regular file left by another process); "
             f"inspect and restore it manually"
         )
+    if not force:
+        _check_no_open_files(backup)
     os.rename(backup, source)
     return f"recovered: {backup} -> {source}"
 
@@ -1782,7 +1790,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--recover", action="store_true",
                    help="rf-rel-01: restore an orphaned <source>.relocate-backup "
                         "left by a run killed mid-swap (renames it back to "
-                        "<source>); dest_root is not required")
+                        "<source>); dest_root is not required. Runs the "
+                        "open-files precheck on the backup unless --force "
+                        "(rf-rel-03)")
     p.add_argument("--dry-run", action="store_true",
                    help="show what would happen, do nothing")
     p.add_argument("--no-verify", action="store_true",
@@ -1879,7 +1889,7 @@ def _run_recover(ns: argparse.Namespace) -> int:
         )
     source = Path(ns.source).expanduser().absolute()
     try:
-        result = recover(source)
+        result = recover(source, force=getattr(ns, "force", False))
     except Exception as exc:
         _log().error("FAILED: %s", exc)
         return 1
