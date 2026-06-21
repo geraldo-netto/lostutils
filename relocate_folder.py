@@ -1452,6 +1452,11 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
             _log().warning("verification disabled (--no-verify): the source %s "
                            "will be deleted without checking the copy", plan.source)
     except Exception:
+        # rf-rel-03: rmtree(plan.target) is reached only AFTER `verify_copy`
+        # has returned or raised. `verify_copy` -> `_run_verify_pool` joins
+        # every still-running SHA-256 worker (shutdown(wait=True), rf-conc-01)
+        # before propagating, so no hash thread is mid-read of a file under
+        # `plan.target` when we delete it — the rmtree cannot race those reads.
         shutil.rmtree(plan.target, ignore_errors=True)
         raise
 

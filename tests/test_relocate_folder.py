@@ -2557,3 +2557,44 @@ def test_run_verify_pool_error_path_no_detached_threads():
               if t not in before and t.is_alive()
               and "ThreadPoolExecutor" in t.name]
     assert not leaked
+
+
+# --- rf-rel-03: rmtree(target) only after verify pool fully joined ----------
+
+def test_copy_and_verify_rmtree_after_pool_joined(tmp_path, monkeypatch):
+    import threading
+    src = tmp_path / "src"; src.mkdir()
+    (src / "a.txt").write_text("aaaa")
+    (src / "b.txt").write_text("bbbb")
+    target = tmp_path / "dst" / "src"
+
+    hash_running = threading.Event()
+    hash_finished = threading.Event()
+    rmtree_calls = []
+    real_rmtree = rf.shutil.rmtree
+
+    def slow_then_fail_sha(path):
+        # one file hashes slowly (records join), the other fails verification.
+        if path.name == "a.txt":
+            hash_running.set()
+            import time
+            time.sleep(0.2)
+            hash_finished.set()
+            return "deadbeef"
+        raise RuntimeError("hash mismatch injected")
+
+    def tracking_rmtree(p, *a, **k):
+        # rf-rel-03: by the time we delete target, the slow hash must be done.
+        rmtree_calls.append((str(p), hash_finished.is_set()))
+        return real_rmtree(p, *a, **k)
+
+    monkeypatch.setattr(rf, "_sha256", slow_then_fail_sha)
+    monkeypatch.setattr(rf.shutil, "rmtree", tracking_rmtree)
+
+    plan = rf.Plan(source=src, target=target, checksum=True, jobs=2)
+    with pytest.raises(RuntimeError):
+        rf._copy_and_verify(plan)
+
+    target_deletes = [done for p, done in rmtree_calls if p == str(target)]
+    assert target_deletes  # target was cleaned up
+    assert all(target_deletes)  # every target rmtree happened post-join

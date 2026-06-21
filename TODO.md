@@ -82,7 +82,6 @@ mmr-rel-03 | open | med | masterclass-mass-rename.py:97 — the guard `old_name.
 mmr-rel-02 | open | med | masterclass-mass-rename.py:99-105 — if clean_name maps two files to the same new_name the second raises FileExistsError and aborts the whole run (no try/continue); clean_name can also return "" after stripping all tokens, producing an empty target. Skip/disambiguate collisions and guard the empty result. | data-loss
 mmr-rel-01 | open | high | masterclass-mass-rename.py:112-115 — list_files returns bare basenames (os.listdir) but rename() calls os.path.exists/os.link/os.rename on those relative names; run from any cwd other than the target dir it operates on wrong/nonexistent paths. Join the directory with each filename. | path-bug
 nm-rel-01 | open | low | numero_magicov2.py:7 — LETTER_MAP = (i%9)+1 maps A-Z as 1..9 repeating (Z=8) and drops accented Portuguese letters silently. Verify the mapping matches the intended numerology system and normalize accents via unicodedata. | domain-logic
-rf-rel-03 | open | med | relocate_folder.py:1346 — _copy_and_verify calls shutil.rmtree(plan.target, ignore_errors=True) on verify failure while running hash threads from rf-rel-02 may still be open-reading files under plan.target; rmtree races those reads. Fully join the verify pool before rmtree. | concurrency vs cleanup
 
 ## testing
 
