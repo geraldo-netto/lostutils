@@ -92,6 +92,56 @@ def test_decode_event_payload_empty_on_garbage():
     assert import_events._decode_event_payload("[broken {also") == []
 
 
+def test_decode_event_payload_ignores_trailing_prose():
+    text = '[{"title": "Sync", "start": "2026-06-22"}] Hope this helps! Let me know.'
+
+    assert import_events._decode_event_payload(text) == [
+        {"title": "Sync", "start": "2026-06-22"}
+    ]
+
+
+def test_decode_event_payload_nested_braces_in_title():
+    text = '[{"title": "Release {v2} {final}", "start": "2026-06-22"}]'
+
+    parsed = import_events._decode_event_payload(text)
+
+    assert parsed[0]["title"] == "Release {v2} {final}"
+
+
+def test_decode_event_payload_object_with_inner_list():
+    text = '{"title": "Conf", "tags": ["a", "b"], "start": "2026-06-22"}'
+
+    parsed = import_events._decode_event_payload(text)
+
+    assert parsed == [{"title": "Conf", "tags": ["a", "b"], "start": "2026-06-22"}]
+
+
+def test_parse_llm_events_skips_non_dict_entries():
+    text = '["just a string", {"title": "Real", "start": "2026-06-22"}, 42]'
+
+    events = import_events.parse_llm_events(text, Path("s.txt"), "Text/LLM")
+
+    assert [e["title"] for e in events] == ["Real"]
+
+
+def test_parse_llm_events_warns_on_undecodable(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        events = import_events.parse_llm_events("total prose, no json", Path("s.txt"), "x")
+
+    assert events == []
+    assert "Failed to decode JSON" in caplog.text
+
+
+def test_parse_llm_events_strips_code_fences():
+    text = '```json\n[{"title": "Fenced", "start": "2026-06-22"}]\n```'
+
+    events = import_events.parse_llm_events(text, Path("s.txt"), "x")
+
+    assert events[0]["title"] == "Fenced"
+
+
 def test_parse_llm_events_folds_separate_date_and_time():
     text = '[{"title": "Sync", "date": "2026-06-22", "time": "14:00"}]'
 
