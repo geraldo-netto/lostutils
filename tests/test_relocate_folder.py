@@ -838,6 +838,31 @@ def test_create_symlink_atomic_with_staging(tmp_path):
     assert leftovers == []
 
 
+def test_create_symlink_refuses_preexisting_link(tmp_path):
+    # rf-sec-02: a file/symlink already squatting the link name is not
+    # silently clobbered; _create_symlink raises instead.
+    link = tmp_path / "the-link"
+    link.write_text("attacker squat")           # pre-existing entry
+    target = tmp_path / "target"; target.mkdir()
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        rf._create_symlink(link, target)
+    # original squatter untouched; no staging leftovers.
+    assert link.read_text() == "attacker squat"
+    leftovers = [p for p in tmp_path.iterdir()
+                 if p.name.startswith(rf.STAGING_PREFIX)]
+    assert leftovers == []
+
+
+def test_create_symlink_refuses_preexisting_symlink(tmp_path):
+    link = tmp_path / "the-link"
+    elsewhere = tmp_path / "elsewhere"; elsewhere.mkdir()
+    link.symlink_to(elsewhere)                   # pre-existing symlink
+    target = tmp_path / "target"; target.mkdir()
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        rf._create_symlink(link, target)
+    assert os.readlink(link) == str(elsewhere)   # not clobbered
+
+
 def test_create_symlink_cleans_staging_when_symlink_fails(tmp_path, monkeypatch):
     link = tmp_path / "the-link"
     target = tmp_path / "target"; target.mkdir()
@@ -848,6 +873,21 @@ def test_create_symlink_cleans_staging_when_symlink_fails(tmp_path, monkeypatch)
     leftovers = [p for p in tmp_path.iterdir()
                  if p.name.startswith(rf.STAGING_PREFIX)]
     assert leftovers == []
+
+
+@settings(max_examples=40, deadline=None)
+@given(name=st.text(alphabet="abcdefghijklmnopqrstuvwxyz0123456789_-",
+                    min_size=1, max_size=16))
+def test_create_symlink_property_absent_name_succeeds(tmp_path_factory, name):
+    # rf-sec-02: for any link name with no pre-existing entry, the symlink is
+    # created pointing at the target and no staging dir is left behind.
+    base = tmp_path_factory.mktemp("cs")
+    link = base / name
+    target = base / "target"; target.mkdir()
+    rf._create_symlink(link, target)
+    assert link.is_symlink()
+    assert os.readlink(link) == str(target)
+    assert not any(p.name.startswith(rf.STAGING_PREFIX) for p in base.iterdir())
 
 
 def test_cleanup_staging_tolerates_oserror(tmp_path, monkeypatch):

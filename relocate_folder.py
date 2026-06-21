@@ -1295,6 +1295,18 @@ def _create_symlink(link: Path, target: Path) -> None:
     try:
         tmp = staging / link.name
         os.symlink(target, tmp)
+        # rf-sec-02: refuse to clobber a pre-existing entry at `link`. The
+        # plain os.rename silently replaces a file/symlink an attacker may
+        # have pre-created at the link name on a world-writable parent, with
+        # no audit. Assert the name is absent first. A residual TOCTOU window
+        # remains between this lstat and the rename (renameat2 RENAME_NOREPLACE
+        # would close it, but stdlib `os` doesn't expose it); the check still
+        # turns a silent clobber into a loud refusal for the common case.
+        if _path_taken(link):
+            raise FileExistsError(
+                f"refusing to overwrite existing path at link target: {link} "
+                f"(an unexpected file/symlink is already there)"
+            )
         os.rename(tmp, link)
     finally:
         _cleanup_staging(staging)
