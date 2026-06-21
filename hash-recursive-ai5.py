@@ -98,11 +98,13 @@ class RunConfig:
         "alias_cap_hits",
         "hash_error_logged",
         "hash_error_suppressed",
-        # hr-obs-01: count benign vanished-file (ENOENT) skips separately
-        # from real EACCES/EIO/... hash errors. The per-stage `*_errors`
-        # totals still include these (back-compat `hash_errors`), but the
-        # summary subtracts this counter so the operator can tell a racy
-        # delete apart from a permission / I/O failure worth investigating.
+        # hr-obs-01 / hr-obs-02: count benign vanished-file (ENOENT/ESTALE)
+        # skips separately from real EACCES/EIO/... hash errors. The
+        # per-stage `*_errors` totals count every None digest and so
+        # include these; the summary line subtracts this counter (and
+        # hash_skipped_shrank) from the printed `hash_errors` so the
+        # printed figure is the real-failure count, while the raw skip
+        # subset is still reported alongside as `hash_skipped`.
         "hash_skipped_vanished",
         # hr-rel-01: a strict-window short read (the file was truncated
         # between walk and hash) yields None just like a real hash error.
@@ -1463,6 +1465,19 @@ def main():
         if not args.quiet:
             # hr-obs-01: abbreviate big counts so the line stays readable.
             f = _fmt_count
+            # hr-obs-02: the per-stage `*_errors` totals count EVERY None
+            # digest, including benign vanished (ENOENT/ESTALE) and shrank
+            # (truncated mid-run) skips. Subtract those subsets so the
+            # printed `hash_errors` is the count of REAL failures worth
+            # investigating (EACCES/EIO/...), matching the counter's
+            # documented contract. Clamp at 0 in case of any miscount.
+            total_hash_errors = info["stage1_errors"] + info["stage2_errors"]
+            real_hash_errors = max(
+                0,
+                total_hash_errors
+                - config.hash_skipped_vanished
+                - config.hash_skipped_shrank,
+            )
             print(
                 f"[ai5] dirs={f(walk_stats['dirs'])} "
                 f"files={f(walk_stats['files'])} "
@@ -1477,7 +1492,7 @@ def main():
                 f"dup_paths={f(dup_paths)} "
                 f"walk_errors={f(walk_stats['dir_errors'])}+"
                 f"{f(walk_stats['entry_errors'])} "
-                f"hash_errors={f(info['stage1_errors'])}+{f(info['stage2_errors'])} "
+                f"hash_errors={f(real_hash_errors)} "
                 f"hash_skipped={f(config.hash_skipped_vanished)} "
                 f"hash_shrank={f(config.hash_skipped_shrank)} "
                 f"walk_s={walk_seconds:.2f} hash_s={hash_seconds:.2f}",

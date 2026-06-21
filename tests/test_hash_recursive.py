@@ -927,6 +927,84 @@ def test_main_summary_stage2_skipped_zero_when_clean(tmp_path, monkeypatch, caps
     assert "hashed_stage2_skipped=0" in err
 
 
+def _run_main_with_stage_stub(tmp_path, monkeypatch, capsys, *, none_tails,
+                              cfg_mutate):
+    # Helper: two big files forced through stage 2, every tail None, with a
+    # RunConfig whose skip counters are pre-seeded so we can assert the
+    # summary's hash_errors subtraction.
+    big = b"q" * (hr.HEAD_TAIL_THRESHOLD + 200)
+    (tmp_path / "a.bin").write_bytes(big)
+    (tmp_path / "b.bin").write_bytes(big)
+    real_run = hr._run_stage
+    seen = {"n": 0}
+
+    def stub(items, fn, total, jobs, cancel_event=None):
+        seen["n"] += 1
+        if seen["n"] == 1:
+            return real_run(items, fn, total, jobs)
+        if none_tails:
+            return ({p: None for _s, p in items}, len(items))
+        return real_run(items, fn, total, jobs)
+
+    real_cls = hr.RunConfig
+
+    class Spy(real_cls):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            cfg_mutate(self)
+
+    monkeypatch.setattr(hr, "_run_stage", stub)
+    monkeypatch.setattr(hr, "RunConfig", Spy)
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    hr.main()
+    return capsys.readouterr().err
+
+
+def test_main_summary_subtracts_vanished_from_hash_errors(tmp_path, monkeypatch, capsys):
+    # hr-obs-02: stage2 reports 2 errors, but both are vanished skips, so
+    # the printed hash_errors must be 0 while hash_skipped shows 2.
+    def mutate(cfg):
+        cfg.hash_skipped_vanished = 2
+    err = _run_main_with_stage_stub(
+        tmp_path, monkeypatch, capsys, none_tails=True, cfg_mutate=mutate)
+    assert "hash_errors=0 " in err
+    assert "hash_skipped=2" in err
+
+
+def test_main_summary_subtracts_shrank_from_hash_errors(tmp_path, monkeypatch, capsys):
+    # hr-obs-02: stage2 reports 2 errors; one vanished + one shrank → net
+    # real hash_errors = 0.
+    def mutate(cfg):
+        cfg.hash_skipped_vanished = 1
+        cfg.hash_skipped_shrank = 1
+    err = _run_main_with_stage_stub(
+        tmp_path, monkeypatch, capsys, none_tails=True, cfg_mutate=mutate)
+    assert "hash_errors=0 " in err
+    assert "hash_skipped=1" in err
+    assert "hash_shrank=1" in err
+
+
+def test_main_summary_real_errors_survive_subtraction(tmp_path, monkeypatch, capsys):
+    # hr-obs-02: a genuine error (no vanished/shrank) is NOT subtracted —
+    # stage2 reports 2 errors, 0 skipped → hash_errors=2.
+    def mutate(cfg):
+        pass
+    err = _run_main_with_stage_stub(
+        tmp_path, monkeypatch, capsys, none_tails=True, cfg_mutate=mutate)
+    assert "hash_errors=2 " in err
+
+
+def test_main_summary_hash_errors_clamps_at_zero(tmp_path, monkeypatch, capsys):
+    # hr-obs-02: an over-count of skips never produces a negative printed
+    # hash_errors (defensive max(0, ...)).
+    def mutate(cfg):
+        cfg.hash_skipped_vanished = 99
+    err = _run_main_with_stage_stub(
+        tmp_path, monkeypatch, capsys, none_tails=True, cfg_mutate=mutate)
+    assert "hash_errors=0 " in err
+    assert "hash_errors=-" not in err
+
+
 def test_main_summary_surfaces_hash_shrank(tmp_path, monkeypatch, capsys):
     # hr-rel-01: the shrank counter is visible in the end-of-run summary.
     (tmp_path / "a.bin").write_bytes(b"x")
