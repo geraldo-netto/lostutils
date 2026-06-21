@@ -1309,10 +1309,21 @@ def _orphaned_backup(source: Path) -> "Path | None":
     An orphan exists when `atomic_swap` died between `os.rename(source, backup)`
     and the symlink creation: the real directory now lives at the backup name
     and `source` itself is gone. Detect that exact shape — source absent (not
-    even a dangling symlink) AND the backup present — so a normal in-progress
-    run (source present) is never misread as a crash."""
+    even a dangling symlink) AND the backup present as a real directory — so a
+    normal in-progress run (source present) is never misread as a crash.
+
+    rf-rel-04: the backup must be an actual directory (and not a symlink). A
+    user's unrelated `foo.relocate-backup` regular file or symlink whose `foo`
+    doesn't exist no longer triggers the misleading "killed mid-swap" warning,
+    because `atomic_swap` only ever renames a real source directory aside."""
     backup = source.with_name(source.name + BACKUP_SUFFIX)
-    if not _path_taken(source) and _path_taken(backup):
+    if _path_taken(source):
+        return None
+    try:
+        mode = os.lstat(backup).st_mode
+    except OSError:
+        return None
+    if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
         return backup
     return None
 

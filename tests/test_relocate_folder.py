@@ -2570,6 +2570,30 @@ def test_orphaned_backup_none_when_no_backup(tmp_path):
     assert rf._orphaned_backup(source) is None
 
 
+def test_orphaned_backup_none_when_backup_is_regular_file(tmp_path):
+    # rf-rel-04: an unrelated <name>.relocate-backup regular file must not be
+    # misread as a killed-mid-swap orphan.
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.write_text("unrelated")
+    assert rf._orphaned_backup(source) is None
+
+
+def test_orphaned_backup_none_when_backup_is_symlink(tmp_path):
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    other = tmp_path / "other"; other.mkdir()
+    backup.symlink_to(other)                  # even a symlink to a dir
+    assert rf._orphaned_backup(source) is None
+
+
+def test_orphaned_backup_none_when_backup_dangling_symlink(tmp_path):
+    source = tmp_path / "mydir"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.symlink_to(tmp_path / "nowhere")
+    assert rf._orphaned_backup(source) is None
+
+
 def test_recover_restores_backup(tmp_path):
     source, backup = _make_orphan(tmp_path)
     msg = rf.recover(source)
