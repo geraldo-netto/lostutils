@@ -1421,6 +1421,12 @@ def main():
               "extras are counted and summarised once at end of run "
               "(hr-obs-03)."))
     args = ap.parse_args()
+    # hr-rel-21: clamp jobs to >= 1. The walk already clamps via max(1, jobs)
+    # but the hash path passes jobs straight to ThreadPoolExecutor, which
+    # raises `max_workers must be greater than 0` once a stage crosses
+    # THREAD_THRESHOLD_BYTES — so `-j 0` aborted big trees while silently
+    # working on small ones.
+    args.jobs = max(1, args.jobs)
     root = os.path.abspath(args.directory)
 
     # hr-rel-17: translate typed RootError to a CLI exit code here, at

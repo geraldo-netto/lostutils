@@ -960,6 +960,20 @@ def test_main_summary_omits_removed_stage2_skipped_field(
     assert "hash_errors=0 " in err
 
 
+def test_main_clamps_zero_jobs_no_crash(tmp_path, monkeypatch, capsys):
+    # hr-rel-21: `-j 0` must not crash the hash pool. Force the threaded
+    # path (THREAD_THRESHOLD_BYTES=0) so ThreadPoolExecutor(max_workers=jobs)
+    # is actually exercised; without the clamp this raised
+    # "max_workers must be greater than 0".
+    (tmp_path / "a.bin").write_bytes(b"dup")
+    (tmp_path / "b.bin").write_bytes(b"dup")
+    monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0)
+    monkeypatch.setattr(hr.sys, "argv", ["hr", "-j", "0", str(tmp_path)])
+    hr.main()                       # must not raise
+    err = capsys.readouterr().err
+    assert "[ai5]" in err
+
+
 def _run_main_with_stage_stub(tmp_path, monkeypatch, capsys, *, none_tails,
                               cfg_mutate):
     # Helper: two big files forced through stage 2, every tail None, with a
