@@ -1300,6 +1300,35 @@ def test_find_duplicate_groups_info_counts_stage2_errors(tmp_path, monkeypatch):
     assert "stage2_skipped" not in result.info
 
 
+# --- coverage completion: cheap edge paths --------------------------------
+
+def test_capped_byte_total_short_circuits_at_threshold():
+    # Early return the instant the running total reaches the threshold.
+    total = hr._capped_byte_total([hr.THREAD_THRESHOLD_BYTES, 10**9])
+    assert total == hr.THREAD_THRESHOLD_BYTES
+
+
+def test_prepare_candidates_drops_non_candidate_overflow():
+    # Non-candidate inode keys are pruned from the overflow dict in place.
+    aliases = {(1, 1): ["a"], (1, 2): ["b"], (1, 3): ["c"]}
+    inode_size = {(1, 1): 100, (1, 2): 100, (1, 3): 50}  # (1,3) size unique
+    overflow = {(1, 3): 5}                               # not a candidate
+    candidates, rep = hr._prepare_candidates(aliases, inode_size, overflow)
+    cand_keys = {k for _, k in candidates}
+    assert (1, 3) not in cand_keys
+    assert (1, 3) not in overflow      # pruned in place
+
+
+def test_preflight_root_probe_error_raises_root_error(monkeypatch):
+    # An OSError/ValueError from the os.path probes is translated to a
+    # typed RootError ("invalid path" branch), never allowed to escape raw.
+    def boom(_root):
+        raise OSError("simulated probe failure")
+    monkeypatch.setattr(hr.os.path, "exists", boom)
+    with pytest.raises(hr.RootError, match="invalid path"):
+        hr._preflight_root("anything")
+
+
 # --- hr-obs-03: bounded stderr error logging ------------------------------
 
 def test_log_hash_error_no_config_unbounded(capsys):

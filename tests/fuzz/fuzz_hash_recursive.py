@@ -137,7 +137,8 @@ class FindDuplicatesFuzz(unittest.TestCase):
                 p.write_bytes(payload)
                 st_ = os.stat(p)
                 files.append((str(p), st_.st_size, st_.st_dev, st_.st_ino))
-            groups, aliases, _ = hr.find_duplicate_groups(files, jobs=1)
+            result = hr.find_duplicate_groups(files, jobs=1)
+            groups = result.groups
             # Either every key collapses into one group, or hashing produced
             # no group (very small payload edge cases). Both are acceptable.
             for digest, keys in groups.items():
