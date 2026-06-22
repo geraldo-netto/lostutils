@@ -1505,6 +1505,45 @@ def test_main_quiet_keeps_hashes_dump_but_no_progress(tmp_path, monkeypatch, cap
     assert out.read_text().strip()             # dump still populated
 
 
+def test_main_hashes_dump_excludes_itself(tmp_path, monkeypatch):
+    # hr-log-04: the dump lives inside the scanned tree but is excluded
+    # from the walk by inode, so it never self-lists and never inflates the
+    # scanned-file count.
+    (tmp_path / "a.bin").write_bytes(b"dup")
+    (tmp_path / "b.bin").write_bytes(b"dup")
+    out = tmp_path / "hashes.txt"               # inside the scanned dir
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    hr.main()
+    text = out.read_text()
+    assert "hashes.txt" not in text             # dump never lists itself
+    names = sorted(ln.split(" ", 1)[1].rsplit("/", 1)[-1]
+                   for ln in text.splitlines() if ln)
+    assert names == ["a.bin", "b.bin"]
+
+
+def test_main_hashes_file_exists_on_cancel_during_walk(tmp_path, monkeypatch):
+    # hr-log-04: eager open means the dump file exists even when a Ctrl-C
+    # aborts before anything is hashed (here: cancel fires during the walk,
+    # so no file is ever hashed).
+    for i in range(5):
+        (tmp_path / f"f{i}.bin").write_bytes(b"x")
+    out = tmp_path / "hashes.txt"
+    real_walk = hr.iter_threaded_walk
+
+    def cancelling_walk(root, jobs, cancel_event=None, skip_ino=None):
+        if cancel_event is not None:
+            cancel_event.set()                  # simulate Ctrl-C during walk
+        return real_walk(root, jobs, cancel_event=cancel_event,
+                         skip_ino=skip_ino)
+
+    monkeypatch.setattr(hr, "iter_threaded_walk", cancelling_walk)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    hr.main()
+    assert out.exists()                         # file created despite no hashing
+
+
 def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
         tmp_path, monkeypatch):
     # hr-log-03: a Ctrl-C (KeyboardInterrupt) mid-pipeline must leave the
@@ -1547,6 +1586,9 @@ def test_main_hashes_close_failure_warns(tmp_path, monkeypatch, capsys):
     class _FH:
         def __init__(self, f):
             self._f = f
+
+        def fileno(self):
+            return self._f.fileno()
 
         def write(self, s):
             return self._f.write(s)

@@ -163,7 +163,7 @@ class RootError(Exception):
     call the preflight helper to validate a user-supplied directory."""
 
 
-def threaded_walk(root, jobs, cancel_event=None):
+def threaded_walk(root, jobs, cancel_event=None, skip_ino=None):
     """Back-compat wrapper: drain :func:`iter_threaded_walk` into a list
     and return ``(entries, stats)`` (hr-scal-05).
 
@@ -176,12 +176,13 @@ def threaded_walk(root, jobs, cancel_event=None):
     stats : dict with keys ``dirs``, ``files``, ``dir_errors``,
         ``entry_errors``.
     """
-    it = iter_threaded_walk(root, jobs, cancel_event=cancel_event)
+    it = iter_threaded_walk(
+        root, jobs, cancel_event=cancel_event, skip_ino=skip_ino)
     results = list(it)
     return results, it.stats
 
 
-def iter_threaded_walk(root, jobs, cancel_event=None):
+def iter_threaded_walk(root, jobs, cancel_event=None, skip_ino=None):
     """Stream entries from a threaded walk (hr-scal-05).
 
     Returns a :class:`_WalkIter`; iterate it to receive
@@ -192,8 +193,15 @@ def iter_threaded_walk(root, jobs, cancel_event=None):
     Unlike :func:`threaded_walk`, the full file list is never
     materialised — RAM tracks "currently buffered" entries, not "every
     file ever seen". On a 50M-file tree this drops peak RSS from
-    multi-GB to whatever the consumer keeps in flight."""
-    return _WalkIter(root, jobs, cancel_event)
+    multi-GB to whatever the consumer keeps in flight.
+
+    `skip_ino` (hr-log-04): an optional ``(st_dev, st_ino)`` tuple whose
+    matching regular file is excluded from the stream and the counts —
+    used to keep the run's own ``hashes.txt`` dump (opened before the
+    walk) from being discovered, hashed, and self-listed. Identity by
+    inode covers every hardlink/alias of the dump file, not just one
+    path spelling."""
+    return _WalkIter(root, jobs, cancel_event, skip_ino)
 
 
 class _WalkState(NamedTuple):
@@ -214,6 +222,8 @@ class _WalkState(NamedTuple):
     jobs: int
     sentinel: object
     cancel_event: "threading.Event | None"
+    # hr-log-04: (dev, ino) of the run's own hashes dump to exclude, or None.
+    skip_ino: "tuple | None"
 
 
 def _walk_worker(idx, state: "_WalkState") -> None:
@@ -277,6 +287,11 @@ def _scan_dir(d, state: "_WalkState", wstats) -> None:
                         state.inflight[0] += 1
                     state.pending.put(e.path)
                 elif stat.S_ISREG(mode):
+                    # hr-log-04: drop the run's own hashes dump (matched by
+                    # inode) so it is never counted, hashed, or self-listed.
+                    if (state.skip_ino is not None
+                            and (st.st_dev, st.st_ino) == state.skip_ino):
+                        continue
                     state.out_q.put(
                         (e.path, st.st_size, st.st_dev, st.st_ino))
                     wstats["files"] += 1
@@ -296,12 +311,13 @@ class _WalkIter:
     workers and posts an end-of-stream sentinel so the consumer can
     unblock from ``out_q.get()`` and then merge stats safely."""
 
-    def __init__(self, root, jobs, cancel_event):
+    def __init__(self, root, jobs, cancel_event, skip_ino=None):
         self._root = root
         # jobs=0/negative would spawn no workers → silent empty result
         # (hr-rel-01).
         self._jobs = max(1, jobs)
         self._cancel = cancel_event
+        self._skip_ino = skip_ino
         self.stats = {"dirs": 0, "files": 0, "dir_errors": 0, "entry_errors": 0}
 
     def __iter__(self):
@@ -320,6 +336,7 @@ class _WalkIter:
             jobs=jobs,
             sentinel=object(),     # signals worker termination
             cancel_event=self._cancel,
+            skip_ino=self._skip_ino,
         )
         state.pending.put(self._root)
 
@@ -1536,18 +1553,30 @@ def main():
     # the run (e.g. when main() is invoked from a long-lived host).
     previous_sigint = _install_sigint_cancel(cancel_event)
 
-    # hr-log-02: the hashes dump is opened lazily on the first hashed file
-    # (after the walk) so the empty file is never itself discovered by a
-    # walk rooted at its own directory.
-    hashes_state = {"fh": None, "failed": False}
+    hashes_state: dict = {"fh": None}
 
     try:
+        # hr-log-04: open the hashes dump BEFORE the walk so it always
+        # exists — even on a Ctrl-C during the walk, before any file is
+        # hashed. hr-log-03: line-buffered so each dumped line is flushed
+        # to the OS as written, leaving a complete file on an abrupt exit.
+        # Capture its inode so the walk excludes the dump from its own
+        # results (no self-count, no self-hash, no self-list).
+        skip_ino = None
+        try:
+            fh = open(args.hashes_file, "a", buffering=1, encoding="utf-8")
+            hashes_state["fh"] = fh
+            dump_stat = os.fstat(fh.fileno())
+            skip_ino = (dump_stat.st_dev, dump_stat.st_ino)
+        except OSError as exc:
+            _log_line(f"WARNING: cannot write {args.hashes_file}: {exc}", False)
         # hr-obs-02 + hr-scal-05: stream the walk so we never materialise
         # the full `files` list. `on_walk_done` snaps the walk/hash
         # boundary so the per-stage durations remain meaningful.
         # hr-log-01: start marker before any scanning begins.
         _log_line(f"start: scanning {root} (jobs={args.jobs})", args.quiet)
-        walk_iter = iter_threaded_walk(root, args.jobs, cancel_event=cancel_event)
+        walk_iter = iter_threaded_walk(
+            root, args.jobs, cancel_event=cancel_event, skip_ino=skip_ino)
         t_start = time.perf_counter()
         walk_boundary: list[float | None] = [None]
 
@@ -1559,33 +1588,14 @@ def main():
         # empty because the callback consumes every group inline.
         on_group, totals = emit_groups_streaming(sys.stdout.write, config=config)
 
-        def _open_hashes():
-            # hr-log-02: lazy, single open; a failure warns once (even under
-            # --quiet, since a missing dump is worth surfacing) then degrades
-            # to "no dump" without aborting the run.
-            if hashes_state["fh"] is None and not hashes_state["failed"]:
-                try:
-                    # hr-log-03: line-buffered so each dumped line is flushed
-                    # to the OS as it is written — a Ctrl-C (or any abrupt
-                    # exit) leaves a complete, valid file instead of losing a
-                    # stdio buffer's worth of trailing lines.
-                    hashes_state["fh"] = open(
-                        args.hashes_file, "a", buffering=1, encoding="utf-8")
-                except OSError as exc:
-                    hashes_state["failed"] = True
-                    _log_line(
-                        f"WARNING: cannot write {args.hashes_file}: {exc}",
-                        False)
-            return hashes_state["fh"]
-
         def _on_hashed(done, total, head, key, aliases):
             # hr-log-02: dump every hashed file and emit a hashing % line on
-            # the same cadence as the walk progress.
-            if head is not None:
-                fh = _open_hashes()
-                if fh is not None:
-                    fh.write("".join(
-                        f"{head} {p}\n" for p in aliases.get(key, ())))
+            # the same cadence as the walk progress. The dump was opened
+            # eagerly above (hr-log-04); just write to it when present.
+            dump = hashes_state["fh"]
+            if head is not None and dump is not None:
+                dump.write("".join(
+                    f"{head} {p}\n" for p in aliases.get(key, ())))
             if done % LOG_EVERY_N_FILES == 0 or done == total:
                 pct = (done * 100) // total if total else 100
                 _log_line(f"hashing {pct}% ({done}/{total})", args.quiet)
