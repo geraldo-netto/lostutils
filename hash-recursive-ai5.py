@@ -11,16 +11,18 @@ Pipeline:
   4. Stage 1 hash — BLAKE3 of the first 4 MiB of each surviving inode.
      Group by (size, head_digest).
   5. Stage 2 hash — for groups with size > 8 MiB and ≥2 members, also
-     hash the last 4 MiB plus two 64 KiB samples at size/3 and 2*size/3.
-     Files that sample-match are reported as duplicates; the rest fall
-     out (head matched but content differed past the head).
+     hash the last 4 MiB, a contiguous 4 MiB block at the file's center,
+     plus two 64 KiB samples at size/3 and 2*size/3. Files that match on
+     all windows are reported as duplicates; the rest fall out (head
+     matched but content differed past the head).
 
-Why head + tail + middle samples? A first-window-only hash treats files as
-duplicate when they only share a container header — common false positive
-for MKV/MP4 files with the same intro, ISOs of related distros, tar
-backups of similar trees, DB dumps with the same schema. Head+tail+samples
-makes accidental collision essentially impossible for real-world content
-while staying bounded (max ~8.13 MiB read per file, regardless of size).
+Why head + center + tail + samples? A first-window-only hash treats files
+as duplicate when they only share a container header — common false
+positive for MKV/MP4 files with the same intro, ISOs of related distros,
+tar backups of similar trees, DB dumps with the same schema. Hashing three
+4 MiB blocks (head, center, tail) plus two point samples makes accidental
+collision essentially impossible for real-world content while staying
+bounded (max ~12.13 MiB read per file, regardless of size).
 """
 from __future__ import annotations
 
@@ -555,24 +557,38 @@ class SamplingStrategy:
 
 
 class ThirdsStrategy(SamplingStrategy):
-    """Default sampler: tail + middle thirds (hr-rel-05 / hr-rel-06).
+    """Default sampler: tail CAP + center CAP block + middle thirds
+    (hr-rel-05 / hr-rel-06).
 
-    Offsets are clamped so the second SAMPLE window can never read past EOF
-    (hr-rel-06): given the stage-2 gate of `size > 2*CAP`, the
-    `floor(2*size/3)+SAMPLE` end-point already fits, but the clamp keeps the
-    function safe if a future caller relaxes the gate or if `SAMPLE` grows."""
+    Combined with the stage-1 head CAP, a confirmed duplicate has had its
+    first 4 MiB, last 4 MiB AND a contiguous 4 MiB block at the file's
+    center hashed, plus two 64 KiB point samples at size/3 and 2*size/3.
+    The center block is the dominant collision-reducer: a 4 MiB contiguous
+    region covers far more than the 128 KiB of point samples, so two large
+    files that differ only somewhere in their middle are now caught.
+
+    Offsets are clamped so no window can read past EOF (hr-rel-06): given
+    the stage-2 gate of `size > 2*CAP`, every window's end-point already
+    fits, but the clamps keep the function safe if a future caller relaxes
+    the gate, if `SAMPLE` grows, or for the center block on small files."""
 
     def windows(self, size: int) -> "list[FileWindow]":
         a = size // 3
         b = 2 * size // 3
-        last_window_end = max(0, size - SAMPLE)
-        a = min(a, last_window_end)
-        b = min(b, last_window_end)
-        # All three stage-2 windows are gated by `size > 2*CAP`, so they
-        # MUST yield their full length. strict=True triggers hr-rel-09
-        # short-read detection.
+        last_sample_start = max(0, size - SAMPLE)
+        a = min(a, last_sample_start)
+        b = min(b, last_sample_start)
+        # Center 4 MiB block: start at the file midpoint minus half a CAP so
+        # the window is centered, clamped so a CAP-wide read never runs past
+        # EOF (covers small files if the size > 2*CAP gate is ever relaxed).
+        last_cap_start = max(0, size - CAP)
+        mid = min(max(0, size // 2 - CAP // 2), last_cap_start)
+        # All stage-2 windows are gated by `size > 2*CAP`, so they MUST
+        # yield their full length. strict=True triggers hr-rel-09 short-read
+        # detection.
         return [
-            FileWindow(-CAP, CAP, os.SEEK_END, strict=True),
+            FileWindow(-CAP, CAP, os.SEEK_END, strict=True),    # tail 4 MiB
+            FileWindow(mid, CAP, os.SEEK_SET, strict=True),     # center 4 MiB
             FileWindow(a, SAMPLE, os.SEEK_SET, strict=True),
             FileWindow(b, SAMPLE, os.SEEK_SET, strict=True),
         ]
@@ -582,9 +598,10 @@ _DEFAULT_SAMPLING: SamplingStrategy = ThirdsStrategy()
 
 
 def hash_tail_and_samples(path, size, strategy=None, config=None):
-    """Stage 2 (only when size > 2*CAP): BLAKE3 of last CAP bytes plus two
-    SAMPLE-byte windows around size/3 and 2*size/3 (hr-rel-05). Catches files
-    that share a container header but differ in body.
+    """Stage 2 (only when size > 2*CAP): BLAKE3 of the last CAP bytes, a
+    center CAP block at the file midpoint, plus two SAMPLE-byte windows
+    around size/3 and 2*size/3 (hr-rel-05). Catches files that share a
+    container header but differ anywhere in the body.
 
     `strategy` (hr-decoup-01) defaults to :class:`ThirdsStrategy`. Pass a
     custom :class:`SamplingStrategy` to override the window layout.
@@ -1077,8 +1094,9 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None):
     reconciliation, so it has been removed."""
     if not stage2_items:
         return {}, {"stage2": 0, "stage2_errors": 0}
+    # Stage 2 reads up to tail CAP + center CAP + two SAMPLE windows.
     stage2_bytes = _capped_byte_total(
-        min(s, CAP + 2 * SAMPLE) for s, _p, _h, _k in stage2_items)
+        min(s, 2 * CAP + 2 * SAMPLE) for s, _p, _h, _k in stage2_items)
     # `_run_stage` consumes the legacy (size, path) shape; project for it.
     tail_by_path, errors = _run_stage(
         [(s, p) for s, p, _h, _k in stage2_items],

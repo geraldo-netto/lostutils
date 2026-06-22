@@ -189,6 +189,35 @@ def test_no_false_dup_for_files_between_cap_and_2cap():
                     "false positive: CAP..2*CAP files with different tails grouped"
 
 
+def test_center_block_catches_middle_only_difference(tmp_path):
+    # New center 4 MiB block: two large files identical at head, tail, AND
+    # both 64 KiB thirds-samples, differing ONLY at the file midpoint, must
+    # NOT be grouped — they would have collided under the head+tail+samples-
+    # only design that this block was added to fix.
+    size = 3 * hr.CAP                       # 12 MiB > 8 MiB stage-2 gate
+    base = bytearray(b"A" * size)
+    a = bytes(base)
+    mid = size // 2                         # 1.5*CAP — inside the center block
+    base[mid] = ord("B")                    # single-byte center difference
+    b = bytes(base)
+    # The difference sits outside head, tail, and both thirds samples.
+    assert a[:hr.CAP] == b[:hr.CAP]
+    assert a[-hr.CAP:] == b[-hr.CAP:]
+    third = size // 3
+    assert a[third:third + hr.SAMPLE] == b[third:third + hr.SAMPLE]
+    assert a[2 * third:2 * third + hr.SAMPLE] == b[2 * third:2 * third + hr.SAMPLE]
+    (tmp_path / "a.bin").write_bytes(a)
+    (tmp_path / "b.bin").write_bytes(b)
+    files, _ = hr.threaded_walk(tmp_path, 1)
+    result = hr.find_duplicate_groups(files, 1)
+    for keys in result.groups.values():
+        paths = [p for k in keys for p in result.aliases[k]
+                 if not isinstance(p, hr._MoreSentinel)]
+        names = sorted(Path(p).name for p in paths)
+        assert names != ["a.bin", "b.bin"], \
+            "center block failed to catch a midpoint-only difference"
+
+
 def test_find_duplicate_groups_no_candidates():
     with TemporaryDirectory() as d:
         root = Path(d)
