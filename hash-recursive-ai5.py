@@ -1398,6 +1398,21 @@ def _install_sigint_cancel(cancel_event):
     return previous
 
 
+def _configure_windows(block_size: int, sample_size: int) -> None:
+    """Override the hash window sizes from the CLI (hr-adapt-01).
+
+    CAP (head / tail / center block) and SAMPLE (mid-file point samples)
+    are read as module globals at hash time, so reassigning them here
+    before the pipeline runs is sufficient — the shared
+    :data:`_DEFAULT_SAMPLING` instance reads the new values too, no rebuild
+    needed. HEAD_TAIL_THRESHOLD tracks CAP so the 'head IS the whole file'
+    gate stays consistent with the chosen block size."""
+    global CAP, SAMPLE, HEAD_TAIL_THRESHOLD
+    CAP = block_size
+    SAMPLE = sample_size
+    HEAD_TAIL_THRESHOLD = CAP
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Duplicate finder (head + tail + mid-samples, "
@@ -1420,6 +1435,16 @@ def main():
               f"stderr (default: {DEFAULT_HASH_ERROR_VERBOSE_CAP}); "
               "extras are counted and summarised once at end of run "
               "(hr-obs-03)."))
+    ap.add_argument(
+        "--block-size", type=int, default=CAP,
+        help=(f"Head/tail/center hash-window size in bytes (default: {CAP} "
+              "= 4 MiB). Larger windows hash more of each file, lowering "
+              "false-positive collision odds at the cost of more I/O "
+              "(hr-adapt-01)."))
+    ap.add_argument(
+        "--sample-size", type=int, default=SAMPLE,
+        help=(f"Mid-file point-sample window in bytes (default: {SAMPLE} "
+              "= 64 KiB) (hr-adapt-01)."))
     args = ap.parse_args()
     # hr-rel-21: clamp jobs to >= 1. The walk already clamps via max(1, jobs)
     # but the hash path passes jobs straight to ThreadPoolExecutor, which
@@ -1427,6 +1452,13 @@ def main():
     # THREAD_THRESHOLD_BYTES — so `-j 0` aborted big trees while silently
     # working on small ones.
     args.jobs = max(1, args.jobs)
+    # hr-adapt-01: validate then apply the window-size overrides before the
+    # pipeline reads CAP/SAMPLE.
+    if args.block_size < 1 or args.sample_size < 1:
+        print("error: --block-size and --sample-size must be >= 1",
+              file=sys.stderr)
+        sys.exit(2)
+    _configure_windows(args.block_size, args.sample_size)
     root = os.path.abspath(args.directory)
 
     # hr-rel-17: translate typed RootError to a CLI exit code here, at

@@ -87,7 +87,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-adapt-01 | open | med | hash-recursive-ai5.py:44-45 — CAP (4 MiB) and SAMPLE (64 KiB) are hardcoded; tuning the hash window (changed twice recently) requires a source edit. SamplingStrategy is pluggable in-code but unreachable from the CLI/RunConfig. Expose --block-size/--sample-size (validated, preserving the size>2*CAP invariant) or document why they stay fixed. | magic-number / no runtime knob
 
 ## CLI / option integrity
 

@@ -1362,6 +1362,46 @@ def test_prepare_candidates_drops_non_candidate_overflow():
     assert (1, 3) not in overflow      # pruned in place
 
 
+def test_configure_windows_overrides_globals():
+    # hr-adapt-01: the helper reassigns CAP/SAMPLE/HEAD_TAIL_THRESHOLD.
+    orig = (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD)
+    try:
+        hr._configure_windows(2048, 128)
+        assert hr.CAP == 2048
+        assert hr.SAMPLE == 128
+        assert hr.HEAD_TAIL_THRESHOLD == 2048   # tracks CAP
+    finally:
+        hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD = orig
+
+
+def test_main_block_size_override_runs(tmp_path, monkeypatch, capsys):
+    # hr-adapt-01: a custom --block-size flows through main without error
+    # and is applied to the module globals.
+    orig = (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD)
+    (tmp_path / "a.bin").write_bytes(b"hello world")
+    (tmp_path / "b.bin").write_bytes(b"hello world")
+    monkeypatch.setattr(
+        hr.sys, "argv",
+        ["hr", "--block-size", "4", "--sample-size", "2", str(tmp_path)])
+    try:
+        hr.main()
+        assert hr.CAP == 4 and hr.SAMPLE == 2
+    finally:
+        hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD = orig
+    assert "[ai5]" in capsys.readouterr().err
+
+
+def test_main_rejects_nonpositive_block_size(tmp_path, monkeypatch, capsys):
+    # hr-adapt-01: a block/sample size < 1 exits 2 before touching globals.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--block-size", "0", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        hr.main()
+    assert exc.value.code == 2
+    assert "must be >= 1" in capsys.readouterr().err
+
+
 def test_read_window_chunks_match_single_read(tmp_path, monkeypatch):
     # hr-mem-01: reading a window in many small sub-chunks must yield the
     # same digest as one read of the whole window.
