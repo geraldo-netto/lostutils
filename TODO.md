@@ -67,7 +67,6 @@ rdv3-rel-01 | open | low | remove-deduplv3.py:107 — the max tiebreaker keeps a
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves the array-bounds path (dnp-rel-01) untested; add fixtures with short lines, single line, and md5-vs-sha256 widths to lock behavior. | coverage
-hr-test-01 | open | med | hash-recursive-ai5.py:234-255 — the BaseException re-enqueue path (root cause of hr-rel-01) is untested: no test makes a worker raise a non-OSError mid-_scan_dir. On a multi-level tree, patch _scan_dir to raise BaseException on one directory and assert all sibling/child regular files are still emitted and stats are finalized non-zero. | regression guard
 
 ## observability
 

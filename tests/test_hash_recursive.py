@@ -1890,6 +1890,55 @@ def test_walk_worker_deterministic_base_exception_terminates(tmp_path, monkeypat
     assert done.is_set(), "deterministic BaseException re-enqueue looped forever"
 
 
+# --- hr-test-01: a true BaseException in _scan_dir re-enqueues the dir -----
+
+class _ScanBoom(BaseException):
+    """True BaseException (not Exception) — exercises the BaseException
+    arm of `_walk_worker` directly, distinct from the RuntimeError tests
+    above which only cover the Exception subset."""
+
+
+def test_scan_dir_base_exception_preserves_siblings_and_stats(
+        tmp_path, monkeypatch):
+    # hr-test-01: patch `_scan_dir` to raise a true BaseException the FIRST
+    # time one specific subdirectory of a multi-level tree is scanned. The
+    # re-enqueue path (hr-conc-01) must hand that directory to a surviving
+    # worker so its children — and every sibling subtree — are still
+    # emitted, and the merged stats must finalize non-zero.
+    (tmp_path / "top.bin").write_bytes(b"x")
+    sub = tmp_path / "sub"
+    (sub / "deep").mkdir(parents=True)
+    (sub / "f0.bin").write_bytes(b"x")
+    (sub / "f1.bin").write_bytes(b"x")
+    (sub / "deep" / "g0.bin").write_bytes(b"x")
+    sib = tmp_path / "sib"
+    sib.mkdir()
+    (sib / "s0.bin").write_bytes(b"x")
+
+    real_scan_dir = hr._scan_dir
+    sub_str = str(sub)
+    state = {"boomed": False}
+    lock = __import__("threading").Lock()
+
+    def flaky_scan_dir(d, st, wstats):
+        with lock:
+            if str(d) == sub_str and not state["boomed"]:
+                state["boomed"] = True
+                raise _ScanBoom("transient failure scanning sub")
+        return real_scan_dir(d, st, wstats)
+
+    monkeypatch.setattr(hr, "_scan_dir", flaky_scan_dir)
+    # jobs>=2 so a surviving worker retries the re-enqueued directory after
+    # the worker that hit the BaseException dies.
+    results, stats = hr.threaded_walk(tmp_path, 3)
+    names = sorted(Path(p).name for p, *_ in results)
+    assert names == ["f0.bin", "f1.bin", "g0.bin", "s0.bin", "top.bin"]
+    assert state["boomed"] is True            # the BaseException really fired
+    assert stats["files"] == 5
+    assert stats["dirs"] > 0                  # stats finalized non-zero
+    assert stats["dir_errors"] == 0           # BaseException != OSError count
+
+
 # --- hr-conc-01: cancel_event aborts the hash stages between batches ------
 
 def test_cancelled_helper():
