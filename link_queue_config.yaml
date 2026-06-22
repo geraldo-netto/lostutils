@@ -1,0 +1,31 @@
+sleep_between_items: 6
+worker_count: 5
+failure_sleep_seconds: 300
+max_per_domain: 0
+log_verbosity: summary
+log_max_lines: 100
+output_folder: /backups/disk4
+default_mode: queue
+default_command: echo {url}
+default_shell: false
+protocols:
+  http:
+    mode: queue
+    shell: false
+    command: yt-dlp {url}
+  https:
+    mode: queue
+    shell: false
+    command: yt-dlp {url}
+  ftp:
+    mode: queue
+    shell: false
+    command: echo [ftp] {url}
+  magnet:
+    mode: immediate
+    shell: false
+    command: /usr/bin/transmission-gtk {url}
+  file:
+    mode: immediate
+    shell: false
+    command: echo [file] {url}
