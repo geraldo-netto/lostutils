@@ -8,19 +8,19 @@ Pipeline:
   2. Hardlink dedup — paths sharing (dev, ino) are aliases of one inode;
      hash the inode once, emit every alias at the end.
   3. Size pre-filter — inodes whose size is unique can't have duplicates.
-  4. Stage 1 hash — BLAKE3 of the first 1 MiB of each surviving inode.
+  4. Stage 1 hash — BLAKE3 of the first 4 MiB of each surviving inode.
      Group by (size, head_digest).
-  5. Stage 2 hash — for groups with size > 2 MiB and ≥2 members, also
-     hash the last MiB plus two 64 KiB samples at size/3 and 2*size/3.
+  5. Stage 2 hash — for groups with size > 8 MiB and ≥2 members, also
+     hash the last 4 MiB plus two 64 KiB samples at size/3 and 2*size/3.
      Files that sample-match are reported as duplicates; the rest fall
      out (head matched but content differed past the head).
 
-Why head + tail + middle samples? A first-MiB-only hash treats files as
+Why head + tail + middle samples? A first-window-only hash treats files as
 duplicate when they only share a container header — common false positive
 for MKV/MP4 files with the same intro, ISOs of related distros, tar
 backups of similar trees, DB dumps with the same schema. Head+tail+samples
 makes accidental collision essentially impossible for real-world content
-while staying bounded (max ~2.13 MiB read per file, regardless of size).
+while staying bounded (max ~8.13 MiB read per file, regardless of size).
 """
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ from typing import NamedTuple
 
 import blake3
 
-CAP = 1024 * 1024              # 1 MiB head/tail window
+CAP = 4 * 1024 * 1024          # 4 MiB head/tail window
 SAMPLE = 64 * 1024             # mid-file sample window
 HEAD_TAIL_THRESHOLD = CAP      # at-or-below this, the head IS the full file
 # (CAP < size <= 2*CAP MUST go through stage 2; otherwise files that share

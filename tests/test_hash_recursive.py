@@ -186,7 +186,7 @@ def test_no_false_dup_for_files_between_cap_and_2cap():
             if len(paths) > 1:
                 names = sorted(Path(p).name for p in paths)
                 assert names != ["x1.bin", "x2.bin"], \
-                    "false positive: 1-2 MiB files with different tails grouped"
+                    "false positive: CAP..2*CAP files with different tails grouped"
 
 
 def test_find_duplicate_groups_no_candidates():
