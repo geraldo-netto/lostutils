@@ -60,6 +60,7 @@ dnp-rel-02 | open | med | dedupl_numpy.py:13 — PATH_OFFSET=26 is hardcoded ("p
 dnp-rel-03 | open | med | dedupl_numpy.py:21-24 — mmap is used as the np.frombuffer source after the file handle closes at with-exit and is never closed (leak); an empty file also makes mmap raise. Keep the file open (or copy), close mm, and guard zero-length files. | resource
 dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None] + arange(32) assumes every line is ≥32+PATH_OFFSET bytes with the hash exactly 32 chars at offset 0; a short/blank/final line reads across the newline or past buffer end, corrupting grouping. Validate line length / derive hash width. | array-bounds
 dnv3-rel-02 | open | low | deduplicate-by-namev3.py:70 — readlines() then cleanup() drops every line that cleans to empty silently; the counts dict loses original line numbers so a duplicate report can't point back to source lines. Retain source indices if traceability is needed. |
+hr-rel-21 | open | low | hash-recursive-ai5.py:1406 — --jobs is unvalidated; `-j 0` or a negative value crashes mid-run with `ThreadPoolExecutor: max_workers must be greater than 0` once a stage's candidate bytes exceed THREAD_THRESHOLD_BYTES. The walk clamps via max(1,jobs) but the hash path passes raw args.jobs straight to ThreadPoolExecutor, so a small tree silently works while a >32 MiB tree aborts. Clamp `args.jobs = max(1, args.jobs)` in main. | crash-on-bad-flag
 rdv3-rel-01 | open | low | remove-deduplv3.py:107 — the max tiebreaker keeps a stable survivor, but if two byte-identical path strings appear in a group (duplicate line) both compare equal and one is emitted for removal though it's the same file. Dedup identical path strings within a group first. | duplicate-path edge
 
 ## testing
@@ -77,3 +78,33 @@ lq-obs-01 | open | low | link_queue.py:1269 — _resize_immediate_pool recompute
 oze-obs-01 | open | med | organize_by_extension.py:1457-1465 — _move_worker computes dest = bucket_dir / source.name up front and discards move_file's return value; when move_file renames the source aside to <name>.collisionN the file lands at that name but the worker still logs the original dest, so "Moved X -> <wrong dest>" is reported. Return/log the Path move_file actually returns. | logged dest diverges from reality
 rf-obs-01 | open | low | relocate_folder.py:992 — the except OSError in _iter_verify_tasks swallows the stat error with no log line, so even if rf-rel-01 is fixed to raise, the operator gets no breadcrumb why an entry couldn't be classified. Log a warning with the path and errno. |
 rdv3-obs-01 | open | low | remove-deduplv3.py:101-112 — groups with all-identical paths or a single survivor are silently skipped; no stderr summary of #groups/#files-to-remove. Emit a stderr summary before the rm block for auditability. | audit
+
+## memory and cpu management
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+hr-mem-01 | open | med | hash-recursive-ai5.py:436-442 — _read_window_into calls f.read(remaining) with remaining == the full window length (CAP is now 4 MiB), so each concurrent hash holds a transient ~4 MiB buffer; peak hash memory ≈ jobs × 4 MiB (~256 MiB at -j 64), 4× since the CAP 1→4 MiB bump. Read in fixed sub-window chunks (e.g. 1 MiB) so per-thread memory is bounded independent of CAP. | peak-RSS scales with CAP×jobs
+
+## adaptability
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+hr-adapt-01 | open | med | hash-recursive-ai5.py:44-45 — CAP (4 MiB) and SAMPLE (64 KiB) are hardcoded; tuning the hash window (changed twice recently) requires a source edit. SamplingStrategy is pluggable in-code but unreachable from the CLI/RunConfig. Expose --block-size/--sample-size (validated, preserving the size>2*CAP invariant) or document why they stay fixed. | magic-number / no runtime knob
+
+## CLI / option integrity
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+hr-cli-01 | open | low | hash-recursive-ai5.py:1410-1412 — the --alias-cap help says "0 = no cap" but RunConfig disables the cap for ANY value <= 0 (`alias_cap if alias_cap > 0 else None`), so `-1` silently disables it too. Align the help text (e.g. "<= 0 = no cap") or reject negatives. | help understates behavior
+
+## documentation
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+hr-doc-01 | open | low | hash-recursive-ai5.py:544-553 — SamplingStrategy docstring (plus _stage2_hash docstring L1078 and the argparse description L1403) still say "tail-CAP plus two SAMPLE windows" / "head + tail + mid-samples" with no mention of the center 4 MiB block added to ThirdsStrategy. Update the three sites to include the center block. | docs-vs-behavior drift
+
+## unused code
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+hr-unused-01 | open | low | hash-recursive-ai5.py:65 — WALK_FLUSH_THRESHOLD = 1024 is defined with a paragraph comment but referenced nowhere (leftover from an abandoned per-worker batch-flush design; the walk now puts each entry to out_q directly). Delete the constant and its comment. | dead constant
