@@ -106,4 +106,3 @@ hr-doc-01 | open | low | hash-recursive-ai5.py:544-553 — SamplingStrategy docs
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-unused-01 | open | low | hash-recursive-ai5.py:65 — WALK_FLUSH_THRESHOLD = 1024 is defined with a paragraph comment but referenced nowhere (leftover from an abandoned per-worker batch-flush design; the walk now puts each entry to out_q directly). Delete the constant and its comment. | dead constant

@@ -57,12 +57,6 @@ SUBMIT_WINDOW = 2
 # BLAKE3 is ~3 GB/s/thread on modern x86. Below this much candidate
 # work, ThreadPoolExecutor setup + per-task overhead exceeds the gain.
 THREAD_THRESHOLD_BYTES = 32 * 1024 * 1024
-# hr-conc-01: each worker accumulates this many entries before grabbing
-# results_lock. The walk previously flushed once per directory — on trees
-# where most dirs hold one or two files, that meant per-entry lock contention
-# at 8+ workers. 1024 keeps the flush cheap (one small extend per dir on a
-# typical tree) without unbounded per-worker memory.
-WALK_FLUSH_THRESHOLD = 1024
 
 DEFAULT_ALIAS_CAP = 1024
 DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
