@@ -1402,6 +1402,42 @@ def test_main_rejects_nonpositive_block_size(tmp_path, monkeypatch, capsys):
     assert "must be >= 1" in capsys.readouterr().err
 
 
+def test_main_logs_start_progress_done(tmp_path, monkeypatch, capsys):
+    # hr-log-01: a start line, a progress line every 50 files, and a done
+    # line all land on stderr.
+    for i in range(120):
+        (tmp_path / f"f{i}.bin").write_bytes(b"")
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "start: scanning" in err
+    assert "progress: 50 files scanned" in err
+    assert "progress: 100 files scanned" in err
+    assert "done: 120 files scanned" in err
+
+
+def test_main_quiet_suppresses_logs(tmp_path, monkeypatch, capsys):
+    # hr-log-01: --quiet suppresses the start/progress/done lines too.
+    for i in range(60):
+        (tmp_path / f"f{i}.bin").write_bytes(b"")
+    monkeypatch.setattr(hr.sys, "argv", ["hr", "-q", str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "start:" not in err
+    assert "progress:" not in err
+    assert "done:" not in err
+
+
+def test_progress_walk_logs_at_interval(capsys):
+    # hr-log-01: the wrapper yields every entry and logs every `every`.
+    entries = [(f"/p/{i}", 0, 1, i) for i in range(5)]
+    out = list(hr._progress_walk(iter(entries), quiet=False, every=2))
+    assert out == entries                     # pass-through, nothing dropped
+    err = capsys.readouterr().err
+    assert "progress: 2 files scanned" in err
+    assert "progress: 4 files scanned" in err
+
+
 def test_read_window_chunks_match_single_read(tmp_path, monkeypatch):
     # hr-mem-01: reading a window in many small sub-chunks must yield the
     # same digest as one read of the whole window.

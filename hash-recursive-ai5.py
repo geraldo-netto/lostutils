@@ -64,6 +64,10 @@ THREAD_THRESHOLD_BYTES = 32 * 1024 * 1024
 
 DEFAULT_ALIAS_CAP = 1024
 DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
+# hr-log-01: emit a walk-progress line to stderr every N files scanned,
+# bracketed by a start and a done line. Suppressed by --quiet alongside the
+# end-of-run summary.
+LOG_EVERY_N_FILES = 50
 # hr-cmplx-01: the alias cap is stored as Optional[int] — `None` means
 # "no cap". The disabled state is detected via `alias_cap is not None`
 # (see `alias_cap_active`), so a legitimate positive cap of any size
@@ -1398,6 +1402,30 @@ def _install_sigint_cancel(cancel_event):
     return previous
 
 
+def _log_line(msg, quiet) -> None:
+    """Emit one ``[ai5]`` operational log line to stderr (hr-log-01).
+    No-op when `quiet` is set, matching the summary's --quiet behaviour."""
+    if not quiet:
+        print(f"[ai5] {msg}", file=sys.stderr)
+
+
+def _progress_walk(walk_iter, quiet, every=LOG_EVERY_N_FILES):
+    """Pass-through generator over the walk that logs a progress line every
+    ``every`` files scanned (hr-log-01).
+
+    Wrapping the walk here keeps `index_inodes` consuming the stream exactly
+    once; closing this generator (which `index_inodes` does in its finally)
+    propagates GeneratorExit into the underlying walk so its coordinator is
+    still joined and ``.stats`` finalised. `main` reads ``walk_iter.stats``
+    from the real iterator, not this wrapper."""
+    n = 0
+    for entry in walk_iter:
+        n += 1
+        if n % every == 0:
+            _log_line(f"progress: {n} files scanned", quiet)
+        yield entry
+
+
 def _configure_windows(block_size: int, sample_size: int) -> None:
     """Override the hash window sizes from the CLI (hr-adapt-01).
 
@@ -1488,6 +1516,8 @@ def main():
         # hr-obs-02 + hr-scal-05: stream the walk so we never materialise
         # the full `files` list. `on_walk_done` snaps the walk/hash
         # boundary so the per-stage durations remain meaningful.
+        # hr-log-01: start marker before any scanning begins.
+        _log_line(f"start: scanning {root} (jobs={args.jobs})", args.quiet)
         walk_iter = iter_threaded_walk(root, args.jobs, cancel_event=cancel_event)
         t_start = time.perf_counter()
         walk_boundary: list[float | None] = [None]
@@ -1499,8 +1529,10 @@ def main():
         # never buffers in memory. Pipeline-internal `final_groups` stays
         # empty because the callback consumes every group inline.
         on_group, totals = emit_groups_streaming(sys.stdout.write, config=config)
+        # hr-log-01: wrap the walk so a progress line prints every N files;
+        # find_duplicate_groups still consumes the stream exactly once.
         result = find_duplicate_groups(
-            walk_iter, args.jobs,
+            _progress_walk(walk_iter, args.quiet), args.jobs,
             on_group=on_group, config=config, on_walk_done=_mark_walk_done,
             cancel_event=cancel_event,
         )
@@ -1508,6 +1540,10 @@ def main():
         walk_stats = walk_iter.stats
         info = result.info
         dup_groups, dup_paths = totals()
+        # hr-log-01: done marker once the pipeline has finished.
+        _log_line(
+            f"done: {walk_stats['files']} files scanned, "
+            f"{dup_groups} duplicate group(s)", args.quiet)
         # hr-rel-03: `_mark_walk_done` is invoked unconditionally by
         # `find_duplicate_groups` the moment `index_inodes` has consumed
         # the walk — even an immediate-cancel walk still returns an empty
