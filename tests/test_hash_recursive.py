@@ -1362,6 +1362,18 @@ def test_prepare_candidates_drops_non_candidate_overflow():
     assert (1, 3) not in overflow      # pruned in place
 
 
+def test_read_window_chunks_match_single_read(tmp_path, monkeypatch):
+    # hr-mem-01: reading a window in many small sub-chunks must yield the
+    # same digest as one read of the whole window.
+    import blake3
+    payload = b"abcdefghij" * 50          # 500 bytes, < CAP
+    f = tmp_path / "f.bin"
+    f.write_bytes(payload)
+    monkeypatch.setattr(hr, "READ_CHUNK", 7)   # force many sub-reads
+    got = hr.hash_head(str(f))
+    assert got == blake3.blake3(payload[:hr.CAP]).hexdigest()
+
+
 def test_preflight_root_probe_error_raises_root_error(monkeypatch):
     # An OSError/ValueError from the os.path probes is translated to a
     # typed RootError ("invalid path" branch), never allowed to escape raw.

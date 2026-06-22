@@ -82,7 +82,6 @@ rdv3-obs-01 | open | low | remove-deduplv3.py:101-112 — groups with all-identi
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-mem-01 | open | med | hash-recursive-ai5.py:436-442 — _read_window_into calls f.read(remaining) with remaining == the full window length (CAP is now 4 MiB), so each concurrent hash holds a transient ~4 MiB buffer; peak hash memory ≈ jobs × 4 MiB (~256 MiB at -j 64), 4× since the CAP 1→4 MiB bump. Read in fixed sub-window chunks (e.g. 1 MiB) so per-thread memory is bounded independent of CAP. | peak-RSS scales with CAP×jobs
 
 ## adaptability
 

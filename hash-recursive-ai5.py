@@ -43,6 +43,10 @@ import blake3
 
 CAP = 4 * 1024 * 1024          # 4 MiB head/tail window
 SAMPLE = 64 * 1024             # mid-file sample window
+# hr-mem-01: cap each read() at this many bytes so a worker's transient
+# buffer is bounded by READ_CHUNK, not by CAP. Without it a 4 MiB window
+# read in one call held ~4 MiB per concurrent hash (~jobs*4 MiB peak).
+READ_CHUNK = 1024 * 1024       # 1 MiB per read syscall
 HEAD_TAIL_THRESHOLD = CAP      # at-or-below this, the head IS the full file
 # (CAP < size <= 2*CAP MUST go through stage 2; otherwise files that share
 # their first CAP bytes but differ in the tail would be reported as duplicates
@@ -429,7 +433,9 @@ def _read_window_into(h, f, length: int, strict: bool) -> bool:
     natural end of the window."""
     remaining = length
     while remaining > 0:
-        chunk = f.read(remaining)
+        # hr-mem-01: bound the per-read allocation to READ_CHUNK so a wide
+        # CAP window doesn't pin CAP bytes per concurrent hash.
+        chunk = f.read(min(remaining, READ_CHUNK))
         if not chunk:
             return not strict
         h.update(chunk)
