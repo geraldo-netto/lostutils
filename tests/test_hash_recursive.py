@@ -892,9 +892,12 @@ def test_hash_file_windows_non_strict_short_read_does_not_tick_shrank(tmp_path):
     assert cfg.hash_skipped_shrank == 0
 
 
-def test_main_summary_surfaces_stage2_skipped(tmp_path, monkeypatch, capsys):
-    # hr-obs-01: stage2_skipped must appear in the summary. Force two big
-    # files through stage 2 with every tail dropped so the counter is > 0.
+def test_main_summary_surfaces_stage2_failures_as_hash_errors(
+        tmp_path, monkeypatch, capsys):
+    # hr-obs-01: stage-2 None tails have a single source of truth. Force
+    # two big files through stage 2 with every tail dropped (and counted as
+    # errors); they surface in `hash_errors`, not a separate overlapping
+    # field.
     big = b"q" * (hr.HEAD_TAIL_THRESHOLD + 200)
     (tmp_path / "a.bin").write_bytes(big)
     (tmp_path / "b.bin").write_bytes(big)
@@ -905,26 +908,27 @@ def test_main_summary_surfaces_stage2_skipped(tmp_path, monkeypatch, capsys):
         seen["n"] += 1
         if seen["n"] == 1:
             return real_run(items, fn, total, jobs)
-        return ({p: None for _s, p in items}, 0)
+        return ({p: None for _s, p in items}, len(items))
 
     monkeypatch.setattr(hr, "_run_stage", stub)
     monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
     hr.main()
     err = capsys.readouterr().err
-    assert "hashed_stage2_skipped=" in err
-    # Both big files were dropped at stage 2 -> skipped >= 2.
-    import re
-    m = re.search(r"hashed_stage2_skipped=(\d+)", err)
-    assert m and int(m.group(1)) >= 2
+    # hr-obs-01: the duplicated/overlapping field is gone.
+    assert "hashed_stage2_skipped" not in err
+    # Both dropped tails surface as real hash errors (no vanished/shrank).
+    assert "hash_errors=2 " in err
 
 
-def test_main_summary_stage2_skipped_zero_when_clean(tmp_path, monkeypatch, capsys):
-    # hr-obs-01: the field is present even when nothing was skipped.
+def test_main_summary_omits_removed_stage2_skipped_field(
+        tmp_path, monkeypatch, capsys):
+    # hr-obs-01: the removed field never appears, even on a clean run.
     (tmp_path / "a.bin").write_bytes(b"x")
     monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
     hr.main()
     err = capsys.readouterr().err
-    assert "hashed_stage2_skipped=0" in err
+    assert "hashed_stage2_skipped" not in err
+    assert "hash_errors=0 " in err
 
 
 def _run_main_with_stage_stub(tmp_path, monkeypatch, capsys, *, none_tails,
@@ -1272,8 +1276,10 @@ def test_emit_groups_does_not_double_count_sentinel():
     assert p == 0
 
 
-def test_find_duplicate_groups_info_includes_stage2_skipped(tmp_path, monkeypatch):
-    # hr-rel-10: dropped tails are counted in info["stage2_skipped"].
+def test_find_duplicate_groups_info_counts_stage2_errors(tmp_path, monkeypatch):
+    # hr-obs-01: dropped tails are counted once, in info["stage2_errors"]
+    # — the single source of truth. The old overlapping stage2_skipped
+    # field is gone.
     big = b"q" * (hr.HEAD_TAIL_THRESHOLD + 200)
     a = tmp_path / "a.bin"; a.write_bytes(big)
     b = tmp_path / "b.bin"; b.write_bytes(big)
@@ -1284,13 +1290,14 @@ def test_find_duplicate_groups_info_includes_stage2_skipped(tmp_path, monkeypatc
         seen["n"] += 1
         if seen["n"] == 1:
             return real_run(items, fn, total, jobs)
-        # Stage 2: every tail = None
-        return ({p: None for _s, p in items}, 0)
+        # Stage 2: every tail = None, counted as errors.
+        return ({p: None for _s, p in items}, len(items))
 
     monkeypatch.setattr(hr, "_run_stage", stub)
     files = [(str(a), len(big), 1, 100), (str(b), len(big), 1, 101)]
     result = hr.find_duplicate_groups(files, jobs=1)
-    assert result.info["stage2_skipped"] >= 2
+    assert result.info["stage2_errors"] >= 2
+    assert "stage2_skipped" not in result.info
 
 
 # --- hr-obs-03: bounded stderr error logging ------------------------------

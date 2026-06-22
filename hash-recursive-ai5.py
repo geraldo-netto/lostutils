@@ -1063,11 +1063,20 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None):
 
     Returns ``(regrouped, info)``. ``regrouped`` maps ``(head, tail) ->
     [keys]`` for digest-confirmed duplicate groups; ``info`` carries
-    ``stage2``, ``stage2_errors``, and ``stage2_skipped`` (hr-rel-10).
+    ``stage2`` (items hashed) and ``stage2_errors`` (None tails).
     `cancel_event` (hr-conc-01) is forwarded to :func:`_run_stage` so a
-    Ctrl-C aborts the tail-hash phase between batches."""
+    Ctrl-C aborts the tail-hash phase between batches.
+
+    hr-obs-01: a None tail has a SINGLE source of truth — it is counted
+    once in ``stage2_errors`` (the count :func:`_run_stage` returns) and
+    then skipped from the regroup below as pure control flow, never
+    re-counted. The benign subset (vanished / truncated) is tracked apart
+    on the :class:`RunConfig` and subtracted by :func:`main` to derive the
+    real-failure figure. The former ``stage2_skipped`` field duplicated
+    ``stage2_errors`` (identical except under cancellation) with no
+    reconciliation, so it has been removed."""
     if not stage2_items:
-        return {}, {"stage2": 0, "stage2_errors": 0, "stage2_skipped": 0}
+        return {}, {"stage2": 0, "stage2_errors": 0}
     stage2_bytes = _capped_byte_total(
         min(s, CAP + 2 * SAMPLE) for s, _p, _h, _k in stage2_items)
     # `_run_stage` consumes the legacy (size, path) shape; project for it.
@@ -1076,18 +1085,12 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None):
         _make_tail_batch(config), stage2_bytes, jobs,
         cancel_event=cancel_event)
     regrouped: dict = {}
-    skipped = 0
     for _s, path, head, key in stage2_items:
         tail = tail_by_path.get(path)
         if tail is None:
-            skipped += 1
-            continue
+            continue   # failed/unhashed tail — already in stage2_errors
         regrouped.setdefault((head, tail), []).append(key)
-    return regrouped, {
-        "stage2": len(stage2_items),
-        "stage2_errors": errors,
-        "stage2_skipped": skipped,
-    }
+    return regrouped, {"stage2": len(stage2_items), "stage2_errors": errors}
 
 
 def _prepare_candidates(aliases, inode_size, overflow):
@@ -1512,9 +1515,6 @@ def main():
                 f"size_collision_inodes={f(info['candidates'])} "
                 f"hashed_stage1={f(info['stage1'])} "
                 f"hashed_stage2={f(info['stage2'])} "
-                # hr-obs-01: surface stage-2 short-read/shrink skips so they
-                # aren't invisible — they were computed but never printed.
-                f"hashed_stage2_skipped={f(info['stage2_skipped'])} "
                 f"dup_groups={f(dup_groups)} "
                 f"dup_paths={f(dup_paths)} "
                 f"walk_errors={f(walk_stats['dir_errors'])}+"
