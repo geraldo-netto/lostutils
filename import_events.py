@@ -12,15 +12,35 @@ import hashlib
 import secrets
 import logging
 import argparse
-from urllib.request import urlretrieve
+from collections import OrderedDict
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 from dataclasses import dataclass
 from datetime import datetime, date
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 # Default paths to the local GGUF models.
-MODEL_PATH = "ggml-model-q4_k.gguf"
-CLIP_PATH = "mmproj-model-f16.gguf"
+MODEL_FILENAME = "ggml-model-q4_k.gguf"
+CLIP_FILENAME = "mmproj-model-f16.gguf"
+CACHE_DIR_ENV = "IMPORT_EVENTS_CACHE_DIR"
+DEFAULT_LLM_CACHE_SIZE = 1
+DOWNLOAD_CHUNK_SIZE = 1 << 20
+DOWNLOAD_PROGRESS_BYTES = 256 << 20
+DOWNLOAD_TIMEOUT_SECONDS = 30
+
+
+def _default_cache_dir() -> Path:
+    explicit = os.environ.get(CACHE_DIR_ENV)
+    if explicit:
+        return Path(explicit).expanduser()
+    base = os.environ.get("XDG_CACHE_HOME")
+    root = Path(base).expanduser() if base else Path.home() / ".cache"
+    return root / "lostutils" / "import_events"
+
+
+MODEL_PATH = str(_default_cache_dir() / MODEL_FILENAME)
+CLIP_PATH = str(_default_cache_dir() / CLIP_FILENAME)
 
 # Reliable HuggingFace download links for LLaVA 1.5 7B
 MODEL_URL = "https://huggingface.co/mys/ggml_llava-v1.5-7b/resolve/main/ggml-model-q4_k.gguf"
@@ -43,14 +63,18 @@ class ModelConfig:
     clip_sha256: Optional[str] = CLIP_SHA256
     model_url: str = MODEL_URL
     clip_url: str = CLIP_URL
+    llm_cache_size: int = DEFAULT_LLM_CACHE_SIZE
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ModelConfig":
+        cache_dir = (Path(args.model_cache_dir).expanduser()
+                     if args.model_cache_dir else _default_cache_dir())
         return cls(
-            model_path=args.model_path,
-            clip_path=args.clip_path,
+            model_path=args.model_path or str(cache_dir / MODEL_FILENAME),
+            clip_path=args.clip_path or str(cache_dir / CLIP_FILENAME),
             model_sha256=args.model_sha256,
             clip_sha256=args.clip_sha256,
+            llm_cache_size=max(0, args.llm_cache_size),
         )
 
 # Image suffixes the vision model handles, mapped to their MIME type so the
@@ -79,7 +103,7 @@ MAX_CONTENT_CHARS = 6000
 PDF_VISION_MAX_PAGES = 5
 PDF_VISION_DPI = 150
 
-_LLM_CACHE: Dict[tuple, Any] = {}
+_LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
 logger = logging.getLogger(__name__)
 
 # Counts files whose extraction raised; main() exits non-zero when > 0 so a run
@@ -114,6 +138,106 @@ def _verify_sha256(path: str, expected: Optional[str]) -> None:
         raise ValueError(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
 
 
+def _path_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _content_range_total(value: Optional[str]) -> Optional[int]:
+    if not value or "/" not in value:
+        return None
+    total = value.rsplit("/", 1)[1].strip()
+    return int(total) if total.isdigit() else None
+
+
+def _response_status(response: Any) -> int:
+    status = getattr(response, "status", None)
+    if status is not None:
+        return int(status)
+    return int(response.getcode())
+
+
+def _download_request(url: str, start_at: int) -> Request:
+    headers = {"Range": f"bytes={start_at}-"} if start_at else {}
+    return Request(url, headers=headers)
+
+
+def _log_download_progress(path: Path, downloaded: int, total: Optional[int]) -> None:
+    if total:
+        pct = (downloaded / total) * 100
+        logger.info("Downloading %s: %d/%d bytes (%.1f%%)", path, downloaded, total, pct)
+    else:
+        logger.info("Downloading %s: %d bytes", path, downloaded)
+
+
+def _publish_complete_part(part: Path, path: Path) -> None:
+    os.replace(part, path)
+    logger.info("Cached %s (%d bytes).", path, _path_size(path))
+
+
+def _stream_download(response: Any, part: Path, mode: str, downloaded: int) -> int:
+    total = _content_range_total(response.headers.get("Content-Range"))
+    if total is None:
+        length = response.headers.get("Content-Length")
+        total = downloaded + int(length) if length and length.isdigit() else None
+
+    next_report = downloaded + DOWNLOAD_PROGRESS_BYTES
+    with open(part, mode) as handle:
+        while True:
+            chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+            handle.write(chunk)
+            downloaded += len(chunk)
+            if downloaded >= next_report:
+                _log_download_progress(part, downloaded, total)
+                next_report = downloaded + DOWNLOAD_PROGRESS_BYTES
+    return downloaded
+
+
+def _download_to_cache(url: str, path_str: str) -> None:
+    """Download to a stable .part file, resuming it on the next run when possible."""
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(f".{path.name}.part")
+    start_at = _path_size(part)
+    if start_at:
+        logger.info("Resuming %s from %d bytes in %s.", path, start_at, part)
+    else:
+        logger.info("Downloading %s to %s.", url, path)
+
+    request = _download_request(url, start_at)
+    try:
+        with urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+            status = _response_status(response)
+            mode = "ab" if start_at and status == 206 else "wb"
+            if start_at and status != 206:
+                logger.warning("Server did not honor resume for %s; restarting download.", path)
+                start_at = 0
+            downloaded = _stream_download(response, part, mode, start_at)
+        _publish_complete_part(part, path)
+        _log_download_progress(path, downloaded, downloaded)
+    except HTTPError as exc:
+        if exc.code == 416 and start_at:
+            total = _content_range_total(exc.headers.get("Content-Range"))
+            if total == _path_size(part):
+                _publish_complete_part(part, path)
+                return
+        logger.warning("Download failed for %s; keeping partial %s (%d bytes): %s",
+                       path, part, _path_size(part), exc)
+        raise
+    except KeyboardInterrupt:
+        logger.warning("Interrupted download for %s; keeping partial %s (%d bytes).",
+                       path, part, _path_size(part))
+        raise
+    except Exception as exc:
+        logger.warning("Download failed for %s; keeping partial %s (%d bytes): %s",
+                       path, part, _path_size(part), exc)
+        raise
+
+
 def ensure_models_exist(config: Optional[ModelConfig] = None) -> None:
     """Checks if models exist locally, downloads them if missing, and verifies them."""
     config = config or ModelConfig()
@@ -126,28 +250,56 @@ def ensure_models_exist(config: Optional[ModelConfig] = None) -> None:
             print(f"--- Model not found: {path_str} ---")
             print(f"Downloading from {url}...")
             print("This may take several minutes depending on your connection (approx 4GB)...")
-            urlretrieve(url, path_str)
+            _download_to_cache(url, path_str)
             print(f"Successfully downloaded {path_str}")
         _verify_sha256(path_str, expected)
 
 
+def _close_cached_llm(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
+    try:
+        close()
+    except Exception as exc:
+        logger.warning("Failed to close evicted LLM client: %s", exc)
+
+
+def _trim_llm_cache(max_entries: int) -> None:
+    while len(_LLM_CACHE) > max_entries:
+        _key, client = _LLM_CACHE.popitem(last=False)
+        _close_cached_llm(client)
+
+
 def get_llm(config: Optional[ModelConfig] = None):
-    """Lazily initializes the local LLaVA model, caching one instance per config."""
+    """Lazily initializes the local LLaVA model with a bounded LRU cache."""
     config = config or ModelConfig()
     key = (config.model_path, config.clip_path)
-    cached = _LLM_CACHE.get(key)
-    if cached is None:
-        from llama_cpp import Llama
-        from llama_cpp.llama_chat_format import Llava15ChatHandler
+    cache_limit = max(0, config.llm_cache_size)
+    if cache_limit == 0:
+        cached = _LLM_CACHE.pop(key, None)
+        if cached is not None:
+            _close_cached_llm(cached)
+    else:
+        cached = _LLM_CACHE.get(key)
+        if cached is not None:
+            _LLM_CACHE.move_to_end(key)
+            _trim_llm_cache(cache_limit)
+            return cached
 
-        ensure_models_exist(config)
-        chat_handler = Llava15ChatHandler(clip_model_path=config.clip_path)
-        cached = Llama(
-            model_path=config.model_path,
-            chat_handler=chat_handler,
-            n_ctx=2048,  # Adjust based on your available RAM and content size
-        )
+    from llama_cpp import Llama
+    from llama_cpp.llama_chat_format import Llava15ChatHandler
+
+    ensure_models_exist(config)
+    chat_handler = Llava15ChatHandler(clip_model_path=config.clip_path)
+    cached = Llama(
+        model_path=config.model_path,
+        chat_handler=chat_handler,
+        n_ctx=2048,  # Adjust based on your available RAM and content size
+    )
+    if cache_limit > 0:
         _LLM_CACHE[key] = cached
+        _trim_llm_cache(cache_limit)
     return cached
 
 
@@ -502,10 +654,26 @@ def dedupe_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Output
 # --------------------------------------------------------------------------- #
+def _atomic_write_bytes(output_path: Path, data: bytes) -> None:
+    tmp = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, output_path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def write_events_json(events: List[Dict[str, Any]], output_path: Path) -> None:
     """Writes the extracted events to a JSON file."""
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(events, f, ensure_ascii=False, indent=2)
+    payload = json.dumps(events, ensure_ascii=False, indent=2).encode("utf-8")
+    _atomic_write_bytes(output_path, payload)
 
 
 _ISO_NO_SECONDS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})((?:[+-]\d{2}:\d{2}|Z)?)$")
@@ -568,8 +736,7 @@ def build_ics(events: List[Dict[str, Any]]) -> bytes:
 
 
 def write_events_ics(events: List[Dict[str, Any]], output_path: Path) -> None:
-    with open(output_path, "wb") as f:
-        f.write(build_ics(events))
+    _atomic_write_bytes(output_path, build_ics(events))
 
 
 # --------------------------------------------------------------------------- #
@@ -592,10 +759,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--timezone", default=None,
                         help="IANA timezone (e.g. Europe/Lisbon) for naive iCalendar times.")
     defaults = ModelConfig()
-    parser.add_argument("--model-path", default=defaults.model_path,
-                        help="Path to the local GGUF language model.")
-    parser.add_argument("--clip-path", default=defaults.clip_path,
-                        help="Path to the local GGUF vision (clip) model.")
+    parser.add_argument("--model-cache-dir", default=None,
+                        help=(f"Directory used for default GGUF downloads "
+                              f"(default: {Path(defaults.model_path).parent})."))
+    parser.add_argument("--model-path", default=None,
+                        help=(f"Path to the local GGUF language model "
+                              f"(default: cache/{MODEL_FILENAME})."))
+    parser.add_argument("--clip-path", default=None,
+                        help=(f"Path to the local GGUF vision (clip) model "
+                              f"(default: cache/{CLIP_FILENAME})."))
+    parser.add_argument("--llm-cache-size", type=int, default=defaults.llm_cache_size,
+                        help=(f"Max loaded LLM instances retained in memory "
+                              f"(default: {DEFAULT_LLM_CACHE_SIZE}; 0 disables)."))
     parser.add_argument("--model-sha256", default=defaults.model_sha256,
                         help="Expected SHA-256 of the language model (integrity check).")
     parser.add_argument("--clip-sha256", default=defaults.clip_sha256,
@@ -603,8 +778,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+def _run_main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     model_config = ModelConfig.from_args(args)
     reset_extraction_failures()
@@ -635,6 +809,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("%d file(s) failed extraction; results may be incomplete.", failures)
         return 1
     return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    try:
+        return _run_main(argv)
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by Ctrl-C; exiting without completing import.")
+        return 130
 
 
 if __name__ == "__main__":

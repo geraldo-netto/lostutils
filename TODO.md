@@ -12,7 +12,7 @@ id prefixes: `dnp-` dedupl_numpy.py, `dnv3-` deduplicate-by-namev3.py, `hr-` has
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-sec-01 | open | high | import_events.py:85 — urlretrieve downloads ~4GB model over HTTPS but MODEL_SHA256/CLIP_SHA256 default to None, so _verify_sha256 only warns and skips; a compromised mirror's GGUF is loaded and executed by llama_cpp. Ship pinned digests by default rather than None. | supply-chain
+ie-sec-01 | open | high | import_events.py:53 — MODEL_SHA256/CLIP_SHA256 default to None, so _verify_sha256 only warns and skips after downloading the GGUF; a compromised mirror's model is loaded by llama_cpp. Ship pinned digests by default rather than None. | supply-chain
 rf-sec-01 | open | med | relocate_folder.py:1287 — source is re-stat'd/walked by path across validate_source -> _check_no_open_files -> ensure_dest_root -> _check_cross_device -> copy_tree with no held handle, leaving a TOCTOU window where source can be swapped for a symlink after the non-symlink check. Open the source dir once with O_DIRECTORY|O_NOFOLLOW and fstat/walk relative to that fd. | STRIDE-Tampering
 rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands; shlex.quote is correct but the script emits destructive commands with no header warning/--dry-run note and no guard that the survivor still exists. Add a leading "review before piping to sh" banner and consider verifying paths. | destructive-output
 
@@ -27,7 +27,6 @@ dnv3-perf-01 | open | med | deduplicate-by-namev3.py:113 — each row block reco
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-scal-01 | open | low | import_events.py:81 — _LLM_CACHE keeps every loaded Llama instance for the process lifetime keyed by (model_path, clip_path); multiple distinct model configs in one run accumulate multi-GB models in RAM with no eviction. Cap cache size or evict on config change. |
 oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_collisions materializes list(files) and builds pairs with a resolve_real_extension call for EVERY file up front, priming head_cache for the whole tree before the first move and contradicting the per-window pop and the streaming docstring. Restrict the pre-pass to needed_dirs members, or stream it in windows. | streaming claim vs reality
 
 ## concurrency
@@ -44,7 +43,7 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-dup-01 | open | low | import_events.py:324 — the `global _extraction_failures; _extraction_failures += 1; logger.exception(...)` block is duplicated verbatim in _run_llm and extract_from_file. Extract a single in-file _record_failure(file, exc) helper. | within-file
+ie-dup-01 | open | low | import_events.py:511 — the `global _extraction_failures; _extraction_failures += 1; logger.exception(...)` block is duplicated verbatim in _run_llm and extract_from_file. Extract a single in-file _record_failure(file, exc) helper. | within-file
 
 ## architecture/modularity/SOLID
 
@@ -72,7 +71,6 @@ dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves 
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-obs-01 | open | low | import_events.py:128 — urlretrieve gives no progress/error context on a ~4GB download; a network failure mid-download leaves a truncated file that _verify_sha256 only catches if a digest is pinned. Download to a temp file, verify, then atomically rename; log byte counts. |
 lq-obs-01 | open | low | link_queue.py:1269 — _resize_immediate_pool recomputes _immediate_pool_size but does not reset _immediate_depth_warned; after an upward resize the next _note_immediate_depth compares the live depth against the larger pool with a stale "already warned" latch, so a backlog over the old size but under the new never clears its warning until it fully drains. Reset _immediate_depth_warned on grow. | edge-trigger desync
 oze-obs-01 | open | med | organize_by_extension.py:1457-1465 — _move_worker computes dest = bucket_dir / source.name up front and discards move_file's return value; when move_file renames the source aside to <name>.collisionN the file lands at that name but the worker still logs the original dest, so "Moved X -> <wrong dest>" is reported. Return/log the Path move_file actually returns. | logged dest diverges from reality
 rf-obs-01 | open | low | relocate_folder.py:992 — the except OSError in _iter_verify_tasks swallows the stat error with no log line, so even if rf-rel-01 is fixed to raise, the operator gets no breadcrumb why an entry couldn't be classified. Log a warning with the path and errno. |

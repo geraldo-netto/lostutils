@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+from collections import OrderedDict
 from pathlib import Path
 from datetime import date, datetime, timezone
 
@@ -437,6 +438,22 @@ def test_write_events_json_roundtrips(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8")) == events
 
 
+def test_atomic_write_removes_temp_on_keyboard_interrupt(tmp_path, monkeypatch):
+    out = tmp_path / "events.json"
+    out.write_bytes(b"old")
+
+    def interrupt(_tmp, _out):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(import_events.os, "replace", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events._atomic_write_bytes(out, b"new")
+
+    assert out.read_bytes() == b"old"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 ICS_TEMPLATE = (
     "BEGIN:VCALENDAR\r\n"
     "VERSION:2.0\r\n"
@@ -690,7 +707,8 @@ def test_process_folder_threads_default_tz(tmp_path):
 def test_model_config_from_args_threads_values():
     args = import_events.parse_args(
         ["dir", "--model-path", "m.gguf", "--clip-path", "c.gguf",
-         "--model-sha256", "a" * 64, "--clip-sha256", "b" * 64]
+         "--model-sha256", "a" * 64, "--clip-sha256", "b" * 64,
+         "--llm-cache-size", "2"]
     )
 
     cfg = import_events.ModelConfig.from_args(args)
@@ -699,6 +717,37 @@ def test_model_config_from_args_threads_values():
     assert cfg.clip_path == "c.gguf"
     assert cfg.model_sha256 == "a" * 64
     assert cfg.clip_sha256 == "b" * 64
+    assert cfg.llm_cache_size == 2
+
+
+def test_default_cache_dir_prefers_import_events_cache_dir(tmp_path, monkeypatch):
+    cache = tmp_path / "models"
+    monkeypatch.setenv(import_events.CACHE_DIR_ENV, str(cache))
+
+    assert import_events._default_cache_dir() == cache
+
+
+def test_model_config_from_args_uses_cache_dir_for_default_paths(tmp_path):
+    cache = tmp_path / "model-cache"
+    args = import_events.parse_args(["dir", "--model-cache-dir", str(cache)])
+
+    cfg = import_events.ModelConfig.from_args(args)
+
+    assert cfg.model_path == str(cache / import_events.MODEL_FILENAME)
+    assert cfg.clip_path == str(cache / import_events.CLIP_FILENAME)
+
+
+def test_model_config_explicit_paths_override_cache_dir(tmp_path):
+    cache = tmp_path / "model-cache"
+    args = import_events.parse_args(
+        ["dir", "--model-cache-dir", str(cache),
+         "--model-path", "custom-model.gguf", "--clip-path", "custom-clip.gguf"]
+    )
+
+    cfg = import_events.ModelConfig.from_args(args)
+
+    assert cfg.model_path == "custom-model.gguf"
+    assert cfg.clip_path == "custom-clip.gguf"
 
 
 def test_model_config_defaults_match_module_constants():
@@ -706,6 +755,7 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.model_path == import_events.MODEL_PATH
     assert cfg.clip_path == import_events.CLIP_PATH
     assert cfg.model_sha256 == import_events.MODEL_SHA256
+    assert cfg.llm_cache_size == import_events.DEFAULT_LLM_CACHE_SIZE
 
 
 def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
@@ -714,7 +764,7 @@ def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
     model.write_bytes(b"m")
     clip.write_bytes(b"c")
     calls = []
-    monkeypatch.setattr(import_events, "urlretrieve",
+    monkeypatch.setattr(import_events, "_download_to_cache",
                         lambda url, path: calls.append((url, path)))
 
     cfg = import_events.ModelConfig(model_path=str(model), clip_path=str(clip))
@@ -728,10 +778,10 @@ def test_ensure_models_exist_downloads_missing_from_config(tmp_path, monkeypatch
     clip = tmp_path / "c.gguf"
     clip.write_bytes(b"c")
 
-    def fake_retrieve(url, path):
+    def fake_download(url, path):
         Path(path).write_bytes(b"downloaded")
 
-    monkeypatch.setattr(import_events, "urlretrieve", fake_retrieve)
+    monkeypatch.setattr(import_events, "_download_to_cache", fake_download)
 
     cfg = import_events.ModelConfig(
         model_path=str(model), clip_path=str(clip), model_url="http://x", clip_url="http://y"
@@ -739,6 +789,188 @@ def test_ensure_models_exist_downloads_missing_from_config(tmp_path, monkeypatch
     import_events.ensure_models_exist(cfg)
 
     assert model.exists()
+
+
+class _FakeDownloadResponse:
+    def __init__(self, chunks, status=200, headers=None):
+        self._chunks = list(chunks)
+        self.status = status
+        self.headers = headers or {}
+
+    def read(self, _size=-1):
+        if not self._chunks:
+            return b""
+        chunk = self._chunks.pop(0)
+        if isinstance(chunk, BaseException):
+            raise chunk
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_download_to_cache_creates_parent_and_publishes_atomically(tmp_path, monkeypatch):
+    dest = tmp_path / "cache" / "m.gguf"
+    calls = []
+
+    def fake_urlopen(request, timeout=None):
+        calls.append((request.full_url, request.get_header("Range"), timeout))
+        return _FakeDownloadResponse([b"downloaded"])
+
+    monkeypatch.setattr(import_events, "urlopen", fake_urlopen)
+
+    import_events._download_to_cache("http://example/model", str(dest))
+
+    assert dest.read_bytes() == b"downloaded"
+    assert calls == [("http://example/model", None, import_events.DOWNLOAD_TIMEOUT_SECONDS)]
+    assert not list(dest.parent.glob("*.part"))
+
+
+def test_download_to_cache_keeps_part_on_failure(tmp_path, monkeypatch):
+    dest = tmp_path / "cache" / "m.gguf"
+
+    def fake_urlopen(_request, timeout=None):
+        assert timeout == import_events.DOWNLOAD_TIMEOUT_SECONDS
+        return _FakeDownloadResponse([b"partial", OSError("network died")])
+
+    monkeypatch.setattr(import_events, "urlopen", fake_urlopen)
+
+    with pytest.raises(OSError, match="network died"):
+        import_events._download_to_cache("http://example/model", str(dest))
+
+    assert not dest.exists()
+    assert (dest.parent / ".m.gguf.part").read_bytes() == b"partial"
+
+
+def test_download_to_cache_keeps_part_on_keyboard_interrupt(tmp_path, monkeypatch):
+    dest = tmp_path / "cache" / "m.gguf"
+
+    def fake_urlopen(_request, timeout=None):
+        assert timeout == import_events.DOWNLOAD_TIMEOUT_SECONDS
+        return _FakeDownloadResponse([b"partial", KeyboardInterrupt()])
+
+    monkeypatch.setattr(import_events, "urlopen", fake_urlopen)
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events._download_to_cache("http://example/model", str(dest))
+
+    assert not dest.exists()
+    assert (dest.parent / ".m.gguf.part").read_bytes() == b"partial"
+
+
+def test_download_to_cache_resumes_existing_part(tmp_path, monkeypatch):
+    dest = tmp_path / "cache" / "m.gguf"
+    dest.parent.mkdir()
+    part = dest.parent / ".m.gguf.part"
+    part.write_bytes(b"old")
+    ranges = []
+
+    def fake_urlopen(request, timeout=None):
+        ranges.append(request.get_header("Range"))
+        return _FakeDownloadResponse(
+            [b"new"],
+            status=206,
+            headers={"Content-Range": "bytes 3-5/6"},
+        )
+
+    monkeypatch.setattr(import_events, "urlopen", fake_urlopen)
+
+    import_events._download_to_cache("http://example/model", str(dest))
+
+    assert ranges == ["bytes=3-"]
+    assert dest.read_bytes() == b"oldnew"
+    assert not part.exists()
+
+
+def test_download_to_cache_restarts_when_resume_is_ignored(tmp_path, monkeypatch):
+    dest = tmp_path / "cache" / "m.gguf"
+    dest.parent.mkdir()
+    part = dest.parent / ".m.gguf.part"
+    part.write_bytes(b"stale")
+
+    def fake_urlopen(_request, timeout=None):
+        return _FakeDownloadResponse([b"fresh"], status=200)
+
+    monkeypatch.setattr(import_events, "urlopen", fake_urlopen)
+
+    import_events._download_to_cache("http://example/model", str(dest))
+
+    assert dest.read_bytes() == b"fresh"
+    assert not part.exists()
+
+
+def test_response_status_uses_getcode_fallback():
+    class NoStatus:
+        def getcode(self):
+            return 206
+
+    assert import_events._response_status(NoStatus()) == 206
+
+
+def test_log_download_progress_without_total(caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        import_events._log_download_progress(Path("m.gguf.part"), 5, None)
+
+    assert "5 bytes" in caplog.text
+
+
+def test_stream_download_reports_progress_threshold(tmp_path, monkeypatch, caplog):
+    import logging
+
+    part = tmp_path / "m.gguf.part"
+    response = _FakeDownloadResponse([b"aa", b"bb"], headers={"Content-Length": "4"})
+    monkeypatch.setattr(import_events, "DOWNLOAD_PROGRESS_BYTES", 2)
+
+    with caplog.at_level(logging.INFO):
+        downloaded = import_events._stream_download(response, part, "wb", 0)
+
+    assert downloaded == 4
+    assert part.read_bytes() == b"aabb"
+    assert "2/4 bytes" in caplog.text
+
+
+def test_download_to_cache_publishes_complete_part_on_416(tmp_path, monkeypatch):
+    dest = tmp_path / "cache" / "m.gguf"
+    dest.parent.mkdir()
+    part = dest.parent / ".m.gguf.part"
+    part.write_bytes(b"old")
+
+    def fake_urlopen(request, timeout=None):
+        raise import_events.HTTPError(
+            request.full_url, 416, "range complete", {"Content-Range": "bytes */3"}, None
+        )
+
+    monkeypatch.setattr(import_events, "urlopen", fake_urlopen)
+
+    import_events._download_to_cache("http://example/model", str(dest))
+
+    assert dest.read_bytes() == b"old"
+    assert not part.exists()
+
+
+def test_download_to_cache_keeps_part_when_416_is_not_complete(tmp_path, monkeypatch):
+    dest = tmp_path / "cache" / "m.gguf"
+    dest.parent.mkdir()
+    part = dest.parent / ".m.gguf.part"
+    part.write_bytes(b"old")
+
+    def fake_urlopen(request, timeout=None):
+        raise import_events.HTTPError(
+            request.full_url, 416, "range mismatch", {"Content-Range": "bytes */4"}, None
+        )
+
+    monkeypatch.setattr(import_events, "urlopen", fake_urlopen)
+
+    with pytest.raises(import_events.HTTPError):
+        import_events._download_to_cache("http://example/model", str(dest))
+
+    assert not dest.exists()
+    assert part.read_bytes() == b"old"
 
 
 def test_get_llm_threads_config_paths(monkeypatch):
@@ -759,7 +991,7 @@ def test_get_llm_threads_config_paths(monkeypatch):
     fake_chat.Llava15ChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
-    monkeypatch.setattr(import_events, "_LLM_CACHE", {})
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
 
     cfg = import_events.ModelConfig(model_path="MM.gguf", clip_path="CC.gguf")
@@ -786,11 +1018,13 @@ def test_get_llm_caches_per_config(monkeypatch):
     fake_chat.Llava15ChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
-    monkeypatch.setattr(import_events, "_LLM_CACHE", {})
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
 
-    cfg1 = import_events.ModelConfig(model_path="A.gguf", clip_path="ca.gguf")
-    cfg2 = import_events.ModelConfig(model_path="B.gguf", clip_path="cb.gguf")
+    cfg1 = import_events.ModelConfig(model_path="A.gguf", clip_path="ca.gguf",
+                                     llm_cache_size=2)
+    cfg2 = import_events.ModelConfig(model_path="B.gguf", clip_path="cb.gguf",
+                                     llm_cache_size=2)
 
     first = import_events.get_llm(cfg1)
     again = import_events.get_llm(cfg1)
@@ -799,6 +1033,104 @@ def test_get_llm_caches_per_config(monkeypatch):
     assert first is again  # same config reuses the cached model
     assert second is not first  # a different config loads its own model
     assert created == ["A.gguf", "B.gguf"]
+
+
+def _install_fake_llama(monkeypatch, created, closed):
+    class FakeHandler:
+        def __init__(self, clip_model_path):
+            self.clip_model_path = clip_model_path
+
+    class FakeLlama:
+        def __init__(self, model_path, chat_handler, n_ctx):
+            self.model_path = model_path
+            created.append(model_path)
+
+        def close(self):
+            closed.append(self.model_path)
+
+    import types
+    fake_llama_cpp = types.ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = FakeLlama
+    fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
+    fake_chat.Llava15ChatHandler = FakeHandler
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
+    monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
+
+
+def test_get_llm_default_cache_size_evicts_previous_config(monkeypatch):
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+
+    first = import_events.get_llm(import_events.ModelConfig(
+        model_path="A.gguf", clip_path="ca.gguf"))
+    second = import_events.get_llm(import_events.ModelConfig(
+        model_path="B.gguf", clip_path="cb.gguf"))
+    first_again = import_events.get_llm(import_events.ModelConfig(
+        model_path="A.gguf", clip_path="ca.gguf"))
+
+    assert first is not second
+    assert first_again is not first  # A was evicted when B loaded.
+    assert created == ["A.gguf", "B.gguf", "A.gguf"]
+    assert closed == ["A.gguf", "B.gguf"]
+
+
+def test_get_llm_cache_size_zero_disables_retention(monkeypatch):
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+    cfg = import_events.ModelConfig(
+        model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0)
+
+    first = import_events.get_llm(cfg)
+    second = import_events.get_llm(cfg)
+
+    assert first is not second
+    assert created == ["A.gguf", "A.gguf"]
+    assert closed == []
+    assert import_events._LLM_CACHE == OrderedDict()
+
+
+def test_get_llm_cache_size_zero_evicts_existing_entry(monkeypatch):
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    existing = type("Existing", (), {
+        "model_path": "A.gguf",
+        "close": lambda self: closed.append(self.model_path),
+    })()
+    monkeypatch.setattr(
+        import_events, "_LLM_CACHE",
+        OrderedDict([(("A.gguf", "ca.gguf"), existing)]),
+    )
+    cfg = import_events.ModelConfig(
+        model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0)
+
+    fresh = import_events.get_llm(cfg)
+
+    assert fresh is not existing
+    assert created == ["A.gguf"]
+    assert closed == ["A.gguf"]
+    assert import_events._LLM_CACHE == OrderedDict()
+
+
+def test_trim_llm_cache_logs_close_failure(monkeypatch, caplog):
+    import logging
+
+    class BadClient:
+        def close(self):
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict([(("a", "b"), BadClient())]))
+
+    with caplog.at_level(logging.WARNING):
+        import_events._trim_llm_cache(0)
+
+    assert "Failed to close evicted LLM client" in caplog.text
+    assert import_events._LLM_CACHE == OrderedDict()
 
 
 class _FakePixmap:
@@ -894,6 +1226,38 @@ def test_extract_from_file_counts_non_llm_failures(tmp_path, monkeypatch):
 
     assert events == []
     assert import_events.extraction_failure_count() == 1
+
+
+def test_main_returns_130_on_keyboard_interrupt_during_scan(tmp_path, monkeypatch):
+    (tmp_path / "event.txt").write_text("Launch tomorrow", encoding="utf-8")
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(import_events, "process_folder", interrupt)
+
+    rc = import_events.main([str(tmp_path), "-o", str(tmp_path / "out.json")])
+
+    assert rc == 130
+
+
+def test_main_returns_130_on_keyboard_interrupt_during_output(tmp_path, monkeypatch):
+    (tmp_path / "event.txt").write_text("Launch tomorrow", encoding="utf-8")
+    out = tmp_path / "out.json"
+    out.write_text("old", encoding="utf-8")
+    event = {"title": "Launch", "start": "2026-06-06", "end": "",
+             "location": "", "source": "event.txt", "type": "Text/LLM"}
+    monkeypatch.setattr(import_events, "process_folder", lambda *a, **k: [event])
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(import_events, "_atomic_write_bytes", interrupt)
+
+    rc = import_events.main([str(tmp_path), "-o", str(out)])
+
+    assert rc == 130
+    assert out.read_text(encoding="utf-8") == "old"
 
 
 def test_main_exits_nonzero_on_extraction_failure(tmp_path, monkeypatch):
