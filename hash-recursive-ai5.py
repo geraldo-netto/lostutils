@@ -1565,8 +1565,12 @@ def main():
             # to "no dump" without aborting the run.
             if hashes_state["fh"] is None and not hashes_state["failed"]:
                 try:
+                    # hr-log-03: line-buffered so each dumped line is flushed
+                    # to the OS as it is written — a Ctrl-C (or any abrupt
+                    # exit) leaves a complete, valid file instead of losing a
+                    # stdio buffer's worth of trailing lines.
                     hashes_state["fh"] = open(
-                        args.hashes_file, "a", encoding="utf-8")
+                        args.hashes_file, "a", buffering=1, encoding="utf-8")
                 except OSError as exc:
                     hashes_state["failed"] = True
                     _log_line(
@@ -1675,9 +1679,17 @@ def main():
                 file=sys.stderr,
             )
     finally:
-        # hr-log-02: flush/close the hashes dump if it was opened.
+        # hr-log-02 / hr-log-03: flush + close the hashes dump if it was
+        # opened. This finally runs on a normal return AND on a Ctrl-C
+        # KeyboardInterrupt (a second Ctrl-C, after the cooperative cancel),
+        # so the file is always closed. The close is guarded so a flush
+        # error can't skip the SIGINT-handler restore below.
         if hashes_state["fh"] is not None:
-            hashes_state["fh"].close()
+            try:
+                hashes_state["fh"].close()
+            except OSError as exc:
+                _log_line(f"WARNING: closing {args.hashes_file} failed: {exc}",
+                          False)
         # hr-rel-20: always restore the previous SIGINT handler so a
         # second run (or a host that imports and calls main()) gets a
         # clean signal stack. `signal.getsignal` returns None when the

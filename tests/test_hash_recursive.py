@@ -1505,6 +1505,69 @@ def test_main_quiet_keeps_hashes_dump_but_no_progress(tmp_path, monkeypatch, cap
     assert out.read_text().strip()             # dump still populated
 
 
+def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
+        tmp_path, monkeypatch):
+    # hr-log-03: a Ctrl-C (KeyboardInterrupt) mid-pipeline must leave the
+    # dump flushed and closed. Line buffering means each line is on disk as
+    # written; main's finally closes the handle even though the interrupt
+    # propagates out.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    out = tmp_path / "hashes.txt"
+    digest = "ab" * 32                          # 64-char hex
+    seen = {}
+
+    def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
+             cancel_event=None, on_hashed=None):
+        list(files)                             # drain walk so threads finish
+        if on_walk_done is not None:
+            on_walk_done()
+        on_hashed(1, 1, digest, (1, 1), {(1, 1): [str(tmp_path / "a.bin")]})
+        # Read from a separate handle: with line buffering the line is
+        # already on disk before main closes the writer.
+        seen["mid"] = out.read_text()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(hr, "find_duplicate_groups", stub)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    with pytest.raises(KeyboardInterrupt):
+        hr.main()
+    assert digest in seen["mid"]                # flushed mid-run
+    assert digest in out.read_text()            # survived the finally close
+
+
+def test_main_hashes_close_failure_warns(tmp_path, monkeypatch, capsys):
+    # hr-log-03: a flush/close error is caught so the SIGINT-handler restore
+    # in the same finally still runs; the failure is warned, not raised.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    (tmp_path / "b.bin").write_bytes(b"x")
+    out = tmp_path / "hashes.txt"
+    real_open = open
+
+    class _FH:
+        def __init__(self, f):
+            self._f = f
+
+        def write(self, s):
+            return self._f.write(s)
+
+        def close(self):
+            self._f.close()
+            raise OSError("disk full on flush")
+
+    def fake_open(path, *a, **kw):
+        if str(path) == str(out):
+            return _FH(real_open(path, *a, **kw))
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    hr.main()                                   # must not raise
+    err = capsys.readouterr().err
+    assert "closing" in err and "failed" in err
+
+
 def test_main_hashes_file_open_failure_warns(tmp_path, monkeypatch, capsys):
     # hr-log-02: an unwritable dump path warns once and does not abort.
     (tmp_path / "a.bin").write_bytes(b"x")
