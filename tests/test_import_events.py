@@ -21,6 +21,10 @@ class FakeLlm:
         return {"choices": [{"message": {"content": self._content}}]}
 
 
+def valid_clip_bytes():
+    return b"GGUF..." + import_events.MTMD_PROJECTOR_METADATA + b"..."
+
+
 def test_extract_with_llm_uses_injected_client(tmp_path):
     source = tmp_path / "event.txt"
     source.write_text("Launch party tomorrow", encoding="utf-8")
@@ -762,7 +766,7 @@ def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
     model = tmp_path / "m.gguf"
     clip = tmp_path / "c.gguf"
     model.write_bytes(b"m")
-    clip.write_bytes(b"c")
+    clip.write_bytes(valid_clip_bytes())
     calls = []
     monkeypatch.setattr(import_events, "_download_to_cache",
                         lambda url, path: calls.append((url, path)))
@@ -776,7 +780,7 @@ def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
 def test_ensure_models_exist_downloads_missing_from_config(tmp_path, monkeypatch):
     model = tmp_path / "m.gguf"
     clip = tmp_path / "c.gguf"
-    clip.write_bytes(b"c")
+    clip.write_bytes(valid_clip_bytes())
 
     def fake_download(url, path):
         Path(path).write_bytes(b"downloaded")
@@ -789,6 +793,39 @@ def test_ensure_models_exist_downloads_missing_from_config(tmp_path, monkeypatch
     import_events.ensure_models_exist(cfg)
 
     assert model.exists()
+
+
+def test_validate_clip_projector_accepts_mtmd_metadata(tmp_path):
+    clip = tmp_path / "clip.gguf"
+    clip.write_bytes(valid_clip_bytes())
+
+    import_events._validate_clip_projector(str(clip))
+
+
+def test_validate_clip_projector_rejects_legacy_metadata(tmp_path):
+    clip = tmp_path / "clip.gguf"
+    clip.write_bytes(b"GGUF...clip.has_llava_projector...")
+
+    with pytest.raises(ValueError, match="missing clip.projector_type metadata"):
+        import_events._validate_clip_projector(str(clip))
+
+
+def test_ensure_models_exist_validates_downloaded_clip(tmp_path, monkeypatch):
+    model = tmp_path / "m.gguf"
+    clip = tmp_path / "c.gguf"
+    model.write_bytes(b"m")
+
+    def fake_download(_url, path):
+        Path(path).write_bytes(valid_clip_bytes())
+
+    monkeypatch.setattr(import_events, "_download_to_cache", fake_download)
+
+    cfg = import_events.ModelConfig(
+        model_path=str(model), clip_path=str(clip), model_url="http://x", clip_url="http://y"
+    )
+    import_events.ensure_models_exist(cfg)
+
+    assert clip.exists()
 
 
 class _FakeDownloadResponse:

@@ -22,12 +22,14 @@ from pathlib import Path
 
 # Default paths to the local GGUF models.
 MODEL_FILENAME = "ggml-model-q4_k.gguf"
-CLIP_FILENAME = "mmproj-model-f16.gguf"
+CLIP_FILENAME = "llava-v1.5-7b-mmproj-model-f16.gguf"
 CACHE_DIR_ENV = "IMPORT_EVENTS_CACHE_DIR"
 DEFAULT_LLM_CACHE_SIZE = 1
 DOWNLOAD_CHUNK_SIZE = 1 << 20
 DOWNLOAD_PROGRESS_BYTES = 256 << 20
 DOWNLOAD_TIMEOUT_SECONDS = 30
+GGUF_METADATA_SCAN_BYTES = 1 << 20
+MTMD_PROJECTOR_METADATA = b"clip.projector_type"
 
 
 def _default_cache_dir() -> Path:
@@ -44,7 +46,10 @@ CLIP_PATH = str(_default_cache_dir() / CLIP_FILENAME)
 
 # Reliable HuggingFace download links for LLaVA 1.5 7B
 MODEL_URL = "https://huggingface.co/mys/ggml_llava-v1.5-7b/resolve/main/ggml-model-q4_k.gguf"
-CLIP_URL = "https://huggingface.co/mys/ggml_llava-v1.5-7b/resolve/main/mmproj-model-f16.gguf"
+CLIP_URL = (
+    "https://huggingface.co/second-state/Llava-v1.5-7B-GGUF/resolve/main/"
+    "llava-v1.5-7b-mmproj-model-f16.gguf"
+)
 
 # Pin the expected SHA-256 hex digest of each model file to enable integrity
 # verification (defends against MITM / a compromised mirror serving a malicious
@@ -136,6 +141,23 @@ def _verify_sha256(path: str, expected: Optional[str]) -> None:
     if actual != expected:
         os.remove(path)
         raise ValueError(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
+
+
+def _clip_projector_supports_mtmd(path: str) -> bool:
+    with open(path, "rb") as f:
+        header = f.read(GGUF_METADATA_SCAN_BYTES)
+    return MTMD_PROJECTOR_METADATA in header
+
+
+def _validate_clip_projector(path: str) -> None:
+    if _clip_projector_supports_mtmd(path):
+        return
+    raise ValueError(
+        f"CLIP projector {path} is missing clip.projector_type metadata; "
+        "it is incompatible with the llama_cpp MTMD loader. Remove the old "
+        "mmproj-model-f16.gguf cache entry or pass --clip-path to a current "
+        "LLaVA 1.5 mmproj GGUF."
+    )
 
 
 def _path_size(path: Path) -> int:
@@ -253,6 +275,8 @@ def ensure_models_exist(config: Optional[ModelConfig] = None) -> None:
             _download_to_cache(url, path_str)
             print(f"Successfully downloaded {path_str}")
         _verify_sha256(path_str, expected)
+        if path_str == config.clip_path:
+            _validate_clip_projector(path_str)
 
 
 def _close_cached_llm(client: Any) -> None:

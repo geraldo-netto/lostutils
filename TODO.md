@@ -12,7 +12,7 @@ id prefixes: `dnp-` dedupl_numpy.py, `dnv3-` deduplicate-by-namev3.py, `hr-` has
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-sec-01 | open | high | import_events.py:53 — MODEL_SHA256/CLIP_SHA256 default to None, so _verify_sha256 only warns and skips after downloading the GGUF; a compromised mirror's model is loaded by llama_cpp. Ship pinned digests by default rather than None. | supply-chain
+ie-sec-01 | open | high | import_events.py:58 — MODEL_SHA256/CLIP_SHA256 default to None, so _verify_sha256 only warns and skips after downloading the GGUF; a compromised mirror's model is loaded by llama_cpp. Ship pinned digests by default rather than None. | supply-chain
 rf-sec-01 | open | med | relocate_folder.py:1287 — source is re-stat'd/walked by path across validate_source -> _check_no_open_files -> ensure_dest_root -> _check_cross_device -> copy_tree with no held handle, leaving a TOCTOU window where source can be swapped for a symlink after the non-symlink check. Open the source dir once with O_DIRECTORY|O_NOFOLLOW and fstat/walk relative to that fd. | STRIDE-Tampering
 rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands; shlex.quote is correct but the script emits destructive commands with no header warning/--dry-run note and no guard that the survivor still exists. Add a leading "review before piping to sh" banner and consider verifying paths. | destructive-output
 
@@ -43,7 +43,7 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-dup-01 | open | low | import_events.py:511 — the `global _extraction_failures; _extraction_failures += 1; logger.exception(...)` block is duplicated verbatim in _run_llm and extract_from_file. Extract a single in-file _record_failure(file, exc) helper. | within-file
+ie-dup-01 | open | low | import_events.py:535 — the `global _extraction_failures; _extraction_failures += 1; logger.exception(...)` block is duplicated verbatim in _run_llm and extract_from_file. Extract a single in-file _record_failure(file, exc) helper. | within-file
 
 ## architecture/modularity/SOLID
 
