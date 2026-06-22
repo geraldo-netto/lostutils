@@ -92,13 +92,11 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cli-01 | open | low | hash-recursive-ai5.py:1410-1412 — the --alias-cap help says "0 = no cap" but RunConfig disables the cap for ANY value <= 0 (`alias_cap if alias_cap > 0 else None`), so `-1` silently disables it too. Align the help text (e.g. "<= 0 = no cap") or reject negatives. | help understates behavior
 
 ## documentation
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-doc-01 | open | low | hash-recursive-ai5.py:544-553 — SamplingStrategy docstring (plus _stage2_hash docstring L1078 and the argparse description L1403) still say "tail-CAP plus two SAMPLE windows" / "head + tail + mid-samples" with no mention of the center 4 MiB block added to ThirdsStrategy. Update the three sites to include the center block. | docs-vs-behavior drift
 
 ## unused code
 

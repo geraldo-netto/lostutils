@@ -1,6 +1,7 @@
 """Tests for hash-recursive-ai5.py — the hr-rel-* reliability fixes
 (jobs clamp, readable-alias representative) and the functions they touch."""
 import importlib.util
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -12,6 +13,14 @@ _PATH = Path(__file__).resolve().parent.parent / "hash-recursive-ai5.py"
 _spec = importlib.util.spec_from_file_location("hash_recursive_ai5", _PATH)
 hr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hr)
+
+_TS_RE = re.compile(
+    r"\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}\]"
+)
+
+
+def _assert_timestamped(text: str) -> None:
+    assert _TS_RE.search(text), text
 
 
 @pytest.fixture(autouse=True)
@@ -284,6 +293,41 @@ def test_run_stage_threaded_branch(monkeypatch):
     assert errors == 1
 
 
+def test_run_stage_serial_batches_and_reports_progress(monkeypatch):
+    # hr-scal-07 / hr-log-05: even the serial path must work in bounded
+    # HASH_BATCH chunks and report progress as each chunk completes.
+    monkeypatch.setattr(hr, "HASH_BATCH", 2)
+    items = ["a", "b", "c", "d", "e"]
+    batch_sizes = []
+    progress = []
+
+    def batch(xs):
+        batch_sizes.append(len(xs))
+        return [(p, p.upper()) for p in xs]
+
+    out, errors = hr._run_stage(
+        items, batch, total_bytes=1, jobs=1,
+        on_progress=lambda done, total: progress.append((done, total)))
+
+    assert out == {"a": "A", "b": "B", "c": "C", "d": "D", "e": "E"}
+    assert errors == 0
+    assert batch_sizes == [2, 2, 1]
+    assert progress == [(2, 5), (4, 5), (5, 5)]
+
+
+def test_run_stage_threaded_reports_progress(monkeypatch):
+    monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0)
+    monkeypatch.setattr(hr, "HASH_BATCH", 2)
+    progress = []
+    out, errors = hr._run_stage(
+        ["a", "b", "c"], lambda xs: [(p, p.upper()) for p in xs],
+        total_bytes=10**9, jobs=1,
+        on_progress=lambda done, total: progress.append((done, total)))
+    assert out == {"a": "A", "b": "B", "c": "C"}
+    assert errors == 0
+    assert progress[-1] == (3, 3)
+
+
 def test_run_stage_windowed_bounds_inflight_submission(monkeypatch):
     # hr-scal-02: the threaded path must NOT submit every batch up front.
     # Track concurrent in-flight batch_fn calls and assert the peak never
@@ -457,6 +501,17 @@ def test_emit_groups_writes_once_per_group():
     chunk_A = next(c for c in out if c.startswith("dA "))
     assert chunk_A.count("\n") == 3
     assert "/p1" in chunk_A and "/p1b" in chunk_A and "/p1c" in chunk_A
+
+
+def test_emit_groups_accepts_explicit_config():
+    aliases = {("d", 0): ["/a"], ("d", 1): ["/b"]}
+    written = []
+    cfg = hr.RunConfig()
+    groups, paths = hr.emit_groups(
+        {"hash": [("d", 0), ("d", 1)]}, aliases, written.append, config=cfg)
+    assert groups == 1
+    assert paths == 2
+    assert written
 
 
 # --- hr-conc-02: cancellable walk ------------------------------------------
@@ -727,7 +782,7 @@ def test_main_quiet_suppresses_summary(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_sys, "argv", ["hr", str(tmp_path), "--quiet"])
     hr.main()
     err = capsys.readouterr().err
-    assert "[ai5]" not in err
+    assert err == ""
 
 
 def test_main_emits_summary_when_not_quiet(tmp_path, monkeypatch, capsys):
@@ -735,7 +790,8 @@ def test_main_emits_summary_when_not_quiet(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(_sys, "argv", ["hr", str(tmp_path)])
     hr.main()
     err = capsys.readouterr().err
-    assert "[ai5]" in err
+    _assert_timestamped(err)
+    assert "dirs=" in err
 
 
 def test_find_duplicate_groups_skips_unread_head(monkeypatch, tmp_path):
@@ -743,8 +799,8 @@ def test_find_duplicate_groups_skips_unread_head(monkeypatch, tmp_path):
     a = tmp_path / "a.bin"; a.write_bytes(b"x" * 100)
     b = tmp_path / "b.bin"; b.write_bytes(b"x" * 100)
 
-    def stub(items, fn, total, jobs, cancel_event=None):
-        # items here is a list of paths (strings); map all to None.
+    def stub(items, fn, total, jobs, cancel_event=None, **kwargs):
+        # items here are stage-1 candidate tuples; map all to None.
         return ({p: None for p in items}, 0)
 
     monkeypatch.setattr(hr, "_run_stage", stub)
@@ -870,13 +926,13 @@ def test_find_duplicate_groups_skips_failed_tail(tmp_path, monkeypatch):
     real_run_stage = hr._run_stage
     call_n = {"n": 0}
 
-    def stub(items, fn, total, jobs, cancel_event=None):
+    def stub(items, fn, total, jobs, cancel_event=None, **kwargs):
         call_n["n"] += 1
         if call_n["n"] == 1:
             # Stage 1: real head hashes (so paths share head).
             return real_run_stage(items, fn, total, jobs)
         # Stage 2: return None for every tail.
-        return ({p: None for _s, p in items}, 0)
+        return ({item: None for item in items}, 0)
 
     monkeypatch.setattr(hr, "_run_stage", stub)
     files = [(str(a), len(big), 1, 100), (str(b), len(big), 1, 101)]
@@ -941,11 +997,11 @@ def test_main_summary_surfaces_stage2_failures_as_hash_errors(
     real_run = hr._run_stage
     seen = {"n": 0}
 
-    def stub(items, fn, total, jobs, cancel_event=None):
+    def stub(items, fn, total, jobs, cancel_event=None, **kwargs):
         seen["n"] += 1
         if seen["n"] == 1:
             return real_run(items, fn, total, jobs)
-        return ({p: None for _s, p in items}, len(items))
+        return ({item: None for item in items}, len(items))
 
     monkeypatch.setattr(hr, "_run_stage", stub)
     monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
@@ -979,7 +1035,7 @@ def test_main_clamps_zero_jobs_no_crash(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hr.sys, "argv", ["hr", "-j", "0", str(tmp_path)])
     hr.main()                       # must not raise
     err = capsys.readouterr().err
-    assert "[ai5]" in err
+    _assert_timestamped(err)
 
 
 def _run_main_with_stage_stub(tmp_path, monkeypatch, capsys, *, none_tails,
@@ -993,12 +1049,12 @@ def _run_main_with_stage_stub(tmp_path, monkeypatch, capsys, *, none_tails,
     real_run = hr._run_stage
     seen = {"n": 0}
 
-    def stub(items, fn, total, jobs, cancel_event=None):
+    def stub(items, fn, total, jobs, cancel_event=None, **kwargs):
         seen["n"] += 1
         if seen["n"] == 1:
             return real_run(items, fn, total, jobs)
         if none_tails:
-            return ({p: None for _s, p in items}, len(items))
+            return ({item: None for item in items}, len(items))
         return real_run(items, fn, total, jobs)
 
     real_cls = hr.RunConfig
@@ -1180,6 +1236,32 @@ def test_fmt_count_int_boundaries():
         assert isinstance(out, str) and len(out) > 0
 
 
+def test_fmt_elapsed_hour_path():
+    assert hr._fmt_elapsed(3661) == "1:01:01"
+
+
+def test_fmt_rate_zero_elapsed():
+    assert hr._fmt_rate(10, 0) == "n/a"
+
+
+def test_log_line_uses_timestamp_prefix(capsys):
+    hr._log_line("hello progress", quiet=False)
+    err = capsys.readouterr().err
+    _assert_timestamped(err)
+    assert "[ai5]" not in err
+    assert "hello progress" in err
+
+
+def test_default_jobs_caps_cpu_count(monkeypatch):
+    monkeypatch.setattr(hr.os, "cpu_count", lambda: 64)
+    assert hr._default_jobs() == hr.DEFAULT_MAX_JOBS
+
+
+def test_default_jobs_handles_missing_cpu_count(monkeypatch):
+    monkeypatch.setattr(hr.os, "cpu_count", lambda: None)
+    assert hr._default_jobs() == 1
+
+
 # --- hr-perf-04 _iter_batches boundary cases -----------------------------
 
 def test_iter_batches_exact_multiple():
@@ -1337,12 +1419,12 @@ def test_find_duplicate_groups_info_counts_stage2_errors(tmp_path, monkeypatch):
     real_run = hr._run_stage
     seen = {"n": 0}
 
-    def stub(items, fn, total, jobs, cancel_event=None):
+    def stub(items, fn, total, jobs, cancel_event=None, **kwargs):
         seen["n"] += 1
         if seen["n"] == 1:
             return real_run(items, fn, total, jobs)
         # Stage 2: every tail = None, counted as errors.
-        return ({p: None for _s, p in items}, len(items))
+        return ({item: None for item in items}, len(items))
 
     monkeypatch.setattr(hr, "_run_stage", stub)
     files = [(str(a), len(big), 1, 100), (str(b), len(big), 1, 101)]
@@ -1396,7 +1478,7 @@ def test_main_block_size_override_runs(tmp_path, monkeypatch, capsys):
         assert hr.CAP == 4 and hr.SAMPLE == 2
     finally:
         hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD = orig
-    assert "[ai5]" in capsys.readouterr().err
+    _assert_timestamped(capsys.readouterr().err)
 
 
 def test_main_rejects_nonpositive_block_size(tmp_path, monkeypatch, capsys):
@@ -1488,8 +1570,24 @@ def test_main_logs_hashing_progress_percent(tmp_path, monkeypatch, capsys):
         hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
     hr.main()
     err = capsys.readouterr().err
-    assert "hashing 100% (120/120)" in err
-    assert "hashing" in err and "(50/120)" in err
+    assert "hashing stage1 100% (120/120)" in err
+    assert "hashing stage1" in err and "(64/120)" in err
+
+
+def test_main_hashing_progress_throttles_small_batches(
+        tmp_path, monkeypatch, capsys):
+    # hr-log-05: batch completions below LOG_EVERY_N_FILES are suppressed
+    # until the final completion for that stage.
+    for i in range(30):
+        (tmp_path / f"f{i}.bin").write_bytes(b"x")
+    out = tmp_path / "hashes.txt"
+    monkeypatch.setattr(hr, "HASH_BATCH", 10)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "hashing stage1 100% (30/30)" in err
+    assert "(10/30)" not in err
 
 
 def test_main_quiet_keeps_hashes_dump_but_no_progress(tmp_path, monkeypatch, capsys):
@@ -1556,7 +1654,7 @@ def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
     seen = {}
 
     def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
-             cancel_event=None, on_hashed=None):
+             cancel_event=None, on_hashed=None, on_stage_progress=None):
         list(files)                             # drain walk so threads finish
         if on_walk_done is not None:
             on_walk_done()
@@ -1752,7 +1850,7 @@ def test_main_emits_sigint_cancel_warning(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
     hr.main()
     err = capsys.readouterr().err
-    assert "walk cancelled by SIGINT" in err
+    assert "cancelled by SIGINT" in err
 
 
 def test_main_immediate_cancel_still_reports_timing(tmp_path, monkeypatch, capsys):
@@ -2017,6 +2115,33 @@ def test_find_duplicate_groups_stage_boundary(tmp_path, size, expected_stage2):
     assert result.info["stage2"] > 0 if expected_stage2 else result.info["stage2"] == 0
 
 
+def test_find_duplicate_groups_reports_stage2_progress(tmp_path):
+    # hr-log-05: stage 2 exposes live progress through the pipeline callback.
+    orig = (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD)
+    try:
+        hr._configure_windows(4, 2)
+        body = b"0123456789"
+        a = tmp_path / "a.bin"; a.write_bytes(body)
+        b = tmp_path / "b.bin"; b.write_bytes(body)
+        files = []
+        for path in (a, b):
+            st_ = path.stat()
+            files.append((str(path), st_.st_size, st_.st_dev, st_.st_ino))
+        progress = []
+
+        def on_progress(stage, done, total):
+            progress.append((stage, done, total))
+
+        result = hr.find_duplicate_groups(
+            files, jobs=1, on_stage_progress=on_progress)
+    finally:
+        hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD = orig
+
+    assert result.info["stage2"] == 2
+    assert any(stage == "stage2" and done == 2 and total == 2
+               for stage, done, total in progress)
+
+
 # --- hr-test-18: _log_hash_error thread-safety stress ----------------------
 
 def test_log_hash_error_concurrent_counter_invariant(capsys):
@@ -2076,8 +2201,9 @@ def test_find_duplicate_groups_on_group_raises_propagates(tmp_path):
 def test_emit_hash_error_line_single_source_of_truth(capsys):
     hr._emit_hash_error_line("/some/path", OSError("boom"))
     err = capsys.readouterr().err
-    # hr-obs-02: severity tag so the line greps apart from other [ai5] lines.
-    assert "[ai5] ERROR: hash failed for /some/path: boom" in err
+    # hr-obs-02: severity tag so the line greps apart from other log lines.
+    _assert_timestamped(err)
+    assert "ERROR: hash failed for /some/path: boom" in err
 
 
 # --- hr-sec-02: realpath in preflight error messages ----------------------
@@ -2415,7 +2541,7 @@ def test_main_cancel_during_hash_takes_effect(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
     hr.main()
     err = capsys.readouterr().err
-    assert "walk cancelled by SIGINT" in err
+    assert "cancelled by SIGINT" in err
 
 
 # --- hr-rel-02: walk is finalized even when the pipeline raises -----------
@@ -2500,6 +2626,13 @@ def test_index_inodes_caps_aliases_with_overflow_count():
     aliases, _ = hr.index_inodes(files, alias_cap=50, overflow=overflow)
     assert len(aliases[(1, 99)]) == 50    # capped at ingest
     assert overflow[(1, 99)] == 450        # 500-50 elided
+
+
+def test_index_inodes_cap_without_overflow_discards_extra_aliases():
+    files = [("/p0", 100, 1, 99), ("/p1", 100, 1, 99)]
+    aliases, inode_size = hr.index_inodes(files, alias_cap=1, overflow=None)
+    assert aliases[(1, 99)] == ["/p0"]
+    assert inode_size[(1, 99)] == 100
 
 
 def test_index_inodes_no_cap_preserves_default_behaviour():

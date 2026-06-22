@@ -37,6 +37,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime
 from typing import NamedTuple
 
 import blake3
@@ -61,13 +62,15 @@ SUBMIT_WINDOW = 2
 # BLAKE3 is ~3 GB/s/thread on modern x86. Below this much candidate
 # work, ThreadPoolExecutor setup + per-task overhead exceeds the gain.
 THREAD_THRESHOLD_BYTES = 32 * 1024 * 1024
+DEFAULT_MAX_JOBS = 8
+WALK_OUT_QUEUE_PER_JOB = 4096
 
 DEFAULT_ALIAS_CAP = 1024
 DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
-# hr-log-01: emit a walk-progress line to stderr every N files scanned,
-# bracketed by a start and a done line. Suppressed by --quiet alongside the
-# end-of-run summary. The same cadence drives the stage-1 hashing-progress
-# line (hr-log-02).
+# hr-log-01 / hr-log-05: emit a timestamped progress line to stderr every N
+# files/items, bracketed by start and done lines. Suppressed by --quiet
+# alongside the end-of-run summary. The same cadence drives stage-1/stage-2
+# hash progress.
 LOG_EVERY_N_FILES = 50
 # hr-log-02: default path for the dump of every hashed file
 # (``<digest> <path>`` per alias). Appended to each run.
@@ -329,7 +332,7 @@ class _WalkIter:
         ]
         state = _WalkState(
             pending=queue.SimpleQueue(),
-            out_q=queue.SimpleQueue(),
+            out_q=queue.Queue(maxsize=max(1, jobs) * WALK_OUT_QUEUE_PER_JOB),
             lock=threading.Lock(),
             inflight=[1],
             per_worker_stats=per_worker_stats,
@@ -383,13 +386,42 @@ class _WalkIter:
                 self.stats[k] = sum(w[k] for w in per_worker_stats)
 
 
+def _log_prefix(now=None) -> str:
+    """Local timestamp prefix for operational stderr lines (hr-log-05)."""
+    stamp = now if now is not None else datetime.now().astimezone()
+    return stamp.strftime("[%Y-%m-%d %H:%M:%S %z]")
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    """Compact monotonic elapsed-time renderer for progress lines."""
+    whole = max(0, int(seconds))
+    minutes, secs = divmod(whole, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
+
+
+def _fmt_rate(done: int, elapsed: float) -> str:
+    """Items/sec for progress logs; avoids divide-by-zero at startup."""
+    if elapsed <= 0:
+        return "n/a"
+    return _fmt_count(int(done / elapsed))
+
+
+def _default_jobs() -> int:
+    """Conservative default for mixed disk I/O; users can still override."""
+    return max(1, min(DEFAULT_MAX_JOBS, os.cpu_count() or 1))
+
+
 def _emit_hash_error_line(path, exc) -> None:
     """Single source of truth for the per-file hash error stderr format
     (hr-dup-04). Both branches of :func:`_log_hash_error` previously
     duplicated this f-string; a future change to the format (e.g. add a
     timestamp prefix or switch to structured JSON) now lands in one
     place."""
-    print(f"[ai5] ERROR: hash failed for {path}: {exc}", file=sys.stderr)
+    print(f"{_log_prefix()} ERROR: hash failed for {path}: {exc}",
+          file=sys.stderr)
 
 
 def _log_hash_error(path, exc, config):
@@ -669,6 +701,13 @@ def _make_head_batch(config):
     return _head_batch
 
 
+def _make_head_candidate_batch(rep, config):
+    """Build a stage-1 batch closure keyed by inode, not path (hr-scal-07)."""
+    def _head_batch(items):
+        return [(key, hash_head(rep[key], config)) for _size, key in items]
+    return _head_batch
+
+
 def _make_tail_batch(config):
     """Build a tail-batch closure that binds `config` for error logging
     (hr-arch-05). Closure shape: ``[(size, path), ...] -> [(path,
@@ -676,6 +715,16 @@ def _make_tail_batch(config):
     def _tail_batch(items):
         return [(p, hash_tail_and_samples(p, s, config=config))
                 for s, p in items]
+    return _tail_batch
+
+
+def _make_tail_stage2_batch(config):
+    """Build a stage-2 batch closure without projecting a second item list."""
+    def _tail_batch(items):
+        return [
+            (item, hash_tail_and_samples(item[1], item[0], config=config))
+            for item in items
+        ]
     return _tail_batch
 
 
@@ -724,14 +773,43 @@ def _cancelled(cancel_event) -> bool:
     return cancel_event is not None and cancel_event.is_set()
 
 
-def _collect_batch(batch, out) -> int:
+def _collect_batch(batch, out) -> "tuple[int, int]":
     """Fold one ``[(path, digest), ...]`` batch into ``out``; return the
-    number of None digests (hash failures) in it (hr-scal-02)."""
+    ``(error_count, item_count)`` in it (hr-scal-02 / hr-log-05)."""
     errors = 0
+    count = 0
     for p, d in batch:
         out[p] = d
+        count += 1
         if d is None:
             errors += 1
+    return errors, count
+
+
+def _notify_stage_progress(on_progress, done: int, total: int) -> None:
+    """Invoke a hash-stage progress callback when one is supplied."""
+    if on_progress is not None:
+        on_progress(done, total)
+
+
+def _run_stage_serial(items, batch_fn, out, cancel_event,
+                      on_progress=None) -> int:
+    """Serial hash dispatch in HASH_BATCH chunks (hr-scal-07).
+
+    The old serial branch handed the entire item list to one batch call.
+    That was cheap for a handful of files, but pathological for hundreds
+    of thousands of tiny same-size files: the worker allocated one huge
+    result list and emitted no progress until the whole stage finished."""
+    errors = 0
+    done = 0
+    total = len(items)
+    for batch in _iter_batches(items, HASH_BATCH):
+        if _cancelled(cancel_event):
+            break
+        batch_errors, count = _collect_batch(batch_fn(batch), out)
+        errors += batch_errors
+        done += count
+        _notify_stage_progress(on_progress, done, total)
     return errors
 
 
@@ -750,7 +828,8 @@ def _fill_window(ex, batch_fn, batches, inflight, window, cancel_event) -> bool:
     return False
 
 
-def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event) -> int:
+def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event,
+                        on_progress=None) -> int:
     """Threaded hash dispatch with BOUNDED submission (hr-scal-02).
 
     At most ``jobs * SUBMIT_WINDOW`` batch futures are kept in flight at
@@ -765,6 +844,8 @@ def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event) -> int:
     the ≤ window in-flight batches finish before the pool drains. Returns
     the running hash-failure count."""
     errors = 0
+    done_count = 0
+    total = len(items)
     window = max(1, jobs) * SUBMIT_WINDOW
     batches = _iter_batches(items, HASH_BATCH)
     with ThreadPoolExecutor(max_workers=jobs) as ex:
@@ -774,16 +855,20 @@ def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event) -> int:
         while inflight:
             done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
             for fut in done:
-                errors += _collect_batch(fut.result(), out)
+                batch_errors, count = _collect_batch(fut.result(), out)
+                errors += batch_errors
+                done_count += count
+                _notify_stage_progress(on_progress, done_count, total)
             if not exhausted:
                 exhausted = _fill_window(
                     ex, batch_fn, batches, inflight, window, cancel_event)
     return errors
 
 
-def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None):
+def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None,
+               on_progress=None):
     """Dispatch a hash stage either serially or via ThreadPoolExecutor,
-    depending on total work. Returns (digest_by_path, error_count).
+    depending on total work. Returns (digest_by_item, error_count).
 
     Stage 2 on huge trees streams batches lazily through `_iter_batches`
     (hr-perf-04) and the threaded path bounds submission to a sliding
@@ -800,15 +885,14 @@ def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None):
     out = {}
     errors = 0
     if total_bytes < THREAD_THRESHOLD_BYTES:
-        if _cancelled(cancel_event):
-            return out, errors
-        return out, _collect_batch(batch_fn(items), out)
+        return out, _run_stage_serial(
+            items, batch_fn, out, cancel_event, on_progress)
     # hr-rel-13: wrap the pool loop in try/finally so a mid-iteration
     # exception (e.g. `batch_fn` raises) doesn't return a silently
     # partial `out` dict to the caller.
     try:
         errors = _run_stage_windowed(
-            items, batch_fn, jobs, out, cancel_event)
+            items, batch_fn, jobs, out, cancel_event, on_progress)
     except Exception as exc:
         # hr-rel-14: surface partial progress on EVERY Python (3.10 and
         # 3.11+). `__partial__` is set unconditionally so 3.10 callers
@@ -1062,7 +1146,7 @@ def _retry_head_alias(key, tried, aliases, config):
 
 
 def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
-                 aliases=None, on_hashed=None):
+                 aliases=None, on_hashed=None, on_progress=None):
     """Run Stage 1 (head hash) and bucket candidates by ``(size, head)``
     (hr-cx-05).
 
@@ -1078,26 +1162,24 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
 
     `on_hashed(done, total, head, key, aliases)` (hr-log-02): invoked once
     per candidate inode on the main thread after its head digest is known
-    (``head`` is None when it failed). Lets :func:`main` drive a hashing-
-    progress line and dump every hashed file without the pipeline doing
-    I/O. ``done`` runs 1..``total`` so the caller can render a percentage."""
+    (``head`` is None when it failed). Lets :func:`main` dump every hashed
+    file without the pipeline doing I/O. Live progress is driven by
+    ``on_progress`` as batches complete."""
     if not candidates:
         return defaultdict(list), {"stage1": 0, "stage1_errors": 0}
-    # hr-perf-01: build the path list and (capped) byte total in one pass
-    # over candidates instead of two — non-surviving keys are never probed.
-    stage1_paths = []
-    stage1_bytes = 0
-    for size, key in candidates:
-        stage1_paths.append(rep[key])
-        if stage1_bytes < THREAD_THRESHOLD_BYTES:
-            stage1_bytes += min(size, CAP)
-    head_by_path, errors = _run_stage(
-        stage1_paths, _make_head_batch(config), stage1_bytes, jobs,
-        cancel_event=cancel_event)
+    stage1_bytes = _capped_byte_total(min(size, CAP) for size, _key in candidates)
+    run_kwargs = {"cancel_event": cancel_event}
+    if on_progress is not None:
+        run_kwargs["on_progress"] = on_progress
+    head_by_key, errors = _run_stage(
+        candidates, _make_head_candidate_batch(rep, config), stage1_bytes,
+        jobs, **run_kwargs)
     by_head: dict = defaultdict(list)
     total = len(candidates)
     for done, (size, key) in enumerate(candidates, 1):
-        head = head_by_path.get(rep[key])
+        if key not in head_by_key:
+            continue
+        head = head_by_key[key]
         if head is None and aliases is not None and len(aliases.get(key, ())) > 1:
             head = _retry_head_alias(key, rep[key], aliases, config)
         if on_hashed is not None:
@@ -1105,11 +1187,12 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
         if head is None:
             continue
         by_head[(size, head)].append(key)
-    return by_head, {"stage1": len(stage1_paths), "stage1_errors": errors}
+    return by_head, {"stage1": len(head_by_key), "stage1_errors": errors}
 
 
-def _stage2_hash(stage2_items, jobs, config, cancel_event=None):
-    """Run Stage 2 (tail + middle samples) and regroup by
+def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
+                 on_progress=None):
+    """Run Stage 2 (tail + center + middle samples) and regroup by
     ``(head, tail)`` (hr-cx-05).
 
     Returns ``(regrouped, info)``. ``regrouped`` maps ``(head, tail) ->
@@ -1131,18 +1214,20 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None):
     # Stage 2 reads up to tail CAP + center CAP + two SAMPLE windows.
     stage2_bytes = _capped_byte_total(
         min(s, 2 * CAP + 2 * SAMPLE) for s, _p, _h, _k in stage2_items)
-    # `_run_stage` consumes the legacy (size, path) shape; project for it.
-    tail_by_path, errors = _run_stage(
-        [(s, p) for s, p, _h, _k in stage2_items],
-        _make_tail_batch(config), stage2_bytes, jobs,
-        cancel_event=cancel_event)
+    run_kwargs = {"cancel_event": cancel_event}
+    if on_progress is not None:
+        run_kwargs["on_progress"] = on_progress
+    tail_by_item, errors = _run_stage(
+        stage2_items, _make_tail_stage2_batch(config), stage2_bytes, jobs,
+        **run_kwargs)
     regrouped: dict = {}
-    for _s, path, head, key in stage2_items:
-        tail = tail_by_path.get(path)
+    for item in stage2_items:
+        _s, _path, head, key = item
+        tail = tail_by_item.get(item)
         if tail is None:
             continue   # failed/unhashed tail — already in stage2_errors
         regrouped.setdefault((head, tail), []).append(key)
-    return regrouped, {"stage2": len(stage2_items), "stage2_errors": errors}
+    return regrouped, {"stage2": len(tail_by_item), "stage2_errors": errors}
 
 
 def _prepare_candidates(aliases, inode_size, overflow):
@@ -1193,7 +1278,7 @@ def _split_stage1_buckets(by_head, rep, accept_group):
 
 def find_duplicate_groups(files, jobs, on_group=None, config=None,
                           on_walk_done=None, cancel_event=None,
-                          on_hashed=None):
+                          on_hashed=None, on_stage_progress=None):
     """Run the dedup pipeline on walk results (hr-arch-01).
 
     `files` may be a list OR an iterator (hr-scal-05). When called with
@@ -1226,8 +1311,12 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
 
     `on_hashed(done, total, head, key, aliases)` (hr-log-02): forwarded to
     :func:`_stage1_hash` and fired once per candidate inode as its head
-    digest is resolved — drives :func:`main`'s hashing-progress line and
-    the per-file ``hashes.txt`` dump.
+    digest is resolved — drives the per-file ``hashes.txt`` dump.
+
+    `on_stage_progress(stage, done, total)` (hr-log-05): fired as stage
+    batches are collected, not after the whole stage returns. This keeps
+    long stage-1 / stage-2 hashing runs visibly alive even when the walk
+    has already finished.
 
     `cancel_event` (hr-conc-01): the SIGINT cooperative-cancel flag, the
     same one the walk workers consult. Forwarded into both hash stages so
@@ -1277,14 +1366,23 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
             final_groups.setdefault(digest_key, []).extend(keys)
 
     # ---- Stage 1: head hash ----
+    def _progress(stage):
+        if on_stage_progress is None:
+            return None
+
+        def _cb(done, total):
+            on_stage_progress(stage, done, total)
+        return _cb
+
     by_head, stage1_info = _stage1_hash(
         candidates, rep, jobs, config, cancel_event, aliases=aliases,
-        on_hashed=on_hashed)
+        on_hashed=on_hashed, on_progress=_progress("stage1"))
     stage2_items = _split_stage1_buckets(by_head, rep, _accept_group)
 
-    # ---- Stage 2: tail + middle samples for size+head collisions ----
+    # ---- Stage 2: tail + center + middle samples for size+head collisions ----
     regrouped, stage2_info = _stage2_hash(
-        stage2_items, jobs, config, cancel_event)
+        stage2_items, jobs, config, cancel_event,
+        on_progress=_progress("stage2"))
     for combined, keys in regrouped.items():
         if len(keys) >= 2:
             _accept_group(combined, keys)
@@ -1440,10 +1538,10 @@ def _install_sigint_cancel(cancel_event):
 
 
 def _log_line(msg, quiet) -> None:
-    """Emit one ``[ai5]`` operational log line to stderr (hr-log-01).
+    """Emit one timestamped operational log line to stderr (hr-log-05).
     No-op when `quiet` is set, matching the summary's --quiet behaviour."""
     if not quiet:
-        print(f"[ai5] {msg}", file=sys.stderr)
+        print(f"{_log_prefix()} {msg}", file=sys.stderr)
 
 
 def _progress_walk(walk_iter, quiet, every=LOG_EVERY_N_FILES):
@@ -1456,10 +1554,17 @@ def _progress_walk(walk_iter, quiet, every=LOG_EVERY_N_FILES):
     still joined and ``.stats`` finalised. `main` reads ``walk_iter.stats``
     from the real iterator, not this wrapper."""
     n = 0
+    started = time.monotonic()
     for entry in walk_iter:
         n += 1
         if n % every == 0:
-            _log_line(f"progress: {n} files scanned", quiet)
+            elapsed = time.monotonic() - started
+            _log_line(
+                f"progress: {n} files scanned "
+                f"elapsed={_fmt_elapsed(elapsed)} "
+                f"rate={_fmt_rate(n, elapsed)}/s",
+                quiet,
+            )
         yield entry
 
 
@@ -1480,16 +1585,19 @@ def _configure_windows(block_size: int, sample_size: int) -> None:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Duplicate finder (head + tail + mid-samples, "
+        description="Duplicate finder (head + tail + center + mid-samples, "
                     "hardlink-aware, two-stage hash).")
     ap.add_argument("directory")
-    ap.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 1,
-                    help="Walk + hash worker threads (default: cpu_count).")
+    ap.add_argument(
+        "-j", "--jobs", type=int, default=_default_jobs(),
+        help=("Walk + hash worker threads "
+              f"(default: min(cpu_count, {DEFAULT_MAX_JOBS}); override for "
+              "fast SSDs or slower disks)."))
     ap.add_argument("-q", "--quiet", action="store_true",
                     help="Suppress the end-of-run summary on stderr.")
     ap.add_argument("--alias-cap", type=int, default=DEFAULT_ALIAS_CAP,
                     help=("Max paths printed per inode group "
-                          f"(default: {DEFAULT_ALIAS_CAP}, 0 = no cap). "
+                          f"(default: {DEFAULT_ALIAS_CAP}, <= 0 = no cap). "
                           "When the cap fires, a `+N more` sentinel is "
                           "appended and a WARNING surfaces once at end "
                           "of run (hr-scal-04)."))
@@ -1587,18 +1695,30 @@ def main():
         # never buffers in memory. Pipeline-internal `final_groups` stays
         # empty because the callback consumes every group inline.
         on_group, totals = emit_groups_streaming(sys.stdout.write, config=config)
+        progress_state: dict = {}
 
         def _on_hashed(done, total, head, key, aliases):
-            # hr-log-02: dump every hashed file and emit a hashing % line on
-            # the same cadence as the walk progress. The dump was opened
-            # eagerly above (hr-log-04); just write to it when present.
+            # hr-log-02: dump every hashed file. Live progress is emitted
+            # by `_on_stage_progress` as each hash batch completes.
             dump = hashes_state["fh"]
             if head is not None and dump is not None:
                 dump.write("".join(
                     f"{head} {p}\n" for p in aliases.get(key, ())))
-            if done % LOG_EVERY_N_FILES == 0 or done == total:
-                pct = (done * 100) // total if total else 100
-                _log_line(f"hashing {pct}% ({done}/{total})", args.quiet)
+
+        def _on_stage_progress(stage, done, total):
+            state = progress_state.setdefault(
+                stage, {"started": time.monotonic(), "last": 0})
+            if done != total and done - state["last"] < LOG_EVERY_N_FILES:
+                return
+            state["last"] = done
+            elapsed = time.monotonic() - state["started"]
+            pct = (done * 100) // total if total else 100
+            _log_line(
+                f"hashing {stage} {pct}% ({done}/{total}) "
+                f"elapsed={_fmt_elapsed(elapsed)} "
+                f"rate={_fmt_rate(done, elapsed)}/s",
+                args.quiet,
+            )
 
         # hr-log-01: wrap the walk so a progress line prints every N files;
         # find_duplicate_groups still consumes the stream exactly once.
@@ -1606,6 +1726,7 @@ def main():
             _progress_walk(walk_iter, args.quiet), args.jobs,
             on_group=on_group, config=config, on_walk_done=_mark_walk_done,
             cancel_event=cancel_event, on_hashed=_on_hashed,
+            on_stage_progress=_on_stage_progress,
         )
         t_end = time.perf_counter()
         walk_stats = walk_iter.stats
@@ -1631,28 +1752,28 @@ def main():
         # hr-scal-04: one-shot warning so the operator knows printed alias
         # lists may be partial.
         if config.alias_cap_hits > 0 and not args.quiet:
-            print(
-                f"[ai5] WARNING: alias cap ({config.alias_cap}) truncated "
+            _log_line(
+                f"WARNING: alias cap ({config.alias_cap}) truncated "
                 f"{config.alias_cap_hits} group(s); rerun with "
                 f"--alias-cap=0 to print every hardlink.",
-                file=sys.stderr,
+                False,
             )
 
         # hr-obs-03: one-shot summary of suppressed hash errors instead of
         # per-file stderr spam.
         if config.hash_error_suppressed > 0 and not args.quiet:
-            print(
-                f"[ai5] WARNING: {config.hash_error_suppressed} additional "
+            _log_line(
+                f"WARNING: {config.hash_error_suppressed} additional "
                 f"hash error(s) suppressed (showed first "
                 f"{config.hash_error_logged}); rerun with a larger "
                 "--hash-error-verbose-cap to see more.",
-                file=sys.stderr,
+                False,
             )
 
         # hr-conc-05: surface partial results when the user hit Ctrl-C.
         if cancel_event.is_set() and not args.quiet:
-            print("[ai5] WARNING: walk cancelled by SIGINT — results are partial.",
-                  file=sys.stderr)
+            _log_line("WARNING: cancelled by SIGINT; results are partial.",
+                      False)
 
         # ---- Summary on stderr (the user's safety net) ----
         if not args.quiet:
@@ -1671,8 +1792,8 @@ def main():
                 - config.hash_skipped_vanished
                 - config.hash_skipped_shrank,
             )
-            print(
-                f"[ai5] dirs={f(walk_stats['dirs'])} "
+            _log_line(
+                f"dirs={f(walk_stats['dirs'])} "
                 f"files={f(walk_stats['files'])} "
                 f"inodes={f(info['inodes'])} "
                 f"size_collision_inodes={f(info['candidates'])} "
@@ -1686,7 +1807,7 @@ def main():
                 f"hash_skipped={f(config.hash_skipped_vanished)} "
                 f"hash_shrank={f(config.hash_skipped_shrank)} "
                 f"walk_s={walk_seconds:.2f} hash_s={hash_seconds:.2f}",
-                file=sys.stderr,
+                False,
             )
     finally:
         # hr-log-02 / hr-log-03: flush + close the hashes dump if it was
