@@ -65,10 +65,9 @@ WALK_FLUSH_THRESHOLD = 1024
 DEFAULT_ALIAS_CAP = 1024
 DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
 # hr-cmplx-01: the alias cap is stored as Optional[int] — `None` means
-# "no cap". `NO_CAP` is retained only as a back-compat alias for callers
-# that imported the old sentinel; it is no longer used to detect the
-# disabled state (that overloaded a legitimate cap of exactly 2**31).
-NO_CAP = None
+# "no cap". The disabled state is detected via `alias_cap is not None`
+# (see `alias_cap_active`), so a legitimate positive cap of any size
+# (including exactly 2**31) is honored verbatim.
 # hr-rel-02: cap the os.access probe in `_readable_rep` — a hardlink-heavy
 # inode with 100k aliases otherwise costs 100k stat syscalls just to pick
 # a representative. The first few aliases are almost always representative
@@ -1187,7 +1186,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     # hr-decoup-04: thread the alias cap from config into index_inodes
     # and the per-inode overflow counts into the emit stage. Skip the
     # cap when the user disabled it (hr-cx-01: `alias_cap_active`
-    # encapsulates the NO_CAP sentinel test).
+    # encapsulates the disabled-state test).
     ingest_cap = config.alias_cap if config.alias_cap_active else None
     overflow: "dict[tuple, int] | None" = {} if ingest_cap is not None else None
     aliases, inode_size = index_inodes(

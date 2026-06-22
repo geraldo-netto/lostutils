@@ -1475,11 +1475,12 @@ def test_runconfig_negative_hash_error_cap_clamps_to_zero():
     assert cfg.hash_error_verbose_cap == 0
 
 
-# --- hr-cx-01: NO_CAP constant + alias_cap_active property -----------------
+# --- hr-cx-01: alias_cap_active property -----------------------------------
 
-def test_no_cap_constant_value():
-    # hr-cmplx-01: the disabled state is now None, not a magic 2**31.
-    assert hr.NO_CAP is None
+def test_no_cap_constant_removed():
+    # hr-cmplx-01: the dead `NO_CAP = None` back-compat alias was removed;
+    # the disabled state is detected via `alias_cap is not None`.
+    assert not hasattr(hr, "NO_CAP")
 
 
 def test_legitimate_cap_of_two_pow_31_is_honored():

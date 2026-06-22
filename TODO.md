@@ -39,7 +39,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cmplx-01 | open | low | hash-recursive-ai5.py:71 — NO_CAP = None is now dead after the Optional[int] migration (alias_cap_active uses `is not None`, ingest uses None directly); the "back-compat alias for old importers" equals literal None and gives importers nothing. Remove it (and its comment), or declare it in a documented __all__. | dead code
 
 ## code duplication
 
