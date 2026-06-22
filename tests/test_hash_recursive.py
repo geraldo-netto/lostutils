@@ -14,6 +14,14 @@ hr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(hr)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cwd(tmp_path, monkeypatch):
+    # hr-log-02: main() now writes ./hashes.txt by default. Run every test
+    # from its own tmp dir so that dump never lands in the repo working
+    # tree (and is auto-cleaned with the tmp dir).
+    monkeypatch.chdir(tmp_path)
+
+
 # --- hr-rel-01: jobs is clamped to >=1 so a walk never silently no-ops ------
 
 def test_threaded_walk_clamps_zero_jobs():
@@ -1436,6 +1444,78 @@ def test_progress_walk_logs_at_interval(capsys):
     err = capsys.readouterr().err
     assert "progress: 2 files scanned" in err
     assert "progress: 4 files scanned" in err
+
+
+def test_main_dumps_every_hashed_file(tmp_path, monkeypatch):
+    # hr-log-02: hashes.txt holds <digest> <path> for every hashed file
+    # (size-collision candidates); unique-size files are never hashed and
+    # so never appear.
+    (tmp_path / "a.bin").write_bytes(b"same")
+    (tmp_path / "b.bin").write_bytes(b"same")
+    (tmp_path / "u.bin").write_bytes(b"a-unique-length-payload")  # unique size
+    out = tmp_path / "hashes.txt"
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    hr.main()
+    lines = [ln for ln in out.read_text().splitlines() if ln]
+    names = sorted(ln.split(" ", 1)[1].rsplit("/", 1)[-1] for ln in lines)
+    assert names == ["a.bin", "b.bin"]
+    for ln in lines:
+        digest, _path = ln.split(" ", 1)
+        assert len(digest) == 64               # blake3 hex digest
+
+
+def test_main_hashes_file_appended(tmp_path, monkeypatch):
+    # hr-log-02: an existing dump is appended to, not overwritten.
+    out = tmp_path / "hashes.txt"
+    out.write_text("PRIOR RUN LINE\n")
+    (tmp_path / "a.bin").write_bytes(b"x")
+    (tmp_path / "b.bin").write_bytes(b"x")
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    hr.main()
+    text = out.read_text()
+    assert "PRIOR RUN LINE" in text            # earlier content preserved
+    assert text.count(" ") >= 2                 # new <digest> <path> lines added
+
+
+def test_main_logs_hashing_progress_percent(tmp_path, monkeypatch, capsys):
+    # hr-log-02: a hashing NN% (done/total) line appears and reaches 100%.
+    for i in range(120):
+        (tmp_path / f"f{i}.bin").write_bytes(b"x")   # all size 1 → 120 candidates
+    out = tmp_path / "hashes.txt"
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "hashing 100% (120/120)" in err
+    assert "hashing" in err and "(50/120)" in err
+
+
+def test_main_quiet_keeps_hashes_dump_but_no_progress(tmp_path, monkeypatch, capsys):
+    # hr-log-02: --quiet silences the hashing line but still writes the dump.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    (tmp_path / "b.bin").write_bytes(b"x")
+    out = tmp_path / "hashes.txt"
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "-q", "--hashes-file", str(out), str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "hashing" not in err
+    assert out.read_text().strip()             # dump still populated
+
+
+def test_main_hashes_file_open_failure_warns(tmp_path, monkeypatch, capsys):
+    # hr-log-02: an unwritable dump path warns once and does not abort.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    (tmp_path / "b.bin").write_bytes(b"x")
+    bad = tmp_path / "nonexistent-dir" / "hashes.txt"   # parent missing
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(bad), str(tmp_path)])
+    hr.main()                                  # must not raise
+    err = capsys.readouterr().err
+    assert "cannot write" in err
+    assert not bad.exists()
 
 
 def test_read_window_chunks_match_single_read(tmp_path, monkeypatch):

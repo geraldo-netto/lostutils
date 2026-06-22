@@ -66,8 +66,12 @@ DEFAULT_ALIAS_CAP = 1024
 DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
 # hr-log-01: emit a walk-progress line to stderr every N files scanned,
 # bracketed by a start and a done line. Suppressed by --quiet alongside the
-# end-of-run summary.
+# end-of-run summary. The same cadence drives the stage-1 hashing-progress
+# line (hr-log-02).
 LOG_EVERY_N_FILES = 50
+# hr-log-02: default path for the dump of every hashed file
+# (``<digest> <path>`` per alias). Appended to each run.
+DEFAULT_HASHES_FILE = "hashes.txt"
 # hr-cmplx-01: the alias cap is stored as Optional[int] — `None` means
 # "no cap". The disabled state is detected via `alias_cap is not None`
 # (see `alias_cap_active`), so a legitimate positive cap of any size
@@ -1041,7 +1045,7 @@ def _retry_head_alias(key, tried, aliases, config):
 
 
 def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
-                 aliases=None):
+                 aliases=None, on_hashed=None):
     """Run Stage 1 (head hash) and bucket candidates by ``(size, head)``
     (hr-cx-05).
 
@@ -1053,7 +1057,13 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
     hr-rel-02: when a multi-alias inode's representative head is None and
     `aliases` is supplied, the next readable alias is retried via
     :func:`_retry_head_alias` so a deleted/unreadable rep doesn't silently
-    exclude an inode whose siblings are still readable."""
+    exclude an inode whose siblings are still readable.
+
+    `on_hashed(done, total, head, key, aliases)` (hr-log-02): invoked once
+    per candidate inode on the main thread after its head digest is known
+    (``head`` is None when it failed). Lets :func:`main` drive a hashing-
+    progress line and dump every hashed file without the pipeline doing
+    I/O. ``done`` runs 1..``total`` so the caller can render a percentage."""
     if not candidates:
         return defaultdict(list), {"stage1": 0, "stage1_errors": 0}
     # hr-perf-01: build the path list and (capped) byte total in one pass
@@ -1068,10 +1078,13 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
         stage1_paths, _make_head_batch(config), stage1_bytes, jobs,
         cancel_event=cancel_event)
     by_head: dict = defaultdict(list)
-    for size, key in candidates:
+    total = len(candidates)
+    for done, (size, key) in enumerate(candidates, 1):
         head = head_by_path.get(rep[key])
         if head is None and aliases is not None and len(aliases.get(key, ())) > 1:
             head = _retry_head_alias(key, rep[key], aliases, config)
+        if on_hashed is not None:
+            on_hashed(done, total, head, key, aliases)
         if head is None:
             continue
         by_head[(size, head)].append(key)
@@ -1162,7 +1175,8 @@ def _split_stage1_buckets(by_head, rep, accept_group):
 
 
 def find_duplicate_groups(files, jobs, on_group=None, config=None,
-                          on_walk_done=None, cancel_event=None):
+                          on_walk_done=None, cancel_event=None,
+                          on_hashed=None):
     """Run the dedup pipeline on walk results (hr-arch-01).
 
     `files` may be a list OR an iterator (hr-scal-05). When called with
@@ -1192,6 +1206,11 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     `on_walk_done()` (hr-scal-05): optional callback invoked the instant
     the inode index has been built — lets :func:`main` split walk-time
     from hash-time without holding a `files` list across both phases.
+
+    `on_hashed(done, total, head, key, aliases)` (hr-log-02): forwarded to
+    :func:`_stage1_hash` and fired once per candidate inode as its head
+    digest is resolved — drives :func:`main`'s hashing-progress line and
+    the per-file ``hashes.txt`` dump.
 
     `cancel_event` (hr-conc-01): the SIGINT cooperative-cancel flag, the
     same one the walk workers consult. Forwarded into both hash stages so
@@ -1242,7 +1261,8 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
 
     # ---- Stage 1: head hash ----
     by_head, stage1_info = _stage1_hash(
-        candidates, rep, jobs, config, cancel_event, aliases=aliases)
+        candidates, rep, jobs, config, cancel_event, aliases=aliases,
+        on_hashed=on_hashed)
     stage2_items = _split_stage1_buckets(by_head, rep, _accept_group)
 
     # ---- Stage 2: tail + middle samples for size+head collisions ----
@@ -1473,6 +1493,10 @@ def main():
         "--sample-size", type=int, default=SAMPLE,
         help=(f"Mid-file point-sample window in bytes (default: {SAMPLE} "
               "= 64 KiB) (hr-adapt-01)."))
+    ap.add_argument(
+        "--hashes-file", default=DEFAULT_HASHES_FILE,
+        help=(f"Dump '<digest> <path>' for every hashed file to this path, "
+              f"appending to it (default: {DEFAULT_HASHES_FILE}) (hr-log-02)."))
     args = ap.parse_args()
     # hr-rel-21: clamp jobs to >= 1. The walk already clamps via max(1, jobs)
     # but the hash path passes jobs straight to ThreadPoolExecutor, which
@@ -1512,6 +1536,11 @@ def main():
     # the run (e.g. when main() is invoked from a long-lived host).
     previous_sigint = _install_sigint_cancel(cancel_event)
 
+    # hr-log-02: the hashes dump is opened lazily on the first hashed file
+    # (after the walk) so the empty file is never itself discovered by a
+    # walk rooted at its own directory.
+    hashes_state = {"fh": None, "failed": False}
+
     try:
         # hr-obs-02 + hr-scal-05: stream the walk so we never materialise
         # the full `files` list. `on_walk_done` snaps the walk/hash
@@ -1529,12 +1558,40 @@ def main():
         # never buffers in memory. Pipeline-internal `final_groups` stays
         # empty because the callback consumes every group inline.
         on_group, totals = emit_groups_streaming(sys.stdout.write, config=config)
+
+        def _open_hashes():
+            # hr-log-02: lazy, single open; a failure warns once (even under
+            # --quiet, since a missing dump is worth surfacing) then degrades
+            # to "no dump" without aborting the run.
+            if hashes_state["fh"] is None and not hashes_state["failed"]:
+                try:
+                    hashes_state["fh"] = open(
+                        args.hashes_file, "a", encoding="utf-8")
+                except OSError as exc:
+                    hashes_state["failed"] = True
+                    _log_line(
+                        f"WARNING: cannot write {args.hashes_file}: {exc}",
+                        False)
+            return hashes_state["fh"]
+
+        def _on_hashed(done, total, head, key, aliases):
+            # hr-log-02: dump every hashed file and emit a hashing % line on
+            # the same cadence as the walk progress.
+            if head is not None:
+                fh = _open_hashes()
+                if fh is not None:
+                    fh.write("".join(
+                        f"{head} {p}\n" for p in aliases.get(key, ())))
+            if done % LOG_EVERY_N_FILES == 0 or done == total:
+                pct = (done * 100) // total if total else 100
+                _log_line(f"hashing {pct}% ({done}/{total})", args.quiet)
+
         # hr-log-01: wrap the walk so a progress line prints every N files;
         # find_duplicate_groups still consumes the stream exactly once.
         result = find_duplicate_groups(
             _progress_walk(walk_iter, args.quiet), args.jobs,
             on_group=on_group, config=config, on_walk_done=_mark_walk_done,
-            cancel_event=cancel_event,
+            cancel_event=cancel_event, on_hashed=_on_hashed,
         )
         t_end = time.perf_counter()
         walk_stats = walk_iter.stats
@@ -1618,6 +1675,9 @@ def main():
                 file=sys.stderr,
             )
     finally:
+        # hr-log-02: flush/close the hashes dump if it was opened.
+        if hashes_state["fh"] is not None:
+            hashes_state["fh"].close()
         # hr-rel-20: always restore the previous SIGINT handler so a
         # second run (or a host that imports and calls main()) gets a
         # clean signal stack. `signal.getsignal` returns None when the
