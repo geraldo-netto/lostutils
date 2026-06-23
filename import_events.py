@@ -130,6 +130,14 @@ PDF_VISION_DPI = 150
 _LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
 _PADDLE_OCR: Optional[Any] = None
 _OCR_WARNED = set()
+_OCR_WARNING_COUNTS: Dict[str, int] = {}
+_OCR_WARNING_LABELS = {
+    "paddle-missing": "PaddleOCR missing",
+    "paddle-error": "PaddleOCR runtime error",
+    "tesseract-missing": "Tesseract missing",
+    "tesseract-error": "Tesseract runtime error",
+    "tesseract-returncode": "Tesseract non-zero exit",
+}
 logger = logging.getLogger(__name__)
 
 # Counts files whose extraction raised; main() exits non-zero when > 0 so a run
@@ -144,6 +152,33 @@ def reset_extraction_failures() -> None:
 
 def extraction_failure_count() -> int:
     return _extraction_failures
+
+
+def _record_extraction_failure(file_path: Path, exc: Exception, action: str) -> None:
+    global _extraction_failures
+    _extraction_failures += 1
+    logger.exception("%s %s: %s", action, file_path.name, exc)
+
+
+def reset_ocr_warnings() -> None:
+    _OCR_WARNED.clear()
+    _OCR_WARNING_COUNTS.clear()
+
+
+def _ocr_warning_summary_items() -> List[str]:
+    items = []
+    for key in sorted(_OCR_WARNING_COUNTS):
+        count = _OCR_WARNING_COUNTS[key]
+        if count > 1:
+            label = _OCR_WARNING_LABELS.get(key, key)
+            items.append(f"{label}={count}")
+    return items
+
+
+def _report_ocr_warning_summary() -> None:
+    summary = ", ".join(_ocr_warning_summary_items())
+    if summary:
+        logger.warning("OCR warning summary: %s", summary)
 
 
 # --------------------------------------------------------------------------- #
@@ -555,6 +590,7 @@ def _read_text(file_path: Path) -> str:
 
 
 def _warn_once(key: str, message: str, *args: Any) -> None:
+    _OCR_WARNING_COUNTS[key] = _OCR_WARNING_COUNTS.get(key, 0) + 1
     if key in _OCR_WARNED:
         return
     _OCR_WARNED.add(key)
@@ -688,9 +724,7 @@ def _run_llm(
         text_output = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         return parse_llm_events(text_output, file_path, event_type)
     except Exception as e:
-        global _extraction_failures
-        _extraction_failures += 1
-        logger.exception("LLM Error processing %s: %s", file_path.name, e)
+        _record_extraction_failure(file_path, e, "LLM Error processing")
         return []
 
 
@@ -803,9 +837,7 @@ def extract_from_file(
         if suffix in PDF_EXTENSIONS:
             return extract_from_pdf(file, llm_client=llm_client, model_config=model_config)
     except Exception as e:
-        global _extraction_failures
-        _extraction_failures += 1
-        logger.exception("Could not extract events from %s: %s", file.name, e)
+        _record_extraction_failure(file, e, "Could not extract events from")
     return []
 
 
@@ -1020,11 +1052,14 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
 
 def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    reset_ocr_warnings()
     try:
         return _run_main(argv)
     except KeyboardInterrupt:
         logger.warning("Interrupted by Ctrl-C; exiting without completing import.")
         return 130
+    finally:
+        _report_ocr_warning_summary()
 
 
 if __name__ == "__main__":

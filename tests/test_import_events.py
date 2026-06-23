@@ -484,6 +484,22 @@ def test_get_paddle_ocr_missing_logs_once(monkeypatch, caplog):
     assert caplog.text.count("PaddleOCR not installed") == 1
 
 
+def test_ocr_warning_summary_counts_suppressed_repeats(caplog):
+    import logging
+
+    import_events.reset_ocr_warnings()
+
+    with caplog.at_level(logging.WARNING):
+        import_events._warn_once("paddle-error", "PaddleOCR failed: %s", "first")
+        import_events._warn_once("paddle-error", "PaddleOCR failed: %s", "second")
+        import_events._warn_once("tesseract-missing", "Tesseract missing")
+        import_events._report_ocr_warning_summary()
+
+    assert caplog.text.count("PaddleOCR failed") == 1
+    assert "PaddleOCR runtime error=2" in caplog.text
+    assert "Tesseract missing=1" not in caplog.text
+
+
 def test_ocr_with_paddle_handles_result_and_old_ocr_signature(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
@@ -527,6 +543,20 @@ def test_ocr_with_paddle_error_logs_once(tmp_path, monkeypatch, caplog):
     assert caplog.text.count("PaddleOCR failed") == 1
 
 
+def test_ocr_with_paddle_propagates_keyboard_interrupt(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+
+    class Engine:
+        def ocr(self, *_args, **_kwargs):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda: Engine())
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events._ocr_with_paddle(img)
+
+
 def test_ocr_image_path_merges_paddle_and_tesseract(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
@@ -550,6 +580,21 @@ def test_ocr_image_bytes_uses_temp_file_and_cleans_it(monkeypatch):
 
     assert import_events._ocr_image_bytes(b"png") == "OCR text"
     assert seen and not seen[0].exists()
+
+
+def test_ocr_image_bytes_cleans_temp_file_on_keyboard_interrupt(monkeypatch):
+    seen = {}
+
+    def interrupt(path):
+        seen["path"] = path
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(import_events, "_ocr_image_path", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events._ocr_image_bytes(b"png")
+
+    assert seen["path"].exists() is False
 
 
 def test_ocr_with_tesseract_returns_stdout(tmp_path, monkeypatch):
@@ -629,6 +674,19 @@ def test_ocr_with_tesseract_nonzero_logs_once(tmp_path, monkeypatch, caplog):
         assert import_events._ocr_with_tesseract(img) == ""
 
     assert caplog.text.count("Tesseract OCR exited non-zero") == 1
+
+
+def test_ocr_with_tesseract_propagates_keyboard_interrupt(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(import_events.subprocess, "run", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events._ocr_with_tesseract(img)
 
 
 def test_ocr_image_bytes_ignores_cleanup_error(monkeypatch):
@@ -1612,9 +1670,36 @@ def test_extract_from_pdf_falls_back_to_vision_after_empty_ocr(monkeypatch):
     assert "image_url" in json.dumps(fake.messages[0])
 
 
+def test_extract_from_pdf_propagates_keyboard_interrupt_from_text_stage(monkeypatch):
+    monkeypatch.setattr(
+        import_events, "_pdf_text",
+        lambda path: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=FakeLlm())
+
+
+def test_extract_from_pdf_propagates_keyboard_interrupt_from_ocr_stage(monkeypatch):
+    monkeypatch.setattr(import_events, "_pdf_text", lambda path: "")
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path: [b"page"])
+    monkeypatch.setattr(
+        import_events, "_ocr_image_bytes",
+        lambda data: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events.extract_from_pdf(Path("scan.pdf"), llm_client=FakeLlm())
+
+
 class RaisingLlm:
     def create_chat_completion(self, messages, **kwargs):
         raise RuntimeError("model OOM")
+
+
+class InterruptingLlm:
+    def create_chat_completion(self, messages, **kwargs):
+        raise KeyboardInterrupt
 
 
 def test_run_llm_counts_failures(tmp_path):
@@ -1626,6 +1711,17 @@ def test_run_llm_counts_failures(tmp_path):
 
     assert events == []
     assert import_events.extraction_failure_count() == 1
+
+
+def test_run_llm_propagates_keyboard_interrupt_without_counting(tmp_path):
+    import_events.reset_extraction_failures()
+    src = tmp_path / "x.txt"
+    src.write_text("content", encoding="utf-8")
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events.extract_with_llm(src, llm_client=InterruptingLlm())
+
+    assert import_events.extraction_failure_count() == 0
 
 
 def test_extract_from_file_counts_non_llm_failures(tmp_path, monkeypatch):
@@ -1641,6 +1737,21 @@ def test_extract_from_file_counts_non_llm_failures(tmp_path, monkeypatch):
 
     assert events == []
     assert import_events.extraction_failure_count() == 1
+
+
+def test_extract_from_file_propagates_keyboard_interrupt_without_counting(tmp_path, monkeypatch):
+    import_events.reset_extraction_failures()
+    ics = tmp_path / "event.ics"
+    ics.write_text("data", encoding="utf-8")
+    monkeypatch.setattr(
+        import_events, "extract_from_ics",
+        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events.extract_from_file(ics)
+
+    assert import_events.extraction_failure_count() == 0
 
 
 def test_main_returns_130_on_keyboard_interrupt_during_scan(tmp_path, monkeypatch):
