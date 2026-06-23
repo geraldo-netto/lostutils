@@ -70,6 +70,29 @@ def test_extract_with_llm_threads_generation_limits(tmp_path):
     assert fake.kwargs[0]["top_p"] == 1.0
 
 
+def test_run_llm_suppresses_client_output_when_not_verbose(capsys):
+    import sys
+
+    class NoisyLlm:
+        def create_chat_completion(self, messages, **kwargs):
+            print("add_text: prompt on stdout")
+            print("add_text: prompt on stderr", file=sys.stderr)
+            return {"choices": [{"message": {"content": '[{"title": "Launch", "start": "2026-06-06"}]'}}]}
+
+    events = import_events._run_llm(
+        [{"role": "user", "content": "Launch"}],
+        Path("event.txt"),
+        "Text/LLM",
+        NoisyLlm(),
+        import_events.ModelConfig(llm_verbose=False),
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert events[0]["title"] == "Launch"
+
+
 def test_extract_with_llm_computes_text_budget_from_context(tmp_path):
     source = tmp_path / "event.txt"
     source.write_text("A" * 2000, encoding="utf-8")
@@ -517,13 +540,16 @@ def test_paddle_texts_handles_old_and_new_shapes():
     assert import_events._paddle_texts(new_shape) == ["New text", "More text"]
 
 
-def test_get_paddle_ocr_builds_quiet_client(monkeypatch):
+def test_get_paddle_ocr_builds_quiet_client(monkeypatch, capsys):
+    import sys
     import types
 
     captured = {}
 
     class FakePaddleOCR:
         def __init__(self, **kwargs):
+            print("Creating model")
+            print("Model files already exist", file=sys.stderr)
             captured.update(kwargs)
 
     fake = types.ModuleType("paddleocr")
@@ -532,6 +558,9 @@ def test_get_paddle_ocr_builds_quiet_client(monkeypatch):
     monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
 
     assert isinstance(import_events._get_paddle_ocr(), FakePaddleOCR)
+    streams = capsys.readouterr()
+    assert streams.out == ""
+    assert streams.err == ""
     assert "show_log" not in captured
     assert captured["use_textline_orientation"] is True
     assert captured["lang"] == "en"

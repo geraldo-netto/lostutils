@@ -14,6 +14,7 @@ import secrets
 import logging
 import argparse
 import tempfile
+import contextlib
 import subprocess
 from collections import OrderedDict
 from urllib.error import HTTPError
@@ -462,6 +463,17 @@ def _report_ocr_warning_summary() -> None:
         logger.warning("OCR warning summary: %s", summary)
 
 
+@contextlib.contextmanager
+def _redirect_stdout_stderr():
+    with open(os.devnull, "w", encoding="utf-8") as devnull:
+        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+            yield
+
+
+def _quiet_output_context(verbose: bool):
+    return contextlib.nullcontext() if verbose else _redirect_stdout_stderr()
+
+
 # --------------------------------------------------------------------------- #
 # Model bootstrap
 # --------------------------------------------------------------------------- #
@@ -661,16 +673,17 @@ def get_llm(config: Optional[ModelConfig] = None):
     from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
     ensure_models_exist(config)
-    chat_handler = Qwen25VLChatHandler(
-        clip_model_path=config.clip_path,
-        verbose=config.llm_verbose,
-    )
-    cached = Llama(
-        model_path=config.model_path,
-        chat_handler=chat_handler,
-        n_ctx=config.llm_context_size,
-        verbose=config.llm_verbose,
-    )
+    with _quiet_output_context(config.llm_verbose):
+        chat_handler = Qwen25VLChatHandler(
+            clip_model_path=config.clip_path,
+            verbose=config.llm_verbose,
+        )
+        cached = Llama(
+            model_path=config.model_path,
+            chat_handler=chat_handler,
+            n_ctx=config.llm_context_size,
+            verbose=config.llm_verbose,
+        )
     if cache_limit > 0:
         _LLM_CACHE[key] = cached
         _trim_llm_cache(cache_limit)
@@ -945,7 +958,8 @@ def _build_paddle_ocr(PaddleOCR: Any, paddle_lang: str) -> Any:
     last_exc: Optional[Exception] = None
     for kwargs in _paddle_constructor_kwargs(paddle_lang):
         try:
-            return PaddleOCR(**kwargs)
+            with _redirect_stdout_stderr():
+                return PaddleOCR(**kwargs)
         except (TypeError, ValueError) as exc:
             last_exc = exc
     if last_exc is not None:
@@ -1109,13 +1123,14 @@ def _run_llm(
     runtime_config = model_config or ModelConfig()
     try:
         client = get_llm(runtime_config) if llm_client is None else llm_client
-        response: Any = client.create_chat_completion(
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=runtime_config.llm_max_tokens,
-            temperature=0.0,
-            top_p=1.0,
-        )
+        with _quiet_output_context(runtime_config.llm_verbose):
+            response: Any = client.create_chat_completion(
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_tokens=runtime_config.llm_max_tokens,
+                temperature=0.0,
+                top_p=1.0,
+            )
         text_output = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         return parse_llm_events(text_output, file_path, event_type)
     except Exception as e:

@@ -12,7 +12,7 @@ id prefixes: `dnp-` dedupl_numpy.py, `dnv3-` deduplicate-by-namev3.py, `hr-` has
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-sec-02 | open | low | import_events.py:1011 — Tesseract is launched as bare `tesseract` from PATH; argv protects the image path, but a poisoned PATH can execute a different binary when OCR is enabled. Resolve the executable once with shutil.which or a validated --tesseract-path and log the resolved path. | STRIDE-Elevation of privilege
+ie-sec-02 | open | low | import_events.py:1025 — Tesseract is launched as bare `tesseract` from PATH; argv protects the image path, but a poisoned PATH can execute a different binary when OCR is enabled. Resolve the executable once with shutil.which or a validated --tesseract-path and log the resolved path. | STRIDE-Elevation of privilege
 rf-sec-01 | open | med | relocate_folder.py:1287 — source is re-stat'd/walked by path across validate_source -> _check_no_open_files -> ensure_dest_root -> _check_cross_device -> copy_tree with no held handle, leaving a TOCTOU window where source can be swapped for a symlink after the non-symlink check. Open the source dir once with O_DIRECTORY|O_NOFOLLOW and fstat/walk relative to that fd. | STRIDE-Tampering
 rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands; shlex.quote is correct but the script emits destructive commands with no header warning/--dry-run note and no guard that the survivor still exists. Add a leading "review before piping to sh" banner and consider verifying paths. | destructive-output
 
@@ -20,13 +20,13 @@ rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-gov-01 | open | low | import_events.py:587 — download and cache warnings log absolute local cache/model paths, which can leak private home-directory names when users paste logs. Redact to cache-relative paths or basename+digest while keeping enough context for diagnosis. | local path disclosure
+ie-gov-01 | open | low | import_events.py:599 — download and cache warnings log absolute local cache/model paths, which can leak private home-directory names when users paste logs. Redact to cache-relative paths or basename+digest while keeping enough context for diagnosis. | local path disclosure
 
 ## data integrity
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-di-01 | open | low | import_events.py:1313 — dedupe_events collapses records by (title, start) only, dropping distinct events that share a title/time but differ by end/location/source. Include more fields or emit a conflict report before discarding. | derived state
+ie-di-01 | open | low | import_events.py:1328 — dedupe_events collapses records by (title, start) only, dropping distinct events that share a title/time but differ by end/location/source. Include more fields or emit a conflict report before discarding. | derived state
 
 ## performance
 
@@ -34,27 +34,27 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
 dnv3-perf-01 | open | med | deduplicate-by-namev3.py:113 — each row block recomputes cdist of its rows against ALL n columns including the already-emitted lower triangle, doubling work; only columns >= start are kept. Pass cleaned_strs[start:] as the column set and offset cols by start. | wasted lower-triangle compute
-ie-perf-01 | open | low | import_events.py:956 — when PaddleOCR is not installed, _get_paddle_ocr retries the import on every image/PDF page despite warning once. Cache a missing sentinel so large runs avoid repeated import machinery. | optional dependency hot path
-ie-perf-02 | open | med | import_events.py:1222 — extract_from_pdf renders and OCRs pages even after _pdf_text found enough text, so text-native PDFs still pay PyMuPDF + Paddle/Tesseract cost. Skip OCR when parsed text is sufficient, or make "always OCR" an explicit flag. | avoid unnecessary OCR
+ie-perf-01 | open | low | import_events.py:970 — when PaddleOCR is not installed, _get_paddle_ocr retries the import on every image/PDF page despite warning once. Cache a missing sentinel so large runs avoid repeated import machinery. | optional dependency hot path
+ie-perf-02 | open | med | import_events.py:1255 — extract_from_pdf renders and OCRs pages even after _pdf_text found enough text, so text-native PDFs still pay PyMuPDF + Paddle/Tesseract cost. Skip OCR when parsed text is sufficient, or make "always OCR" an explicit flag. | avoid unnecessary OCR
 
 ## scalability
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-scal-02 | open | med | import_events.py:1283 — process_folder sorts the whole iterator before work starts; recursive scans materialize every path and delay the first extraction. Stream with a heap/window or make deterministic ordering opt-in. | large recursive trees
+ie-scal-02 | open | med | import_events.py:1316 — process_folder sorts the whole iterator before work starts; recursive scans materialize every path and delay the first extraction. Stream with a heap/window or make deterministic ordering opt-in. | large recursive trees
 oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_collisions materializes list(files) and builds pairs with a resolve_real_extension call for EVERY file up front, priming head_cache for the whole tree before the first move and contradicting the per-window pop and the streaming docstring. Restrict the pre-pass to needed_dirs members, or stream it in windows. | streaming claim vs reality
 
 ## concurrency
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-conc-01 | open | med | import_events.py:1336 — atomic replace protects a single writer from partial files but concurrent runs targeting the same output still race and the last writer silently wins. Add an advisory output lock or refuse when a sibling lock exists. | shared output race
+ie-conc-01 | open | med | import_events.py:1351 — atomic replace protects a single writer from partial files but concurrent runs targeting the same output still race and the last writer silently wins. Add an advisory output lock or refuse when a sibling lock exists. | shared output race
 
 ## dependability
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-depend-01 | open | med | import_events.py:1215 — extract_from_pdf calls _pdf_text before image fallback without isolating pypdf/PyMuPDF failures, so one corrupt/encrypted page can skip OCR and vision for the whole file. Catch stage-level exceptions and continue to later stages with a surfaced warning. | graceful degradation
+ie-depend-01 | open | med | import_events.py:1248 — extract_from_pdf calls _pdf_text before image fallback without isolating pypdf/PyMuPDF failures, so one corrupt/encrypted page can skip OCR and vision for the whole file. Catch stage-level exceptions and continue to later stages with a surfaced warning. | graceful degradation
 
 ## code complexity
 
@@ -86,20 +86,20 @@ rdv3-rel-01 | open | low | remove-deduplv3.py:107 — the max tiebreaker keeps a
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-robust-01 | open | low | import_events.py:468 — _verify_sha256 deletes a mismatched cached model immediately, losing the artifact and forcing a full redownload even for transient/provenance issues. Move it aside as .bad.<digest> and keep diagnostics. | partial-state recovery
+ie-robust-01 | open | low | import_events.py:480 — _verify_sha256 deletes a mismatched cached model immediately, losing the artifact and forcing a full redownload even for transient/provenance issues. Move it aside as .bad.<digest> and keep diagnostics. | partial-state recovery
 
 ## testing
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves the array-bounds path (dnp-rel-01) untested; add fixtures with short lines, single line, and md5-vs-sha256 widths to lock behavior. | coverage
-ie-test-01 | open | med | import_events.py:1215 — tests cover mocked happy-path OCR stages but not corrupt/encrypted PDFs or PyMuPDF render failures; add fixtures that prove PDF extraction degrades from text -> OCR -> vision without losing failure counts. | coverage
+ie-test-01 | open | med | import_events.py:1248 — tests cover mocked happy-path OCR stages but not corrupt/encrypted PDFs or PyMuPDF render failures; add fixtures that prove PDF extraction degrades from text -> OCR -> vision without losing failure counts. | coverage
 
 ## test / fuzz coverage
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-fuzz-01 | open | med | import_events.py:902 — _merge_text_blocks handles OCR output normalization/dedupe but fuzz coverage does not stress Unicode whitespace, repeated lines, huge OCR blocks, or mixed backend output order. Add property tests for idempotence, max_chars, and stable dedupe. | fuzz/property
+ie-fuzz-01 | open | med | import_events.py:915 — _merge_text_blocks handles OCR output normalization/dedupe but fuzz coverage does not stress Unicode whitespace, repeated lines, huge OCR blocks, or mixed backend output order. Add property tests for idempotence, max_chars, and stable dedupe. | fuzz/property
 
 ## observability
 
@@ -114,31 +114,31 @@ rdv3-obs-01 | open | low | remove-deduplv3.py:101-112 — groups with all-identi
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-watch-01 | open | med | import_events.py:1094 — _run_llm has no per-file timeout/stall heartbeat around client.create_chat_completion, so a stuck llama_cpp call can block the whole run until Ctrl-C. Add a monotonic deadline/worker timeout or watchdog progress log. | stall detection
+ie-watch-01 | open | med | import_events.py:1127 — _run_llm has no per-file timeout/stall heartbeat around client.create_chat_completion, so a stuck llama_cpp call can block the whole run until Ctrl-C. Add a monotonic deadline/worker timeout or watchdog progress log. | stall detection
 
 ## time & scheduling correctness
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-time-01 | open | low | import_events.py:572 — download timeout is per socket operation, not an overall monotonic deadline, so slow trickle responses can run indefinitely while still resetting the timeout. Add total deadline/stall elapsed checks with time.monotonic(). | monotonic deadline
+ie-time-01 | open | low | import_events.py:584 — download timeout is per socket operation, not an overall monotonic deadline, so slow trickle responses can run indefinitely while still resetting the timeout. Add total deadline/stall elapsed checks with time.monotonic(). | monotonic deadline
 
 ## platform
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-plat-01 | open | low | import_events.py:1011 — OCR assumes a `tesseract` executable name on PATH and POSIX-like process behavior; Windows/package-manager installs may use a different binary path. Add a configurable executable path and startup validation. | external binary portability
+ie-plat-01 | open | low | import_events.py:1025 — OCR assumes a `tesseract` executable name on PATH and POSIX-like process behavior; Windows/package-manager installs may use a different binary path. Add a configurable executable path and startup validation. | external binary portability
 
 ## caching strategy
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cache-01 | open | med | import_events.py:411 — _LLM_CACHE cache keys ignore model file identity, so replacing a GGUF at the same path can reuse a stale loaded model. Include digest/mtime identity or clear on verification changes. | key shape + invalidation
+ie-cache-01 | open | med | import_events.py:412 — _LLM_CACHE cache keys ignore model file identity, so replacing a GGUF at the same path can reuse a stale loaded model. Include digest/mtime identity or clear on verification changes. | key shape + invalidation
 
 ## memory and cpu management
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-mem-02 | open | med | import_events.py:1184 — _pdf_to_images stores rendered page PNG bytes for up to PDF_VISION_MAX_PAGES before OCR/vision, so page images are materialized together. Stream one rendered page at a time through OCR/vision. | streaming
+ie-mem-02 | open | med | import_events.py:1199 — _pdf_to_images stores rendered page PNG bytes for up to PDF_VISION_MAX_PAGES before OCR/vision, so page images are materialized together. Stream one rendered page at a time through OCR/vision. | streaming
 
 ## adaptability
 
@@ -154,7 +154,7 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-api-01 | open | med | import_events.py:323 — ModelConfig() direct construction with a custom model_path still inherits the default SHA pins, while from_args disables pins for custom paths. Move digest selection into a constructor/factory invariant so programmatic callers do not get surprising hash mismatches. | public dataclass contract
+ie-api-01 | open | med | import_events.py:324 — ModelConfig() direct construction with a custom model_path still inherits the default SHA pins, while from_args disables pins for custom paths. Move digest selection into a constructor/factory invariant so programmatic callers do not get surprising hash mismatches. | public dataclass contract
 
 ## CLI / option integrity
 
@@ -180,4 +180,4 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-mem-01 | rejected | med | import_events.py:30 — DEFAULT_LLM_CONTEXT_SIZE=65536 raises llama.cpp KV-cache memory and can trigger a train-context warning on 4k-trained GGUF files. | User explicitly requested keeping/increasing 64k context and text budget; eliminating the warning while staying at 64k requires a model trained/extended for that context, not a code-only change.
+ie-mem-01 | rejected | med | import_events.py:32 — DEFAULT_LLM_CONTEXT_SIZE=65536 uses less than the current Qwen2.5-VL model's 128k training window and may emit a llama.cpp underutilization notice. | User explicitly requested keeping 64k context and text budget; use --llm-context 128000 only when the extra RAM/KV-cache cost is acceptable.
