@@ -462,6 +462,8 @@ _OCR_WARNING_LABELS = {
     "tesseract-error": "Tesseract runtime error",
     "tesseract-returncode": "Tesseract non-zero exit",
 }
+LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+LOG_FORMAT = "%(asctime)s %(levelname)s: %(message)s"
 logger = logging.getLogger(__name__)
 
 # Counts files whose extraction raised; main() exits non-zero when > 0 so a run
@@ -2256,8 +2258,12 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
     return 0
 
 
+def _configure_logging() -> None:
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    _configure_logging()
     reset_ocr_warnings()
     try:
         return _run_main(argv)

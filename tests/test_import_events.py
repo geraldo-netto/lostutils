@@ -2832,6 +2832,21 @@ def test_extract_from_file_propagates_keyboard_interrupt_without_counting(tmp_pa
     assert import_events.extraction_failure_count() == 0
 
 
+def test_configure_logging_includes_date_and_time(monkeypatch):
+    captured = {}
+
+    def fake_basic_config(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(import_events.logging, "basicConfig", fake_basic_config)
+
+    import_events._configure_logging()
+
+    assert captured["level"] == import_events.logging.INFO
+    assert captured["format"] == "%(asctime)s %(levelname)s: %(message)s"
+    assert captured["datefmt"] == "%Y-%m-%d %H:%M:%S"
+
+
 def test_main_returns_130_on_keyboard_interrupt_during_scan(tmp_path, monkeypatch):
     (tmp_path / "event.txt").write_text("Launch tomorrow", encoding="utf-8")
     calls = []
