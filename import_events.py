@@ -23,8 +23,8 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 # Default paths to the local GGUF models.
-MODEL_FILENAME = "ggml-model-q4_k.gguf"
-CLIP_FILENAME = "llava-v1.5-7b-mmproj-model-f16.gguf"
+MODEL_FILENAME = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
+CLIP_FILENAME = "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
 CACHE_DIR_ENV = "IMPORT_EVENTS_CACHE_DIR"
 DEFAULT_LLM_CACHE_SIZE = 1
 DEFAULT_LLM_CONTEXT_SIZE = 65536
@@ -181,17 +181,20 @@ def _language_instruction(language: str) -> str:
 MODEL_PATH = str(_default_cache_dir() / MODEL_FILENAME)
 CLIP_PATH = str(_default_cache_dir() / CLIP_FILENAME)
 
-# Reliable HuggingFace download links for LLaVA 1.5 7B
-MODEL_URL = "https://huggingface.co/mys/ggml_llava-v1.5-7b/resolve/main/ggml-model-q4_k.gguf"
+# Reliable HuggingFace download links for Qwen2.5-VL 7B.
+MODEL_URL = (
+    "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/"
+    "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
+)
 CLIP_URL = (
-    "https://huggingface.co/second-state/Llava-v1.5-7B-GGUF/resolve/main/"
-    "llava-v1.5-7b-mmproj-model-f16.gguf"
+    "https://huggingface.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF/resolve/main/"
+    "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
 )
 
 # Pin the expected SHA-256 hex digest of each default model file to enable
 # integrity verification before llama_cpp loads the GGUF.
-MODEL_SHA256: Optional[str] = "7ac9c2f7b8d76cc7f3118cdf0953ebab7a7a9b12bad5dbe237219d2ab61765ea"
-CLIP_SHA256: Optional[str] = "50da4e5b0a011615f77686f9b02613571e65d23083c225e107c08c3b1775d9b1"
+MODEL_SHA256: Optional[str] = "9258bf05b12686d097ff3b6b18d968ab393649780aa2b3cd67fec43d50554392"
+CLIP_SHA256: Optional[str] = "c24a7f5fcfc68286f0a217023b6738e73bea4f11787a43e8238d4bb1b8604cde"
 
 
 @dataclass
@@ -362,8 +365,8 @@ def _validate_clip_projector(path: str) -> None:
     raise ValueError(
         f"CLIP projector {path} is missing clip.projector_type metadata; "
         "it is incompatible with the llama_cpp MTMD loader. Remove the old "
-        "mmproj-model-f16.gguf cache entry or pass --clip-path to a current "
-        "LLaVA 1.5 mmproj GGUF."
+        "mmproj cache entry or pass --clip-path to a current Qwen2.5-VL "
+        "mmproj GGUF."
     )
 
 
@@ -503,7 +506,7 @@ def _trim_llm_cache(max_entries: int) -> None:
 
 
 def get_llm(config: Optional[ModelConfig] = None):
-    """Lazily initializes the local LLaVA model with a bounded LRU cache."""
+    """Lazily initializes the local Qwen2.5-VL model with a bounded LRU cache."""
     config = config or ModelConfig()
     key = (config.model_path, config.clip_path, config.llm_context_size, config.llm_verbose)
     cache_limit = max(0, config.llm_cache_size)
@@ -519,10 +522,10 @@ def get_llm(config: Optional[ModelConfig] = None):
             return cached
 
     from llama_cpp import Llama
-    from llama_cpp.llama_chat_format import Llava15ChatHandler
+    from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
     ensure_models_exist(config)
-    chat_handler = Llava15ChatHandler(
+    chat_handler = Qwen25VLChatHandler(
         clip_model_path=config.clip_path,
         verbose=config.llm_verbose,
     )
@@ -935,7 +938,7 @@ def extract_with_llm(
     llm_client: Optional[Any] = None,
     model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
-    """Uses the local LLaVA model to extract events from a text or image file."""
+    """Uses the local Qwen2.5-VL model to extract events from a text or image file."""
     runtime_config = model_config or ModelConfig()
     if is_image:
         return extract_from_image(file_path, llm_client=llm_client,

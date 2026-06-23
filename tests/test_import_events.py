@@ -1377,7 +1377,7 @@ def test_validate_clip_projector_accepts_mtmd_metadata(tmp_path):
 
 def test_validate_clip_projector_rejects_legacy_metadata(tmp_path):
     clip = tmp_path / "clip.gguf"
-    clip.write_bytes(b"GGUF...clip.has_llava_projector...")
+    clip.write_bytes(b"GGUF...clip.has_legacy_projector...")
 
     with pytest.raises(ValueError, match="missing clip.projector_type metadata"):
         import_events._validate_clip_projector(str(clip))
@@ -1602,7 +1602,7 @@ def test_get_llm_threads_config_paths(monkeypatch):
     fake_llama_cpp = types.ModuleType("llama_cpp")
     fake_llama_cpp.Llama = FakeLlama
     fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
-    fake_chat.Llava15ChatHandler = FakeHandler
+    fake_chat.Qwen25VLChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
     monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
@@ -1635,7 +1635,7 @@ def test_get_llm_caches_per_config(monkeypatch):
     fake_llama_cpp = types.ModuleType("llama_cpp")
     fake_llama_cpp.Llama = FakeLlama
     fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
-    fake_chat.Llava15ChatHandler = FakeHandler
+    fake_chat.Qwen25VLChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
     monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
@@ -1694,7 +1694,7 @@ def _install_fake_llama(monkeypatch, created, closed):
     fake_llama_cpp = types.ModuleType("llama_cpp")
     fake_llama_cpp.Llama = FakeLlama
     fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
-    fake_chat.Llava15ChatHandler = FakeHandler
+    fake_chat.Qwen25VLChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)

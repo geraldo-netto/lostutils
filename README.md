@@ -4,7 +4,9 @@ a set of cli/gui scripts/tools for a number of things
 ## import_events.py
 
 `import_events.py` extracts calendar events from `.ics`, text, image, and PDF
-files into JSON, with optional `.ics` output.
+files into JSON, with optional `.ics` output. By default it downloads and uses
+`ggml-org/Qwen2.5-VL-7B-Instruct-GGUF` with the Q4_K_M language model and f16
+mmproj projector.
 
 Optional runtime dependencies enable richer extraction:
 
