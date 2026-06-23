@@ -48,6 +48,7 @@ DEFAULT_OCR_LANGUAGES = ("pt-br", "en", "es", "it", "fr", "de")
 DEFAULT_OCR_LANGUAGE_SCORE = 0.70
 DEFAULT_TESSERACT_PSM = "6"
 DEFAULT_OCR_ENGINE = "auto"
+DEFAULT_PADDLE_OCR_DEVICE = "auto"
 DEFAULT_PDF_OCR_MODE = "auto"
 DEFAULT_TENTATIVE_EVENTS = "keep"
 DEFAULT_NO_ACTIVITY_EVENTS = "skip"
@@ -398,6 +399,7 @@ class ModelConfig:
     ocr_timeout_seconds: int = OCR_TIMEOUT_SECONDS
     tesseract_psm: str = DEFAULT_TESSERACT_PSM
     ocr_engine: str = DEFAULT_OCR_ENGINE
+    paddle_ocr_device: str = DEFAULT_PADDLE_OCR_DEVICE
     pdf_ocr_mode: str = DEFAULT_PDF_OCR_MODE
     tentative_events: str = DEFAULT_TENTATIVE_EVENTS
     no_activity_events: str = DEFAULT_NO_ACTIVITY_EVENTS
@@ -443,6 +445,7 @@ class ModelConfig:
             ocr_timeout_seconds=max(1, args.ocr_timeout),
             tesseract_psm=str(args.tesseract_psm),
             ocr_engine=args.ocr_engine,
+            paddle_ocr_device=args.paddle_ocr_device,
             pdf_ocr_mode=args.pdf_ocr_mode,
             tentative_events=args.tentative_events,
             no_activity_events=args.no_activity_events,
@@ -1746,51 +1749,101 @@ def _paddle_texts(value: Any) -> List[str]:
     return []
 
 
-def _paddle_constructor_kwargs(paddle_lang: str) -> List[Dict[str, Any]]:
-    return [
+def _paddle_gpu_available(paddle_module: Any) -> bool:
+    try:
+        cuda_ready = (paddle_module.device.is_compiled_with_cuda() and
+                      paddle_module.device.cuda.device_count() > 0)
+    except Exception:
+        cuda_ready = False
+    try:
+        rocm_ready = bool(paddle_module.device.is_compiled_with_rocm())
+    except Exception:
+        rocm_ready = False
+    return bool(cuda_ready or rocm_ready)
+
+
+def _resolve_paddle_ocr_device(requested: str, paddle_module: Any) -> str:
+    device = (requested or DEFAULT_PADDLE_OCR_DEVICE).strip().lower()
+    if device != "auto":
+        return device
+    return "gpu:0" if _paddle_gpu_available(paddle_module) else "cpu"
+
+
+def _paddle_constructor_kwargs(paddle_lang: str, device: Optional[str]) -> List[Dict[str, Any]]:
+    kwargs = [
         {"use_textline_orientation": True, "lang": paddle_lang},
         {"use_angle_cls": True, "lang": paddle_lang},
         {"lang": paddle_lang},
     ]
+    if device is None:
+        return kwargs
+    return [{**item, "device": device} for item in kwargs]
 
 
-def _build_paddle_ocr(PaddleOCR: Any, paddle_lang: str) -> Any:
+def _build_paddle_ocr_with_kwargs(PaddleOCR: Any, paddle_lang: str,
+                                  device: Optional[str]) -> Tuple[Any, Optional[Exception]]:
     last_exc: Optional[Exception] = None
-    for kwargs in _paddle_constructor_kwargs(paddle_lang):
+    for kwargs in _paddle_constructor_kwargs(paddle_lang, device):
         try:
             with _redirect_stdout_stderr():
-                return PaddleOCR(**kwargs)
+                return PaddleOCR(**kwargs), None
         except (TypeError, ValueError) as exc:
             last_exc = exc
-    if last_exc is not None:
-        raise last_exc
+    return None, last_exc
+
+
+def _build_paddle_ocr(PaddleOCR: Any, paddle_lang: str, device: str) -> Tuple[Any, str]:
+    engine, exc = _build_paddle_ocr_with_kwargs(PaddleOCR, paddle_lang, device)
+    if engine is not None:
+        return engine, device
+    if device != "cpu":
+        logger.warning("PaddleOCR failed on %s; falling back to CPU: %s", device, exc)
+    engine, exc = _build_paddle_ocr_with_kwargs(PaddleOCR, paddle_lang, "cpu")
+    if engine is not None:
+        return engine, "cpu"
+    engine, exc = _build_paddle_ocr_with_kwargs(PaddleOCR, paddle_lang, None)
+    if engine is not None:
+        return engine, "cpu"
+    if exc is not None:
+        raise exc
     raise RuntimeError("no PaddleOCR constructor candidates")
 
 
-def _get_paddle_ocr(language: str = DEFAULT_OCR_FALLBACK_LANGUAGE) -> Optional[Any]:
+def _get_paddle_ocr(
+    language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
+    config: Optional[ModelConfig] = None,
+) -> Optional[Any]:
     global _PADDLE_OCR
+    runtime_config = config or ModelConfig()
     paddle_lang = _paddle_language(_normalize_language(language))
     with _PADDLE_OCR_LOCK:
         if _PADDLE_OCR is None:
             _PADDLE_OCR = {}
-        if paddle_lang in _PADDLE_OCR:
-            return _PADDLE_OCR[paddle_lang]
         try:
             import paddleocr as paddleocr_module
             PaddleOCR = paddleocr_module.PaddleOCR
+            import paddle as paddle_module
         except ImportError:
             _warn_once("paddle-missing", "PaddleOCR not installed; skipping Paddle OCR.")
             return None
+        device = _resolve_paddle_ocr_device(runtime_config.paddle_ocr_device, paddle_module)
+        cache_key = (paddle_lang, device)
+        if cache_key in _PADDLE_OCR:
+            return _PADDLE_OCR[cache_key]
         try:
-            _PADDLE_OCR[paddle_lang] = _build_paddle_ocr(PaddleOCR, paddle_lang)
+            engine, effective_device = _build_paddle_ocr(PaddleOCR, paddle_lang, device)
         except Exception as exc:
             _warn_once(f"paddle-init-{paddle_lang}",
-                       "PaddleOCR failed to initialize for language %s: %s",
-                       paddle_lang, exc)
+                       "PaddleOCR failed to initialize for language %s on %s: %s",
+                       paddle_lang, device, exc)
             return None
+        effective_key = (paddle_lang, effective_device)
+        _PADDLE_OCR[effective_key] = engine
+        _PADDLE_OCR[cache_key] = engine
         version = getattr(paddleocr_module, "__version__", "unknown")
-        logger.info("Using PaddleOCR %s with language %s.", version, paddle_lang)
-        return _PADDLE_OCR[paddle_lang]
+        logger.info("Using PaddleOCR %s with language %s on %s.",
+                    version, paddle_lang, effective_device)
+        return engine
 
 
 def _run_paddle_ocr(engine: Any, image_path: Path) -> Any:
@@ -1803,8 +1856,12 @@ def _run_paddle_ocr(engine: Any, image_path: Path) -> Any:
         return engine.ocr(str(image_path))
 
 
-def _ocr_with_paddle(image_path: Path, language: str = DEFAULT_OCR_FALLBACK_LANGUAGE) -> str:
-    engine = _get_paddle_ocr(language)
+def _ocr_with_paddle(
+    image_path: Path,
+    language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
+    config: Optional[ModelConfig] = None,
+) -> str:
+    engine = _get_paddle_ocr(language, config)
     if engine is None:
         return ""
     try:
@@ -1852,10 +1909,10 @@ def _ocr_image_path_once(
     runtime_config = config or ModelConfig()
     engine = runtime_config.ocr_engine
     if engine == "paddle":
-        return _ocr_with_paddle(image_path, language)[:runtime_config.text_budget_chars()]
+        return _ocr_with_paddle(image_path, language, runtime_config)[:runtime_config.text_budget_chars()]
     if engine == "tesseract":
         return _ocr_with_tesseract(image_path, language, runtime_config)[:runtime_config.text_budget_chars()]
-    paddle_text = _ocr_with_paddle(image_path, language)
+    paddle_text = _ocr_with_paddle(image_path, language, runtime_config)
     if engine == "auto" and _has_usable_ocr_text(paddle_text):
         return paddle_text[:runtime_config.text_budget_chars()]
     return _merge_text_blocks([
@@ -2163,6 +2220,7 @@ def extract_from_pdf(
                 {
                     "ocr_chain": ocr_chain,
                     "ocr_engine": runtime_config.ocr_engine,
+                    "paddle_ocr_device": runtime_config.paddle_ocr_device,
                     "pdf_vision_dpi": runtime_config.pdf_vision_dpi,
                     "pdf_vision_pages": runtime_config.pdf_vision_max_pages,
                     "tesseract_psm": runtime_config.tesseract_psm,
@@ -2515,6 +2573,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=("OCR engine policy: auto uses Paddle first and falls back to "
                               "Tesseract when weak; both preserves merged OCR "
                               f"(default: {DEFAULT_OCR_ENGINE})."))
+    parser.add_argument("--paddle-ocr-device", default=defaults.paddle_ocr_device,
+                        help=("PaddleOCR inference device: auto, cpu, gpu, gpu:0, etc.; "
+                              f"auto uses GPU only when Paddle reports one (default: {DEFAULT_PADDLE_OCR_DEVICE})."))
     parser.add_argument("--pdf-ocr-mode", choices=("auto", "always", "never"),
                         default=defaults.pdf_ocr_mode,
                         help=("PDF OCR policy: auto skips OCR when parsed text is usable; "

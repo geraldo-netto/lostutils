@@ -940,6 +940,31 @@ def test_paddle_texts_handles_old_and_new_shapes():
     assert import_events._paddle_texts(new_shape) == ["New text", "More text"]
 
 
+def _install_fake_paddle(monkeypatch, cuda=False, rocm=False, device_count=0):
+    import types
+
+    class FakeCuda:
+        @staticmethod
+        def device_count():
+            return device_count
+
+    class FakeDevice:
+        cuda = FakeCuda()
+
+        @staticmethod
+        def is_compiled_with_cuda():
+            return cuda
+
+        @staticmethod
+        def is_compiled_with_rocm():
+            return rocm
+
+    fake = types.ModuleType("paddle")
+    fake.device = FakeDevice()
+    monkeypatch.setitem(__import__("sys").modules, "paddle", fake)
+    return fake
+
+
 def test_get_paddle_ocr_builds_quiet_client(monkeypatch, capsys):
     import sys
     import types
@@ -955,6 +980,7 @@ def test_get_paddle_ocr_builds_quiet_client(monkeypatch, capsys):
     fake = types.ModuleType("paddleocr")
     fake.PaddleOCR = FakePaddleOCR
     monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
     monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
 
     assert isinstance(import_events._get_paddle_ocr(), FakePaddleOCR)
@@ -964,6 +990,7 @@ def test_get_paddle_ocr_builds_quiet_client(monkeypatch, capsys):
     assert "show_log" not in captured
     assert captured["use_textline_orientation"] is True
     assert captured["lang"] == "en"
+    assert captured["device"] == "cpu"
 
 
 def test_get_paddle_ocr_maps_language_and_logs_version(monkeypatch, caplog):
@@ -980,13 +1007,15 @@ def test_get_paddle_ocr_maps_language_and_logs_version(monkeypatch, caplog):
     fake.PaddleOCR = FakePaddleOCR
     fake.__version__ = "9.9"
     monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
     monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
 
     with caplog.at_level(logging.INFO):
         assert isinstance(import_events._get_paddle_ocr("de"), FakePaddleOCR)
 
     assert captured["lang"] == "german"
-    assert "Using PaddleOCR 9.9 with language german" in caplog.text
+    assert captured["device"] == "cpu"
+    assert "Using PaddleOCR 9.9 with language german on cpu" in caplog.text
 
 
 def test_get_paddle_ocr_falls_back_for_constructor_signature(monkeypatch):
@@ -1003,13 +1032,14 @@ def test_get_paddle_ocr_falls_back_for_constructor_signature(monkeypatch):
     fake = types.ModuleType("paddleocr")
     fake.PaddleOCR = FakePaddleOCR
     monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
     monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
 
     import_events._get_paddle_ocr()
 
     assert calls == [
-        {"use_textline_orientation": True, "lang": "en"},
-        {"use_angle_cls": True, "lang": "en"},
+        {"use_textline_orientation": True, "lang": "en", "device": "cpu"},
+        {"use_angle_cls": True, "lang": "en", "device": "cpu"},
     ]
 
 
@@ -1027,14 +1057,57 @@ def test_get_paddle_ocr_falls_back_to_lang_only(monkeypatch):
     fake = types.ModuleType("paddleocr")
     fake.PaddleOCR = FakePaddleOCR
     monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
     monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
 
     assert isinstance(import_events._get_paddle_ocr(), FakePaddleOCR)
     assert calls == [
-        {"use_textline_orientation": True, "lang": "en"},
-        {"use_angle_cls": True, "lang": "en"},
-        {"lang": "en"},
+        {"use_textline_orientation": True, "lang": "en", "device": "cpu"},
+        {"use_angle_cls": True, "lang": "en", "device": "cpu"},
+        {"lang": "en", "device": "cpu"},
     ]
+
+
+def test_get_paddle_ocr_auto_uses_gpu_when_paddle_reports_gpu(monkeypatch):
+    import types
+
+    captured = {}
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch, cuda=True, device_count=1)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
+
+    assert isinstance(import_events._get_paddle_ocr(), FakePaddleOCR)
+
+    assert captured["device"] == "gpu:0"
+
+
+def test_get_paddle_ocr_explicit_device_is_passed(monkeypatch):
+    import types
+
+    captured = {}
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
+
+    assert isinstance(import_events._get_paddle_ocr(
+        "en", import_events.ModelConfig(paddle_ocr_device="gpu:1")),
+        FakePaddleOCR)
+
+    assert captured["device"] == "gpu:1"
 
 
 def test_get_paddle_ocr_missing_logs_once(monkeypatch, caplog):
@@ -1085,7 +1158,7 @@ def test_ocr_with_paddle_handles_result_and_old_ocr_signature(tmp_path, monkeypa
                 raise TypeError("old ocr signature")
             return [[[[0, 0], [1, 1]], ("Paddle text", 0.9)]]
 
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en", config=None: Engine())
 
     assert import_events._ocr_with_paddle(img) == "Paddle text"
 
@@ -1101,7 +1174,7 @@ def test_ocr_with_paddle_prefers_predict_api(tmp_path, monkeypatch):
         def ocr(self, *_args, **_kwargs):
             raise AssertionError("deprecated ocr API should not be called")
 
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en", config=None: Engine())
 
     assert import_events._ocr_with_paddle(img) == "Predict text"
 
@@ -1109,7 +1182,7 @@ def test_ocr_with_paddle_prefers_predict_api(tmp_path, monkeypatch):
 def test_ocr_with_paddle_handles_missing_engine(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": None)
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en", config=None: None)
 
     assert import_events._ocr_with_paddle(img) == ""
 
@@ -1125,7 +1198,7 @@ def test_ocr_with_paddle_error_logs_once(tmp_path, monkeypatch, caplog):
         def ocr(self, *_args, **_kwargs):
             raise RuntimeError("bad image")
 
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en", config=None: Engine())
 
     with caplog.at_level(logging.WARNING):
         assert import_events._ocr_with_paddle(img) == ""
@@ -1142,7 +1215,7 @@ def test_ocr_with_paddle_propagates_keyboard_interrupt(tmp_path, monkeypatch):
         def ocr(self, *_args, **_kwargs):
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en", config=None: Engine())
 
     with pytest.raises(KeyboardInterrupt):
         import_events._ocr_with_paddle(img)
@@ -1151,7 +1224,8 @@ def test_ocr_with_paddle_propagates_keyboard_interrupt(tmp_path, monkeypatch):
 def test_ocr_image_path_merges_paddle_and_tesseract(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
-    monkeypatch.setattr(import_events, "_ocr_with_paddle", lambda path, language="en": "Alpha\nShared")
+    monkeypatch.setattr(import_events, "_ocr_with_paddle",
+                        lambda path, language="en", config=None: "Alpha\nShared")
     monkeypatch.setattr(
         import_events, "_ocr_with_tesseract",
         lambda path, language="en", config=None: "shared\nBeta",
@@ -1275,7 +1349,7 @@ def test_ocr_image_path_auto_skips_tesseract_when_paddle_is_usable(tmp_path, mon
     img.write_bytes(b"image")
     calls = []
     monkeypatch.setattr(import_events, "_ocr_with_paddle",
-                        lambda path, language="en": "Readable Paddle OCR text")
+                        lambda path, language="en", config=None: "Readable Paddle OCR text")
 
     def tesseract(path, language="en", config=None):
         calls.append(path)
@@ -1292,7 +1366,8 @@ def test_ocr_image_path_auto_skips_tesseract_when_paddle_is_usable(tmp_path, mon
 def test_ocr_image_path_auto_falls_back_to_tesseract_when_paddle_is_weak(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
-    monkeypatch.setattr(import_events, "_ocr_with_paddle", lambda path, language="en": "x")
+    monkeypatch.setattr(import_events, "_ocr_with_paddle",
+                        lambda path, language="en", config=None: "x")
     monkeypatch.setattr(import_events, "_ocr_with_tesseract",
                         lambda path, language="en", config=None: "Tesseract text")
 
@@ -1306,7 +1381,7 @@ def test_ocr_image_path_engine_modes_call_requested_backend(tmp_path, monkeypatc
     img.write_bytes(b"image")
     calls = []
     monkeypatch.setattr(import_events, "_ocr_with_paddle",
-                        lambda path, language="en": calls.append("paddle") or "Paddle text")
+                        lambda path, language="en", config=None: calls.append("paddle") or "Paddle text")
     monkeypatch.setattr(import_events, "_ocr_with_tesseract",
                         lambda path, language="en", config=None: calls.append("tesseract") or "Tesseract text")
 
@@ -1975,7 +2050,7 @@ def test_model_config_from_args_threads_values():
          "--ocr-languages", "Brazilian Portuguese,English,German",
          "--ocr-language-score", "0.65",
          "--tesseract-psm", "11", "--ocr-engine", "tesseract",
-         "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
+         "--paddle-ocr-device", "gpu:1", "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
          "--tentative-events", "skip", "--no-activity-events", "keep",
          "--pdf-vision-dpi", "200", "--stage-cache", "refresh",
          "--stage-cache-dir", "cache", "--benchmark", "--workers", "2"]
@@ -2001,6 +2076,7 @@ def test_model_config_from_args_threads_values():
     assert cfg.ocr_timeout_seconds == 9
     assert cfg.tesseract_psm == "11"
     assert cfg.ocr_engine == "tesseract"
+    assert cfg.paddle_ocr_device == "gpu:1"
     assert cfg.pdf_ocr_mode == "never"
     assert cfg.tentative_events == "skip"
     assert cfg.no_activity_events == "keep"
@@ -2080,6 +2156,7 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.ocr_timeout_seconds == import_events.OCR_TIMEOUT_SECONDS
     assert cfg.tesseract_psm == import_events.DEFAULT_TESSERACT_PSM
     assert cfg.ocr_engine == import_events.DEFAULT_OCR_ENGINE
+    assert cfg.paddle_ocr_device == import_events.DEFAULT_PADDLE_OCR_DEVICE
     assert cfg.pdf_ocr_mode == import_events.DEFAULT_PDF_OCR_MODE
     assert cfg.tentative_events == import_events.DEFAULT_TENTATIVE_EVENTS
     assert cfg.no_activity_events == import_events.DEFAULT_NO_ACTIVITY_EVENTS
