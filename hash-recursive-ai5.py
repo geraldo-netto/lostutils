@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import io
 import os
 import queue
 import signal
@@ -1544,6 +1545,17 @@ def _log_line(msg, quiet) -> None:
         print(f"{_log_prefix()} {msg}", file=sys.stderr)
 
 
+def _configure_stdio_encoding() -> None:
+    """Keep path output writable for Unicode and surrogate-escaped names."""
+    for stream in (sys.stdout, sys.stderr):
+        if not isinstance(stream, io.TextIOBase):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="surrogateescape")
+        except (AttributeError, TypeError, ValueError, OSError):
+            continue
+
+
 def _progress_walk(walk_iter, quiet, every=LOG_EVERY_N_FILES):
     """Pass-through generator over the walk that logs a progress line every
     ``every`` files scanned (hr-log-01).
@@ -1584,6 +1596,7 @@ def _configure_windows(block_size: int, sample_size: int) -> None:
 
 
 def main():
+    _configure_stdio_encoding()
     ap = argparse.ArgumentParser(
         description="Duplicate finder (head + tail + center + mid-samples, "
                     "hardlink-aware, two-stage hash).")
@@ -1672,7 +1685,10 @@ def main():
         # results (no self-count, no self-hash, no self-list).
         skip_ino = None
         try:
-            fh = open(args.hashes_file, "a", buffering=1, encoding="utf-8")
+            fh = open(
+                args.hashes_file, "a", buffering=1,
+                encoding="utf-8", errors="surrogateescape",
+            )
             hashes_state["fh"] = fh
             dump_stat = os.fstat(fh.fileno())
             skip_ino = (dump_stat.st_dev, dump_stat.st_ino)

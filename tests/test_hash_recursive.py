@@ -1,6 +1,8 @@
 """Tests for hash-recursive-ai5.py — the hr-rel-* reliability fixes
 (jobs clamp, readable-alias representative) and the functions they touch."""
 import importlib.util
+import io
+import os
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -1559,6 +1561,71 @@ def test_main_hashes_file_appended(tmp_path, monkeypatch):
     text = out.read_text()
     assert "PRIOR RUN LINE" in text            # earlier content preserved
     assert text.count(" ") >= 2                 # new <digest> <path> lines added
+
+
+def test_main_hashes_file_handles_surrogateescape_path(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("Windows paths are not represented with surrogateescape")
+    raw_name = b"bad_\xa7.bin"
+    raw_path = os.fsencode(tmp_path) + b"/" + raw_name
+    fd = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(b"same")
+    (tmp_path / "ok.bin").write_bytes(b"same")
+    out = tmp_path / "hashes.txt"
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+
+    hr.main()
+
+    dumped = out.read_bytes()
+    assert raw_name in dumped
+    assert b"ok.bin" in dumped
+
+
+def test_main_hashes_file_keeps_multilingual_paths(tmp_path, monkeypatch):
+    names = [
+        "русский.bin",
+        "ελληνικά.bin",
+        "עברית.bin",
+        "日本語.bin",
+        "中文.bin",
+    ]
+    for name in names:
+        (tmp_path / name).write_bytes(b"same")
+    out = tmp_path / "hashes.txt"
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "-q", "--hashes-file", str(out), str(tmp_path)])
+
+    hr.main()
+
+    text = out.read_text(encoding="utf-8")
+    for name in names:
+        assert name in text
+
+
+def test_main_stdout_handles_surrogateescape_path_with_strict_stream(
+        tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("Windows paths are not represented with surrogateescape")
+    raw_name = b"bad_\xa7.bin"
+    raw_path = os.fsencode(tmp_path) + b"/" + raw_name
+    fd = os.open(raw_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(b"same")
+    (tmp_path / "ok.bin").write_bytes(b"same")
+    out = tmp_path / "hashes.txt"
+    stdout_bytes = io.BytesIO()
+    strict_stdout = io.TextIOWrapper(stdout_bytes, encoding="ascii", errors="strict")
+    monkeypatch.setattr(hr.sys, "stdout", strict_stdout)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "-q", "--hashes-file", str(out), str(tmp_path)])
+
+    hr.main()
+
+    strict_stdout.flush()
+    assert raw_name in stdout_bytes.getvalue()
+    assert b"ok.bin" in stdout_bytes.getvalue()
 
 
 def test_main_logs_hashing_progress_percent(tmp_path, monkeypatch, capsys):
