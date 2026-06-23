@@ -1706,7 +1706,7 @@ def test_model_config_from_args_threads_values():
          "--ocr-fallback-language", "Spanish", "--ocr-timeout", "9",
          "--ocr-languages", "Brazilian Portuguese,English,German",
          "--ocr-language-score", "0.65",
-         "--tesseract-psm", "11", "--pdf-vision-pages", "3",
+         "--tesseract-psm", "11", "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
          "--pdf-vision-dpi", "200", "--benchmark"]
     )
 
@@ -1727,6 +1727,7 @@ def test_model_config_from_args_threads_values():
     assert cfg.ocr_language_score == 0.65
     assert cfg.ocr_timeout_seconds == 9
     assert cfg.tesseract_psm == "11"
+    assert cfg.pdf_ocr_mode == "never"
     assert cfg.pdf_vision_max_pages == 3
     assert cfg.pdf_vision_dpi == 200
     assert cfg.benchmark is True
@@ -2352,6 +2353,44 @@ def test_merge_text_blocks_preserves_primary_calendar_grid_rows():
         "Event B",
         "OCR Only",
     ]
+
+
+def test_extract_from_pdf_auto_skips_ocr_when_text_is_usable(monkeypatch):
+    text = " ".join(["This reservation confirmation contains enough readable words"] * 8)
+    fake = FakeLlm('[{"title": "Reservation", "start": "2026-06-22"}]')
+    monkeypatch.setattr(import_events, "_pdf_text", lambda path, max_chars=1000: text)
+
+    def fail_render(path, config=None):
+        raise AssertionError("PDF OCR should be skipped for usable parsed text")
+
+    monkeypatch.setattr(import_events, "_pdf_to_images", fail_render)
+
+    events = import_events.extract_from_pdf(
+        Path("text.pdf"),
+        llm_client=fake,
+        model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+    )
+
+    assert events[0]["type"] == "PDF"
+    assert text in fake.messages[0][1]["content"]
+
+
+def test_extract_from_pdf_never_skips_ocr_for_sparse_text(monkeypatch):
+    fake = FakeLlm('[{"title": "Sparse", "start": "2026-06-22"}]')
+    monkeypatch.setattr(import_events, "_pdf_text", lambda path, max_chars=1000: "x")
+
+    def fail_render(path, config=None):
+        raise AssertionError("PDF OCR should be disabled")
+
+    monkeypatch.setattr(import_events, "_pdf_to_images", fail_render)
+
+    events = import_events.extract_from_pdf(
+        Path("sparse.pdf"),
+        llm_client=fake,
+        model_config=import_events.ModelConfig(pdf_ocr_mode="never"),
+    )
+
+    assert events[0]["type"] == "PDF"
 
 
 def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):

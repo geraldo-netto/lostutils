@@ -43,6 +43,7 @@ DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
 DEFAULT_OCR_LANGUAGES = ("pt-br", "en", "es", "it", "fr", "de")
 DEFAULT_OCR_LANGUAGE_SCORE = 0.70
 DEFAULT_TESSERACT_PSM = "6"
+DEFAULT_PDF_OCR_MODE = "auto"
 PDF_VISION_MAX_PAGES = 5
 PDF_VISION_DPI = 150
 TEXT_CHARS_PER_TOKEN = 4
@@ -188,6 +189,22 @@ def _language_match_score(text: str, language: str) -> float:
     if best_other <= 0:
         return 1.0
     return target_score / (target_score + best_other)
+
+
+def _has_usable_extracted_text(text: str) -> bool:
+    compact = "".join(ch for ch in text if not ch.isspace())
+    if len(compact) < 80:
+        return False
+    alpha = sum(1 for ch in compact if ch.isalpha())
+    return alpha >= 30 and (alpha / max(1, len(compact))) >= 0.20
+
+
+def _should_pdf_ocr(config: "ModelConfig", pdf_text: str) -> bool:
+    if config.pdf_ocr_mode == "always":
+        return True
+    if config.pdf_ocr_mode == "never":
+        return False
+    return not _has_usable_extracted_text(pdf_text)
 
 
 def _ocr_language_backend_key(language: str) -> Tuple[str, str]:
@@ -344,6 +361,7 @@ class ModelConfig:
     ocr_language_score: float = DEFAULT_OCR_LANGUAGE_SCORE
     ocr_timeout_seconds: int = OCR_TIMEOUT_SECONDS
     tesseract_psm: str = DEFAULT_TESSERACT_PSM
+    pdf_ocr_mode: str = DEFAULT_PDF_OCR_MODE
     pdf_vision_max_pages: int = PDF_VISION_MAX_PAGES
     pdf_vision_dpi: int = PDF_VISION_DPI
     benchmark: bool = False
@@ -380,6 +398,7 @@ class ModelConfig:
             ocr_language_score=min(1.0, max(0.0, args.ocr_language_score)),
             ocr_timeout_seconds=max(1, args.ocr_timeout),
             tesseract_psm=str(args.tesseract_psm),
+            pdf_ocr_mode=args.pdf_ocr_mode,
             pdf_vision_max_pages=max(1, args.pdf_vision_pages),
             pdf_vision_dpi=max(36, args.pdf_vision_dpi),
             benchmark=args.benchmark,
@@ -1735,18 +1754,24 @@ def extract_from_pdf(
     )
     language, source = _language_for_text_with_source(pdf_text, runtime_config)
     _log_language_preanalysis(file_path, "PDF text", language, source)
-    ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, runtime_config)
-    ocr_language = ocr_chain[0]
-    _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
-    _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, runtime_config.ocr_language_score)
-    images = _timed_stage(
-        runtime_config, file_path, "pdf_render",
-        lambda: _pdf_to_images(file_path, runtime_config),
-    )
-    ocr_text = _timed_stage(
-        runtime_config, file_path, "pdf_ocr",
-        lambda: _pdf_ocr_text(images, runtime_config, ocr_language, ocr_chain, file_path.name),
-    )
+    images: List[bytes] = []
+    ocr_text = ""
+    if _should_pdf_ocr(runtime_config, pdf_text):
+        ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, runtime_config)
+        ocr_language = ocr_chain[0]
+        _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
+        _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, runtime_config.ocr_language_score)
+        images = _timed_stage(
+            runtime_config, file_path, "pdf_render",
+            lambda: _pdf_to_images(file_path, runtime_config),
+        )
+        ocr_text = _timed_stage(
+            runtime_config, file_path, "pdf_ocr",
+            lambda: _pdf_ocr_text(images, runtime_config, ocr_language, ocr_chain, file_path.name),
+        )
+    else:
+        logger.info("Skipping PDF OCR for %s: mode=%s, parsed text chars=%d",
+                    file_path.name, runtime_config.pdf_ocr_mode, len(pdf_text.strip()))
     text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
     if text.strip():
         language, source = _language_for_text_with_source(text, runtime_config)
@@ -1993,6 +2018,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=f"Seconds before one OCR engine call times out (default: {OCR_TIMEOUT_SECONDS}).")
     parser.add_argument("--tesseract-psm", default=defaults.tesseract_psm,
                         help=f"Tesseract page segmentation mode (default: {DEFAULT_TESSERACT_PSM}).")
+    parser.add_argument("--pdf-ocr-mode", choices=("auto", "always", "never"),
+                        default=defaults.pdf_ocr_mode,
+                        help=("PDF OCR policy: auto skips OCR when parsed text is usable; "
+                              "always matches the old precision-heavy behavior; never is text-only "
+                              f"(default: {DEFAULT_PDF_OCR_MODE})."))
     parser.add_argument("--pdf-vision-pages", type=int, default=defaults.pdf_vision_max_pages,
                         help=f"Max rendered PDF pages for OCR/vision fallback (default: {PDF_VISION_MAX_PAGES}).")
     parser.add_argument("--pdf-vision-dpi", type=int, default=defaults.pdf_vision_dpi,
