@@ -149,19 +149,43 @@ def _detect_language_from_text(text: str) -> Optional[str]:
     return language if score > 0 else None
 
 
-def _language_for_text(text: str, config: "ModelConfig") -> str:
+def _language_for_text_with_source(text: str, config: "ModelConfig") -> tuple:
     requested = _normalize_language(config.language)
     if requested != DEFAULT_LANGUAGE:
-        return requested
-    return _detect_language_from_text(text) or DEFAULT_LANGUAGE
+        return requested, "configured"
+    detected = _detect_language_from_text(text)
+    if detected:
+        return detected, "detected"
+    return DEFAULT_LANGUAGE, "llm-auto"
+
+
+def _language_for_text(text: str, config: "ModelConfig") -> str:
+    language, _source = _language_for_text_with_source(text, config)
+    return language
+
+
+def _language_for_ocr_with_source(seed_text: str, config: "ModelConfig") -> tuple:
+    language, source = _language_for_text_with_source(seed_text, config)
+    if language != DEFAULT_LANGUAGE:
+        return language, source
+    fallback = _normalize_language(config.ocr_fallback_language)
+    if fallback != DEFAULT_LANGUAGE:
+        return fallback, "ocr-fallback"
+    return DEFAULT_OCR_FALLBACK_LANGUAGE, "ocr-default"
 
 
 def _language_for_ocr(seed_text: str, config: "ModelConfig") -> str:
-    language = _language_for_text(seed_text, config)
-    if language != DEFAULT_LANGUAGE:
-        return language
-    fallback = _normalize_language(config.ocr_fallback_language)
-    return fallback if fallback != DEFAULT_LANGUAGE else DEFAULT_OCR_FALLBACK_LANGUAGE
+    language, _source = _language_for_ocr_with_source(seed_text, config)
+    return language
+
+
+def _log_language_preanalysis(file_path: Path, stage: str, language: str, source: str) -> None:
+    if language == DEFAULT_LANGUAGE:
+        logger.info("Language pre-analysis for %s [%s]: LLM auto-detect (%s)",
+                    file_path.name, stage, source)
+        return
+    logger.info("Language pre-analysis for %s [%s]: %s (%s) via %s",
+                file_path.name, stage, _language_name(language), language, source)
 
 
 def _language_instruction(language: str) -> str:
@@ -944,7 +968,8 @@ def extract_with_llm(
         return extract_from_image(file_path, llm_client=llm_client,
                                   model_config=runtime_config)
     content = _read_text(file_path, runtime_config.text_budget_chars())
-    language = _language_for_text(content, runtime_config)
+    language, source = _language_for_text_with_source(content, runtime_config)
+    _log_language_preanalysis(file_path, "text", language, source)
     return _run_llm(_text_messages(content, language), file_path, "Text/LLM",
                     llm_client, runtime_config)
 
@@ -955,13 +980,16 @@ def extract_from_image(
     model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
     runtime_config = model_config or ModelConfig()
-    ocr_language = _language_for_ocr("", runtime_config)
+    ocr_language, ocr_source = _language_for_ocr_with_source("", runtime_config)
+    _log_language_preanalysis(file_path, "image OCR", ocr_language, ocr_source)
     text = _ocr_image_path(file_path, runtime_config, ocr_language)
     if text.strip():
-        language = _language_for_text(text, runtime_config)
+        language, source = _language_for_text_with_source(text, runtime_config)
+        _log_language_preanalysis(file_path, "image OCR text", language, source)
         return _run_llm(_text_messages(text, language), file_path, "Image/OCR",
                         llm_client, runtime_config)
-    language = _language_for_text("", runtime_config)
+    language, source = _language_for_text_with_source("", runtime_config)
+    _log_language_preanalysis(file_path, "image vision", language, source)
     return _run_llm(_image_messages(file_path, language), file_path, "Image/Vision",
                     llm_client, runtime_config)
 
@@ -1023,19 +1051,23 @@ def extract_from_pdf(
     runtime_config = model_config or ModelConfig()
     text_budget = runtime_config.text_budget_chars()
     pdf_text = _pdf_text(file_path, text_budget)
-    language = _language_for_text(pdf_text, runtime_config)
-    ocr_language = _language_for_ocr(pdf_text, runtime_config)
+    language, source = _language_for_text_with_source(pdf_text, runtime_config)
+    _log_language_preanalysis(file_path, "PDF text", language, source)
+    ocr_language, ocr_source = _language_for_ocr_with_source(pdf_text, runtime_config)
+    _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
     images = _pdf_to_images(file_path, runtime_config)
     ocr_text = _pdf_ocr_text(images, runtime_config, ocr_language)
     text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
     if text.strip():
-        language = _language_for_text(text, runtime_config)
+        language, source = _language_for_text_with_source(text, runtime_config)
+        _log_language_preanalysis(file_path, "PDF merged text", language, source)
         event_type = "PDF/OCR" if ocr_text.strip() else "PDF"
         return _run_llm(_text_messages(text, language), file_path, event_type,
                         llm_client, runtime_config)
 
     events: List[Dict[str, Any]] = []
-    language = _language_for_text("", runtime_config)
+    language, source = _language_for_text_with_source("", runtime_config)
+    _log_language_preanalysis(file_path, "PDF vision", language, source)
     for data in images:
         events.extend(_run_llm(_image_messages_from_bytes(data, "image/png", language),
                                file_path, "PDF/Vision", llm_client, runtime_config))

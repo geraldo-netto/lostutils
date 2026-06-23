@@ -96,6 +96,19 @@ def test_extract_with_llm_uses_explicit_text_budget(tmp_path):
     assert "abcdef" not in prompt
 
 
+def test_extract_with_llm_logs_detected_language(tmp_path, caplog):
+    import logging
+
+    source = tmp_path / "event.txt"
+    source.write_text("Festa de São João no Porto", encoding="utf-8")
+    fake = FakeLlm()
+
+    with caplog.at_level(logging.INFO):
+        import_events.extract_with_llm(source, llm_client=fake)
+
+    assert "Language pre-analysis for event.txt [text]: Portuguese (pt) via detected" in caplog.text
+
+
 def test_normalize_event_date_returns_iso_strings():
     assert import_events.normalize_event_date(date(2026, 6, 6)) == "2026-06-06"
     assert import_events.normalize_event_date(
@@ -860,6 +873,28 @@ def test_extract_from_image_passes_fallback_language_to_ocr_and_detects_llm_lang
     assert "Portuguese (pt)" in fake.messages[0][1]["content"]
 
 
+def test_extract_from_image_logs_ocr_and_post_ocr_languages(tmp_path, monkeypatch, caplog):
+    import logging
+
+    img = tmp_path / "poster.png"
+    img.write_bytes(b"image")
+    fake = FakeLlm('[{"title": "Festa", "start": "2026-06-22"}]')
+    monkeypatch.setattr(
+        import_events, "_ocr_image_path",
+        lambda path, config=None, language="en": "Festa de São João no Porto",
+    )
+
+    with caplog.at_level(logging.INFO):
+        import_events.extract_from_image(
+            img,
+            llm_client=fake,
+            model_config=import_events.ModelConfig(ocr_fallback_language="it"),
+        )
+
+    assert "Language pre-analysis for poster.png [image OCR]: Italian (it) via ocr-fallback" in caplog.text
+    assert "Language pre-analysis for poster.png [image OCR text]: Portuguese (pt) via detected" in caplog.text
+
+
 def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypatch):
     img = tmp_path / "poster.png"
     img.write_bytes(b"image")
@@ -871,6 +906,21 @@ def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypat
 
     assert events[0]["type"] == "Image/Vision"
     assert "image_url" in json.dumps(fake.messages[0])
+
+
+def test_extract_from_image_logs_vision_auto_language(tmp_path, monkeypatch, caplog):
+    import logging
+
+    img = tmp_path / "poster.png"
+    img.write_bytes(b"image")
+    fake = FakeLlm('[{"title": "Vision Event", "start": "2026-06-22"}]')
+    monkeypatch.setattr(import_events, "_ocr_image_path",
+                        lambda path, config=None, language="en": "")
+
+    with caplog.at_level(logging.INFO):
+        import_events.extract_from_image(img, llm_client=fake)
+
+    assert "Language pre-analysis for poster.png [image vision]: LLM auto-detect (llm-auto)" in caplog.text
 
 
 def test_extract_from_image_passes_language_to_vision_prompt(tmp_path, monkeypatch):
@@ -1891,6 +1941,28 @@ def test_extract_from_pdf_detects_language_before_ocr(monkeypatch):
     assert seen["language"] == "pt"
     assert events[0]["type"] == "PDF/OCR"
     assert "Portuguese (pt)" in fake.messages[0][1]["content"]
+
+
+def test_extract_from_pdf_logs_language_preanalysis(monkeypatch, caplog):
+    import logging
+
+    fake = FakeLlm('[{"title": "Festa", "start": "2026-06-22"}]')
+    monkeypatch.setattr(
+        import_events, "_pdf_text",
+        lambda path, max_chars=import_events.MAX_CONTENT_CHARS: "Festa de São João no Porto",
+    )
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [b"page"])
+    monkeypatch.setattr(
+        import_events, "_ocr_image_bytes",
+        lambda data, config=None, language="en": "música",
+    )
+
+    with caplog.at_level(logging.INFO):
+        import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
+
+    assert "Language pre-analysis for agenda.pdf [PDF text]: Portuguese (pt) via detected" in caplog.text
+    assert "Language pre-analysis for agenda.pdf [PDF OCR]: Portuguese (pt) via detected" in caplog.text
+    assert "Language pre-analysis for agenda.pdf [PDF merged text]: Portuguese (pt) via detected" in caplog.text
 
 
 def test_extract_from_pdf_falls_back_to_vision_after_empty_ocr(monkeypatch):
