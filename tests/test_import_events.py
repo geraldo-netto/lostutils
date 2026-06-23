@@ -141,6 +141,37 @@ def test_extract_with_llm_threads_generation_limits(tmp_path):
     assert fake.kwargs[0]["top_p"] == 1.0
 
 
+def test_run_llm_logs_model_name_stage_and_completion(caplog):
+    import logging
+
+    cfg = import_events.ModelConfig(
+        model_path="/private/cache/Model.gguf",
+        clip_path="/private/cache/Projector.gguf",
+        llm_context_size=2048,
+        llm_max_tokens=77,
+        llm_gpu_layers=12,
+        llm_main_gpu=1,
+        llm_mlock=True,
+    )
+
+    with caplog.at_level(logging.INFO):
+        events = import_events._run_llm(
+            [{"role": "user", "content": "Launch"}],
+            Path("event.txt"),
+            "Text/LLM",
+            FakeLlm(),
+            cfg,
+        )
+
+    assert events[0]["title"] == "Launch"
+    assert "Starting LLM extraction for event.txt [Text/LLM]: model=Model.gguf" in caplog.text
+    assert "projector=Projector.gguf" in caplog.text
+    assert "n_ctx=2048" in caplog.text
+    assert "max_tokens=77" in caplog.text
+    assert "Completed LLM extraction for event.txt [Text/LLM]: model=Model.gguf" in caplog.text
+    assert "/private/cache" not in caplog.text
+
+
 def test_run_llm_suppresses_client_output_when_not_verbose(capsys):
     import sys
 
@@ -1766,7 +1797,7 @@ def test_run_text_llm_uses_stage_cache_without_real_model(tmp_path, monkeypatch)
     cfg = import_events.ModelConfig(stage_cache="on", stage_cache_dir=str(tmp_path / "cache"))
     calls = []
 
-    def fake_response(messages, file_path, llm_client, model_config=None):
+    def fake_response(messages, file_path, event_type, llm_client, model_config=None):
         calls.append(messages)
         return '[{"title": "Launch", "start": "2026-06-06"}]'
 
@@ -2240,7 +2271,7 @@ def test_model_config_from_args_threads_values():
          "--model-sha256", "a" * 64, "--clip-sha256", "b" * 64,
          "--llm-cache-size", "2", "--llm-context", "3072",
          "--llm-max-tokens", "123", "--llm-gpu-layers", "12",
-         "--llm-main-gpu", "1", "--max-content-chars", "456",
+         "--llm-main-gpu", "1", "--mlock", "--max-content-chars", "456",
          "--llm-verbose", "--language", "Portuguese",
          "--ocr-fallback-language", "Spanish", "--ocr-timeout", "9",
          "--ocr-languages", "Brazilian Portuguese,English,German",
@@ -2265,6 +2296,7 @@ def test_model_config_from_args_threads_values():
     assert cfg.llm_max_tokens == 123
     assert cfg.llm_gpu_layers == 12
     assert cfg.llm_main_gpu == 1
+    assert cfg.llm_mlock is True
     assert cfg.llm_verbose is True
     assert cfg.max_content_chars == 456
     assert cfg.language == "pt"
@@ -2300,6 +2332,42 @@ def test_model_config_default_text_budget_is_64k():
     assert import_events.DEFAULT_LLM_CONTEXT_SIZE == 0
     assert import_events.MAX_CONTENT_CHARS == 65536
     assert cfg.text_budget_chars() == 65536
+
+
+def test_parse_cgroup_memory_limit_rejects_unbounded_values():
+    assert import_events._parse_cgroup_memory_limit("max") is None
+    assert import_events._parse_cgroup_memory_limit("") is None
+    assert import_events._parse_cgroup_memory_limit(str(import_events.CGROUP_UNLIMITED_MEMORY_BYTES)) is None
+    assert import_events._parse_cgroup_memory_limit("1048576") == 1048576
+
+
+def test_environment_memory_prefers_cgroup_limit(tmp_path, monkeypatch):
+    memory_max = tmp_path / "memory.max"
+    memory_max.write_text("1024", encoding="utf-8")
+    monkeypatch.setattr(import_events, "CGROUP_MEMORY_LIMIT_PATHS", (memory_max,))
+    monkeypatch.setattr(import_events, "_physical_memory_bytes", lambda: 2048)
+
+    assert import_events._environment_memory_bytes() == 1024
+
+
+def test_enable_fault_tracebacks_uses_dedicated_stderr_fd(monkeypatch):
+    fake_file = object()
+    calls = []
+    monkeypatch.setattr(import_events, "_FAULT_TRACEBACK_FILE", None)
+    monkeypatch.setattr(import_events, "_FAULT_TRACEBACKS_ENABLED", False)
+    monkeypatch.setattr(import_events.os, "dup", lambda fd: 99)
+    monkeypatch.setattr(import_events.os, "fdopen", lambda fd, mode: fake_file)
+    monkeypatch.setattr(
+        import_events.faulthandler,
+        "enable",
+        lambda file, all_threads: calls.append((file, all_threads)),
+    )
+
+    import_events._enable_fault_tracebacks()
+
+    assert calls == [(fake_file, True)]
+    assert import_events._FAULT_TRACEBACK_FILE is fake_file
+    assert import_events._FAULT_TRACEBACKS_ENABLED is True
 
 
 def test_default_cache_dir_prefers_import_events_cache_dir(tmp_path, monkeypatch):
@@ -2347,6 +2415,7 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.llm_max_tokens == import_events.DEFAULT_LLM_MAX_TOKENS
     assert cfg.llm_gpu_layers == import_events.DEFAULT_LLM_GPU_LAYERS
     assert cfg.llm_main_gpu == import_events.DEFAULT_LLM_MAIN_GPU
+    assert cfg.llm_mlock is import_events.DEFAULT_LLM_MLOCK
     assert cfg.llm_verbose is False
     assert cfg.max_content_chars is None
     assert cfg.language == import_events.DEFAULT_LANGUAGE
@@ -2665,7 +2734,8 @@ def test_get_llm_threads_config_paths(monkeypatch, caplog):
         "n_ctx": import_events.DEFAULT_LLM_CONTEXT_SIZE,
         "n_gpu_layers": import_events.DEFAULT_LLM_GPU_LAYERS,
     }
-    assert "Using LLM GPU backend: n_gpu_layers=-1, main_gpu=0." in caplog.text
+    assert "Loading LLM model: model=MM.gguf, projector=CC.gguf" in caplog.text
+    assert "Using LLM GPU backend for model MM.gguf: n_gpu_layers=-1, main_gpu=0." in caplog.text
 
 
 def test_prepare_vulkan_environment_moves_deprecated_radv_flags():
@@ -2726,7 +2796,7 @@ def test_get_llm_falls_back_to_cpu_when_gpu_init_fails(monkeypatch, caplog):
     assert created == [import_events.DEFAULT_LLM_GPU_LAYERS, 0]
     assert client.n_gpu_layers == 0
     assert "falling back to CPU" in caplog.text
-    assert "Using LLM CPU backend." in caplog.text
+    assert "Using LLM CPU backend for model A.gguf." in caplog.text
 
 
 def test_get_llm_uses_cpu_when_gpu_backend_missing(monkeypatch, caplog):
@@ -2762,7 +2832,7 @@ def test_get_llm_uses_cpu_when_gpu_backend_missing(monkeypatch, caplog):
 
     assert created == [0]
     assert "no GPU backend" in caplog.text
-    assert "Using LLM CPU backend." in caplog.text
+    assert "Using LLM CPU backend for model A.gguf." in caplog.text
 
 
 def test_get_llm_preserves_keyboard_interrupt_during_gpu_init(monkeypatch):
@@ -2871,12 +2941,13 @@ def _install_fake_llama(monkeypatch, created, closed):
 
     class FakeLlama:
         def __init__(self, model_path, chat_handler, n_ctx, n_gpu_layers=0,
-                     main_gpu=0, verbose=True):
+                     main_gpu=0, verbose=True, use_mlock=False):
             self.model_path = model_path
             self.n_ctx = n_ctx
             self.n_gpu_layers = n_gpu_layers
             self.main_gpu = main_gpu
             self.verbose = verbose
+            self.use_mlock = use_mlock
             created.append(model_path)
 
         def close(self):
@@ -2893,6 +2964,75 @@ def _install_fake_llama(monkeypatch, created, closed):
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
+
+
+def test_get_llm_enables_mlock_within_memory_budget(tmp_path, monkeypatch, caplog):
+    import logging
+
+    model = tmp_path / "model.gguf"
+    clip = tmp_path / "clip.gguf"
+    model.write_bytes(b"m" * 60)
+    clip.write_bytes(b"c" * 10)
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+    monkeypatch.setattr(import_events, "_environment_memory_bytes", lambda: 100)
+
+    with caplog.at_level(logging.INFO):
+        client = import_events.get_llm(import_events.ModelConfig(
+            model_path=str(model), clip_path=str(clip), llm_cache_size=0,
+            llm_mlock=True))
+
+    assert client.use_mlock is True
+    assert "Using llama.cpp mlock" in caplog.text
+
+
+def test_get_llm_skips_mlock_over_memory_budget(tmp_path, monkeypatch, caplog):
+    import logging
+
+    model = tmp_path / "model.gguf"
+    clip = tmp_path / "clip.gguf"
+    model.write_bytes(b"m" * 71)
+    clip.write_bytes(b"")
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+    monkeypatch.setattr(import_events, "_environment_memory_bytes", lambda: 100)
+
+    with caplog.at_level(logging.WARNING):
+        client = import_events.get_llm(import_events.ModelConfig(
+            model_path=str(model), clip_path=str(clip), llm_cache_size=0,
+            llm_mlock=True))
+
+    assert client.use_mlock is False
+    assert "exceeds 70% memory budget" in caplog.text
+
+
+def test_get_llm_cache_key_includes_mlock_request(tmp_path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    clip = tmp_path / "clip.gguf"
+    model.write_bytes(b"m")
+    clip.write_bytes(b"c")
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+    monkeypatch.setattr(import_events, "_environment_memory_bytes", lambda: 100)
+
+    base = import_events.ModelConfig(
+        model_path=str(model), clip_path=str(clip), llm_cache_size=2)
+    locked = import_events.ModelConfig(
+        model_path=str(model), clip_path=str(clip), llm_cache_size=2,
+        llm_mlock=True)
+
+    first = import_events.get_llm(base)
+    second = import_events.get_llm(locked)
+
+    assert second is not first
+    assert first.use_mlock is False
+    assert second.use_mlock is True
 
 
 def test_get_llm_default_cache_size_evicts_previous_config(monkeypatch):
@@ -2948,6 +3088,7 @@ def test_get_llm_cache_size_zero_evicts_existing_entry(monkeypatch):
                 import_events.DEFAULT_LLM_CONTEXT_SIZE,
                 import_events.DEFAULT_LLM_GPU_LAYERS,
                 import_events.DEFAULT_LLM_MAIN_GPU,
+                import_events.DEFAULT_LLM_MLOCK,
                 False,
             ),
             existing,

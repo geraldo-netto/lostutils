@@ -37,8 +37,10 @@ Language handling:
   included in the LLM prompt.
 
 Useful runtime knobs include `--llm-context`, `--max-content-chars`,
-`--llm-max-tokens`, `--ocr-languages`, `--ocr-language-score`,
+`--llm-max-tokens`, `--mlock`, `--ocr-languages`, `--ocr-language-score`,
 `--ocr-timeout`, `--tesseract-psm`, `--pdf-vision-pages`, and
 `--pdf-vision-dpi`. When `--max-content-chars` is omitted, the text budget is
 computed from the selected LLM context size. The default `--llm-context 0`
 lets llama.cpp use the model-native context window.
+`--mlock` is opt-in and is skipped automatically when the model plus projector
+files would exceed 70% of the memory limit visible to the process.

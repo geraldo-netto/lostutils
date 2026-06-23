@@ -13,6 +13,7 @@ import hashlib
 import secrets
 import logging
 import argparse
+import faulthandler
 import tempfile
 import unicodedata
 import contextlib
@@ -38,6 +39,8 @@ DEFAULT_LLM_CONTEXT_SIZE = 0
 DEFAULT_LLM_MAX_TOKENS = 512
 DEFAULT_LLM_GPU_LAYERS = -1
 DEFAULT_LLM_MAIN_GPU = 0
+DEFAULT_LLM_MLOCK = False
+LLM_MLOCK_MEMORY_FRACTION = 0.70
 DOWNLOAD_CHUNK_SIZE = 1 << 20
 DOWNLOAD_PROGRESS_BYTES = 256 << 20
 DOWNLOAD_TIMEOUT_SECONDS = 30
@@ -67,6 +70,11 @@ MAX_CONTEXT_TEXT_CHARS = 65536
 GGUF_METADATA_SCAN_BYTES = 1 << 20
 MTMD_PROJECTOR_METADATA = b"clip.projector_type"
 RADV_DEPRECATED_PERFTEST_FLAGS = ("video_decode", "video_encode")
+CGROUP_UNLIMITED_MEMORY_BYTES = 1 << 60
+CGROUP_MEMORY_LIMIT_PATHS = (
+    Path("/sys/fs/cgroup/memory.max"),
+    Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+)
 
 _LANGUAGE_CODE_RE = re.compile(r"^[a-z][a-z0-9_+.-]{0,31}$")
 _LANGUAGE_ALIASES = {
@@ -182,6 +190,154 @@ def _default_cache_dir() -> Path:
     base = os.environ.get("XDG_CACHE_HOME")
     root = Path(base).expanduser() if base else Path.home() / ".cache"
     return root / "lostutils" / "import_events"
+
+
+def _parse_cgroup_memory_limit(value: str) -> Optional[int]:
+    raw = value.strip()
+    if raw == "max" or not raw:
+        return None
+    try:
+        limit = int(raw)
+    except ValueError:
+        return None
+    if limit <= 0 or limit >= CGROUP_UNLIMITED_MEMORY_BYTES:
+        return None
+    return limit
+
+
+def _cgroup_memory_limit_bytes(paths: Optional[Iterable[Path]] = None) -> Optional[int]:
+    limits = []
+    for path in (paths if paths is not None else CGROUP_MEMORY_LIMIT_PATHS):
+        try:
+            parsed = _parse_cgroup_memory_limit(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if parsed is not None:
+            limits.append(parsed)
+    return min(limits) if limits else None
+
+
+def _physical_memory_bytes() -> Optional[int]:
+    try:
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError):
+        return None
+    if pages <= 0 or page_size <= 0:
+        return None
+    return pages * page_size
+
+
+def _environment_memory_bytes() -> Optional[int]:
+    candidates = [
+        value for value in (_cgroup_memory_limit_bytes(), _physical_memory_bytes())
+        if value is not None
+    ]
+    return min(candidates) if candidates else None
+
+
+def _format_bytes(value: int) -> str:
+    amount = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024.0 or unit == "TiB":
+            return f"{amount:.1f} {unit}"
+        amount /= 1024.0
+    return f"{value} B"
+
+
+def _path_basename(path: str) -> str:
+    name = Path(path).name
+    return name if name else path
+
+
+def _llm_model_name(config: "ModelConfig") -> str:
+    return _path_basename(config.model_path)
+
+
+def _llm_projector_name(config: "ModelConfig") -> str:
+    return _path_basename(config.clip_path)
+
+
+def _llm_mlock_status(config: "ModelConfig") -> str:
+    return "requested" if config.llm_mlock else "off"
+
+
+def _log_llm_runtime_config(config: "ModelConfig") -> None:
+    logger.info(
+        "LLM configured: model=%s, projector=%s, n_ctx=%s, max_tokens=%d, "
+        "gpu_layers=%s, main_gpu=%d, mlock=%s.",
+        _llm_model_name(config),
+        _llm_projector_name(config),
+        config.llm_context_size,
+        config.llm_max_tokens,
+        config.llm_gpu_layers,
+        config.llm_main_gpu,
+        _llm_mlock_status(config),
+    )
+
+
+def _log_llm_request_start(file_path: Path, event_type: str, config: "ModelConfig") -> None:
+    logger.info(
+        "Starting LLM extraction for %s [%s]: model=%s, projector=%s, "
+        "n_ctx=%s, max_tokens=%d, gpu_layers=%s, main_gpu=%d, mlock=%s.",
+        file_path.name,
+        event_type,
+        _llm_model_name(config),
+        _llm_projector_name(config),
+        config.llm_context_size,
+        config.llm_max_tokens,
+        config.llm_gpu_layers,
+        config.llm_main_gpu,
+        _llm_mlock_status(config),
+    )
+
+
+def _log_llm_request_done(file_path: Path, event_type: str, config: "ModelConfig", text: str) -> None:
+    logger.info(
+        "Completed LLM extraction for %s [%s]: model=%s, response_chars=%d.",
+        file_path.name,
+        event_type,
+        _llm_model_name(config),
+        len(text),
+    )
+
+
+def _llm_lock_estimate_bytes(config: "ModelConfig") -> Optional[int]:
+    seen = set()
+    total = 0
+    for path_str in (config.model_path, config.clip_path):
+        path = Path(path_str)
+        key = str(path.expanduser().resolve(strict=False))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            total += path.stat().st_size
+        except OSError as exc:
+            logger.warning("Cannot estimate llama.cpp mlock size for %s: %s", path, exc)
+            return None
+    return total
+
+
+def _should_use_llm_mlock(config: "ModelConfig") -> bool:
+    if not config.llm_mlock:
+        return False
+    estimate = _llm_lock_estimate_bytes(config)
+    environment_memory = _environment_memory_bytes()
+    if estimate is None or environment_memory is None:
+        logger.warning("llama.cpp mlock requested but memory budget could not be verified; loading without mlock.")
+        return False
+    budget = int(environment_memory * LLM_MLOCK_MEMORY_FRACTION)
+    if estimate <= budget:
+        logger.info("Using llama.cpp mlock: estimated lock %s within 70%% memory budget %s.",
+                    _format_bytes(estimate), _format_bytes(budget))
+        return True
+    logger.warning(
+        "llama.cpp mlock requested but estimated lock %s exceeds 70%% memory budget %s; loading without mlock.",
+        _format_bytes(estimate),
+        _format_bytes(budget),
+    )
+    return False
 
 
 def _normalize_language(value: Optional[str]) -> str:
@@ -478,6 +634,7 @@ class ModelConfig:
     llm_max_tokens: int = DEFAULT_LLM_MAX_TOKENS
     llm_gpu_layers: int = DEFAULT_LLM_GPU_LAYERS
     llm_main_gpu: int = DEFAULT_LLM_MAIN_GPU
+    llm_mlock: bool = DEFAULT_LLM_MLOCK
     llm_verbose: bool = False
     max_content_chars: Optional[int] = None
     language: str = DEFAULT_LANGUAGE
@@ -524,6 +681,7 @@ class ModelConfig:
             llm_max_tokens=max(1, args.llm_max_tokens),
             llm_gpu_layers=args.llm_gpu_layers,
             llm_main_gpu=max(0, args.llm_main_gpu),
+            llm_mlock=bool(args.llm_mlock),
             llm_verbose=args.llm_verbose,
             max_content_chars=(max(1, args.max_content_chars)
                                if args.max_content_chars is not None else None),
@@ -581,6 +739,8 @@ MAX_CONTENT_CHARS = _text_budget_from_context(DEFAULT_LLM_CONTEXT_SIZE,
 _LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
 _LLM_CACHE_LOCK = threading.RLock()
 _LLM_REQUEST_LOCK = threading.Lock()
+_FAULT_TRACEBACK_FILE: Optional[Any] = None
+_FAULT_TRACEBACKS_ENABLED = False
 _OUTPUT_REDIRECT_LOCK = threading.RLock()
 _OCR_WARNING_LOCK = threading.Lock()
 _PADDLE_OCR_LOCK = threading.Lock()
@@ -913,14 +1073,28 @@ def _new_llm_client(config: ModelConfig, Llama: Any,
             clip_model_path=config.clip_path,
             verbose=config.llm_verbose,
         )
-        return Llama(
-            model_path=config.model_path,
-            chat_handler=chat_handler,
-            n_ctx=config.llm_context_size,
-            n_gpu_layers=gpu_layers,
-            main_gpu=config.llm_main_gpu,
-            verbose=config.llm_verbose,
+        use_mlock = _should_use_llm_mlock(config)
+        logger.info(
+            "Loading LLM model: model=%s, projector=%s, n_ctx=%s, "
+            "n_gpu_layers=%s, main_gpu=%d, mlock=%s.",
+            _llm_model_name(config),
+            _llm_projector_name(config),
+            config.llm_context_size,
+            gpu_layers,
+            config.llm_main_gpu,
+            "on" if use_mlock else "off",
         )
+        kwargs = {
+            "model_path": config.model_path,
+            "chat_handler": chat_handler,
+            "n_ctx": config.llm_context_size,
+            "n_gpu_layers": gpu_layers,
+            "main_gpu": config.llm_main_gpu,
+            "verbose": config.llm_verbose,
+        }
+        if use_mlock:
+            kwargs["use_mlock"] = True
+        return Llama(**kwargs)
 
 
 def _llm_supports_gpu_offload(llama_cpp: Any) -> bool:
@@ -930,10 +1104,10 @@ def _llm_supports_gpu_offload(llama_cpp: Any) -> bool:
 
 def _log_llm_device(config: ModelConfig, effective_gpu_layers: int) -> None:
     if effective_gpu_layers == 0:
-        logger.info("Using LLM CPU backend.")
+        logger.info("Using LLM CPU backend for model %s.", _llm_model_name(config))
         return
-    logger.info("Using LLM GPU backend: n_gpu_layers=%s, main_gpu=%d.",
-                effective_gpu_layers, config.llm_main_gpu)
+    logger.info("Using LLM GPU backend for model %s: n_gpu_layers=%s, main_gpu=%d.",
+                _llm_model_name(config), effective_gpu_layers, config.llm_main_gpu)
 
 
 def _load_llm_client(config: ModelConfig, Llama: Any,
@@ -962,6 +1136,7 @@ def get_llm(config: Optional[ModelConfig] = None):
         config.llm_context_size,
         config.llm_gpu_layers,
         config.llm_main_gpu,
+        config.llm_mlock,
         config.llm_verbose,
     )
     cache_limit = max(0, config.llm_cache_size)
@@ -2147,11 +2322,13 @@ def _create_chat_completion(client: Any, messages: List[Any], config: ModelConfi
 def _llm_response_text(
     messages: List[Any],
     file_path: Path,
+    event_type: str,
     llm_client: Optional[Any],
     model_config: Optional[ModelConfig] = None,
 ) -> Optional[str]:
     runtime_config = model_config or ModelConfig()
     try:
+        _log_llm_request_start(file_path, event_type, runtime_config)
         client = get_llm(runtime_config) if llm_client is None else llm_client
         # llama.cpp generation diagnostics can include the full prompt; keep
         # request output quiet even when model-load diagnostics are enabled.
@@ -2162,7 +2339,9 @@ def _llm_response_text(
                 "llm",
                 lambda: _create_chat_completion(client, messages, runtime_config),
             )
-        return response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        text = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        _log_llm_request_done(file_path, event_type, runtime_config, text)
+        return text
     except Exception as e:
         _record_extraction_failure(file_path, e, "LLM Error processing")
         return None
@@ -2176,7 +2355,7 @@ def _run_llm(
     model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
     runtime_config = model_config or ModelConfig()
-    text_output = _llm_response_text(messages, file_path, llm_client, model_config)
+    text_output = _llm_response_text(messages, file_path, event_type, llm_client, model_config)
     if text_output is None:
         return []
     return _filter_events_by_policy(
@@ -2210,7 +2389,7 @@ def _run_text_llm(
             return _filter_events_by_policy(
                 parse_llm_events(cached, file_path, event_type), runtime_config)
     text_output = _llm_response_text(_text_messages(content, language, runtime_config), file_path,
-                                     llm_client, runtime_config)
+                                     event_type, llm_client, runtime_config)
     if text_output is None:
         return []
     if llm_client is None:
@@ -2811,6 +2990,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                               f"as possible, 0 forces CPU (default: {DEFAULT_LLM_GPU_LAYERS})."))
     parser.add_argument("--llm-main-gpu", type=int, default=defaults.llm_main_gpu,
                         help=f"Main GPU index for llama.cpp offload (default: {DEFAULT_LLM_MAIN_GPU}).")
+    parser.add_argument("--mlock", "--llm-mlock", dest="llm_mlock", action="store_true",
+                        default=defaults.llm_mlock,
+                        help=("Ask llama.cpp to lock model memory only when the estimated "
+                              "GGUF footprint is at most 70% of environment memory."))
     parser.add_argument("--max-content-chars", type=int, default=None,
                         help=("Max text characters sent to the LLM per file "
                               "(default: computed from --llm-context)."))
@@ -2891,6 +3074,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 def _run_main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     model_config = ModelConfig.from_args(args)
+    _log_llm_runtime_config(model_config)
+    _enable_fault_tracebacks()
     reset_extraction_failures()
 
     folder = Path(args.directory)
@@ -2923,6 +3108,20 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
 
 def _configure_logging() -> None:
     logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+
+
+def _enable_fault_tracebacks() -> None:
+    global _FAULT_TRACEBACK_FILE, _FAULT_TRACEBACKS_ENABLED
+    if _FAULT_TRACEBACKS_ENABLED:
+        return
+    try:
+        _FAULT_TRACEBACK_FILE = os.fdopen(os.dup(2), "w")
+        faulthandler.enable(file=_FAULT_TRACEBACK_FILE, all_threads=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        logger.warning("Could not enable fatal-signal tracebacks: %s", exc)
+        return
+    _FAULT_TRACEBACKS_ENABLED = True
+    logger.info("Fatal-signal tracebacks enabled for native crashes.")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
