@@ -45,6 +45,8 @@ DEFAULT_OCR_LANGUAGE_SCORE = 0.70
 DEFAULT_TESSERACT_PSM = "6"
 DEFAULT_OCR_ENGINE = "auto"
 DEFAULT_PDF_OCR_MODE = "auto"
+DEFAULT_STAGE_CACHE = "off"
+STAGE_CACHE_VERSION = 1
 PDF_VISION_MAX_PAGES = 5
 PDF_VISION_DPI = 150
 TEXT_CHARS_PER_TOKEN = 4
@@ -374,6 +376,8 @@ class ModelConfig:
     pdf_ocr_mode: str = DEFAULT_PDF_OCR_MODE
     pdf_vision_max_pages: int = PDF_VISION_MAX_PAGES
     pdf_vision_dpi: int = PDF_VISION_DPI
+    stage_cache: str = DEFAULT_STAGE_CACHE
+    stage_cache_dir: Optional[str] = None
     benchmark: bool = False
 
     @classmethod
@@ -412,6 +416,8 @@ class ModelConfig:
             pdf_ocr_mode=args.pdf_ocr_mode,
             pdf_vision_max_pages=max(1, args.pdf_vision_pages),
             pdf_vision_dpi=max(36, args.pdf_vision_dpi),
+            stage_cache=args.stage_cache,
+            stage_cache_dir=(args.stage_cache_dir or str(cache_dir / "stage-cache")),
             benchmark=args.benchmark,
         )
 
@@ -1405,6 +1411,87 @@ def _timed_stage(config: ModelConfig, subject: Path, stage: str, work: Callable[
         logger.info("Timing for %s [%s]: %.3fs", subject.name, stage, elapsed)
 
 
+def _file_sha256(file_path: Path) -> Optional[str]:
+    if not file_path.exists():
+        return None
+    digest = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(DOWNLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _stage_cache_root(config: ModelConfig) -> Path:
+    if config.stage_cache_dir:
+        return Path(config.stage_cache_dir).expanduser()
+    return _default_cache_dir() / "stage-cache"
+
+
+def _stage_cache_key(file_path: Path, stage: str, options: Dict[str, Any]) -> Optional[str]:
+    file_digest = _file_sha256(file_path)
+    if file_digest is None:
+        return None
+    payload = {
+        "version": STAGE_CACHE_VERSION,
+        "stage": stage,
+        "file_sha256": file_digest,
+        "options": options,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _stage_cache_path(config: ModelConfig, cache_key: str) -> Path:
+    return _stage_cache_root(config) / f"{cache_key}.json"
+
+
+def _read_stage_cache_text(config: ModelConfig, file_path: Path, stage: str,
+                           options: Dict[str, Any]) -> Optional[str]:
+    if config.stage_cache in {"off", "refresh"}:
+        return None
+    cache_key = _stage_cache_key(file_path, stage, options)
+    if cache_key is None:
+        return None
+    try:
+        data = json.loads(_stage_cache_path(config, cache_key).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    text = data.get("text") if isinstance(data, dict) else None
+    if isinstance(text, str):
+        logger.info("Stage cache hit for %s [%s]", file_path.name, stage)
+        return text
+    return None
+
+
+def _write_stage_cache_text(config: ModelConfig, file_path: Path, stage: str,
+                            options: Dict[str, Any], text: str) -> None:
+    if config.stage_cache == "off":
+        return
+    cache_key = _stage_cache_key(file_path, stage, options)
+    if cache_key is None:
+        return
+    cache_path = _stage_cache_path(config, cache_key)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps({"text": text}, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    _atomic_write_bytes(cache_path, payload)
+
+
+def _cached_text_stage(config: ModelConfig, file_path: Path, stage: str,
+                       options: Dict[str, Any], work: Callable[[], str]) -> str:
+    cached = _read_stage_cache_text(config, file_path, stage, options)
+    if cached is not None:
+        return cached
+    text = work()
+    _write_stage_cache_text(config, file_path, stage, options, text)
+    return text
+
+
 def _merge_text_blocks(blocks: List[str], max_chars: int = MAX_CONTENT_CHARS) -> str:
     seen = set()
     merged: List[str] = []
@@ -1622,13 +1709,12 @@ def _ocr_image_bytes(
             pass
 
 
-def _run_llm(
+def _llm_response_text(
     messages: List[Any],
     file_path: Path,
-    event_type: str,
     llm_client: Optional[Any],
     model_config: Optional[ModelConfig] = None,
-) -> List[Dict[str, Any]]:
+) -> Optional[str]:
     runtime_config = model_config or ModelConfig()
     try:
         client = get_llm(runtime_config) if llm_client is None else llm_client
@@ -1645,11 +1731,53 @@ def _run_llm(
                     top_p=1.0,
                 ),
             )
-        text_output = response.get("choices", [{}])[0].get("message", {}).get("content", "")
-        return parse_llm_events(text_output, file_path, event_type)
+        return response.get("choices", [{}])[0].get("message", {}).get("content", "")
     except Exception as e:
         _record_extraction_failure(file_path, e, "LLM Error processing")
+        return None
+
+
+def _run_llm(
+    messages: List[Any],
+    file_path: Path,
+    event_type: str,
+    llm_client: Optional[Any],
+    model_config: Optional[ModelConfig] = None,
+) -> List[Dict[str, Any]]:
+    text_output = _llm_response_text(messages, file_path, llm_client, model_config)
+    if text_output is None:
         return []
+    return parse_llm_events(text_output, file_path, event_type)
+
+
+def _run_text_llm(
+    content: str,
+    language: str,
+    file_path: Path,
+    event_type: str,
+    llm_client: Optional[Any],
+    model_config: Optional[ModelConfig] = None,
+) -> List[Dict[str, Any]]:
+    runtime_config = model_config or ModelConfig()
+    cache_options = {
+        "event_type": event_type,
+        "language": language,
+        "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        "model_path": runtime_config.model_path,
+        "llm_context_size": runtime_config.llm_context_size,
+        "llm_max_tokens": runtime_config.llm_max_tokens,
+    }
+    if llm_client is None:
+        cached = _read_stage_cache_text(runtime_config, file_path, "llm_text", cache_options)
+        if cached is not None:
+            return parse_llm_events(cached, file_path, event_type)
+    text_output = _llm_response_text(_text_messages(content, language), file_path,
+                                     llm_client, runtime_config)
+    if text_output is None:
+        return []
+    if llm_client is None:
+        _write_stage_cache_text(runtime_config, file_path, "llm_text", cache_options, text_output)
+    return parse_llm_events(text_output, file_path, event_type)
 
 
 def extract_with_llm(
@@ -1670,8 +1798,8 @@ def extract_with_llm(
     language, source = _language_for_text_with_source(content, runtime_config)
     _log_language_preanalysis(file_path, "text", language, source)
     prepared = _prepare_text_for_llm(content, runtime_config.text_budget_chars())
-    return _run_llm(_text_messages(prepared, language), file_path, "Text/LLM",
-                    llm_client, runtime_config)
+    return _run_text_llm(prepared, language, file_path, "Text/LLM",
+                         llm_client, runtime_config)
 
 
 def extract_from_image(
@@ -1692,8 +1820,8 @@ def extract_from_image(
         language, source = _language_for_text_with_source(text, runtime_config)
         _log_language_preanalysis(file_path, "image OCR text", language, source)
         prepared = _prepare_text_for_llm(text, runtime_config.text_budget_chars())
-        return _run_llm(_text_messages(prepared, language), file_path, "Image/OCR",
-                        llm_client, runtime_config)
+        return _run_text_llm(prepared, language, file_path, "Image/OCR",
+                             llm_client, runtime_config)
     language, source = _language_for_text_with_source("", runtime_config)
     _log_language_preanalysis(file_path, "image vision", language, source)
     return _run_llm(_image_messages(file_path, language), file_path, "Image/Vision",
@@ -1759,6 +1887,19 @@ def _pdf_ocr_text(
     )
 
 
+def _pdf_ocr_from_file(
+    file_path: Path,
+    config: ModelConfig,
+    language: str,
+    language_chain: Tuple[str, ...],
+) -> str:
+    images = _timed_stage(
+        config, file_path, "pdf_render",
+        lambda: _pdf_to_images(file_path, config),
+    )
+    return _pdf_ocr_text(images, config, language, language_chain, file_path.name)
+
+
 def extract_from_pdf(
     file_path: Path,
     llm_client: Optional[Any] = None,
@@ -1769,7 +1910,11 @@ def extract_from_pdf(
     text_budget = runtime_config.text_budget_chars()
     pdf_text = _timed_stage(
         runtime_config, file_path, "pdf_text",
-        lambda: _pdf_text(file_path, text_budget),
+        lambda: _cached_text_stage(
+            runtime_config, file_path, "pdf_text",
+            {"text_budget": text_budget},
+            lambda: _pdf_text(file_path, text_budget),
+        ),
     )
     language, source = _language_for_text_with_source(pdf_text, runtime_config)
     _log_language_preanalysis(file_path, "PDF text", language, source)
@@ -1780,13 +1925,19 @@ def extract_from_pdf(
         ocr_language = ocr_chain[0]
         _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
         _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, runtime_config.ocr_language_score)
-        images = _timed_stage(
-            runtime_config, file_path, "pdf_render",
-            lambda: _pdf_to_images(file_path, runtime_config),
-        )
         ocr_text = _timed_stage(
             runtime_config, file_path, "pdf_ocr",
-            lambda: _pdf_ocr_text(images, runtime_config, ocr_language, ocr_chain, file_path.name),
+            lambda: _cached_text_stage(
+                runtime_config, file_path, "pdf_ocr",
+                {
+                    "ocr_chain": ocr_chain,
+                    "ocr_engine": runtime_config.ocr_engine,
+                    "pdf_vision_dpi": runtime_config.pdf_vision_dpi,
+                    "pdf_vision_pages": runtime_config.pdf_vision_max_pages,
+                    "tesseract_psm": runtime_config.tesseract_psm,
+                },
+                lambda: _pdf_ocr_from_file(file_path, runtime_config, ocr_language, ocr_chain),
+            ),
         )
     else:
         logger.info("Skipping PDF OCR for %s: mode=%s, parsed text chars=%d",
@@ -1797,10 +1948,15 @@ def extract_from_pdf(
         _log_language_preanalysis(file_path, "PDF merged text", language, source)
         event_type = "PDF/OCR" if ocr_text.strip() else "PDF"
         prepared = _prepare_text_for_llm(text, text_budget)
-        return _run_llm(_text_messages(prepared, language), file_path, event_type,
-                        llm_client, runtime_config)
+        return _run_text_llm(prepared, language, file_path, event_type,
+                             llm_client, runtime_config)
 
     events: List[Dict[str, Any]] = []
+    if not images and runtime_config.pdf_ocr_mode != "never":
+        images = _timed_stage(
+            runtime_config, file_path, "pdf_render",
+            lambda: _pdf_to_images(file_path, runtime_config),
+        )
     language, source = _language_for_text_with_source("", runtime_config)
     _log_language_preanalysis(file_path, "PDF vision", language, source)
     for data in images:
@@ -2051,6 +2207,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=f"Max rendered PDF pages for OCR/vision fallback (default: {PDF_VISION_MAX_PAGES}).")
     parser.add_argument("--pdf-vision-dpi", type=int, default=defaults.pdf_vision_dpi,
                         help=f"PDF render DPI for OCR/vision fallback (default: {PDF_VISION_DPI}).")
+    parser.add_argument("--stage-cache", choices=("off", "on", "refresh"),
+                        default=defaults.stage_cache,
+                        help=("Local cache for parsed PDF text, OCR text, and text-LLM responses; "
+                              "refresh rewrites entries "
+                              f"(default: {DEFAULT_STAGE_CACHE})."))
+    parser.add_argument("--stage-cache-dir", default=None,
+                        help="Directory for --stage-cache entries (default: model cache/stage-cache).")
     parser.add_argument("--benchmark", action="store_true",
                         help="Log per-file stage timings for precision/speed tuning.")
     parser.add_argument("--model-sha256", default=None,

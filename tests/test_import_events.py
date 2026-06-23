@@ -1356,6 +1356,55 @@ def test_timed_stage_preserves_keyboard_interrupt():
         )
 
 
+def test_cached_text_stage_reuses_file_hash_cache(tmp_path):
+    source = tmp_path / "source.pdf"
+    source.write_text("input", encoding="utf-8")
+    cfg = import_events.ModelConfig(stage_cache="on", stage_cache_dir=str(tmp_path / "cache"))
+    calls = []
+
+    def produce():
+        calls.append("called")
+        return "cached text"
+
+    assert import_events._cached_text_stage(cfg, source, "pdf_text", {"x": 1}, produce) == "cached text"
+    assert import_events._cached_text_stage(cfg, source, "pdf_text", {"x": 1}, produce) == "cached text"
+    assert calls == ["called"]
+
+
+def test_cached_text_stage_refresh_rewrites_cache(tmp_path):
+    source = tmp_path / "source.pdf"
+    source.write_text("input", encoding="utf-8")
+    cfg = import_events.ModelConfig(stage_cache="refresh", stage_cache_dir=str(tmp_path / "cache"))
+    calls = []
+
+    def produce():
+        calls.append("called")
+        return f"value {len(calls)}"
+
+    assert import_events._cached_text_stage(cfg, source, "pdf_text", {}, produce) == "value 1"
+    assert import_events._cached_text_stage(cfg, source, "pdf_text", {}, produce) == "value 2"
+
+
+def test_run_text_llm_uses_stage_cache_without_real_model(tmp_path, monkeypatch):
+    source = tmp_path / "event.txt"
+    source.write_text("Launch", encoding="utf-8")
+    cfg = import_events.ModelConfig(stage_cache="on", stage_cache_dir=str(tmp_path / "cache"))
+    calls = []
+
+    def fake_response(messages, file_path, llm_client, model_config=None):
+        calls.append(messages)
+        return '[{"title": "Launch", "start": "2026-06-06"}]'
+
+    monkeypatch.setattr(import_events, "_llm_response_text", fake_response)
+
+    first = import_events._run_text_llm("Launch", "en", source, "Text/LLM", None, cfg)
+    second = import_events._run_text_llm("Launch", "en", source, "Text/LLM", None, cfg)
+
+    assert first == second
+    assert [event["title"] for event in second] == ["Launch"]
+    assert len(calls) == 1
+
+
 def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypatch):
     img = tmp_path / "poster.png"
     img.write_bytes(b"image")
@@ -1757,7 +1806,8 @@ def test_model_config_from_args_threads_values():
          "--ocr-language-score", "0.65",
          "--tesseract-psm", "11", "--ocr-engine", "tesseract",
          "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
-         "--pdf-vision-dpi", "200", "--benchmark"]
+         "--pdf-vision-dpi", "200", "--stage-cache", "refresh",
+         "--stage-cache-dir", "cache", "--benchmark"]
     )
 
     cfg = import_events.ModelConfig.from_args(args)
@@ -1781,6 +1831,8 @@ def test_model_config_from_args_threads_values():
     assert cfg.pdf_ocr_mode == "never"
     assert cfg.pdf_vision_max_pages == 3
     assert cfg.pdf_vision_dpi == 200
+    assert cfg.stage_cache == "refresh"
+    assert cfg.stage_cache_dir == "cache"
     assert cfg.benchmark is True
 
 
