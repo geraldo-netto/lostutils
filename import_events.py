@@ -20,12 +20,13 @@ import subprocess
 import time
 import queue
 import threading
+import shutil
 from collections import OrderedDict
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from dataclasses import dataclass
 from datetime import datetime, date
-from typing import List, Dict, Any, Optional, Callable, Tuple, MutableMapping
+from typing import List, Dict, Any, Optional, Callable, Tuple, MutableMapping, Iterable
 from pathlib import Path
 
 # Default paths to the local GGUF models.
@@ -47,13 +48,15 @@ DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
 DEFAULT_OCR_LANGUAGES = ("pt-br", "en", "es", "it", "fr", "de")
 DEFAULT_OCR_LANGUAGE_SCORE = 0.70
 DEFAULT_TESSERACT_PSM = "6"
+DEFAULT_TESSERACT_PATH = "tesseract"
 DEFAULT_OCR_ENGINE = "auto"
-DEFAULT_PADDLE_OCR_DEVICE = "auto"
+DEFAULT_PADDLE_OCR_DEVICE = "cpu"
 DEFAULT_PDF_OCR_MODE = "auto"
 DEFAULT_TENTATIVE_EVENTS = "keep"
 DEFAULT_NO_ACTIVITY_EVENTS = "skip"
 DEFAULT_STAGE_CACHE = "off"
 DEFAULT_WORKERS = 4
+DEFAULT_DETERMINISTIC_ORDER = False
 STAGE_CACHE_VERSION = 1
 PDF_VISION_MAX_PAGES = 0
 PDF_VISION_DPI = 150
@@ -89,6 +92,19 @@ _LANGUAGE_ALIASES = {
     "deu": "de",
     "ger": "de",
     "german": "de",
+    "rus": "ru",
+    "russian": "ru",
+    "ell": "el",
+    "greek": "el",
+    "heb": "he",
+    "hebrew": "he",
+    "jpn": "ja",
+    "japanese": "ja",
+    "chi-sim": "zh",
+    "chi_sim": "zh",
+    "chinese": "zh",
+    "kor": "ko",
+    "korean": "ko",
 }
 _LANGUAGE_NAMES = {
     "en": "English",
@@ -98,8 +114,20 @@ _LANGUAGE_NAMES = {
     "it": "Italian",
     "fr": "French",
     "de": "German",
+    "ru": "Russian",
+    "el": "Greek",
+    "he": "Hebrew",
+    "ja": "Japanese",
+    "zh": "Chinese",
+    "ko": "Korean",
 }
-_PADDLE_LANGUAGE_CODES = {"de": "german", "pt-br": "pt"}
+_PADDLE_LANGUAGE_CODES = {
+    "de": "german",
+    "pt-br": "pt",
+    "ja": "japan",
+    "zh": "ch",
+    "ko": "korean",
+}
 _TESSERACT_LANGUAGE_CODES = {
     "en": "eng",
     "pt": "por",
@@ -108,6 +136,12 @@ _TESSERACT_LANGUAGE_CODES = {
     "it": "ita",
     "fr": "fra",
     "de": "deu",
+    "ru": "rus",
+    "el": "ell",
+    "he": "heb",
+    "ja": "jpn",
+    "zh": "chi_sim",
+    "ko": "kor",
 }
 _LANGUAGE_STOPWORDS = {
     "en": {"the", "and", "with", "from", "for", "at", "on", "in", "event"},
@@ -124,6 +158,14 @@ _LANGUAGE_MARKERS = {
     "fr": "àâçéèêëîïôùûüÿœ",
     "de": "äöüß",
 }
+_LANGUAGE_SCRIPT_RANGES = (
+    ("ja", ((0x3040, 0x30FF),)),  # Hiragana/Katakana distinguish Japanese from Han-only text.
+    ("ko", ((0xAC00, 0xD7AF), (0x1100, 0x11FF))),
+    ("ru", ((0x0400, 0x04FF),)),
+    ("el", ((0x0370, 0x03FF),)),
+    ("he", ((0x0590, 0x05FF),)),
+    ("zh", ((0x4E00, 0x9FFF),)),
+)
 
 
 def _text_budget_from_context(context_size: int, max_tokens: int) -> int:
@@ -181,7 +223,23 @@ def _language_scores(text: str) -> Dict[str, int]:
     return scores
 
 
+def _count_script_chars(text: str, ranges: Tuple[Tuple[int, int], ...]) -> int:
+    return sum(1 for char in text if any(start <= ord(char) <= end for start, end in ranges))
+
+
+def _detect_language_from_script(text: str) -> Optional[str]:
+    scores = [
+        (language, _count_script_chars(text, ranges))
+        for language, ranges in _LANGUAGE_SCRIPT_RANGES
+    ]
+    language, score = max(scores, key=lambda item: item[1])
+    return language if score > 0 else None
+
+
 def _detect_language_from_text(text: str) -> Optional[str]:
+    scripted = _detect_language_from_script(text)
+    if scripted:
+        return scripted
     scores = _language_scores(text)
     if not scores:
         return None
@@ -428,6 +486,7 @@ class ModelConfig:
     ocr_language_score: float = DEFAULT_OCR_LANGUAGE_SCORE
     ocr_timeout_seconds: int = OCR_TIMEOUT_SECONDS
     tesseract_psm: str = DEFAULT_TESSERACT_PSM
+    tesseract_path: str = DEFAULT_TESSERACT_PATH
     ocr_engine: str = DEFAULT_OCR_ENGINE
     paddle_ocr_device: str = DEFAULT_PADDLE_OCR_DEVICE
     pdf_ocr_mode: str = DEFAULT_PDF_OCR_MODE
@@ -439,6 +498,7 @@ class ModelConfig:
     stage_cache_dir: Optional[str] = None
     benchmark: bool = False
     workers: int = DEFAULT_WORKERS
+    deterministic_order: bool = DEFAULT_DETERMINISTIC_ORDER
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ModelConfig":
@@ -474,6 +534,7 @@ class ModelConfig:
             ocr_language_score=min(1.0, max(0.0, args.ocr_language_score)),
             ocr_timeout_seconds=max(1, args.ocr_timeout),
             tesseract_psm=str(args.tesseract_psm),
+            tesseract_path=args.tesseract_path,
             ocr_engine=args.ocr_engine,
             paddle_ocr_device=args.paddle_ocr_device,
             pdf_ocr_mode=args.pdf_ocr_mode,
@@ -485,6 +546,7 @@ class ModelConfig:
             stage_cache_dir=(args.stage_cache_dir or str(cache_dir / "stage-cache")),
             benchmark=args.benchmark,
             workers=max(1, args.workers),
+            deterministic_order=args.deterministic_order,
         )
 
     def text_budget_chars(self) -> int:
@@ -523,9 +585,12 @@ _OUTPUT_REDIRECT_LOCK = threading.RLock()
 _OCR_WARNING_LOCK = threading.Lock()
 _PADDLE_OCR_LOCK = threading.Lock()
 _PADDLE_RUN_LOCK = threading.Lock()
+_TESSERACT_PATH_LOCK = threading.Lock()
 _EXTRACTION_FAILURE_LOCK = threading.Lock()
 _PADDLE_OCR: Optional[Any] = None
 _PADDLE_OCR_DISABLED = False
+_PADDLE_OCR_MISSING = False
+_TESSERACT_PATH_CACHE: Dict[str, Optional[str]] = {}
 _OCR_WARNED = set()
 _OCR_WARNING_COUNTS: Dict[str, int] = {}
 _OCR_WARNING_LABELS = {
@@ -569,10 +634,11 @@ def reset_ocr_warnings() -> None:
 
 
 def reset_paddle_ocr_state() -> None:
-    global _PADDLE_OCR, _PADDLE_OCR_DISABLED
+    global _PADDLE_OCR, _PADDLE_OCR_DISABLED, _PADDLE_OCR_MISSING
     with _PADDLE_OCR_LOCK:
         _PADDLE_OCR = None
         _PADDLE_OCR_DISABLED = False
+        _PADDLE_OCR_MISSING = False
 
 
 def _disable_paddle_ocr() -> None:
@@ -1861,11 +1927,11 @@ def _get_paddle_ocr(
     language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
     config: Optional[ModelConfig] = None,
 ) -> Optional[Any]:
-    global _PADDLE_OCR
+    global _PADDLE_OCR, _PADDLE_OCR_MISSING
     runtime_config = config or ModelConfig()
     paddle_lang = _paddle_language(_normalize_language(language))
     with _PADDLE_OCR_LOCK:
-        if _PADDLE_OCR_DISABLED:
+        if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
             return None
         if _PADDLE_OCR is None:
             _PADDLE_OCR = {}
@@ -1874,6 +1940,7 @@ def _get_paddle_ocr(
             PaddleOCR = paddleocr_module.PaddleOCR
             import paddle as paddle_module
         except ImportError:
+            _PADDLE_OCR_MISSING = True
             _warn_once("paddle-missing", "PaddleOCR not installed; skipping Paddle OCR.")
             return None
         device = _resolve_paddle_ocr_device(runtime_config.paddle_ocr_device, paddle_module)
@@ -1926,6 +1993,39 @@ def _ocr_with_paddle(
     return "\n".join(_paddle_texts(result))
 
 
+def _display_path(path: str) -> str:
+    try:
+        resolved = Path(path).expanduser().resolve()
+        return str(Path("~") / resolved.relative_to(Path.home()))
+    except ValueError:
+        return str(Path(path).expanduser())
+    except OSError:
+        return path
+
+
+def _resolve_tesseract_executable(raw_path: str) -> Optional[str]:
+    requested = (raw_path or DEFAULT_TESSERACT_PATH).strip() or DEFAULT_TESSERACT_PATH
+    has_separator = any(sep and sep in requested for sep in (os.sep, os.altsep))
+    candidate = Path(requested).expanduser()
+    if candidate.is_absolute() or has_separator:
+        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+    return shutil.which(requested)
+
+
+def _resolve_tesseract_path(config: ModelConfig) -> Optional[str]:
+    requested = config.tesseract_path or DEFAULT_TESSERACT_PATH
+    with _TESSERACT_PATH_LOCK:
+        if requested in _TESSERACT_PATH_CACHE:
+            return _TESSERACT_PATH_CACHE[requested]
+        resolved = _resolve_tesseract_executable(requested)
+        _TESSERACT_PATH_CACHE[requested] = resolved
+    if resolved:
+        logger.info("Using Tesseract executable: %s", _display_path(resolved))
+    else:
+        _warn_once("tesseract-missing", "Tesseract executable not found: %s", requested)
+    return resolved
+
+
 def _ocr_with_tesseract(
     image_path: Path,
     language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
@@ -1933,18 +2033,18 @@ def _ocr_with_tesseract(
 ) -> str:
     runtime_config = config or ModelConfig()
     tess_lang = _tesseract_language(_normalize_language(language))
+    executable = _resolve_tesseract_path(runtime_config)
+    if executable is None:
+        return ""
     try:
         result = subprocess.run(
-            ["tesseract", str(image_path), "stdout",
+            [executable, str(image_path), "stdout",
              "-l", tess_lang, "--psm", runtime_config.tesseract_psm],
             capture_output=True,
             text=True,
             timeout=runtime_config.ocr_timeout_seconds,
             check=False,
         )
-    except FileNotFoundError:
-        _warn_once("tesseract-missing", "Tesseract executable not found; skipping Tesseract OCR.")
-        return ""
     except (subprocess.TimeoutExpired, OSError) as exc:
         _warn_once("tesseract-error", "Tesseract OCR failed; skipping Tesseract OCR: %s", exc)
         return ""
@@ -2189,39 +2289,68 @@ def _pdf_text(file_path: Path, max_chars: int = MAX_CONTENT_CHARS) -> str:
     return "\n".join(parts)[:max_chars]
 
 
-def _pdf_to_images(file_path: Path, config: Optional[ModelConfig] = None) -> List[bytes]:
+def _safe_pdf_stage(
+    config: ModelConfig,
+    file_path: Path,
+    stage: str,
+    work: Callable[[], Any],
+    fallback: Any,
+) -> Any:
+    try:
+        return _timed_stage(config, file_path, stage, work)
+    except Exception as exc:
+        logger.warning("PDF stage %s failed for %s; continuing with fallback: %s",
+                       stage, file_path.name, exc)
+        return fallback
+
+
+def _render_pdf_image_paths(
+    file_path: Path,
+    output_dir: Path,
+    config: Optional[ModelConfig] = None,
+) -> List[Path]:
     runtime_config = config or ModelConfig()
     try:
         import fitz  # PyMuPDF
     except ImportError:
         logger.warning("PyMuPDF not installed; cannot OCR/vision-scan PDF %s", file_path.name)
         return []
-    images: List[bytes] = []
+    image_paths: List[Path] = []
     with fitz.open(str(file_path)) as doc:
         for page in doc:
             if (runtime_config.pdf_vision_max_pages > 0 and
-                    len(images) >= runtime_config.pdf_vision_max_pages):
+                    len(image_paths) >= runtime_config.pdf_vision_max_pages):
                 logger.info("Capping vision scan of %s at %d pages",
                             file_path.name, runtime_config.pdf_vision_max_pages)
                 break
-            images.append(page.get_pixmap(dpi=runtime_config.pdf_vision_dpi).tobytes("png"))
-    return images
+            image_path = output_dir / f"page-{len(image_paths) + 1:06d}.png"
+            image_path.write_bytes(page.get_pixmap(dpi=runtime_config.pdf_vision_dpi).tobytes("png"))
+            image_paths.append(image_path)
+    return image_paths
 
 
-def _pdf_ocr_text(
-    images: List[bytes],
+def _pdf_to_images(file_path: Path, config: Optional[ModelConfig] = None) -> List[bytes]:
+    with tempfile.TemporaryDirectory(prefix="import-events-pdf-") as tmp_dir:
+        return [
+            path.read_bytes()
+            for path in _render_pdf_image_paths(file_path, Path(tmp_dir), config)
+        ]
+
+
+def _pdf_ocr_text_from_paths(
+    image_paths: List[Path],
     config: Optional[ModelConfig] = None,
     language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
     language_chain: Optional[Tuple[str, ...]] = None,
     subject: str = "PDF",
 ) -> str:
     runtime_config = config or ModelConfig()
-    if not images:
+    if not image_paths:
         return ""
     languages = language_chain or (language,)
     return _ocr_chain_text(
         lambda selected: _merge_text_blocks(
-            [_ocr_image_bytes(data, runtime_config, selected) for data in images],
+            [_ocr_image_path_once(path, runtime_config, selected) for path in image_paths],
             runtime_config.text_budget_chars(),
         ),
         tuple(languages),
@@ -2237,11 +2366,12 @@ def _pdf_ocr_from_file(
     language: str,
     language_chain: Tuple[str, ...],
 ) -> str:
-    images = _timed_stage(
-        config, file_path, "pdf_render",
-        lambda: _pdf_to_images(file_path, config),
-    )
-    return _pdf_ocr_text(images, config, language, language_chain, file_path.name)
+    with tempfile.TemporaryDirectory(prefix="import-events-pdf-") as tmp_dir:
+        image_paths = _timed_stage(
+            config, file_path, "pdf_render",
+            lambda: _render_pdf_image_paths(file_path, Path(tmp_dir), config),
+        )
+        return _pdf_ocr_text_from_paths(image_paths, config, language, language_chain, file_path.name)
 
 
 def extract_from_pdf(
@@ -2252,81 +2382,94 @@ def extract_from_pdf(
     """Extracts events from a PDF: parsed/OCR text first, else vision per page."""
     runtime_config = model_config or ModelConfig()
     text_budget = runtime_config.text_budget_chars()
-    pdf_text = _timed_stage(
+    pdf_text = _safe_pdf_stage(
         runtime_config, file_path, "pdf_text",
         lambda: _cached_text_stage(
             runtime_config, file_path, "pdf_text",
             {"text_budget": text_budget},
             lambda: _pdf_text(file_path, text_budget),
         ),
+        "",
     )
     language, source = _language_for_text_with_source(pdf_text, runtime_config)
     _log_language_preanalysis(file_path, "PDF text", language, source)
-    images: List[bytes] = []
-    ocr_text = ""
-    if _should_pdf_ocr(runtime_config, pdf_text):
-        ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, runtime_config)
-        ocr_language = ocr_chain[0]
-        _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
-        _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, runtime_config.ocr_language_score)
-        ocr_text = _timed_stage(
-            runtime_config, file_path, "pdf_ocr",
-            lambda: _cached_text_stage(
-                runtime_config, file_path, "pdf_ocr",
-                {
-                    "ocr_chain": ocr_chain,
-                    "ocr_engine": runtime_config.ocr_engine,
-                    "paddle_ocr_device": runtime_config.paddle_ocr_device,
-                    "pdf_vision_dpi": runtime_config.pdf_vision_dpi,
-                    "pdf_vision_pages": runtime_config.pdf_vision_max_pages,
-                    "tesseract_psm": runtime_config.tesseract_psm,
-                },
-                lambda: _pdf_ocr_from_file(file_path, runtime_config, ocr_language, ocr_chain),
-            ),
-        )
-    else:
-        logger.info("Skipping PDF OCR for %s: mode=%s, parsed text chars=%d",
-                    file_path.name, runtime_config.pdf_ocr_mode, len(pdf_text.strip()))
-    text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
-    if text.strip():
-        language, source = _language_for_text_with_source(text, runtime_config)
-        _log_language_preanalysis(file_path, "PDF merged text", language, source)
-        event_type = "PDF/OCR" if ocr_text.strip() else "PDF"
-        prepared = _prepare_text_for_llm(text, text_budget)
-        llm_events = _run_text_llm(prepared, language, file_path, event_type,
-                                   llm_client, runtime_config)
-        return _merge_layout_events(
-            llm_events, _layout_events_from_text(text, file_path, event_type),
-            runtime_config)
+    with tempfile.TemporaryDirectory(prefix="import-events-pdf-") as tmp_dir:
+        image_paths: List[Path] = []
 
-    events: List[Dict[str, Any]] = []
-    if not images and runtime_config.pdf_ocr_mode != "never":
-        images = _timed_stage(
-            runtime_config, file_path, "pdf_render",
-            lambda: _pdf_to_images(file_path, runtime_config),
-        )
-    language, source = _language_for_text_with_source("", runtime_config)
-    _log_language_preanalysis(file_path, "PDF vision", language, source)
-    for data in images:
-        events.extend(_run_llm(_image_messages_from_bytes(
-            data, "image/png", language, runtime_config),
-            file_path, "PDF/Vision", llm_client, runtime_config))
-    return events
+        def render_once() -> List[Path]:
+            nonlocal image_paths
+            if not image_paths:
+                image_paths = _safe_pdf_stage(
+                    runtime_config, file_path, "pdf_render",
+                    lambda: _render_pdf_image_paths(file_path, Path(tmp_dir), runtime_config),
+                    [],
+                )
+            return image_paths
+
+        ocr_text = ""
+        if _should_pdf_ocr(runtime_config, pdf_text):
+            ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, runtime_config)
+            ocr_language = ocr_chain[0]
+            _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
+            _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, runtime_config.ocr_language_score)
+            ocr_options = {
+                "ocr_chain": ocr_chain,
+                "ocr_engine": runtime_config.ocr_engine,
+                "paddle_ocr_device": runtime_config.paddle_ocr_device,
+                "pdf_vision_dpi": runtime_config.pdf_vision_dpi,
+                "pdf_vision_pages": runtime_config.pdf_vision_max_pages,
+                "tesseract_path": runtime_config.tesseract_path,
+                "tesseract_psm": runtime_config.tesseract_psm,
+            }
+            cached_ocr = _read_stage_cache_text(runtime_config, file_path, "pdf_ocr", ocr_options)
+            if cached_ocr is not None:
+                ocr_text = cached_ocr
+            else:
+                ocr_text = _safe_pdf_stage(
+                    runtime_config, file_path, "pdf_ocr",
+                    lambda: _pdf_ocr_text_from_paths(
+                        render_once(), runtime_config, ocr_language, ocr_chain, file_path.name),
+                    "",
+                )
+                _write_stage_cache_text(runtime_config, file_path, "pdf_ocr", ocr_options, ocr_text)
+        else:
+            logger.info("Skipping PDF OCR for %s: mode=%s, parsed text chars=%d",
+                        file_path.name, runtime_config.pdf_ocr_mode, len(pdf_text.strip()))
+        text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
+        if text.strip():
+            language, source = _language_for_text_with_source(text, runtime_config)
+            _log_language_preanalysis(file_path, "PDF merged text", language, source)
+            event_type = "PDF/OCR" if ocr_text.strip() else "PDF"
+            prepared = _prepare_text_for_llm(text, text_budget)
+            llm_events = _run_text_llm(prepared, language, file_path, event_type,
+                                       llm_client, runtime_config)
+            return _merge_layout_events(
+                llm_events, _layout_events_from_text(text, file_path, event_type),
+                runtime_config)
+
+        events: List[Dict[str, Any]] = []
+        if runtime_config.pdf_ocr_mode != "never":
+            render_once()
+        language, source = _language_for_text_with_source("", runtime_config)
+        _log_language_preanalysis(file_path, "PDF vision", language, source)
+        for image_path in image_paths:
+            events.extend(_run_llm(_image_messages(image_path, language, runtime_config),
+                                   file_path, "PDF/Vision", llm_client, runtime_config))
+        return events
 
 
 # --------------------------------------------------------------------------- #
 # Folder scan
 # --------------------------------------------------------------------------- #
-def _scan_files(path: Path, recursive: bool) -> List[Path]:
+def _scan_files(path: Path, recursive: bool, deterministic_order: bool = False) -> Iterable[Path]:
     files = path.rglob("*") if recursive else path.iterdir()
-    selected: List[Path] = []
-    for file in sorted(files):
+    iterable = sorted(files) if deterministic_order else files
+    for file in iterable:
         if file.is_symlink():
             logger.warning("Skipping symlink %s", file)
             continue
         if file.is_file():
-            selected.append(file)
-    return selected
+            yield file
 
 
 def extract_from_file(
@@ -2379,12 +2522,14 @@ def _file_worker(
     llm_client: Optional[Any],
     default_tz: Optional[str],
 ) -> None:
-    while not stop_event.is_set():
+    while True:
+        item = work_queue.get()
         try:
-            index, file = work_queue.get_nowait()
-        except queue.Empty:
-            return
-        try:
+            if item is None:
+                return
+            index, file = item
+            if stop_event.is_set():
+                continue
             events = _extract_file_events(file, runtime_config, llm_client, default_tz)
             done_queue.put((index, events, None))
         except BaseException as exc:
@@ -2394,21 +2539,51 @@ def _file_worker(
             work_queue.task_done()
 
 
+def _feed_file_queue(
+    files: Iterable[Path],
+    work_queue: queue.Queue,
+    done_queue: queue.Queue,
+    stop_event: threading.Event,
+    workers: int,
+) -> None:
+    count = 0
+    error: Optional[BaseException] = None
+    try:
+        for count, file in enumerate(files, start=1):
+            while not stop_event.is_set():
+                try:
+                    work_queue.put((count - 1, file), timeout=0.1)
+                    break
+                except queue.Full:
+                    continue
+            if stop_event.is_set():
+                break
+    except BaseException as exc:
+        error = exc
+        stop_event.set()
+    finally:
+        done_queue.put((None, count, error))
+        for _ in range(workers):
+            while True:
+                try:
+                    work_queue.put(None, timeout=0.1)
+                    break
+                except queue.Full:
+                    if stop_event.is_set():
+                        break
+
+
 def _run_file_workers(
-    files: List[Path],
+    files: Iterable[Path],
     runtime_config: ModelConfig,
     llm_client: Optional[Any],
     default_tz: Optional[str],
 ) -> List[Dict[str, Any]]:
-    if not files:
-        return []
-    work_queue: queue.Queue = queue.Queue()
+    workers = max(1, runtime_config.workers)
+    work_queue: queue.Queue = queue.Queue(maxsize=max(1, workers * 2))
     done_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()
-    results: List[List[Dict[str, Any]]] = [[] for _ in files]
-    for index, file in enumerate(files):
-        work_queue.put((index, file))
-    workers = min(runtime_config.workers, len(files))
+    results: Dict[int, List[Dict[str, Any]]] = {}
     threads = [
         threading.Thread(
             target=_file_worker,
@@ -2420,9 +2595,24 @@ def _run_file_workers(
     ]
     for thread in threads:
         thread.start()
+    feeder = threading.Thread(
+        target=_feed_file_queue,
+        args=(files, work_queue, done_queue, stop_event, workers),
+        name="import-events-feeder",
+        daemon=True,
+    )
+    feeder.start()
+    expected: Optional[int] = None
+    completed = 0
     try:
-        for _ in files:
+        while expected is None or completed < expected:
             index, events, exc = done_queue.get()
+            if index is None:
+                expected = events
+                if exc is not None:
+                    raise exc
+                continue
+            completed += 1
             if exc is not None:
                 raise exc
             results[index] = events
@@ -2431,9 +2621,15 @@ def _run_file_workers(
         for thread in threads:
             thread.join(timeout=0.2)
         raise
+    except BaseException:
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=0.2)
+        raise
+    feeder.join()
     for thread in threads:
         thread.join()
-    return [event for events in results for event in events]
+    return [event for index in sorted(results) for event in results[index]]
 
 
 def process_folder(
@@ -2450,15 +2646,16 @@ def process_folder(
         logger.error("Error: %s is not a valid directory.", folder_path)
         return []
 
-    return _run_file_workers(_scan_files(path, recursive), runtime_config, llm_client, default_tz)
+    files = _scan_files(path, recursive, runtime_config.deterministic_order)
+    return _run_file_workers(files, runtime_config, llm_client, default_tz)
 
 
 def dedupe_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Drops events sharing the same (title, start), keeping first occurrence."""
+    """Drops exact event duplicates, keeping first occurrence."""
     seen = set()
     unique: List[Dict[str, Any]] = []
     for e in events:
-        key = (e.get("title"), e.get("start"))
+        key = tuple((e.get(field) or "") for field in ("title", "start", "end", "location", "source"))
         if key in seen:
             continue
         seen.add(key)
@@ -2525,6 +2722,17 @@ def _match_end_to_start(start: Any, end: Any) -> Any:
     return end
 
 
+def _end_precedes_start(start: Any, end: Any) -> bool:
+    if isinstance(start, datetime) and isinstance(end, datetime):
+        return end < start
+    if isinstance(start, datetime) and not isinstance(end, datetime) and isinstance(end, date):
+        return end < start.date()
+    if not isinstance(start, datetime) and isinstance(start, date):
+        end_date = end.date() if isinstance(end, datetime) else end
+        return isinstance(end_date, date) and end_date < start
+    return False
+
+
 def build_ics(events: List[Dict[str, Any]]) -> bytes:
     """Builds an importable iCalendar document from extracted events."""
     from icalendar import Calendar, Event as IcsEvent
@@ -2543,7 +2751,12 @@ def build_ics(events: List[Dict[str, Any]]) -> bytes:
         ie.add("dtstart", start)
         end = _parse_iso(e.get("end", "")) if e.get("end") else None
         if end is not None:
-            ie.add("dtend", _match_end_to_start(start, end))
+            matched_end = _match_end_to_start(start, end)
+            if _end_precedes_start(start, matched_end):
+                logger.warning("Skipping event end before start for %s: %r < %r",
+                               e.get("title"), e.get("end"), e.get("start"))
+            else:
+                ie.add("dtend", matched_end)
         if e.get("location"):
             ie.add("location", e["location"])
         cal.add_component(ie)
@@ -2570,14 +2783,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("-r", "--recursive", action="store_true",
                         help="Scan subdirectories recursively.")
     parser.add_argument("--no-dedup", action="store_true",
-                        help="Keep duplicate events (default: drop same title+start).")
+                        help="Keep duplicate events (default: drop exact duplicates).")
     parser.add_argument("--timezone", default=None,
                         help="IANA timezone (e.g. Europe/Lisbon) for naive iCalendar times.")
     defaults = ModelConfig()
     parser.add_argument("--model-cache-dir", default=None,
                         help=(f"Directory used for default GGUF downloads "
                               f"(default: ${CACHE_DIR_ENV}, $XDG_CACHE_HOME, "
-                              f"or ~/.cache/lostutils/import_events)."))
+                              "or ~/.cache/lostutils/import_events)."))
     parser.add_argument("--model-path", default=None,
                         help=(f"Path to the local GGUF language model "
                               f"(default: cache/{MODEL_FILENAME})."))
@@ -2588,7 +2801,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=(f"Max loaded LLM instances retained in memory "
                               f"(default: {DEFAULT_LLM_CACHE_SIZE}; 0 disables)."))
     parser.add_argument("--llm-context", type=int, default=defaults.llm_context_size,
-                        help=(f"LLM context size in tokens "
+                        help=("LLM context size in tokens "
                               "(default: 0, use model-native context)."))
     parser.add_argument("--llm-max-tokens", type=int, default=defaults.llm_max_tokens,
                         help=(f"Max tokens generated per LLM call "
@@ -2625,14 +2838,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=f"Seconds before one OCR engine call times out (default: {OCR_TIMEOUT_SECONDS}).")
     parser.add_argument("--tesseract-psm", default=defaults.tesseract_psm,
                         help=f"Tesseract page segmentation mode (default: {DEFAULT_TESSERACT_PSM}).")
+    parser.add_argument("--tesseract-path", default=defaults.tesseract_path,
+                        help=("Tesseract executable name or path "
+                              f"(default: {DEFAULT_TESSERACT_PATH})."))
     parser.add_argument("--ocr-engine", choices=("auto", "paddle", "tesseract", "both"),
                         default=defaults.ocr_engine,
                         help=("OCR engine policy: auto uses Paddle first and falls back to "
                               "Tesseract when weak; both preserves merged OCR "
                               f"(default: {DEFAULT_OCR_ENGINE})."))
     parser.add_argument("--paddle-ocr-device", default=defaults.paddle_ocr_device,
-                        help=("PaddleOCR inference device: auto, cpu, gpu, gpu:0, etc.; "
-                              f"auto uses GPU only when Paddle reports one (default: {DEFAULT_PADDLE_OCR_DEVICE})."))
+                        help=("PaddleOCR inference device: cpu, auto, gpu, gpu:0, etc.; "
+                              "auto uses GPU only when Paddle reports one "
+                              f"(default: {DEFAULT_PADDLE_OCR_DEVICE})."))
     parser.add_argument("--pdf-ocr-mode", choices=("auto", "always", "never"),
                         default=defaults.pdf_ocr_mode,
                         help=("PDF OCR policy: auto skips OCR when parsed text is usable; "
@@ -2662,6 +2879,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Log per-file stage timings for precision/speed tuning.")
     parser.add_argument("--workers", type=int, default=defaults.workers,
                         help=f"Parallel file worker threads (default: {DEFAULT_WORKERS}).")
+    parser.add_argument("--deterministic-order", action="store_true",
+                        help="Sort all matching files before processing; slower on large recursive trees.")
     parser.add_argument("--model-sha256", default=None,
                         help="Expected SHA-256 of the language model (integrity check).")
     parser.add_argument("--clip-sha256", default=None,
