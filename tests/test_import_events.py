@@ -1968,7 +1968,8 @@ def test_model_config_from_args_threads_values():
         ["dir", "--model-path", "m.gguf", "--clip-path", "c.gguf",
          "--model-sha256", "a" * 64, "--clip-sha256", "b" * 64,
          "--llm-cache-size", "2", "--llm-context", "3072",
-         "--llm-max-tokens", "123", "--max-content-chars", "456",
+         "--llm-max-tokens", "123", "--llm-gpu-layers", "12",
+         "--llm-main-gpu", "1", "--max-content-chars", "456",
          "--llm-verbose", "--language", "Portuguese",
          "--ocr-fallback-language", "Spanish", "--ocr-timeout", "9",
          "--ocr-languages", "Brazilian Portuguese,English,German",
@@ -1989,6 +1990,8 @@ def test_model_config_from_args_threads_values():
     assert cfg.llm_cache_size == 2
     assert cfg.llm_context_size == 3072
     assert cfg.llm_max_tokens == 123
+    assert cfg.llm_gpu_layers == 12
+    assert cfg.llm_main_gpu == 1
     assert cfg.llm_verbose is True
     assert cfg.max_content_chars == 456
     assert cfg.language == "pt"
@@ -2066,6 +2069,8 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.llm_cache_size == import_events.DEFAULT_LLM_CACHE_SIZE
     assert cfg.llm_context_size == import_events.DEFAULT_LLM_CONTEXT_SIZE
     assert cfg.llm_max_tokens == import_events.DEFAULT_LLM_MAX_TOKENS
+    assert cfg.llm_gpu_layers == import_events.DEFAULT_LLM_GPU_LAYERS
+    assert cfg.llm_main_gpu == import_events.DEFAULT_LLM_MAIN_GPU
     assert cfg.llm_verbose is False
     assert cfg.max_content_chars is None
     assert cfg.language == import_events.DEFAULT_LANGUAGE
@@ -2345,14 +2350,20 @@ def test_get_llm_threads_config_paths(monkeypatch):
             captured["handler_verbose"] = verbose
 
     class FakeLlama:
-        def __init__(self, model_path, chat_handler, n_ctx, verbose=True):
+        def __init__(self, model_path, chat_handler, n_ctx, n_gpu_layers=0,
+                     main_gpu=0, verbose=True):
             captured["model"] = model_path
             captured["n_ctx"] = n_ctx
+            captured["n_gpu_layers"] = n_gpu_layers
+            captured["main_gpu"] = main_gpu
             captured["llama_verbose"] = verbose
 
     import types
     fake_llama_cpp = types.ModuleType("llama_cpp")
     fake_llama_cpp.Llama = FakeLlama
+    fake_llama_cpp.llama_cpp = type(
+        "FakeLlamaCpp", (), {"llama_supports_gpu_offload": staticmethod(lambda: True)}
+    )
     fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
     fake_chat.Qwen25VLChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
@@ -2367,9 +2378,119 @@ def test_get_llm_threads_config_paths(monkeypatch):
         "clip": "CC.gguf",
         "handler_verbose": False,
         "llama_verbose": False,
+        "main_gpu": import_events.DEFAULT_LLM_MAIN_GPU,
         "model": "MM.gguf",
         "n_ctx": import_events.DEFAULT_LLM_CONTEXT_SIZE,
+        "n_gpu_layers": import_events.DEFAULT_LLM_GPU_LAYERS,
     }
+
+
+def test_get_llm_falls_back_to_cpu_when_gpu_init_fails(monkeypatch, caplog):
+    import logging
+    import types
+
+    created = []
+
+    class FakeHandler:
+        def __init__(self, clip_model_path, verbose=True):
+            pass
+
+    class FakeLlama:
+        def __init__(self, model_path, chat_handler, n_ctx, n_gpu_layers=0,
+                     main_gpu=0, verbose=True):
+            created.append(n_gpu_layers)
+            if n_gpu_layers != 0:
+                raise RuntimeError("vulkan init failed")
+            self.n_gpu_layers = n_gpu_layers
+
+    fake_llama_cpp = types.ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = FakeLlama
+    fake_llama_cpp.llama_cpp = type(
+        "FakeLlamaCpp", (), {"llama_supports_gpu_offload": staticmethod(lambda: True)}
+    )
+    fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
+    fake_chat.Qwen25VLChatHandler = FakeHandler
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+    monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
+
+    with caplog.at_level(logging.WARNING):
+        client = import_events.get_llm(import_events.ModelConfig(
+            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0))
+
+    assert created == [import_events.DEFAULT_LLM_GPU_LAYERS, 0]
+    assert client.n_gpu_layers == 0
+    assert "falling back to CPU" in caplog.text
+
+
+def test_get_llm_uses_cpu_when_gpu_backend_missing(monkeypatch, caplog):
+    import logging
+    import types
+
+    created = []
+
+    class FakeHandler:
+        def __init__(self, clip_model_path, verbose=True):
+            pass
+
+    class FakeLlama:
+        def __init__(self, model_path, chat_handler, n_ctx, n_gpu_layers=0,
+                     main_gpu=0, verbose=True):
+            created.append(n_gpu_layers)
+
+    fake_llama_cpp = types.ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = FakeLlama
+    fake_llama_cpp.llama_cpp = type(
+        "FakeLlamaCpp", (), {"llama_supports_gpu_offload": staticmethod(lambda: False)}
+    )
+    fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
+    fake_chat.Qwen25VLChatHandler = FakeHandler
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+    monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
+
+    with caplog.at_level(logging.WARNING):
+        import_events.get_llm(import_events.ModelConfig(
+            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0))
+
+    assert created == [0]
+    assert "no GPU backend" in caplog.text
+
+
+def test_get_llm_preserves_keyboard_interrupt_during_gpu_init(monkeypatch):
+    import types
+
+    created = []
+
+    class FakeHandler:
+        def __init__(self, clip_model_path, verbose=True):
+            pass
+
+    class FakeLlama:
+        def __init__(self, model_path, chat_handler, n_ctx, n_gpu_layers=0,
+                     main_gpu=0, verbose=True):
+            created.append(n_gpu_layers)
+            raise KeyboardInterrupt
+
+    fake_llama_cpp = types.ModuleType("llama_cpp")
+    fake_llama_cpp.Llama = FakeLlama
+    fake_llama_cpp.llama_cpp = type(
+        "FakeLlamaCpp", (), {"llama_supports_gpu_offload": staticmethod(lambda: True)}
+    )
+    fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
+    fake_chat.Qwen25VLChatHandler = FakeHandler
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
+    monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+    monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events.get_llm(import_events.ModelConfig(
+            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0))
+
+    assert created == [import_events.DEFAULT_LLM_GPU_LAYERS]
 
 
 def test_get_llm_caches_per_config(monkeypatch):
@@ -2380,12 +2501,16 @@ def test_get_llm_caches_per_config(monkeypatch):
             pass
 
     class FakeLlama:
-        def __init__(self, model_path, chat_handler, n_ctx, verbose=True):
+        def __init__(self, model_path, chat_handler, n_ctx, n_gpu_layers=0,
+                     main_gpu=0, verbose=True):
             created.append(model_path)
 
     import types
     fake_llama_cpp = types.ModuleType("llama_cpp")
     fake_llama_cpp.Llama = FakeLlama
+    fake_llama_cpp.llama_cpp = type(
+        "FakeLlamaCpp", (), {"llama_supports_gpu_offload": staticmethod(lambda: True)}
+    )
     fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
     fake_chat.Qwen25VLChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
@@ -2407,7 +2532,7 @@ def test_get_llm_caches_per_config(monkeypatch):
     assert created == ["A.gguf", "B.gguf"]
 
 
-def test_get_llm_cache_key_includes_context_size(monkeypatch):
+def test_get_llm_cache_key_includes_context_and_gpu_settings(monkeypatch):
     created = []
     closed = []
     _install_fake_llama(monkeypatch, created, closed)
@@ -2419,11 +2544,17 @@ def test_get_llm_cache_key_includes_context_size(monkeypatch):
     second = import_events.get_llm(import_events.ModelConfig(
         model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=2,
         llm_context_size=4096))
+    third = import_events.get_llm(import_events.ModelConfig(
+        model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=3,
+        llm_context_size=4096, llm_gpu_layers=12, llm_main_gpu=1))
 
     assert second is not first
-    assert created == ["A.gguf", "A.gguf"]
+    assert third is not second
+    assert created == ["A.gguf", "A.gguf", "A.gguf"]
     assert first.n_ctx == 2048
     assert second.n_ctx == 4096
+    assert third.n_gpu_layers == 12
+    assert third.main_gpu == 1
 
 
 def _install_fake_llama(monkeypatch, created, closed):
@@ -2433,9 +2564,12 @@ def _install_fake_llama(monkeypatch, created, closed):
             self.verbose = verbose
 
     class FakeLlama:
-        def __init__(self, model_path, chat_handler, n_ctx, verbose=True):
+        def __init__(self, model_path, chat_handler, n_ctx, n_gpu_layers=0,
+                     main_gpu=0, verbose=True):
             self.model_path = model_path
             self.n_ctx = n_ctx
+            self.n_gpu_layers = n_gpu_layers
+            self.main_gpu = main_gpu
             self.verbose = verbose
             created.append(model_path)
 
@@ -2445,6 +2579,9 @@ def _install_fake_llama(monkeypatch, created, closed):
     import types
     fake_llama_cpp = types.ModuleType("llama_cpp")
     fake_llama_cpp.Llama = FakeLlama
+    fake_llama_cpp.llama_cpp = type(
+        "FakeLlamaCpp", (), {"llama_supports_gpu_offload": staticmethod(lambda: True)}
+    )
     fake_chat = types.ModuleType("llama_cpp.llama_chat_format")
     fake_chat.Qwen25VLChatHandler = FakeHandler
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp", fake_llama_cpp)
@@ -2499,7 +2636,14 @@ def test_get_llm_cache_size_zero_evicts_existing_entry(monkeypatch):
     monkeypatch.setattr(
         import_events, "_LLM_CACHE",
         OrderedDict([(
-            ("A.gguf", "ca.gguf", import_events.DEFAULT_LLM_CONTEXT_SIZE, False),
+            (
+                "A.gguf",
+                "ca.gguf",
+                import_events.DEFAULT_LLM_CONTEXT_SIZE,
+                import_events.DEFAULT_LLM_GPU_LAYERS,
+                import_events.DEFAULT_LLM_MAIN_GPU,
+                False,
+            ),
             existing,
         )]),
     )

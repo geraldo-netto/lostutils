@@ -35,6 +35,8 @@ CACHE_DIR_ENV = "IMPORT_EVENTS_CACHE_DIR"
 DEFAULT_LLM_CACHE_SIZE = 1
 DEFAULT_LLM_CONTEXT_SIZE = 0
 DEFAULT_LLM_MAX_TOKENS = 512
+DEFAULT_LLM_GPU_LAYERS = -1
+DEFAULT_LLM_MAIN_GPU = 0
 DOWNLOAD_CHUNK_SIZE = 1 << 20
 DOWNLOAD_PROGRESS_BYTES = 256 << 20
 DOWNLOAD_TIMEOUT_SECONDS = 30
@@ -385,6 +387,8 @@ class ModelConfig:
     llm_cache_size: int = DEFAULT_LLM_CACHE_SIZE
     llm_context_size: int = DEFAULT_LLM_CONTEXT_SIZE
     llm_max_tokens: int = DEFAULT_LLM_MAX_TOKENS
+    llm_gpu_layers: int = DEFAULT_LLM_GPU_LAYERS
+    llm_main_gpu: int = DEFAULT_LLM_MAIN_GPU
     llm_verbose: bool = False
     max_content_chars: Optional[int] = None
     language: str = DEFAULT_LANGUAGE
@@ -426,6 +430,8 @@ class ModelConfig:
             llm_cache_size=max(0, args.llm_cache_size),
             llm_context_size=(0 if args.llm_context <= 0 else max(512, args.llm_context)),
             llm_max_tokens=max(1, args.llm_max_tokens),
+            llm_gpu_layers=args.llm_gpu_layers,
+            llm_main_gpu=max(0, args.llm_main_gpu),
             llm_verbose=args.llm_verbose,
             max_content_chars=(max(1, args.max_content_chars)
                                if args.max_content_chars is not None else None),
@@ -784,10 +790,53 @@ def reset_llm_cache() -> None:
 atexit.register(reset_llm_cache)
 
 
+def _new_llm_client(config: ModelConfig, Llama: Any,
+                    Qwen25VLChatHandler: Any, gpu_layers: int) -> Any:
+    with _quiet_output_context(config.llm_verbose):
+        chat_handler = Qwen25VLChatHandler(
+            clip_model_path=config.clip_path,
+            verbose=config.llm_verbose,
+        )
+        return Llama(
+            model_path=config.model_path,
+            chat_handler=chat_handler,
+            n_ctx=config.llm_context_size,
+            n_gpu_layers=gpu_layers,
+            main_gpu=config.llm_main_gpu,
+            verbose=config.llm_verbose,
+        )
+
+
+def _llm_supports_gpu_offload(llama_cpp: Any) -> bool:
+    supports = getattr(llama_cpp, "llama_supports_gpu_offload", None)
+    return bool(supports()) if callable(supports) else False
+
+
+def _load_llm_client(config: ModelConfig, Llama: Any,
+                     Qwen25VLChatHandler: Any, llama_cpp: Any) -> Any:
+    if config.llm_gpu_layers == 0:
+        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0)
+    if not _llm_supports_gpu_offload(llama_cpp):
+        logger.warning("LLM GPU offload requested, but llama.cpp has no GPU backend; falling back to CPU.")
+        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0)
+    try:
+        return _new_llm_client(config, Llama, Qwen25VLChatHandler, config.llm_gpu_layers)
+    except Exception as exc:
+        logger.warning("LLM GPU offload failed; falling back to CPU: %s", exc)
+        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0)
+
+
 def get_llm(config: Optional[ModelConfig] = None):
     """Lazily initializes the local Qwen2.5-VL model with a bounded LRU cache."""
     config = config or ModelConfig()
-    key = (config.model_path, config.clip_path, config.llm_context_size, config.llm_verbose)
+    key = (
+        config.model_path,
+        config.clip_path,
+        config.llm_context_size,
+        config.llm_gpu_layers,
+        config.llm_main_gpu,
+        config.llm_verbose,
+    )
     cache_limit = max(0, config.llm_cache_size)
     with _LLM_CACHE_LOCK:
         if cache_limit == 0:
@@ -801,21 +850,11 @@ def get_llm(config: Optional[ModelConfig] = None):
                 _trim_llm_cache(cache_limit)
                 return cached
 
-        from llama_cpp import Llama
+        from llama_cpp import Llama, llama_cpp
         from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
         ensure_models_exist(config)
-        with _quiet_output_context(config.llm_verbose):
-            chat_handler = Qwen25VLChatHandler(
-                clip_model_path=config.clip_path,
-                verbose=config.llm_verbose,
-            )
-            cached = Llama(
-                model_path=config.model_path,
-                chat_handler=chat_handler,
-                n_ctx=config.llm_context_size,
-                verbose=config.llm_verbose,
-            )
+        cached = _load_llm_client(config, Llama, Qwen25VLChatHandler, llama_cpp)
         if cache_limit > 0:
             _LLM_CACHE[key] = cached
             _trim_llm_cache(cache_limit)
@@ -1934,6 +1973,8 @@ def _run_text_llm(
         "model_path": runtime_config.model_path,
         "llm_context_size": runtime_config.llm_context_size,
         "llm_max_tokens": runtime_config.llm_max_tokens,
+        "llm_gpu_layers": runtime_config.llm_gpu_layers,
+        "llm_main_gpu": runtime_config.llm_main_gpu,
         "tentative_events": runtime_config.tentative_events,
         "no_activity_events": runtime_config.no_activity_events,
     }
@@ -2425,6 +2466,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--llm-max-tokens", type=int, default=defaults.llm_max_tokens,
                         help=(f"Max tokens generated per LLM call "
                               f"(default: {DEFAULT_LLM_MAX_TOKENS})."))
+    parser.add_argument("--llm-gpu-layers", type=int, default=defaults.llm_gpu_layers,
+                        help=("Number of model layers to offload to GPU; -1 offloads as many "
+                              f"as possible, 0 forces CPU (default: {DEFAULT_LLM_GPU_LAYERS})."))
+    parser.add_argument("--llm-main-gpu", type=int, default=defaults.llm_main_gpu,
+                        help=f"Main GPU index for llama.cpp offload (default: {DEFAULT_LLM_MAIN_GPU}).")
     parser.add_argument("--max-content-chars", type=int, default=None,
                         help=("Max text characters sent to the LLM per file "
                               "(default: computed from --llm-context)."))
