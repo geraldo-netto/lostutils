@@ -1144,6 +1144,55 @@ def test_ocr_with_tesseract_receives_language_and_config(tmp_path, monkeypatch):
     assert calls[0][1]["timeout"] == 7
 
 
+def test_ocr_image_path_auto_skips_tesseract_when_paddle_is_usable(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    calls = []
+    monkeypatch.setattr(import_events, "_ocr_with_paddle",
+                        lambda path, language="en": "Readable Paddle OCR text")
+
+    def tesseract(path, language="en", config=None):
+        calls.append(path)
+        return "Tesseract text"
+
+    monkeypatch.setattr(import_events, "_ocr_with_tesseract", tesseract)
+
+    text = import_events._ocr_image_path_once(img, import_events.ModelConfig(ocr_engine="auto"))
+
+    assert text == "Readable Paddle OCR text"
+    assert calls == []
+
+
+def test_ocr_image_path_auto_falls_back_to_tesseract_when_paddle_is_weak(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    monkeypatch.setattr(import_events, "_ocr_with_paddle", lambda path, language="en": "x")
+    monkeypatch.setattr(import_events, "_ocr_with_tesseract",
+                        lambda path, language="en", config=None: "Tesseract text")
+
+    text = import_events._ocr_image_path_once(img, import_events.ModelConfig(ocr_engine="auto"))
+
+    assert text == "x\nTesseract text"
+
+
+def test_ocr_image_path_engine_modes_call_requested_backend(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    calls = []
+    monkeypatch.setattr(import_events, "_ocr_with_paddle",
+                        lambda path, language="en": calls.append("paddle") or "Paddle text")
+    monkeypatch.setattr(import_events, "_ocr_with_tesseract",
+                        lambda path, language="en", config=None: calls.append("tesseract") or "Tesseract text")
+
+    assert import_events._ocr_image_path_once(
+        img, import_events.ModelConfig(ocr_engine="paddle")) == "Paddle text"
+    assert import_events._ocr_image_path_once(
+        img, import_events.ModelConfig(ocr_engine="tesseract")) == "Tesseract text"
+    assert import_events._ocr_image_path_once(
+        img, import_events.ModelConfig(ocr_engine="both")) == "Paddle text\nTesseract text"
+    assert calls == ["paddle", "tesseract", "paddle", "tesseract"]
+
+
 def test_ocr_with_tesseract_missing_logs_once(tmp_path, monkeypatch, caplog):
     import logging
 
@@ -1706,7 +1755,8 @@ def test_model_config_from_args_threads_values():
          "--ocr-fallback-language", "Spanish", "--ocr-timeout", "9",
          "--ocr-languages", "Brazilian Portuguese,English,German",
          "--ocr-language-score", "0.65",
-         "--tesseract-psm", "11", "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
+         "--tesseract-psm", "11", "--ocr-engine", "tesseract",
+         "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
          "--pdf-vision-dpi", "200", "--benchmark"]
     )
 
@@ -1727,6 +1777,7 @@ def test_model_config_from_args_threads_values():
     assert cfg.ocr_language_score == 0.65
     assert cfg.ocr_timeout_seconds == 9
     assert cfg.tesseract_psm == "11"
+    assert cfg.ocr_engine == "tesseract"
     assert cfg.pdf_ocr_mode == "never"
     assert cfg.pdf_vision_max_pages == 3
     assert cfg.pdf_vision_dpi == 200

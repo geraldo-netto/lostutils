@@ -43,6 +43,7 @@ DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
 DEFAULT_OCR_LANGUAGES = ("pt-br", "en", "es", "it", "fr", "de")
 DEFAULT_OCR_LANGUAGE_SCORE = 0.70
 DEFAULT_TESSERACT_PSM = "6"
+DEFAULT_OCR_ENGINE = "auto"
 DEFAULT_PDF_OCR_MODE = "auto"
 PDF_VISION_MAX_PAGES = 5
 PDF_VISION_DPI = 150
@@ -197,6 +198,14 @@ def _has_usable_extracted_text(text: str) -> bool:
         return False
     alpha = sum(1 for ch in compact if ch.isalpha())
     return alpha >= 30 and (alpha / max(1, len(compact))) >= 0.20
+
+
+def _has_usable_ocr_text(text: str) -> bool:
+    compact = "".join(ch for ch in text if not ch.isspace())
+    if len(compact) < 20:
+        return False
+    alpha = sum(1 for ch in compact if ch.isalpha())
+    return alpha >= 8 and (alpha / max(1, len(compact))) >= 0.20
 
 
 def _should_pdf_ocr(config: "ModelConfig", pdf_text: str) -> bool:
@@ -361,6 +370,7 @@ class ModelConfig:
     ocr_language_score: float = DEFAULT_OCR_LANGUAGE_SCORE
     ocr_timeout_seconds: int = OCR_TIMEOUT_SECONDS
     tesseract_psm: str = DEFAULT_TESSERACT_PSM
+    ocr_engine: str = DEFAULT_OCR_ENGINE
     pdf_ocr_mode: str = DEFAULT_PDF_OCR_MODE
     pdf_vision_max_pages: int = PDF_VISION_MAX_PAGES
     pdf_vision_dpi: int = PDF_VISION_DPI
@@ -398,6 +408,7 @@ class ModelConfig:
             ocr_language_score=min(1.0, max(0.0, args.ocr_language_score)),
             ocr_timeout_seconds=max(1, args.ocr_timeout),
             tesseract_psm=str(args.tesseract_psm),
+            ocr_engine=args.ocr_engine,
             pdf_ocr_mode=args.pdf_ocr_mode,
             pdf_vision_max_pages=max(1, args.pdf_vision_pages),
             pdf_vision_dpi=max(36, args.pdf_vision_dpi),
@@ -1539,8 +1550,16 @@ def _ocr_image_path_once(
     language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
 ) -> str:
     runtime_config = config or ModelConfig()
+    engine = runtime_config.ocr_engine
+    if engine == "paddle":
+        return _ocr_with_paddle(image_path, language)[:runtime_config.text_budget_chars()]
+    if engine == "tesseract":
+        return _ocr_with_tesseract(image_path, language, runtime_config)[:runtime_config.text_budget_chars()]
+    paddle_text = _ocr_with_paddle(image_path, language)
+    if engine == "auto" and _has_usable_ocr_text(paddle_text):
+        return paddle_text[:runtime_config.text_budget_chars()]
     return _merge_text_blocks([
-        _ocr_with_paddle(image_path, language),
+        paddle_text,
         _ocr_with_tesseract(image_path, language, runtime_config),
     ], runtime_config.text_budget_chars())
 
@@ -2018,6 +2037,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=f"Seconds before one OCR engine call times out (default: {OCR_TIMEOUT_SECONDS}).")
     parser.add_argument("--tesseract-psm", default=defaults.tesseract_psm,
                         help=f"Tesseract page segmentation mode (default: {DEFAULT_TESSERACT_PSM}).")
+    parser.add_argument("--ocr-engine", choices=("auto", "paddle", "tesseract", "both"),
+                        default=defaults.ocr_engine,
+                        help=("OCR engine policy: auto uses Paddle first and falls back to "
+                              "Tesseract when weak; both preserves merged OCR "
+                              f"(default: {DEFAULT_OCR_ENGINE})."))
     parser.add_argument("--pdf-ocr-mode", choices=("auto", "always", "never"),
                         default=defaults.pdf_ocr_mode,
                         help=("PDF OCR policy: auto skips OCR when parsed text is usable; "
