@@ -26,6 +26,7 @@ ie-gov-01 | open | low | import_events.py:601 — download and cache warnings lo
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+dnv3-di-01 | open | low | deduplicate-by-namev3.py:70 — input is decoded with `errors="replace"`, so distinct invalid byte sequences collapse to U+FFFD and can be reported as the same cleaned string. Use surrogateescape or binary-safe decoding so malformed filenames remain distinguishable. | derived state
 ie-di-01 | open | low | import_events.py:1330 — dedupe_events collapses records by (title, start) only, dropping distinct events that share a title/time but differ by end/location/source. Include more fields or emit a conflict report before discarding. | derived state
 
 ## performance
@@ -87,6 +88,8 @@ rdv3-rel-01 | open | low | remove-deduplv3.py:107 — the max tiebreaker keeps a
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-robust-01 | open | low | import_events.py:482 — _verify_sha256 deletes a mismatched cached model immediately, losing the artifact and forcing a full redownload even for transient/provenance issues. Move it aside as .bad.<digest> and keep diagnostics. | partial-state recovery
+rf-robust-02 | open | med | relocate_folder.py:622/1737 — copy_tree and _copy_and_verify only clean partial targets on `Exception`; Ctrl-C raises `KeyboardInterrupt` and can leave a partially copied target that blocks retry. Handle KeyboardInterrupt/BaseException with best-effort cleanup or a surfaced recovery instruction. | Ctrl-C cleanup
+rf-robust-03 | open | med | relocate_folder.py:1300 — _backup_target only rolls back on `Exception`; Ctrl-C/SystemExit while the source is renamed aside bypasses the restore path and can leave `<source>` missing with only `<source>.relocate-backup`. Roll back on BaseException and re-raise, leaving SIGKILL/power-loss to --recover. | Ctrl-C rollback
 
 ## testing
 
@@ -121,6 +124,7 @@ ie-watch-01 | open | med | import_events.py:1129 — _run_llm has no per-file ti
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-time-01 | open | low | import_events.py:586 — download timeout is per socket operation, not an overall monotonic deadline, so slow trickle responses can run indefinitely while still resetting the timeout. Add total deadline/stall elapsed checks with time.monotonic(). | monotonic deadline
+lq-time-01 | open | med | link_queue.py:1990 — worker claim deadlines, failure cooldowns, and shutdown joins use time.time(), so wall-clock jumps can make waits expire early or stall. Use time.monotonic() for elapsed deadlines and keep wall time only for display timestamps. | monotonic deadline
 
 ## platform
 
@@ -160,6 +164,7 @@ ie-api-01 | open | med | import_events.py:326 — ModelConfig() direct construct
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+dnv3-cli-01 | open | low | deduplicate-by-namev3.py:64 — --threshold accepts negative values; non-empty inputs then pass a negative score_cutoff into rapidfuzz and crash with OverflowError instead of a CLI validation error. Reject values below 0 before running cdist and cover the edge case. | option validation
 
 ## dependency
 
@@ -170,6 +175,19 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+
+## i18n
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+ie-i18n-01 | open | med | import_events.py:157 — language pre-analysis tokenizes only Latin letters and has stopword/marker maps for en/pt/es/it/fr/de, so Russian, Greek, Hebrew, Japanese, Chinese, and other non-Latin text fall through to LLM auto-detect and the Latin OCR default chain. Add script-aware detection and map detected languages to Paddle/Tesseract backend codes. | non-Latin language coverage
+ie-i18n-02 | open | low | import_events.py:904 — _read_text hardcodes UTF-8 with `errors="ignore"`, so cp1251, Shift-JIS, Big5, ISO-8859, and other non-UTF-8 text can be silently mangled before language detection and LLM extraction. Add encoding detection or a --text-encoding/strict warning path. | non-UTF8 document handling
+
+## release & deploy engineering
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+ie-release-01 | open | low | import_events.py:1465 — pyflakes reports "f-string is missing placeholders" for a help string that does not interpolate anything, so a basic lint gate fails even though runtime behavior works. Drop the unnecessary `f` or add a lint exception. | static analysis gate
 
 ## unused code
 
