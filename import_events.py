@@ -41,6 +41,7 @@ PDF_VISION_DPI = 150
 TEXT_CHARS_PER_TOKEN = 4
 TEXT_PROMPT_RESERVED_TOKENS = 768
 MIN_CONTENT_CHARS = 512
+MAX_CONTEXT_TEXT_CHARS = 65536
 GGUF_METADATA_SCAN_BYTES = 1 << 20
 MTMD_PROJECTOR_METADATA = b"clip.projector_type"
 
@@ -101,7 +102,7 @@ _LANGUAGE_MARKERS = {
 
 def _text_budget_from_context(context_size: int, max_tokens: int) -> int:
     available = max(128, int(context_size) - int(max_tokens) - TEXT_PROMPT_RESERVED_TOKENS)
-    return max(MIN_CONTENT_CHARS, available * TEXT_CHARS_PER_TOKEN)
+    return min(MAX_CONTEXT_TEXT_CHARS, max(MIN_CONTENT_CHARS, available * TEXT_CHARS_PER_TOKEN))
 
 
 def _default_cache_dir() -> Path:
@@ -786,6 +787,26 @@ def _paddle_texts(value: Any) -> List[str]:
     return []
 
 
+def _paddle_constructor_kwargs(paddle_lang: str) -> List[Dict[str, Any]]:
+    return [
+        {"use_textline_orientation": True, "lang": paddle_lang},
+        {"use_angle_cls": True, "lang": paddle_lang},
+        {"lang": paddle_lang},
+    ]
+
+
+def _build_paddle_ocr(PaddleOCR: Any, paddle_lang: str) -> Any:
+    last_exc: Optional[Exception] = None
+    for kwargs in _paddle_constructor_kwargs(paddle_lang):
+        try:
+            return PaddleOCR(**kwargs)
+        except (TypeError, ValueError) as exc:
+            last_exc = exc
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("no PaddleOCR constructor candidates")
+
+
 def _get_paddle_ocr(language: str = DEFAULT_OCR_FALLBACK_LANGUAGE) -> Optional[Any]:
     global _PADDLE_OCR
     if _PADDLE_OCR is None:
@@ -800,10 +821,7 @@ def _get_paddle_ocr(language: str = DEFAULT_OCR_FALLBACK_LANGUAGE) -> Optional[A
         _warn_once("paddle-missing", "PaddleOCR not installed; skipping Paddle OCR.")
         return None
     try:
-        _PADDLE_OCR[paddle_lang] = PaddleOCR(
-            use_angle_cls=True, lang=paddle_lang, show_log=False)
-    except TypeError:
-        _PADDLE_OCR[paddle_lang] = PaddleOCR(lang=paddle_lang)
+        _PADDLE_OCR[paddle_lang] = _build_paddle_ocr(PaddleOCR, paddle_lang)
     except Exception as exc:
         _warn_once(f"paddle-init-{paddle_lang}",
                    "PaddleOCR failed to initialize for language %s: %s",

@@ -488,7 +488,8 @@ def test_get_paddle_ocr_builds_quiet_client(monkeypatch):
     monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
 
     assert isinstance(import_events._get_paddle_ocr(), FakePaddleOCR)
-    assert captured["show_log"] is False
+    assert "show_log" not in captured
+    assert captured["use_textline_orientation"] is True
     assert captured["lang"] == "en"
 
 
@@ -523,7 +524,7 @@ def test_get_paddle_ocr_falls_back_for_constructor_signature(monkeypatch):
     class FakePaddleOCR:
         def __init__(self, **kwargs):
             calls.append(kwargs)
-            if "show_log" in kwargs:
+            if "use_textline_orientation" in kwargs:
                 raise TypeError("old signature")
 
     fake = types.ModuleType("paddleocr")
@@ -534,7 +535,31 @@ def test_get_paddle_ocr_falls_back_for_constructor_signature(monkeypatch):
     import_events._get_paddle_ocr()
 
     assert calls == [
-        {"use_angle_cls": True, "lang": "en", "show_log": False},
+        {"use_textline_orientation": True, "lang": "en"},
+        {"use_angle_cls": True, "lang": "en"},
+    ]
+
+
+def test_get_paddle_ocr_falls_back_to_lang_only(monkeypatch):
+    import types
+
+    calls = []
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if "use_textline_orientation" in kwargs or "use_angle_cls" in kwargs:
+                raise ValueError("Unknown argument")
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
+
+    assert isinstance(import_events._get_paddle_ocr(), FakePaddleOCR)
+    assert calls == [
+        {"use_textline_orientation": True, "lang": "en"},
+        {"use_angle_cls": True, "lang": "en"},
         {"lang": "en"},
     ]
 
@@ -1244,6 +1269,13 @@ def test_model_config_text_budget_uses_context_when_not_overridden():
     cfg = import_events.ModelConfig(llm_context_size=2048, llm_max_tokens=100)
 
     assert cfg.text_budget_chars() == import_events._text_budget_from_context(2048, 100)
+
+
+def test_model_config_default_text_budget_is_64k():
+    cfg = import_events.ModelConfig()
+
+    assert import_events.MAX_CONTENT_CHARS == 65536
+    assert cfg.text_budget_chars() == 65536
 
 
 def test_default_cache_dir_prefers_import_events_cache_dir(tmp_path, monkeypatch):
