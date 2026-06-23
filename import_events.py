@@ -468,8 +468,56 @@ def _report_ocr_warning_summary() -> None:
 @contextlib.contextmanager
 def _redirect_stdout_stderr():
     with open(os.devnull, "w", encoding="utf-8") as devnull:
-        with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-            yield
+        saved_fds = _redirect_process_fds(devnull.fileno())
+        restored = False
+        try:
+            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                try:
+                    yield
+                finally:
+                    _restore_process_fds(saved_fds)
+                    restored = True
+        finally:
+            if not restored:
+                _restore_process_fds(saved_fds)
+
+
+def _flush_standard_streams() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, ValueError, OSError):
+            continue
+
+
+def _redirect_process_fds(target_fd: int) -> Tuple[Optional[int], Optional[int]]:
+    _flush_standard_streams()
+    saved: List[Optional[int]] = []
+    for fd in (1, 2):
+        saved_fd: Optional[int] = None
+        try:
+            saved_fd = os.dup(fd)
+            os.dup2(target_fd, fd)
+        except OSError:
+            if saved_fd is not None:
+                os.close(saved_fd)
+            saved.append(None)
+        else:
+            saved.append(saved_fd)
+    return saved[0], saved[1]
+
+
+def _restore_process_fds(saved_fds: Tuple[Optional[int], Optional[int]]) -> None:
+    _flush_standard_streams()
+    for fd, saved_fd in zip((1, 2), saved_fds):
+        if saved_fd is None:
+            continue
+        try:
+            os.dup2(saved_fd, fd)
+        except OSError:
+            pass
+        finally:
+            os.close(saved_fd)
 
 
 def _quiet_output_context(verbose: bool):

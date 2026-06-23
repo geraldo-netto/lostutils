@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import os
 from collections import OrderedDict
 from pathlib import Path
 from datetime import date, datetime, timezone
@@ -91,6 +92,58 @@ def test_run_llm_suppresses_client_output_when_not_verbose(capsys):
     assert captured.out == ""
     assert captured.err == ""
     assert events[0]["title"] == "Launch"
+
+
+def test_run_llm_suppresses_fd_output_when_not_verbose(capfd):
+    class NoisyLlm:
+        def create_chat_completion(self, messages, **kwargs):
+            os.write(1, b"add_text: prompt on stdout\n")
+            os.write(2, b"add_text: prompt on stderr\n")
+            return {
+                "choices": [{
+                    "message": {
+                        "content": '[{"title": "Launch", "start": "2026-06-06"}]',
+                    },
+                }],
+            }
+
+    events = import_events._run_llm(
+        [{"role": "user", "content": "Launch"}],
+        Path("event.txt"),
+        "Text/LLM",
+        NoisyLlm(),
+        import_events.ModelConfig(llm_verbose=False),
+    )
+
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert events[0]["title"] == "Launch"
+
+
+def test_run_llm_restores_fd_output_after_keyboard_interrupt(capfd):
+    class InterruptingNoisyLlm:
+        def create_chat_completion(self, messages, **kwargs):
+            os.write(1, b"hidden stdout\n")
+            os.write(2, b"hidden stderr\n")
+            raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events._run_llm(
+            [{"role": "user", "content": "Launch"}],
+            Path("event.txt"),
+            "Text/LLM",
+            InterruptingNoisyLlm(),
+            import_events.ModelConfig(llm_verbose=False),
+        )
+
+    os.write(1, b"visible stdout\n")
+    os.write(2, b"visible stderr\n")
+    captured = capfd.readouterr()
+    assert "hidden" not in captured.out
+    assert "hidden" not in captured.err
+    assert "visible stdout" in captured.out
+    assert "visible stderr" in captured.err
 
 
 def test_extract_with_llm_computes_text_budget_from_context(tmp_path):
