@@ -70,6 +70,32 @@ def test_extract_with_llm_threads_generation_limits(tmp_path):
     assert fake.kwargs[0]["top_p"] == 1.0
 
 
+def test_extract_with_llm_computes_text_budget_from_context(tmp_path):
+    source = tmp_path / "event.txt"
+    source.write_text("A" * 2000, encoding="utf-8")
+    fake = FakeLlm()
+    cfg = import_events.ModelConfig(llm_context_size=1024, llm_max_tokens=1)
+
+    import_events.extract_with_llm(source, llm_client=fake, model_config=cfg)
+
+    prompt = fake.messages[0][1]["content"]
+    assert "A" * cfg.text_budget_chars() in prompt
+    assert "A" * (cfg.text_budget_chars() + 1) not in prompt
+
+
+def test_extract_with_llm_uses_explicit_text_budget(tmp_path):
+    source = tmp_path / "event.txt"
+    source.write_text("abcdef", encoding="utf-8")
+    fake = FakeLlm()
+    cfg = import_events.ModelConfig(max_content_chars=3)
+
+    import_events.extract_with_llm(source, llm_client=fake, model_config=cfg)
+
+    prompt = fake.messages[0][1]["content"]
+    assert "\nabc\n" in prompt
+    assert "abcdef" not in prompt
+
+
 def test_normalize_event_date_returns_iso_strings():
     assert import_events.normalize_event_date(date(2026, 6, 6)) == "2026-06-06"
     assert import_events.normalize_event_date(
@@ -359,6 +385,12 @@ def test_text_messages_uses_random_nonce_delimiter():
     assert "\nhello\n" in user
 
 
+def test_text_messages_include_language_hint():
+    msg = import_events._text_messages("olá", "pt")
+
+    assert "Portuguese (pt)" in msg[1]["content"]
+
+
 def test_text_messages_nonce_differs_per_call():
     a = import_events._text_messages("x")[1]["content"]
     b = import_events._text_messages("x")[1]["content"]
@@ -397,10 +429,31 @@ def test_image_messages_uses_correct_mime(tmp_path):
     img = tmp_path / "poster.png"
     img.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    messages = import_events._image_messages(img)
+    messages = import_events._image_messages(img, "es")
 
+    assert "Spanish (es)" in messages[1]["content"][0]["text"]
     url = messages[1]["content"][1]["image_url"]["url"]
     assert url.startswith("data:image/png;base64,")
+
+
+def test_language_detection_handles_portuguese_text():
+    cfg = import_events.ModelConfig()
+    text = "Festa de São João no Porto com música e evento cultural"
+
+    assert import_events._language_for_text(text, cfg) == "pt"
+
+
+def test_language_config_override_skips_detection():
+    cfg = import_events.ModelConfig(language="fr")
+
+    assert import_events._language_for_text("the event is in English", cfg) == "fr"
+    assert import_events._language_for_ocr("", cfg) == "fr"
+
+
+def test_ocr_language_fallback_never_returns_auto():
+    cfg = import_events.ModelConfig(language="auto", ocr_fallback_language="auto")
+
+    assert import_events._language_for_ocr("", cfg) == import_events.DEFAULT_OCR_FALLBACK_LANGUAGE
 
 
 def test_merge_text_blocks_dedupes_normalized_lines():
@@ -436,6 +489,30 @@ def test_get_paddle_ocr_builds_quiet_client(monkeypatch):
 
     assert isinstance(import_events._get_paddle_ocr(), FakePaddleOCR)
     assert captured["show_log"] is False
+    assert captured["lang"] == "en"
+
+
+def test_get_paddle_ocr_maps_language_and_logs_version(monkeypatch, caplog):
+    import logging
+    import types
+
+    captured = {}
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    fake.__version__ = "9.9"
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
+
+    with caplog.at_level(logging.INFO):
+        assert isinstance(import_events._get_paddle_ocr("de"), FakePaddleOCR)
+
+    assert captured["lang"] == "german"
+    assert "Using PaddleOCR 9.9 with language german" in caplog.text
 
 
 def test_get_paddle_ocr_falls_back_for_constructor_signature(monkeypatch):
@@ -510,7 +587,7 @@ def test_ocr_with_paddle_handles_result_and_old_ocr_signature(tmp_path, monkeypa
                 raise TypeError("old ocr signature")
             return [[[[0, 0], [1, 1]], ("Paddle text", 0.9)]]
 
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda: Engine())
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
 
     assert import_events._ocr_with_paddle(img) == "Paddle text"
 
@@ -518,7 +595,7 @@ def test_ocr_with_paddle_handles_result_and_old_ocr_signature(tmp_path, monkeypa
 def test_ocr_with_paddle_handles_missing_engine(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda: None)
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": None)
 
     assert import_events._ocr_with_paddle(img) == ""
 
@@ -534,7 +611,7 @@ def test_ocr_with_paddle_error_logs_once(tmp_path, monkeypatch, caplog):
         def ocr(self, *_args, **_kwargs):
             raise RuntimeError("bad image")
 
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda: Engine())
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
 
     with caplog.at_level(logging.WARNING):
         assert import_events._ocr_with_paddle(img) == ""
@@ -551,7 +628,7 @@ def test_ocr_with_paddle_propagates_keyboard_interrupt(tmp_path, monkeypatch):
         def ocr(self, *_args, **_kwargs):
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda: Engine())
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
 
     with pytest.raises(KeyboardInterrupt):
         import_events._ocr_with_paddle(img)
@@ -560,8 +637,11 @@ def test_ocr_with_paddle_propagates_keyboard_interrupt(tmp_path, monkeypatch):
 def test_ocr_image_path_merges_paddle_and_tesseract(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
-    monkeypatch.setattr(import_events, "_ocr_with_paddle", lambda path: "Alpha\nShared")
-    monkeypatch.setattr(import_events, "_ocr_with_tesseract", lambda path: "shared\nBeta")
+    monkeypatch.setattr(import_events, "_ocr_with_paddle", lambda path, language="en": "Alpha\nShared")
+    monkeypatch.setattr(
+        import_events, "_ocr_with_tesseract",
+        lambda path, language="en", config=None: "shared\nBeta",
+    )
 
     text = import_events._ocr_image_path(img)
 
@@ -571,7 +651,7 @@ def test_ocr_image_path_merges_paddle_and_tesseract(tmp_path, monkeypatch):
 def test_ocr_image_bytes_uses_temp_file_and_cleans_it(monkeypatch):
     seen = []
 
-    def fake_ocr(path):
+    def fake_ocr(path, config=None, language="en"):
         seen.append(path)
         assert path.exists()
         return "OCR text"
@@ -585,7 +665,7 @@ def test_ocr_image_bytes_uses_temp_file_and_cleans_it(monkeypatch):
 def test_ocr_image_bytes_cleans_temp_file_on_keyboard_interrupt(monkeypatch):
     seen = {}
 
-    def interrupt(path):
+    def interrupt(path, config=None, language="en"):
         seen["path"] = path
         raise KeyboardInterrupt
 
@@ -614,7 +694,29 @@ def test_ocr_with_tesseract_returns_stdout(tmp_path, monkeypatch):
     monkeypatch.setattr(import_events.subprocess, "run", fake_run)
 
     assert import_events._ocr_with_tesseract(img) == "Tesseract text"
-    assert calls[0][0][:3] == ["tesseract", str(img), "stdout"]
+    assert calls[0][0] == ["tesseract", str(img), "stdout", "-l", "eng", "--psm", "6"]
+
+
+def test_ocr_with_tesseract_receives_language_and_config(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "Texto"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return Result()
+
+    cfg = import_events.ModelConfig(ocr_timeout_seconds=7, tesseract_psm="11")
+    monkeypatch.setattr(import_events.subprocess, "run", fake_run)
+
+    assert import_events._ocr_with_tesseract(img, "pt", cfg) == "Texto"
+    assert calls[0][0] == ["tesseract", str(img), "stdout", "-l", "por", "--psm", "11"]
+    assert calls[0][1]["timeout"] == 7
 
 
 def test_ocr_with_tesseract_missing_logs_once(tmp_path, monkeypatch, caplog):
@@ -690,7 +792,8 @@ def test_ocr_with_tesseract_propagates_keyboard_interrupt(tmp_path, monkeypatch)
 
 
 def test_ocr_image_bytes_ignores_cleanup_error(monkeypatch):
-    monkeypatch.setattr(import_events, "_ocr_image_path", lambda path: "OCR text")
+    monkeypatch.setattr(import_events, "_ocr_image_path",
+                        lambda path, config=None, language="en": "OCR text")
     monkeypatch.setattr(import_events.os, "unlink", lambda path: (_ for _ in ()).throw(OSError))
 
     assert import_events._ocr_image_bytes(b"png") == "OCR text"
@@ -700,7 +803,8 @@ def test_extract_from_image_uses_ocr_before_llm(tmp_path, monkeypatch):
     img = tmp_path / "poster.png"
     img.write_bytes(b"image")
     fake = FakeLlm('[{"title": "OCR Event", "start": "2026-06-22"}]')
-    monkeypatch.setattr(import_events, "_ocr_image_path", lambda path: "OCR calendar text")
+    monkeypatch.setattr(import_events, "_ocr_image_path",
+                        lambda path, config=None, language="en": "OCR calendar text")
 
     events = import_events.extract_from_image(img, llm_client=fake)
 
@@ -709,11 +813,34 @@ def test_extract_from_image_uses_ocr_before_llm(tmp_path, monkeypatch):
     assert "image_url" not in json.dumps(fake.messages[0])
 
 
+def test_extract_from_image_passes_fallback_language_to_ocr_and_detects_llm_language(
+    tmp_path, monkeypatch
+):
+    img = tmp_path / "poster.png"
+    img.write_bytes(b"image")
+    fake = FakeLlm('[{"title": "Festa", "start": "2026-06-22"}]')
+    seen = {}
+
+    def fake_ocr(path, config=None, language="en"):
+        seen["language"] = language
+        return "Festa de São João no Porto"
+
+    cfg = import_events.ModelConfig(ocr_fallback_language="pt")
+    monkeypatch.setattr(import_events, "_ocr_image_path", fake_ocr)
+
+    events = import_events.extract_from_image(img, llm_client=fake, model_config=cfg)
+
+    assert seen["language"] == "pt"
+    assert events[0]["type"] == "Image/OCR"
+    assert "Portuguese (pt)" in fake.messages[0][1]["content"]
+
+
 def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypatch):
     img = tmp_path / "poster.png"
     img.write_bytes(b"image")
     fake = FakeLlm('[{"title": "Vision Event", "start": "2026-06-22"}]')
-    monkeypatch.setattr(import_events, "_ocr_image_path", lambda path: "")
+    monkeypatch.setattr(import_events, "_ocr_image_path",
+                        lambda path, config=None, language="en": "")
 
     events = import_events.extract_from_image(img, llm_client=fake)
 
@@ -721,11 +848,28 @@ def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypat
     assert "image_url" in json.dumps(fake.messages[0])
 
 
+def test_extract_from_image_passes_language_to_vision_prompt(tmp_path, monkeypatch):
+    img = tmp_path / "poster.png"
+    img.write_bytes(b"image")
+    fake = FakeLlm('[{"title": "Vision Event", "start": "2026-06-22"}]')
+    monkeypatch.setattr(import_events, "_ocr_image_path",
+                        lambda path, config=None, language="en": "")
+
+    import_events.extract_from_image(
+        img,
+        llm_client=fake,
+        model_config=import_events.ModelConfig(language="es"),
+    )
+
+    assert "Spanish (es)" in fake.messages[0][1]["content"][0]["text"]
+
+
 def test_process_folder_handles_images_with_various_formats(tmp_path, monkeypatch):
     for name in ("a.png", "b.webp", "c.gif", "d.bmp", "e.tiff"):
         (tmp_path / name).write_bytes(b"fake-image-bytes")
     fake = FakeLlm('[{"title": "Expo", "start": "2026-06-22T10:00"}]')
-    monkeypatch.setattr(import_events, "_ocr_image_path", lambda path: "Expo 2026-06-22")
+    monkeypatch.setattr(import_events, "_ocr_image_path",
+                        lambda path, config=None, language="en": "Expo 2026-06-22")
 
     events = import_events.process_folder(str(tmp_path), llm_client=fake)
 
@@ -1070,7 +1214,11 @@ def test_model_config_from_args_threads_values():
         ["dir", "--model-path", "m.gguf", "--clip-path", "c.gguf",
          "--model-sha256", "a" * 64, "--clip-sha256", "b" * 64,
          "--llm-cache-size", "2", "--llm-context", "3072",
-         "--llm-max-tokens", "123", "--llm-verbose"]
+         "--llm-max-tokens", "123", "--max-content-chars", "456",
+         "--llm-verbose", "--language", "Portuguese",
+         "--ocr-fallback-language", "Spanish", "--ocr-timeout", "9",
+         "--tesseract-psm", "11", "--pdf-vision-pages", "3",
+         "--pdf-vision-dpi", "200"]
     )
 
     cfg = import_events.ModelConfig.from_args(args)
@@ -1083,6 +1231,19 @@ def test_model_config_from_args_threads_values():
     assert cfg.llm_context_size == 3072
     assert cfg.llm_max_tokens == 123
     assert cfg.llm_verbose is True
+    assert cfg.max_content_chars == 456
+    assert cfg.language == "pt"
+    assert cfg.ocr_fallback_language == "es"
+    assert cfg.ocr_timeout_seconds == 9
+    assert cfg.tesseract_psm == "11"
+    assert cfg.pdf_vision_max_pages == 3
+    assert cfg.pdf_vision_dpi == 200
+
+
+def test_model_config_text_budget_uses_context_when_not_overridden():
+    cfg = import_events.ModelConfig(llm_context_size=2048, llm_max_tokens=100)
+
+    assert cfg.text_budget_chars() == import_events._text_budget_from_context(2048, 100)
 
 
 def test_default_cache_dir_prefers_import_events_cache_dir(tmp_path, monkeypatch):
@@ -1129,6 +1290,13 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.llm_context_size == import_events.DEFAULT_LLM_CONTEXT_SIZE
     assert cfg.llm_max_tokens == import_events.DEFAULT_LLM_MAX_TOKENS
     assert cfg.llm_verbose is False
+    assert cfg.max_content_chars is None
+    assert cfg.language == import_events.DEFAULT_LANGUAGE
+    assert cfg.ocr_fallback_language == import_events.DEFAULT_OCR_FALLBACK_LANGUAGE
+    assert cfg.ocr_timeout_seconds == import_events.OCR_TIMEOUT_SECONDS
+    assert cfg.tesseract_psm == import_events.DEFAULT_TESSERACT_PSM
+    assert cfg.pdf_vision_max_pages == import_events.PDF_VISION_MAX_PAGES
+    assert cfg.pdf_vision_dpi == import_events.PDF_VISION_DPI
 
 
 def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
@@ -1628,6 +1796,17 @@ def test_pdf_to_images_uses_configured_dpi(monkeypatch):
     assert images == [f"png:{import_events.PDF_VISION_DPI}".encode("utf-8")]
 
 
+def test_pdf_to_images_uses_runtime_config(monkeypatch):
+    _install_fake_fitz(monkeypatch, pages=5)
+
+    images = import_events._pdf_to_images(
+        Path("custom.pdf"),
+        import_events.ModelConfig(pdf_vision_max_pages=2, pdf_vision_dpi=96),
+    )
+
+    assert images == [b"png:96", b"png:96"]
+
+
 def test_pdf_to_images_returns_empty_without_pymupdf(monkeypatch):
     import builtins
     real_import = builtins.__import__
@@ -1644,9 +1823,11 @@ def test_pdf_to_images_returns_empty_without_pymupdf(monkeypatch):
 
 def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):
     fake = FakeLlm('[{"title": "PDF Event", "start": "2026-06-22"}]')
-    monkeypatch.setattr(import_events, "_pdf_text", lambda path: "PDF text\nShared")
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path: [b"page"])
-    monkeypatch.setattr(import_events, "_ocr_image_bytes", lambda data: "shared\nOCR text")
+    monkeypatch.setattr(import_events, "_pdf_text",
+                        lambda path, max_chars=import_events.MAX_CONTENT_CHARS: "PDF text\nShared")
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [b"page"])
+    monkeypatch.setattr(import_events, "_ocr_image_bytes",
+                        lambda data, config=None, language="en": "shared\nOCR text")
 
     events = import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
 
@@ -1658,11 +1839,35 @@ def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):
     assert "image_url" not in json.dumps(fake.messages[0])
 
 
+def test_extract_from_pdf_detects_language_before_ocr(monkeypatch):
+    fake = FakeLlm('[{"title": "Festa", "start": "2026-06-22"}]')
+    seen = {}
+    monkeypatch.setattr(
+        import_events, "_pdf_text",
+        lambda path, max_chars=import_events.MAX_CONTENT_CHARS: "Festa de São João no Porto",
+    )
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [b"page"])
+
+    def fake_ocr(data, config=None, language="en"):
+        seen["language"] = language
+        return "música"
+
+    monkeypatch.setattr(import_events, "_ocr_image_bytes", fake_ocr)
+
+    events = import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
+
+    assert seen["language"] == "pt"
+    assert events[0]["type"] == "PDF/OCR"
+    assert "Portuguese (pt)" in fake.messages[0][1]["content"]
+
+
 def test_extract_from_pdf_falls_back_to_vision_after_empty_ocr(monkeypatch):
     fake = FakeLlm('[{"title": "Vision PDF", "start": "2026-06-22"}]')
-    monkeypatch.setattr(import_events, "_pdf_text", lambda path: "")
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path: [b"page"])
-    monkeypatch.setattr(import_events, "_ocr_image_bytes", lambda data: "")
+    monkeypatch.setattr(import_events, "_pdf_text",
+                        lambda path, max_chars=import_events.MAX_CONTENT_CHARS: "")
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [b"page"])
+    monkeypatch.setattr(import_events, "_ocr_image_bytes",
+                        lambda data, config=None, language="en": "")
 
     events = import_events.extract_from_pdf(Path("scan.pdf"), llm_client=fake)
 
@@ -1673,7 +1878,8 @@ def test_extract_from_pdf_falls_back_to_vision_after_empty_ocr(monkeypatch):
 def test_extract_from_pdf_propagates_keyboard_interrupt_from_text_stage(monkeypatch):
     monkeypatch.setattr(
         import_events, "_pdf_text",
-        lambda path: (_ for _ in ()).throw(KeyboardInterrupt),
+        lambda path, max_chars=import_events.MAX_CONTENT_CHARS: (
+            _ for _ in ()).throw(KeyboardInterrupt),
     )
 
     with pytest.raises(KeyboardInterrupt):
@@ -1681,11 +1887,13 @@ def test_extract_from_pdf_propagates_keyboard_interrupt_from_text_stage(monkeypa
 
 
 def test_extract_from_pdf_propagates_keyboard_interrupt_from_ocr_stage(monkeypatch):
-    monkeypatch.setattr(import_events, "_pdf_text", lambda path: "")
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path: [b"page"])
+    monkeypatch.setattr(import_events, "_pdf_text",
+                        lambda path, max_chars=import_events.MAX_CONTENT_CHARS: "")
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [b"page"])
     monkeypatch.setattr(
         import_events, "_ocr_image_bytes",
-        lambda data: (_ for _ in ()).throw(KeyboardInterrupt),
+        lambda data, config=None, language="en": (
+            _ for _ in ()).throw(KeyboardInterrupt),
     )
 
     with pytest.raises(KeyboardInterrupt):
