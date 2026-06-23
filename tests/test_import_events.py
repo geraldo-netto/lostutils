@@ -128,6 +128,18 @@ def test_process_folder_uses_injected_client_for_text_files(tmp_path):
     assert [event["title"] for event in events] == ["Launch"]
 
 
+def test_process_folder_logs_per_file_event_count(tmp_path, caplog):
+    import logging
+
+    (tmp_path / "event.txt").write_text("Launch party tomorrow", encoding="utf-8")
+
+    with caplog.at_level(logging.INFO):
+        events = import_events.process_folder(str(tmp_path), llm_client=FakeLlm())
+
+    assert [event["title"] for event in events] == ["Launch"]
+    assert "Completed event.txt: 1 event(s)." in caplog.text
+
+
 def test_extract_with_llm_threads_generation_limits(tmp_path):
     source = tmp_path / "event.txt"
     source.write_text("Launch party tomorrow", encoding="utf-8")
@@ -2721,7 +2733,8 @@ def test_get_llm_threads_config_paths(monkeypatch, caplog):
     monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
 
-    cfg = import_events.ModelConfig(model_path="MM.gguf", clip_path="CC.gguf")
+    cfg = import_events.ModelConfig(
+        model_path="MM.gguf", clip_path="CC.gguf", llm_gpu_layers=-1)
     with caplog.at_level(logging.INFO):
         import_events.get_llm(cfg)
 
@@ -2732,7 +2745,7 @@ def test_get_llm_threads_config_paths(monkeypatch, caplog):
         "main_gpu": import_events.DEFAULT_LLM_MAIN_GPU,
         "model": "MM.gguf",
         "n_ctx": import_events.DEFAULT_LLM_CONTEXT_SIZE,
-        "n_gpu_layers": import_events.DEFAULT_LLM_GPU_LAYERS,
+        "n_gpu_layers": -1,
     }
     assert "Loading LLM model: model=MM.gguf, projector=CC.gguf" in caplog.text
     assert "Using LLM GPU backend for model MM.gguf: n_gpu_layers=-1, main_gpu=0." in caplog.text
@@ -2791,9 +2804,10 @@ def test_get_llm_falls_back_to_cpu_when_gpu_init_fails(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO):
         client = import_events.get_llm(import_events.ModelConfig(
-            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0))
+            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0,
+            llm_gpu_layers=-1))
 
-    assert created == [import_events.DEFAULT_LLM_GPU_LAYERS, 0]
+    assert created == [-1, 0]
     assert client.n_gpu_layers == 0
     assert "falling back to CPU" in caplog.text
     assert "Using LLM CPU backend for model A.gguf." in caplog.text
@@ -2828,7 +2842,8 @@ def test_get_llm_uses_cpu_when_gpu_backend_missing(monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO):
         import_events.get_llm(import_events.ModelConfig(
-            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0))
+            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0,
+            llm_gpu_layers=-1))
 
     assert created == [0]
     assert "no GPU backend" in caplog.text
@@ -2864,9 +2879,10 @@ def test_get_llm_preserves_keyboard_interrupt_during_gpu_init(monkeypatch):
 
     with pytest.raises(KeyboardInterrupt):
         import_events.get_llm(import_events.ModelConfig(
-            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0))
+            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0,
+            llm_gpu_layers=-1))
 
-    assert created == [import_events.DEFAULT_LLM_GPU_LAYERS]
+    assert created == [-1]
 
 
 def test_get_llm_caches_per_config(monkeypatch):
@@ -3257,22 +3273,23 @@ def test_extract_from_pdf_auto_skips_ocr_when_text_is_usable(monkeypatch):
     assert text in fake.messages[0][1]["content"]
 
 
-def test_extract_from_pdf_never_skips_ocr_for_sparse_text(monkeypatch):
-    fake = FakeLlm('[{"title": "Sparse", "start": "2026-06-22"}]')
+def test_extract_from_pdf_default_uses_vision_for_sparse_text_without_ocr(monkeypatch):
+    fake = FakeLlm('[{"title": "Vision Sparse", "start": "2026-06-22"}]')
+    render_calls = []
     monkeypatch.setattr(import_events, "_pdf_text", lambda path, max_chars=1000: "x")
-
-    def fail_render(path, config=None):
-        raise AssertionError("PDF OCR should be disabled")
-
-    monkeypatch.setattr(import_events, "_pdf_to_images", fail_render)
-
-    events = import_events.extract_from_pdf(
-        Path("sparse.pdf"),
-        llm_client=fake,
-        model_config=import_events.ModelConfig(pdf_ocr_mode="never"),
+    monkeypatch.setattr(import_events, "_render_pdf_image_paths",
+                        lambda path, output_dir, config=None: (
+                            render_calls.append(path) or _fake_rendered_paths(output_dir, b"vision")))
+    monkeypatch.setattr(
+        import_events, "_ocr_image_path_once",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("PDF OCR should be disabled")),
     )
 
-    assert events[0]["type"] == "PDF"
+    events = import_events.extract_from_pdf(Path("sparse.pdf"), llm_client=fake)
+
+    assert events[0]["type"] == "PDF/Vision"
+    assert "image_url" in json.dumps(fake.messages[0])
+    assert render_calls == [Path("sparse.pdf")]
 
 
 def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):
@@ -3284,7 +3301,11 @@ def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):
     monkeypatch.setattr(import_events, "_ocr_image_path_once",
                         lambda path, config=None, language="en": "shared\nOCR text")
 
-    events = import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
+    events = import_events.extract_from_pdf(
+        Path("agenda.pdf"),
+        llm_client=fake,
+        model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+    )
 
     assert events[0]["type"] == "PDF/OCR"
     prompt = fake.messages[0][1]["content"]
@@ -3309,7 +3330,11 @@ def test_extract_from_pdf_continues_to_ocr_when_text_stage_fails(monkeypatch, ca
                         lambda path, config=None, language="en": "OCR Event 2026-06-22")
 
     with caplog.at_level(logging.WARNING):
-        events = import_events.extract_from_pdf(Path("encrypted.pdf"), llm_client=fake)
+        events = import_events.extract_from_pdf(
+            Path("encrypted.pdf"),
+            llm_client=fake,
+            model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+        )
 
     assert events[0]["type"] == "PDF/OCR"
     assert "PDF stage pdf_text failed for encrypted.pdf" in caplog.text
@@ -3345,7 +3370,11 @@ def test_extract_from_pdf_expands_calendar_hierarchy_before_llm(monkeypatch):
     )
     monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
 
-    events = import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
+    events = import_events.extract_from_pdf(
+        Path("agenda.pdf"),
+        llm_client=fake,
+        model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+    )
 
     prompt = fake.messages[0][1]["content"]
     assert "2026-03-08 - Community Fair" in prompt
@@ -3587,7 +3616,11 @@ def test_extract_from_pdf_detects_language_before_ocr(monkeypatch):
 
     monkeypatch.setattr(import_events, "_ocr_image_path_once", fake_ocr)
 
-    events = import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
+    events = import_events.extract_from_pdf(
+        Path("agenda.pdf"),
+        llm_client=fake,
+        model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+    )
 
     assert seen["language"] == "pt"
     assert events[0]["type"] == "PDF/OCR"
@@ -3610,7 +3643,11 @@ def test_extract_from_pdf_logs_language_preanalysis(monkeypatch, caplog):
     )
 
     with caplog.at_level(logging.INFO):
-        import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
+        import_events.extract_from_pdf(
+            Path("agenda.pdf"),
+            llm_client=fake,
+            model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+        )
 
     assert "Language pre-analysis for agenda.pdf [PDF text]: Portuguese (pt) via detected" in caplog.text
     assert "Language pre-analysis for agenda.pdf [PDF OCR]: Portuguese (pt) via detected" in caplog.text
@@ -3628,7 +3665,11 @@ def test_extract_from_pdf_falls_back_to_vision_after_empty_ocr(monkeypatch):
     monkeypatch.setattr(import_events, "_ocr_image_path_once",
                         lambda path, config=None, language="en": "")
 
-    events = import_events.extract_from_pdf(Path("scan.pdf"), llm_client=fake)
+    events = import_events.extract_from_pdf(
+        Path("scan.pdf"),
+        llm_client=fake,
+        model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+    )
 
     assert events[0]["type"] == "PDF/Vision"
     assert "image_url" in json.dumps(fake.messages[0])
@@ -3658,7 +3699,11 @@ def test_extract_from_pdf_propagates_keyboard_interrupt_from_ocr_stage(monkeypat
     )
 
     with pytest.raises(KeyboardInterrupt):
-        import_events.extract_from_pdf(Path("scan.pdf"), llm_client=FakeLlm())
+        import_events.extract_from_pdf(
+            Path("scan.pdf"),
+            llm_client=FakeLlm(),
+            model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+        )
 
 
 class RaisingLlm:
@@ -3723,19 +3768,83 @@ def test_extract_from_file_propagates_keyboard_interrupt_without_counting(tmp_pa
     assert import_events.extraction_failure_count() == 0
 
 
-def test_configure_logging_includes_date_and_time(monkeypatch):
-    captured = {}
+def test_configure_logging_uses_dedicated_stderr_fd(monkeypatch):
+    root = import_events.logging.getLogger()
+    original_handlers = list(root.handlers)
 
-    def fake_basic_config(**kwargs):
-        captured.update(kwargs)
+    class FakeStream:
+        def write(self, _text):
+            pass
 
-    monkeypatch.setattr(import_events.logging, "basicConfig", fake_basic_config)
+        def flush(self):
+            pass
 
-    import_events._configure_logging()
+    fake_file = FakeStream()
+    monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
+    monkeypatch.setattr(import_events.os, "dup", lambda fd: 77)
+    monkeypatch.setattr(import_events.os, "fdopen", lambda fd, mode, buffering=1: fake_file)
 
-    assert captured["level"] == import_events.logging.INFO
-    assert captured["format"] == "%(asctime)s %(levelname)s: %(message)s"
-    assert captured["datefmt"] == "%Y-%m-%d %H:%M:%S"
+    try:
+        import_events._configure_logging()
+
+        app_handlers = [
+            handler for handler in root.handlers
+            if getattr(handler, "_import_events_app_handler", False)
+        ]
+        assert len(app_handlers) == 1
+        assert app_handlers[0].stream is fake_file
+        assert root.level == import_events.logging.INFO
+        assert app_handlers[0].formatter._fmt == "%(asctime)s %(levelname)s: %(message)s"
+        assert app_handlers[0].formatter.datefmt == "%Y-%m-%d %H:%M:%S"
+    finally:
+        root.handlers[:] = original_handlers
+        monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
+
+
+def test_configured_logging_survives_quiet_output_redirect(tmp_path, monkeypatch):
+    root = import_events.logging.getLogger()
+    original_handlers = list(root.handlers)
+    log_path = tmp_path / "app.log"
+    log_file = log_path.open("w", encoding="utf-8", buffering=1)
+    monkeypatch.setattr(import_events, "_APP_LOG_FILE", log_file)
+
+    try:
+        import_events._configure_logging()
+        with import_events._quiet_output_context(False):
+            import_events.logger.info("diagnostic survived")
+        log_file.flush()
+
+        assert "diagnostic survived" in log_path.read_text(encoding="utf-8")
+    finally:
+        root.handlers[:] = original_handlers
+        log_file.close()
+        monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
+
+
+def test_print_run_output_prints_all_event_rows(capsys):
+    events = [
+        {"title": f"Event {index}", "start": "2026-06-06", "location": "",
+         "source": "event.txt"}
+        for index in range(3)
+    ]
+
+    import_events._print_run_output(events, "events.json", False)
+
+    out = capsys.readouterr().out
+    assert "Extracted 3 potential events -> events.json" in out
+    assert "Event 0" in out
+    assert "Event 1" in out
+    assert "Event 2" in out
+
+
+def test_print_run_output_summary_only_hides_event_rows(capsys):
+    events = [{"title": "Event", "start": "2026-06-06", "location": "", "source": "event.txt"}]
+
+    import_events._print_run_output(events, "events.json", True)
+
+    out = capsys.readouterr().out
+    assert "Extracted 1 potential events -> events.json" in out
+    assert "[2026-06-06]" not in out
 
 
 def test_main_returns_130_on_keyboard_interrupt_during_scan(tmp_path, monkeypatch):

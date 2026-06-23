@@ -37,7 +37,7 @@ CACHE_DIR_ENV = "IMPORT_EVENTS_CACHE_DIR"
 DEFAULT_LLM_CACHE_SIZE = 1
 DEFAULT_LLM_CONTEXT_SIZE = 0
 DEFAULT_LLM_MAX_TOKENS = 512
-DEFAULT_LLM_GPU_LAYERS = -1
+DEFAULT_LLM_GPU_LAYERS = 0
 DEFAULT_LLM_MAIN_GPU = 0
 DEFAULT_LLM_MLOCK = False
 LLM_MLOCK_MEMORY_FRACTION = 0.70
@@ -54,7 +54,7 @@ DEFAULT_TESSERACT_PSM = "6"
 DEFAULT_TESSERACT_PATH = "tesseract"
 DEFAULT_OCR_ENGINE = "auto"
 DEFAULT_PADDLE_OCR_DEVICE = "cpu"
-DEFAULT_PDF_OCR_MODE = "auto"
+DEFAULT_PDF_OCR_MODE = "never"
 DEFAULT_TENTATIVE_EVENTS = "keep"
 DEFAULT_NO_ACTIVITY_EVENTS = "skip"
 DEFAULT_STAGE_CACHE = "off"
@@ -441,6 +441,14 @@ def _should_pdf_ocr(config: "ModelConfig", pdf_text: str) -> bool:
     return not _has_usable_extracted_text(pdf_text)
 
 
+def _should_use_pdf_text(config: "ModelConfig", pdf_text: str, ocr_text: str) -> bool:
+    if ocr_text.strip():
+        return True
+    if _has_usable_extracted_text(pdf_text):
+        return True
+    return config.pdf_ocr_mode == "always" and bool(pdf_text.strip())
+
+
 def _ocr_language_backend_key(language: str) -> Tuple[str, str]:
     normalized = _normalize_language(language)
     return _paddle_language(normalized), _tesseract_language(normalized)
@@ -739,6 +747,7 @@ MAX_CONTENT_CHARS = _text_budget_from_context(DEFAULT_LLM_CONTEXT_SIZE,
 _LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
 _LLM_CACHE_LOCK = threading.RLock()
 _LLM_REQUEST_LOCK = threading.Lock()
+_APP_LOG_FILE: Optional[Any] = None
 _FAULT_TRACEBACK_FILE: Optional[Any] = None
 _FAULT_TRACEBACKS_ENABLED = False
 _OUTPUT_REDIRECT_LOCK = threading.RLock()
@@ -2615,20 +2624,18 @@ def extract_from_pdf(
             logger.info("Skipping PDF OCR for %s: mode=%s, parsed text chars=%d",
                         file_path.name, runtime_config.pdf_ocr_mode, len(pdf_text.strip()))
         text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
-        if text.strip():
+        event_type = "PDF/OCR" if ocr_text.strip() else "PDF"
+        layout_events = _layout_events_from_text(text, file_path, event_type) if text.strip() else []
+        if _should_use_pdf_text(runtime_config, pdf_text, ocr_text) or layout_events:
             language, source = _language_for_text_with_source(text, runtime_config)
             _log_language_preanalysis(file_path, "PDF merged text", language, source)
-            event_type = "PDF/OCR" if ocr_text.strip() else "PDF"
             prepared = _prepare_text_for_llm(text, text_budget)
             llm_events = _run_text_llm(prepared, language, file_path, event_type,
                                        llm_client, runtime_config)
-            return _merge_layout_events(
-                llm_events, _layout_events_from_text(text, file_path, event_type),
-                runtime_config)
+            return _merge_layout_events(llm_events, layout_events, runtime_config)
 
         events: List[Dict[str, Any]] = []
-        if runtime_config.pdf_ocr_mode != "never":
-            render_once()
+        render_once()
         language, source = _language_for_text_with_source("", runtime_config)
         _log_language_preanalysis(file_path, "PDF vision", language, source)
         for image_path in image_paths:
@@ -2690,7 +2697,9 @@ def _extract_file_events(
             model_config=runtime_config,
         ),
     )
-    return _filter_events_by_policy(events, runtime_config)
+    filtered = _filter_events_by_policy(events, runtime_config)
+    logger.info("Completed %s: %d event(s).", file.name, len(filtered))
+    return filtered
 
 
 def _file_worker(
@@ -2965,6 +2974,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Keep duplicate events (default: drop exact duplicates).")
     parser.add_argument("--timezone", default=None,
                         help="IANA timezone (e.g. Europe/Lisbon) for naive iCalendar times.")
+    parser.add_argument("--summary-only", action="store_true",
+                        help="Print only the extraction summary; JSON/ICS outputs still contain all events.")
     defaults = ModelConfig()
     parser.add_argument("--model-cache-dir", default=None,
                         help=(f"Directory used for default GGUF downloads "
@@ -3036,7 +3047,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--pdf-ocr-mode", choices=("auto", "always", "never"),
                         default=defaults.pdf_ocr_mode,
                         help=("PDF OCR policy: auto skips OCR when parsed text is usable; "
-                              "always matches the old precision-heavy behavior; never is text-only "
+                              "always runs OCR; never skips OCR and uses vision for unreadable PDFs "
                               f"(default: {DEFAULT_PDF_OCR_MODE})."))
     parser.add_argument("--tentative-events", choices=("keep", "skip"),
                         default=defaults.tentative_events,
@@ -3071,6 +3082,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _print_run_output(events: List[Dict[str, Any]], targets: str, summary_only: bool) -> None:
+    print(f"\nExtracted {len(events)} potential events -> {targets}\n")
+    if summary_only:
+        return
+    for event in events:
+        location = f" @ {event['location']}" if event.get("location") else ""
+        print(f"[{event['start']}] {event['title']}{location} (Source: {event['source']})")
+
+
 def _run_main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     model_config = ModelConfig.from_args(args)
@@ -3094,10 +3114,7 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
         write_events_ics(events, Path(args.emit_ics))
 
     targets = args.output + (f", {args.emit_ics}" if args.emit_ics else "")
-    print(f"\nExtracted {len(events)} potential events -> {targets}\n")
-    for event in events:
-        location = f" @ {event['location']}" if event.get("location") else ""
-        print(f"[{event['start']}] {event['title']}{location} (Source: {event['source']})")
+    _print_run_output(events, targets, args.summary_only)
 
     failures = extraction_failure_count()
     if failures:
@@ -3107,7 +3124,21 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
 
 
 def _configure_logging() -> None:
-    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
+    global _APP_LOG_FILE
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    if _APP_LOG_FILE is None:
+        try:
+            _APP_LOG_FILE = os.fdopen(os.dup(2), "w", buffering=1)
+        except OSError:
+            _APP_LOG_FILE = sys.stderr
+    for handler in list(root.handlers):
+        if getattr(handler, "_import_events_app_handler", False):
+            root.removeHandler(handler)
+    handler = logging.StreamHandler(_APP_LOG_FILE)
+    handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATE_FORMAT))
+    handler._import_events_app_handler = True  # type: ignore[attr-defined]
+    root.addHandler(handler)
 
 
 def _enable_fault_tracebacks() -> None:

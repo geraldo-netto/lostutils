@@ -19,7 +19,8 @@ Optional runtime dependencies enable richer extraction:
 
 Missing optional OCR/PDF dependencies degrade gracefully: the script logs the
 missing backend, uses the remaining stages, and exits non-zero only when a file
-extraction actually fails.
+extraction actually fails. PDF OCR is disabled by default; text-native PDFs use
+parsed text, while unreadable/scanned PDFs fall back to the vision model.
 
 Language handling:
 
@@ -37,10 +38,12 @@ Language handling:
   included in the LLM prompt.
 
 Useful runtime knobs include `--llm-context`, `--max-content-chars`,
-`--llm-max-tokens`, `--mlock`, `--ocr-languages`, `--ocr-language-score`,
-`--ocr-timeout`, `--tesseract-psm`, `--pdf-vision-pages`, and
-`--pdf-vision-dpi`. When `--max-content-chars` is omitted, the text budget is
-computed from the selected LLM context size. The default `--llm-context 0`
-lets llama.cpp use the model-native context window.
+`--llm-max-tokens`, `--llm-gpu-layers`, `--mlock`, `--ocr-languages`,
+`--ocr-language-score`, `--ocr-timeout`, `--tesseract-psm`, `--pdf-ocr-mode`,
+`--pdf-vision-pages`, and `--summary-only`. When `--max-content-chars` is
+omitted, the text budget is computed from the selected LLM context size. The
+default `--llm-context 0` lets llama.cpp use the model-native context window.
+The default `--llm-gpu-layers 0` uses CPU; pass a positive layer count or `-1`
+to opt into llama.cpp GPU offload.
 `--mlock` is opt-in and is skipped automatically when the model plus projector
 files would exceed 70% of the memory limit visible to the process.
