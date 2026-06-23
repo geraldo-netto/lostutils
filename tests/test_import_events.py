@@ -1441,6 +1441,7 @@ def test_model_config_text_budget_uses_context_when_not_overridden():
 def test_model_config_default_text_budget_is_64k():
     cfg = import_events.ModelConfig()
 
+    assert import_events.DEFAULT_LLM_CONTEXT_SIZE == 0
     assert import_events.MAX_CONTENT_CHARS == 65536
     assert cfg.text_budget_chars() == 65536
 

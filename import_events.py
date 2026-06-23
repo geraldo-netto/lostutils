@@ -29,7 +29,7 @@ MODEL_FILENAME = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
 CLIP_FILENAME = "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
 CACHE_DIR_ENV = "IMPORT_EVENTS_CACHE_DIR"
 DEFAULT_LLM_CACHE_SIZE = 1
-DEFAULT_LLM_CONTEXT_SIZE = 65536
+DEFAULT_LLM_CONTEXT_SIZE = 0
 DEFAULT_LLM_MAX_TOKENS = 512
 DOWNLOAD_CHUNK_SIZE = 1 << 20
 DOWNLOAD_PROGRESS_BYTES = 256 << 20
@@ -112,6 +112,8 @@ _LANGUAGE_MARKERS = {
 
 
 def _text_budget_from_context(context_size: int, max_tokens: int) -> int:
+    if int(context_size) <= 0:
+        return MAX_CONTEXT_TEXT_CHARS
     available = max(128, int(context_size) - int(max_tokens) - TEXT_PROMPT_RESERVED_TOKENS)
     return min(MAX_CONTEXT_TEXT_CHARS, max(MIN_CONTENT_CHARS, available * TEXT_CHARS_PER_TOKEN))
 
@@ -363,7 +365,7 @@ class ModelConfig:
             model_sha256=model_sha256,
             clip_sha256=clip_sha256,
             llm_cache_size=max(0, args.llm_cache_size),
-            llm_context_size=max(512, args.llm_context),
+            llm_context_size=(0 if args.llm_context <= 0 else max(512, args.llm_context)),
             llm_max_tokens=max(1, args.llm_max_tokens),
             llm_verbose=args.llm_verbose,
             max_content_chars=(max(1, args.max_content_chars)
@@ -1461,7 +1463,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                               f"(default: {DEFAULT_LLM_CACHE_SIZE}; 0 disables)."))
     parser.add_argument("--llm-context", type=int, default=defaults.llm_context_size,
                         help=(f"LLM context size in tokens "
-                              f"(default: {DEFAULT_LLM_CONTEXT_SIZE})."))
+                              "(default: 0, use model-native context)."))
     parser.add_argument("--llm-max-tokens", type=int, default=defaults.llm_max_tokens,
                         help=(f"Max tokens generated per LLM call "
                               f"(default: {DEFAULT_LLM_MAX_TOKENS})."))
