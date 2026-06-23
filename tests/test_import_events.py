@@ -15,6 +15,9 @@ import import_events
 SAMPLE_TABLE_CALENDAR_PDF = (
     Path(__file__).parent / "fixtures" / "import_events_table_calendar_2026.pdf"
 )
+SAMPLE_HIERARCHY_CALENDAR_PDF = (
+    Path(__file__).parent / "fixtures" / "import_events_hierarchy_calendar_2026.pdf"
+)
 
 
 class FakeLlm:
@@ -433,6 +436,15 @@ def test_coerce_start_parses_loose_am_pm_time():
     assert import_events._coerce_start(
         {"date": "2026-06-22", "time": "12 PM"}
     ) == "2026-06-22T12:00"
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "10pm"}
+    ) == "2026-06-22T22:00"
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "21.15"}
+    ) == "2026-06-22T21:15"
+    assert import_events._coerce_start(
+        {"date": "2026-06-22", "time": "18h30"}
+    ) == "2026-06-22T18:30"
 
 
 def test_coerce_start_logs_dropped_unparseable_time(caplog):
@@ -453,6 +465,8 @@ def test_coerce_start_loose_time_join_is_parseable():
 def test_normalize_loose_time_rejects_out_of_range():
     assert import_events._normalize_loose_time("13 PM") is None
     assert import_events._normalize_loose_time("0 AM") is None
+    assert import_events._normalize_loose_time("25:00") is None
+    assert import_events._normalize_loose_time("21.99") is None
     assert import_events._normalize_loose_time("garbage") is None
     assert import_events._normalize_loose_time("14:00") == "14:00"
 
@@ -547,9 +561,37 @@ def test_calendar_hierarchy_lines_expands_portuguese_month_day_pairs():
 
     assert lines == [
         "2026-03-08 - Community Fair",
-        "2026-03-15 - Support Group T5 10h",
+        "2026-03-15T10:00 - Support Group T5",
         "2026-03-22 - Prep Meeting T1M4 AR",
         "2026-04-05 - Garden Day",
+    ]
+
+
+def test_calendar_hierarchy_lines_handles_grid_day_rows():
+    text = """
+    Março 2026
+    Domingo Segunda Terça Quarta Quinta Sexta Sábado
+    1 2 3 4 5 6 7
+    8
+    Mystic Fair BH
+    10pm Night Circle
+    9 10 11 12 13 14
+    15
+    Grupo de Apoio T5 10h
+    16 17 18 19 20 21
+    22
+    Encontro Pre. T1M4 AR
+    Ritual Online 21.15
+    """
+
+    lines = import_events._calendar_hierarchy_lines(text)
+
+    assert lines == [
+        "2026-03-08 - Mystic Fair BH",
+        "2026-03-08T22:00 - Night Circle",
+        "2026-03-15T10:00 - Grupo de Apoio T5",
+        "2026-03-22 - Encontro Pre. T1M4 AR",
+        "2026-03-22T21:15 - Ritual Online",
     ]
 
 
@@ -2258,6 +2300,21 @@ def test_pdf_to_images_returns_empty_without_pymupdf(monkeypatch):
     assert import_events._pdf_to_images(Path("x.pdf")) == []
 
 
+def test_merge_text_blocks_preserves_primary_calendar_grid_rows():
+    primary = "1 2 3 4\nEvent A\n1 2 3 4\nEvent B"
+    ocr = "Event B\nOCR Only"
+
+    merged = import_events._merge_text_blocks([primary, ocr], 1000)
+
+    assert merged.splitlines() == [
+        "1 2 3 4",
+        "Event A",
+        "1 2 3 4",
+        "Event B",
+        "OCR Only",
+    ]
+
+
 def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):
     fake = FakeLlm('[{"title": "PDF Event", "start": "2026-06-22"}]')
     monkeypatch.setattr(import_events, "_pdf_text",
@@ -2303,26 +2360,33 @@ def test_extract_from_synthetic_calendar_pdf_expands_hierarchy(tmp_path, monkeyp
             "Domingo",
             "8",
             "Mystic Fair BH",
+            "10pm Night Circle",
             "15",
             "Grupo de Apoio T5 10h",
             "22",
             "Encontro Pre. T1M4 AR",
+            "Ritual Online 21.15",
             "April 2026",
             "Sunday",
             "5",
-            "Garden Day",
+            "Garden Day 23:00",
+            "12 Community Brunch",
             "Mayo 2026",
             "Lunes",
-            "11 Feria Local",
+            "11 Feria Local 9 AM",
+            "18 Cine Foro 21.15",
             "Giugno 2026",
             "Domenica",
-            "7 Laboratorio",
+            "7 Laboratorio 18h30",
+            "21 Cena sociale",
             "Juillet 2026",
             "Dimanche",
-            "12 Atelier",
+            "12 Atelier 14:00:30",
+            "19 Bal Populaire",
             "Oktober 2026",
             "Sonntag",
-            "18 Sommer Treffen",
+            "18 Sommer Treffen um 21.15",
+            "25 Spätprogramm 23:00",
         ],
     )
     fake = FakeLlm('[{"title": "Mystic Fair BH", "start": "2026-03-08"}]')
@@ -2334,13 +2398,48 @@ def test_extract_from_synthetic_calendar_pdf_expands_hierarchy(tmp_path, monkeyp
     prompt = fake.messages[0][1]["content"]
     assert "Calendário 2026" in extracted_text
     assert "2026-03-08 - Mystic Fair BH" in prompt
-    assert "2026-03-15 - Grupo de Apoio T5 10h" in prompt
+    assert "2026-03-08T22:00 - Night Circle" in prompt
+    assert "2026-03-15T10:00 - Grupo de Apoio T5" in prompt
     assert "2026-03-22 - Encontro Pre. T1M4 AR" in prompt
-    assert "2026-04-05 - Garden Day" in prompt
-    assert "2026-05-11 - Feria Local" in prompt
-    assert "2026-06-07 - Laboratorio" in prompt
-    assert "2026-07-12 - Atelier" in prompt
-    assert "2026-10-18 - Sommer Treffen" in prompt
+    assert "2026-03-22T21:15 - Ritual Online" in prompt
+    assert "2026-04-05T23:00 - Garden Day" in prompt
+    assert "2026-04-12 - Community Brunch" in prompt
+    assert "2026-05-11T09:00 - Feria Local" in prompt
+    assert "2026-05-18T21:15 - Cine Foro" in prompt
+    assert "2026-06-07T18:30 - Laboratorio" in prompt
+    assert "2026-06-21 - Cena sociale" in prompt
+    assert "2026-07-12T14:00:30 - Atelier" in prompt
+    assert "2026-07-19 - Bal Populaire" in prompt
+    assert "2026-10-18T21:15 - Sommer Treffen" in prompt
+    assert "2026-10-25T23:00 - Spätprogramm" in prompt
+    assert "2026-02-01 - 3 4" not in prompt
+    assert events[0]["type"] == "PDF"
+
+
+def test_sample_hierarchy_calendar_pdf_expands_rows(monkeypatch):
+    fake = FakeLlm('[{"title": "Mystic Fair BH", "start": "2026-03-08"}]')
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+
+    events = import_events.extract_from_pdf(SAMPLE_HIERARCHY_CALENDAR_PDF, llm_client=fake)
+
+    extracted_text = import_events._pdf_text(SAMPLE_HIERARCHY_CALENDAR_PDF)
+    prompt = fake.messages[0][1]["content"]
+    assert "Calendário 2026" in extracted_text
+    assert "2026-03-08 - Mystic Fair BH" in prompt
+    assert "2026-03-08T22:00 - Night Circle" in prompt
+    assert "2026-03-15T10:00 - Grupo de Apoio T5" in prompt
+    assert "2026-03-22 - Encontro Pre. T1M4 AR" in prompt
+    assert "2026-03-22T21:15 - Ritual Online" in prompt
+    assert "2026-04-05T23:00 - Garden Day" in prompt
+    assert "2026-04-12 - Community Brunch" in prompt
+    assert "2026-05-11T09:00 - Feria Local" in prompt
+    assert "2026-05-18T21:15 - Cine Foro" in prompt
+    assert "2026-06-07T18:30 - Laboratorio" in prompt
+    assert "2026-06-21 - Cena sociale" in prompt
+    assert "2026-07-12T14:00:30 - Atelier" in prompt
+    assert "2026-07-19 - Bal Populaire" in prompt
+    assert "2026-10-18T21:15 - Sommer Treffen" in prompt
+    assert "2026-10-25T23:00 - Spätprogramm" in prompt
     assert events[0]["type"] == "PDF"
 
 
