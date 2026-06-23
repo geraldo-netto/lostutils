@@ -187,11 +187,13 @@ def test_decode_event_payload_object_wins_when_before_list():
     ]
 
 
-def test_decode_event_payload_skips_unparseable_earliest_bracket():
+def test_decode_event_payload_recovers_after_unparseable_earliest_bracket():
     # The earliest bracket fails to decode; the next one is tried.
     text = '{not json {"title": "Real", "start": "2026-06-22"}'
 
-    assert import_events._decode_event_payload(text) == []
+    assert import_events._decode_event_payload(text) == [
+        {"title": "Real", "start": "2026-06-22"}
+    ]
 
 
 def test_decode_event_payload_object_with_inner_list():
@@ -218,6 +220,9 @@ def test_parse_llm_events_warns_on_undecodable(caplog):
 
     assert events == []
     assert "Failed to decode JSON" in caplog.text
+    assert "chars=20" in caplog.text
+    assert "sha256=" in caplog.text
+    assert "excerpt='total prose, no json'" in caplog.text
 
 
 def test_parse_llm_events_does_not_warn_on_empty_json(caplog):
@@ -654,6 +659,22 @@ def test_ocr_with_paddle_handles_result_and_old_ocr_signature(tmp_path, monkeypa
     monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
 
     assert import_events._ocr_with_paddle(img) == "Paddle text"
+
+
+def test_ocr_with_paddle_prefers_predict_api(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+
+    class Engine:
+        def predict(self, path):
+            return [{"rec_texts": ["Predict text"]}]
+
+        def ocr(self, *_args, **_kwargs):
+            raise AssertionError("deprecated ocr API should not be called")
+
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en": Engine())
+
+    assert import_events._ocr_with_paddle(img) == "Predict text"
 
 
 def test_ocr_with_paddle_handles_missing_engine(tmp_path, monkeypatch):
@@ -1897,6 +1918,22 @@ def test_trim_llm_cache_logs_close_failure(monkeypatch, caplog):
     assert import_events._LLM_CACHE == OrderedDict()
 
 
+def test_reset_llm_cache_closes_all_cached_clients(monkeypatch):
+    closed = []
+    first = type("Client", (), {"close": lambda self: closed.append("first")})()
+    second = type("Client", (), {"close": lambda self: closed.append("second")})()
+    monkeypatch.setattr(
+        import_events,
+        "_LLM_CACHE",
+        OrderedDict([(("a",), first), (("b",), second)]),
+    )
+
+    import_events.reset_llm_cache()
+
+    assert closed == ["first", "second"]
+    assert import_events._LLM_CACHE == OrderedDict()
+
+
 class _FakePixmap:
     def __init__(self, dpi):
         self.dpi = dpi
@@ -2137,15 +2174,18 @@ def test_extract_from_file_propagates_keyboard_interrupt_without_counting(tmp_pa
 
 def test_main_returns_130_on_keyboard_interrupt_during_scan(tmp_path, monkeypatch):
     (tmp_path / "event.txt").write_text("Launch tomorrow", encoding="utf-8")
+    calls = []
 
     def interrupt(*_args, **_kwargs):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(import_events, "process_folder", interrupt)
+    monkeypatch.setattr(import_events, "reset_llm_cache", lambda: calls.append("reset"))
 
     rc = import_events.main([str(tmp_path), "-o", str(tmp_path / "out.json")])
 
     assert rc == 130
+    assert calls == ["reset"]
 
 
 def test_main_returns_130_on_keyboard_interrupt_during_output(tmp_path, monkeypatch):

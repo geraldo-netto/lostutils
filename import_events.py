@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import json
+import atexit
 import base64
 import hashlib
 import secrets
@@ -33,6 +34,7 @@ DOWNLOAD_CHUNK_SIZE = 1 << 20
 DOWNLOAD_PROGRESS_BYTES = 256 << 20
 DOWNLOAD_TIMEOUT_SECONDS = 30
 OCR_TIMEOUT_SECONDS = 120
+LLM_RESPONSE_LOG_EXCERPT_CHARS = 160
 DEFAULT_LANGUAGE = "auto"
 DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
 DEFAULT_OCR_LANGUAGES = ("pt-br", "en", "es", "it", "fr", "de")
@@ -630,6 +632,15 @@ def _trim_llm_cache(max_entries: int) -> None:
         _close_cached_llm(client)
 
 
+def reset_llm_cache() -> None:
+    while _LLM_CACHE:
+        _key, client = _LLM_CACHE.popitem(last=False)
+        _close_cached_llm(client)
+
+
+atexit.register(reset_llm_cache)
+
+
 def get_llm(config: Optional[ModelConfig] = None):
     """Lazily initializes the local Qwen2.5-VL model with a bounded LRU cache."""
     config = config or ModelConfig()
@@ -767,7 +778,8 @@ def parse_llm_events(text_output: str, file_path: Path, event_type: str) -> List
     decoded_events = _decode_event_payload_or_none(clean_json)
     raw_events = decoded_events or []
     if decoded_events is None and clean_json:
-        logger.warning("Failed to decode JSON from LLM response in %s", file_path.name)
+        logger.warning("Failed to decode JSON from LLM response in %s (%s)",
+                       file_path.name, _llm_response_log_context(clean_json))
 
     formatted_events: List[Dict[str, Any]] = []
     for e in raw_events:
@@ -789,10 +801,16 @@ def _decode_event_payload(clean_json: str) -> List[Any]:
     return decoded if decoded is not None else []
 
 
+def _llm_response_log_context(text: str) -> str:
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
+    excerpt = " ".join(text.split())[:LLM_RESPONSE_LOG_EXCERPT_CHARS]
+    return f"chars={len(text)}, sha256={digest}, excerpt={excerpt!r}"
+
+
 def _decode_event_payload_or_none(clean_json: str) -> Optional[List[Any]]:
     """Decodes the first JSON list/object in the text, starting at the earliest bracket."""
     decoder = json.JSONDecoder()
-    starts = sorted(pos for pos in (clean_json.find(b) for b in ("[", "{")) if pos != -1)
+    starts = [idx for idx, char in enumerate(clean_json) if char in "[{"]
     for idx in starts:
         try:
             parsed, _end = decoder.raw_decode(clean_json[idx:])
@@ -960,15 +978,22 @@ def _get_paddle_ocr(language: str = DEFAULT_OCR_FALLBACK_LANGUAGE) -> Optional[A
     return _PADDLE_OCR[paddle_lang]
 
 
+def _run_paddle_ocr(engine: Any, image_path: Path) -> Any:
+    predict = getattr(engine, "predict", None)
+    if callable(predict):
+        return predict(str(image_path))
+    try:
+        return engine.ocr(str(image_path), cls=True)
+    except TypeError:
+        return engine.ocr(str(image_path))
+
+
 def _ocr_with_paddle(image_path: Path, language: str = DEFAULT_OCR_FALLBACK_LANGUAGE) -> str:
     engine = _get_paddle_ocr(language)
     if engine is None:
         return ""
     try:
-        try:
-            result = engine.ocr(str(image_path), cls=True)
-        except TypeError:
-            result = engine.ocr(str(image_path))
+        result = _run_paddle_ocr(engine, image_path)
     except Exception as exc:
         _warn_once("paddle-error", "PaddleOCR failed; skipping Paddle OCR: %s", exc)
         return ""
@@ -1504,6 +1529,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.warning("Interrupted by Ctrl-C; exiting without completing import.")
         return 130
     finally:
+        reset_llm_cache()
         _report_ocr_warning_summary()
 
 
