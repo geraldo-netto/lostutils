@@ -667,6 +667,49 @@ def test_calendar_table_lines_ignore_malformed_date_candidates():
     assert lines == ["2026-06-19 - Cena social"]
 
 
+def test_calendar_table_lines_expands_boteccum_schedule_rows():
+    text = """
+    CALENDARIO DE ATIVIDADES BOTECCUM 2026
+    DIA/MES ATIVIDADES BOTECCUM
+    19/06 ASTROLOGIA – CAP 4
+    26/06 CORPUS HERMETICUM – ITEM 8 E LIBELLUS I
+    03/07 ASTROLOGIA – CAP 5
+    10/07 CORPUS HERMETICUM – LIBELLI I A IV
+    17/07 ASTROLOGIA – CAP 6
+    24/07 SEM ATIVIDADE (INICIAÇÕES EUROPA)
+    31/07 CORPUS HERMETICUM – LIBELLI V A VIII
+    07/08 ASTROLOGIA – CAP 7
+    14/08 CORPUS HERMETICUM – LIBELLI IX A X
+    21/08 ASTROLOGIA – CAP 8
+    28/08 CORPUS HERMETICUM – XI A XII
+    04/09 SEM ATIVIDADE (ELEVAÇÃO DE GRAU YNYS II)
+    11/09 ASTROLOGIA – CAP 9
+    18/09 CORPUS HERMETICUM – XII A XIV
+    25/09 ASTROLOGIA – CAP 10
+    02/10 CORPUS HERMETICUM – XV A XVIII
+    09/10 ASTROLOGIA – CAP 11
+    16/10 A DEFINIR
+    23/10 ASTROLOGIA – CAP 12
+    30/11 A DEFINIR
+    06/11 ASTROLOGIA – CAP 13
+    13/11 A DEFINIR
+    20/11 ASTROLOGIA – CAP 14
+    27/11 A DEFINIR
+    04/12 ASTROLOGIA – CAP 15
+    11/12 A DEFINIR
+    18/12 ASTROLOGIA – APENDICES
+    """
+
+    lines = import_events._calendar_table_lines(text)
+
+    assert len(lines) == 27
+    assert "2026-06-19 - ASTROLOGIA – CAP 4" in lines
+    assert "2026-07-24 - SEM ATIVIDADE (INICIAÇÕES EUROPA)" in lines
+    assert "2026-10-16 - A DEFINIR" in lines
+    assert "2026-11-30 - A DEFINIR" in lines
+    assert lines[-1] == "2026-12-18 - ASTROLOGIA – APENDICES"
+
+
 def test_prepare_text_for_llm_prepends_inferred_calendar_hierarchy():
     text = "Março 2026\nDomingo\n8\nCommunity Fair"
 
@@ -683,6 +726,88 @@ def test_prepare_text_for_llm_prepends_inferred_table_rows():
     prepared = import_events._prepare_text_for_llm(text, 1000)
 
     assert "2026-06-19 - astrologia - cap 4" in prepared
+
+
+def test_layout_events_from_text_parses_expanded_calendar_rows():
+    text = """
+    CALENDARIO 2026
+    DIA/MES ATIVIDADES
+    19/06 astrologia - cap 4
+    26/06 encontro 21.15
+    """
+
+    events = import_events._layout_events_from_text(text, Path("agenda.pdf"), "PDF")
+
+    assert events == [
+        {
+            "title": "astrologia - cap 4",
+            "start": "2026-06-19",
+            "end": "",
+            "location": "",
+            "source": "agenda.pdf",
+            "type": "PDF/Layout",
+        },
+        {
+            "title": "encontro",
+            "start": "2026-06-26T21:15",
+            "end": "",
+            "location": "",
+            "source": "agenda.pdf",
+            "type": "PDF/Layout",
+        },
+    ]
+
+
+def test_merge_layout_events_keeps_llm_duplicate_precedence():
+    llm = [{
+        "title": "ASTROLOGIA - CAP 4",
+        "start": "2026-06-19",
+        "end": "",
+        "location": "Room A",
+        "source": "agenda.pdf",
+        "type": "PDF",
+    }]
+    layout = [{
+        "title": "astrologia - cap 4",
+        "start": "2026-06-19",
+        "end": "",
+        "location": "",
+        "source": "agenda.pdf",
+        "type": "PDF/Layout",
+    }]
+
+    assert import_events._merge_layout_events(llm, layout) == llm
+
+
+def test_event_policy_defaults_keep_tentative_and_skip_no_activity():
+    events = [
+        {"title": "A DEFINIR", "start": "2026-10-16"},
+        {"title": "SEM ATIVIDADE (INICIAÇÕES EUROPA)", "start": "2026-07-24"},
+        {"title": "ASTROLOGIA – CAP 4", "start": "2026-06-19"},
+    ]
+
+    filtered = import_events._filter_events_by_policy(events)
+
+    assert [event["title"] for event in filtered] == [
+        "A DEFINIR",
+        "ASTROLOGIA – CAP 4",
+    ]
+
+
+def test_event_policy_can_skip_tentative_and_keep_no_activity():
+    cfg = import_events.ModelConfig(tentative_events="skip", no_activity_events="keep")
+    events = [
+        {"title": "Tema a definir", "start": "2026-10-16"},
+        {"title": "SEM ATIVIDADE (INICIAÇÕES EUROPA)", "start": "2026-07-24"},
+        {"title": "ASTROLOGIA – CAP 4", "start": "2026-06-19"},
+    ]
+
+    filtered = import_events._filter_events_by_policy(events, cfg)
+
+    assert [event["title"] for event in filtered] == [
+        "SEM ATIVIDADE (INICIAÇÕES EUROPA)",
+        "ASTROLOGIA – CAP 4",
+    ]
 
 
 def test_prepare_text_for_llm_leaves_non_hierarchical_text_unchanged():
@@ -1806,6 +1931,7 @@ def test_model_config_from_args_threads_values():
          "--ocr-language-score", "0.65",
          "--tesseract-psm", "11", "--ocr-engine", "tesseract",
          "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
+         "--tentative-events", "skip", "--no-activity-events", "keep",
          "--pdf-vision-dpi", "200", "--stage-cache", "refresh",
          "--stage-cache-dir", "cache", "--benchmark"]
     )
@@ -1829,6 +1955,8 @@ def test_model_config_from_args_threads_values():
     assert cfg.tesseract_psm == "11"
     assert cfg.ocr_engine == "tesseract"
     assert cfg.pdf_ocr_mode == "never"
+    assert cfg.tentative_events == "skip"
+    assert cfg.no_activity_events == "keep"
     assert cfg.pdf_vision_max_pages == 3
     assert cfg.pdf_vision_dpi == 200
     assert cfg.stage_cache == "refresh"
@@ -1901,6 +2029,10 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.ocr_language_score == import_events.DEFAULT_OCR_LANGUAGE_SCORE
     assert cfg.ocr_timeout_seconds == import_events.OCR_TIMEOUT_SECONDS
     assert cfg.tesseract_psm == import_events.DEFAULT_TESSERACT_PSM
+    assert cfg.ocr_engine == import_events.DEFAULT_OCR_ENGINE
+    assert cfg.pdf_ocr_mode == import_events.DEFAULT_PDF_OCR_MODE
+    assert cfg.tentative_events == import_events.DEFAULT_TENTATIVE_EVENTS
+    assert cfg.no_activity_events == import_events.DEFAULT_NO_ACTIVITY_EVENTS
     assert cfg.pdf_vision_max_pages == import_events.PDF_VISION_MAX_PAGES
     assert cfg.pdf_vision_dpi == import_events.PDF_VISION_DPI
 
@@ -2529,6 +2661,68 @@ def test_extract_from_pdf_expands_calendar_hierarchy_before_llm(monkeypatch):
     assert "2026-03-08 - Community Fair" in prompt
     assert "Original content:\nMarço 2026" in prompt
     assert events[0]["type"] == "PDF"
+
+
+def test_extract_from_pdf_returns_layout_events_when_llm_omits_rows(monkeypatch):
+    fake = FakeLlm('[{"title": "Event Alpha", "start": "2026-06-19", "location": "Hall"}]')
+    text = """
+    CALENDARIO 2026
+    DIA/MES ATIVIDADES
+    19/06 Event Alpha
+    26/06 Event Beta
+    03/07 Event Gamma
+    """
+    monkeypatch.setattr(import_events, "_pdf_text", lambda path, max_chars=1000: text)
+
+    events = import_events.extract_from_pdf(
+        Path("agenda.pdf"),
+        llm_client=fake,
+        model_config=import_events.ModelConfig(pdf_ocr_mode="never"),
+    )
+
+    assert events[0]["title"] == "Event Alpha"
+    assert events[0]["location"] == "Hall"
+    assert ("Event Beta", "2026-06-26", "PDF/Layout") in {
+        (event["title"], event["start"], event["type"]) for event in events
+    }
+    assert ("Event Gamma", "2026-07-03", "PDF/Layout") in {
+        (event["title"], event["start"], event["type"]) for event in events
+    }
+
+
+def test_extract_from_pdf_applies_layout_event_policy(monkeypatch):
+    text = """
+    CALENDARIO DE ATIVIDADES BOTECCUM 2026
+    DIA/MES ATIVIDADES BOTECCUM
+    19/06 ASTROLOGIA – CAP 4
+    24/07 SEM ATIVIDADE (INICIAÇÕES EUROPA)
+    16/10 A DEFINIR
+    """
+    monkeypatch.setattr(import_events, "_pdf_text", lambda path, max_chars=1000: text)
+
+    default_events = import_events.extract_from_pdf(
+        Path("agenda.pdf"),
+        llm_client=FakeLlm('{"events": []}'),
+        model_config=import_events.ModelConfig(pdf_ocr_mode="never"),
+    )
+    override_events = import_events.extract_from_pdf(
+        Path("agenda.pdf"),
+        llm_client=FakeLlm('{"events": []}'),
+        model_config=import_events.ModelConfig(
+            pdf_ocr_mode="never",
+            tentative_events="skip",
+            no_activity_events="keep",
+        ),
+    )
+
+    assert {event["title"] for event in default_events} == {
+        "ASTROLOGIA – CAP 4",
+        "A DEFINIR",
+    }
+    assert {event["title"] for event in override_events} == {
+        "ASTROLOGIA – CAP 4",
+        "SEM ATIVIDADE (INICIAÇÕES EUROPA)",
+    }
 
 
 def test_extract_from_synthetic_calendar_pdf_expands_hierarchy(tmp_path, monkeypatch):
