@@ -17,6 +17,7 @@ import tempfile
 import unicodedata
 import contextlib
 import subprocess
+import time
 from collections import OrderedDict
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -345,6 +346,7 @@ class ModelConfig:
     tesseract_psm: str = DEFAULT_TESSERACT_PSM
     pdf_vision_max_pages: int = PDF_VISION_MAX_PAGES
     pdf_vision_dpi: int = PDF_VISION_DPI
+    benchmark: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ModelConfig":
@@ -380,6 +382,7 @@ class ModelConfig:
             tesseract_psm=str(args.tesseract_psm),
             pdf_vision_max_pages=max(1, args.pdf_vision_pages),
             pdf_vision_dpi=max(36, args.pdf_vision_dpi),
+            benchmark=args.benchmark,
         )
 
     def text_budget_chars(self) -> int:
@@ -1361,6 +1364,17 @@ def _warn_once(key: str, message: str, *args: Any) -> None:
     logger.warning(message, *args)
 
 
+def _timed_stage(config: ModelConfig, subject: Path, stage: str, work: Callable[[], Any]) -> Any:
+    if not config.benchmark:
+        return work()
+    start = time.monotonic()
+    try:
+        return work()
+    finally:
+        elapsed = time.monotonic() - start
+        logger.info("Timing for %s [%s]: %.3fs", subject.name, stage, elapsed)
+
+
 def _merge_text_blocks(blocks: List[str], max_chars: int = MAX_CONTENT_CHARS) -> str:
     seen = set()
     merged: List[str] = []
@@ -1581,12 +1595,17 @@ def _run_llm(
     try:
         client = get_llm(runtime_config) if llm_client is None else llm_client
         with _quiet_output_context(runtime_config.llm_verbose):
-            response: Any = client.create_chat_completion(
-                messages=messages,
-                response_format={"type": "json_object"},
-                max_tokens=runtime_config.llm_max_tokens,
-                temperature=0.0,
-                top_p=1.0,
+            response: Any = _timed_stage(
+                runtime_config,
+                file_path,
+                "llm",
+                lambda: client.create_chat_completion(
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    max_tokens=runtime_config.llm_max_tokens,
+                    temperature=0.0,
+                    top_p=1.0,
+                ),
             )
         text_output = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         return parse_llm_events(text_output, file_path, event_type)
@@ -1606,7 +1625,10 @@ def extract_with_llm(
     if is_image:
         return extract_from_image(file_path, llm_client=llm_client,
                                   model_config=runtime_config)
-    content = _read_text(file_path, runtime_config.text_budget_chars())
+    content = _timed_stage(
+        runtime_config, file_path, "text_read",
+        lambda: _read_text(file_path, runtime_config.text_budget_chars()),
+    )
     language, source = _language_for_text_with_source(content, runtime_config)
     _log_language_preanalysis(file_path, "text", language, source)
     prepared = _prepare_text_for_llm(content, runtime_config.text_budget_chars())
@@ -1624,7 +1646,10 @@ def extract_from_image(
     ocr_language = ocr_chain[0]
     _log_language_preanalysis(file_path, "image OCR", ocr_language, ocr_source)
     _log_ocr_language_chain(file_path, "image OCR", ocr_chain, runtime_config.ocr_language_score)
-    text = _ocr_image_path(file_path, runtime_config, ocr_language, ocr_chain, "image OCR")
+    text = _timed_stage(
+        runtime_config, file_path, "image_ocr",
+        lambda: _ocr_image_path(file_path, runtime_config, ocr_language, ocr_chain, "image OCR"),
+    )
     if text.strip():
         language, source = _language_for_text_with_source(text, runtime_config)
         _log_language_preanalysis(file_path, "image OCR text", language, source)
@@ -1704,15 +1729,24 @@ def extract_from_pdf(
     """Extracts events from a PDF: parsed/OCR text first, else vision per page."""
     runtime_config = model_config or ModelConfig()
     text_budget = runtime_config.text_budget_chars()
-    pdf_text = _pdf_text(file_path, text_budget)
+    pdf_text = _timed_stage(
+        runtime_config, file_path, "pdf_text",
+        lambda: _pdf_text(file_path, text_budget),
+    )
     language, source = _language_for_text_with_source(pdf_text, runtime_config)
     _log_language_preanalysis(file_path, "PDF text", language, source)
     ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, runtime_config)
     ocr_language = ocr_chain[0]
     _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
     _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, runtime_config.ocr_language_score)
-    images = _pdf_to_images(file_path, runtime_config)
-    ocr_text = _pdf_ocr_text(images, runtime_config, ocr_language, ocr_chain, file_path.name)
+    images = _timed_stage(
+        runtime_config, file_path, "pdf_render",
+        lambda: _pdf_to_images(file_path, runtime_config),
+    )
+    ocr_text = _timed_stage(
+        runtime_config, file_path, "pdf_ocr",
+        lambda: _pdf_ocr_text(images, runtime_config, ocr_language, ocr_chain, file_path.name),
+    )
     text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
     if text.strip():
         language, source = _language_for_text_with_source(text, runtime_config)
@@ -1766,6 +1800,7 @@ def process_folder(
     model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
     """Iterates through a folder and extracts event data from every supported file."""
+    runtime_config = model_config or ModelConfig()
     path = Path(folder_path)
     if not path.is_dir():
         logger.error("Error: %s is not a valid directory.", folder_path)
@@ -1779,8 +1814,15 @@ def process_folder(
             continue
         if file.is_file():
             all_events.extend(
-                extract_from_file(file, llm_client=llm_client, default_tz=default_tz,
-                                  model_config=model_config)
+                _timed_stage(
+                    runtime_config,
+                    file,
+                    "total",
+                    lambda file=file: extract_from_file(
+                        file, llm_client=llm_client, default_tz=default_tz,
+                        model_config=runtime_config,
+                    ),
+                )
             )
     return all_events
 
@@ -1955,6 +1997,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=f"Max rendered PDF pages for OCR/vision fallback (default: {PDF_VISION_MAX_PAGES}).")
     parser.add_argument("--pdf-vision-dpi", type=int, default=defaults.pdf_vision_dpi,
                         help=f"PDF render DPI for OCR/vision fallback (default: {PDF_VISION_DPI}).")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Log per-file stage timings for precision/speed tuning.")
     parser.add_argument("--model-sha256", default=None,
                         help="Expected SHA-256 of the language model (integrity check).")
     parser.add_argument("--clip-sha256", default=None,

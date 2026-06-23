@@ -1282,6 +1282,31 @@ def test_extract_from_image_logs_ocr_and_post_ocr_languages(tmp_path, monkeypatc
     assert "Language pre-analysis for poster.png [image OCR text]: Portuguese (pt) via detected" in caplog.text
 
 
+def test_timed_stage_logs_when_benchmark_enabled(caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO):
+        result = import_events._timed_stage(
+            import_events.ModelConfig(benchmark=True),
+            Path("sample.pdf"),
+            "pdf_text",
+            lambda: "ok",
+        )
+
+    assert result == "ok"
+    assert "Timing for sample.pdf [pdf_text]:" in caplog.text
+
+
+def test_timed_stage_preserves_keyboard_interrupt():
+    with pytest.raises(KeyboardInterrupt):
+        import_events._timed_stage(
+            import_events.ModelConfig(benchmark=True),
+            Path("sample.pdf"),
+            "llm",
+            lambda: (_ for _ in ()).throw(KeyboardInterrupt),
+        )
+
+
 def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypatch):
     img = tmp_path / "poster.png"
     img.write_bytes(b"image")
@@ -1682,7 +1707,7 @@ def test_model_config_from_args_threads_values():
          "--ocr-languages", "Brazilian Portuguese,English,German",
          "--ocr-language-score", "0.65",
          "--tesseract-psm", "11", "--pdf-vision-pages", "3",
-         "--pdf-vision-dpi", "200"]
+         "--pdf-vision-dpi", "200", "--benchmark"]
     )
 
     cfg = import_events.ModelConfig.from_args(args)
@@ -1704,6 +1729,7 @@ def test_model_config_from_args_threads_values():
     assert cfg.tesseract_psm == "11"
     assert cfg.pdf_vision_max_pages == 3
     assert cfg.pdf_vision_dpi == 200
+    assert cfg.benchmark is True
 
 
 def test_model_config_text_budget_uses_context_when_not_overridden():
