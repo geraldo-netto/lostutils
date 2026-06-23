@@ -14,10 +14,12 @@ import import_events
 class FakeLlm:
     def __init__(self, content='[{"title": "Launch", "start": "2026-06-06"}]'):
         self.messages = []
+        self.kwargs = []
         self._content = content
 
-    def create_chat_completion(self, messages):
+    def create_chat_completion(self, messages, **kwargs):
         self.messages.append(messages)
+        self.kwargs.append(kwargs)
         return {"choices": [{"message": {"content": self._content}}]}
 
 
@@ -43,6 +45,8 @@ def test_extract_with_llm_uses_injected_client(tmp_path):
         }
     ]
     assert fake.messages
+    assert fake.kwargs[0]["response_format"] == {"type": "json_object"}
+    assert fake.kwargs[0]["temperature"] == 0.0
 
 
 def test_process_folder_uses_injected_client_for_text_files(tmp_path):
@@ -51,6 +55,19 @@ def test_process_folder_uses_injected_client_for_text_files(tmp_path):
     events = import_events.process_folder(str(tmp_path), llm_client=FakeLlm())
 
     assert [event["title"] for event in events] == ["Launch"]
+
+
+def test_extract_with_llm_threads_generation_limits(tmp_path):
+    source = tmp_path / "event.txt"
+    source.write_text("Launch party tomorrow", encoding="utf-8")
+    fake = FakeLlm()
+    cfg = import_events.ModelConfig(llm_max_tokens=77)
+
+    import_events.extract_with_llm(source, llm_client=fake, model_config=cfg)
+
+    assert fake.kwargs[0]["max_tokens"] == 77
+    assert fake.kwargs[0]["response_format"] == {"type": "json_object"}
+    assert fake.kwargs[0]["top_p"] == 1.0
 
 
 def test_normalize_event_date_returns_iso_strings():
@@ -72,6 +89,15 @@ def test_parse_llm_events_handles_object_and_nested_arrays_in_strings():
     assert events[0]["title"] == "Board [internal]"
     assert events[0]["start"] == "2026-06-06"
     assert events[0]["type"] == "Text/LLM"
+
+
+def test_parse_llm_events_unwraps_events_object():
+    text = '{"events": [{"title": "Wrapped", "start": "2026-06-22"}]}'
+
+    events = import_events.parse_llm_events(text, Path("source.txt"), "Text/LLM")
+
+    assert events[0]["title"] == "Wrapped"
+    assert events[0]["source"] == "source.txt"
 
 
 def test_decode_event_payload_object_after_stray_open_bracket():
@@ -153,6 +179,18 @@ def test_parse_llm_events_warns_on_undecodable(caplog):
 
     assert events == []
     assert "Failed to decode JSON" in caplog.text
+
+
+def test_parse_llm_events_does_not_warn_on_empty_json(caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        list_events = import_events.parse_llm_events("[]", Path("s.txt"), "x")
+        object_events = import_events.parse_llm_events('{"events": []}', Path("s.txt"), "x")
+
+    assert list_events == []
+    assert object_events == []
+    assert "Failed to decode JSON" not in caplog.text
 
 
 def test_parse_llm_events_strips_code_fences():
@@ -365,15 +403,276 @@ def test_image_messages_uses_correct_mime(tmp_path):
     assert url.startswith("data:image/png;base64,")
 
 
-def test_process_folder_handles_images_with_various_formats(tmp_path):
+def test_merge_text_blocks_dedupes_normalized_lines():
+    merged = import_events._merge_text_blocks([
+        "Launch   Party\nExpo",
+        " launch party \nWorkshop",
+    ])
+
+    assert merged.splitlines() == ["Launch Party", "Expo", "Workshop"]
+
+
+def test_paddle_texts_handles_old_and_new_shapes():
+    old_shape = [[[[0, 0], [1, 1]], ("Old text", 0.99)]]
+    new_shape = [{"rec_texts": ["New text", "More text"]}]
+
+    assert import_events._paddle_texts(old_shape) == ["Old text"]
+    assert import_events._paddle_texts(new_shape) == ["New text", "More text"]
+
+
+def test_get_paddle_ocr_builds_quiet_client(monkeypatch):
+    import types
+
+    captured = {}
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
+
+    assert isinstance(import_events._get_paddle_ocr(), FakePaddleOCR)
+    assert captured["show_log"] is False
+
+
+def test_get_paddle_ocr_falls_back_for_constructor_signature(monkeypatch):
+    import types
+
+    calls = []
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if "show_log" in kwargs:
+                raise TypeError("old signature")
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
+
+    import_events._get_paddle_ocr()
+
+    assert calls == [
+        {"use_angle_cls": True, "lang": "en", "show_log": False},
+        {"lang": "en"},
+    ]
+
+
+def test_get_paddle_ocr_missing_logs_once(monkeypatch, caplog):
+    import builtins
+    import logging
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "paddleocr":
+            raise ImportError("no paddle")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", None)
+    monkeypatch.setattr(import_events, "_OCR_WARNED", set())
+
+    with caplog.at_level(logging.WARNING):
+        assert import_events._get_paddle_ocr() is None
+        assert import_events._get_paddle_ocr() is None
+
+    assert caplog.text.count("PaddleOCR not installed") == 1
+
+
+def test_ocr_with_paddle_handles_result_and_old_ocr_signature(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+
+    class Engine:
+        def ocr(self, path, **kwargs):
+            if "cls" in kwargs:
+                raise TypeError("old ocr signature")
+            return [[[[0, 0], [1, 1]], ("Paddle text", 0.9)]]
+
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda: Engine())
+
+    assert import_events._ocr_with_paddle(img) == "Paddle text"
+
+
+def test_ocr_with_paddle_handles_missing_engine(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda: None)
+
+    assert import_events._ocr_with_paddle(img) == ""
+
+
+def test_ocr_with_paddle_error_logs_once(tmp_path, monkeypatch, caplog):
+    import logging
+
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    monkeypatch.setattr(import_events, "_OCR_WARNED", set())
+
+    class Engine:
+        def ocr(self, *_args, **_kwargs):
+            raise RuntimeError("bad image")
+
+    monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda: Engine())
+
+    with caplog.at_level(logging.WARNING):
+        assert import_events._ocr_with_paddle(img) == ""
+        assert import_events._ocr_with_paddle(img) == ""
+
+    assert caplog.text.count("PaddleOCR failed") == 1
+
+
+def test_ocr_image_path_merges_paddle_and_tesseract(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    monkeypatch.setattr(import_events, "_ocr_with_paddle", lambda path: "Alpha\nShared")
+    monkeypatch.setattr(import_events, "_ocr_with_tesseract", lambda path: "shared\nBeta")
+
+    text = import_events._ocr_image_path(img)
+
+    assert text.splitlines() == ["Alpha", "Shared", "Beta"]
+
+
+def test_ocr_image_bytes_uses_temp_file_and_cleans_it(monkeypatch):
+    seen = []
+
+    def fake_ocr(path):
+        seen.append(path)
+        assert path.exists()
+        return "OCR text"
+
+    monkeypatch.setattr(import_events, "_ocr_image_path", fake_ocr)
+
+    assert import_events._ocr_image_bytes(b"png") == "OCR text"
+    assert seen and not seen[0].exists()
+
+
+def test_ocr_with_tesseract_returns_stdout(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "Tesseract text"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        return Result()
+
+    monkeypatch.setattr(import_events.subprocess, "run", fake_run)
+
+    assert import_events._ocr_with_tesseract(img) == "Tesseract text"
+    assert calls[0][0][:3] == ["tesseract", str(img), "stdout"]
+
+
+def test_ocr_with_tesseract_missing_logs_once(tmp_path, monkeypatch, caplog):
+    import logging
+
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    monkeypatch.setattr(import_events, "_OCR_WARNED", set())
+
+    def missing(*_args, **_kwargs):
+        raise FileNotFoundError
+
+    monkeypatch.setattr(import_events.subprocess, "run", missing)
+
+    with caplog.at_level(logging.WARNING):
+        assert import_events._ocr_with_tesseract(img) == ""
+        assert import_events._ocr_with_tesseract(img) == ""
+
+    assert caplog.text.count("Tesseract executable not found") == 1
+
+
+def test_ocr_with_tesseract_timeout_logs_once(tmp_path, monkeypatch, caplog):
+    import logging
+
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    monkeypatch.setattr(import_events, "_OCR_WARNED", set())
+
+    def timeout(*_args, **_kwargs):
+        raise import_events.subprocess.TimeoutExpired("tesseract", 1)
+
+    monkeypatch.setattr(import_events.subprocess, "run", timeout)
+
+    with caplog.at_level(logging.WARNING):
+        assert import_events._ocr_with_tesseract(img) == ""
+        assert import_events._ocr_with_tesseract(img) == ""
+
+    assert caplog.text.count("Tesseract OCR failed") == 1
+
+
+def test_ocr_with_tesseract_nonzero_logs_once(tmp_path, monkeypatch, caplog):
+    import logging
+
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    monkeypatch.setattr(import_events, "_OCR_WARNED", set())
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "bad image"
+
+    monkeypatch.setattr(import_events.subprocess, "run", lambda *a, **k: Result())
+
+    with caplog.at_level(logging.WARNING):
+        assert import_events._ocr_with_tesseract(img) == ""
+        assert import_events._ocr_with_tesseract(img) == ""
+
+    assert caplog.text.count("Tesseract OCR exited non-zero") == 1
+
+
+def test_ocr_image_bytes_ignores_cleanup_error(monkeypatch):
+    monkeypatch.setattr(import_events, "_ocr_image_path", lambda path: "OCR text")
+    monkeypatch.setattr(import_events.os, "unlink", lambda path: (_ for _ in ()).throw(OSError))
+
+    assert import_events._ocr_image_bytes(b"png") == "OCR text"
+
+
+def test_extract_from_image_uses_ocr_before_llm(tmp_path, monkeypatch):
+    img = tmp_path / "poster.png"
+    img.write_bytes(b"image")
+    fake = FakeLlm('[{"title": "OCR Event", "start": "2026-06-22"}]')
+    monkeypatch.setattr(import_events, "_ocr_image_path", lambda path: "OCR calendar text")
+
+    events = import_events.extract_from_image(img, llm_client=fake)
+
+    assert events[0]["type"] == "Image/OCR"
+    assert "OCR calendar text" in fake.messages[0][1]["content"]
+    assert "image_url" not in json.dumps(fake.messages[0])
+
+
+def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypatch):
+    img = tmp_path / "poster.png"
+    img.write_bytes(b"image")
+    fake = FakeLlm('[{"title": "Vision Event", "start": "2026-06-22"}]')
+    monkeypatch.setattr(import_events, "_ocr_image_path", lambda path: "")
+
+    events = import_events.extract_from_image(img, llm_client=fake)
+
+    assert events[0]["type"] == "Image/Vision"
+    assert "image_url" in json.dumps(fake.messages[0])
+
+
+def test_process_folder_handles_images_with_various_formats(tmp_path, monkeypatch):
     for name in ("a.png", "b.webp", "c.gif", "d.bmp", "e.tiff"):
         (tmp_path / name).write_bytes(b"fake-image-bytes")
     fake = FakeLlm('[{"title": "Expo", "start": "2026-06-22T10:00"}]')
+    monkeypatch.setattr(import_events, "_ocr_image_path", lambda path: "Expo 2026-06-22")
 
     events = import_events.process_folder(str(tmp_path), llm_client=fake)
 
     assert len(events) == 5
-    assert all(e["type"] == "Image/Vision" for e in events)
+    assert all(e["type"] == "Image/OCR" for e in events)
 
 
 def test_process_folder_skips_symlinked_files(tmp_path):
@@ -384,9 +683,9 @@ def test_process_folder_skips_symlinked_files(tmp_path):
     seen = []
 
     class TrackingLlm(FakeLlm):
-        def create_chat_completion(self, messages):
+        def create_chat_completion(self, messages, **kwargs):
             seen.append(messages)
-            return super().create_chat_completion(messages)
+            return super().create_chat_completion(messages, **kwargs)
 
     events = import_events.process_folder(str(tmp_path), llm_client=TrackingLlm())
 
@@ -712,7 +1011,8 @@ def test_model_config_from_args_threads_values():
     args = import_events.parse_args(
         ["dir", "--model-path", "m.gguf", "--clip-path", "c.gguf",
          "--model-sha256", "a" * 64, "--clip-sha256", "b" * 64,
-         "--llm-cache-size", "2"]
+         "--llm-cache-size", "2", "--llm-context", "3072",
+         "--llm-max-tokens", "123", "--llm-verbose"]
     )
 
     cfg = import_events.ModelConfig.from_args(args)
@@ -722,6 +1022,9 @@ def test_model_config_from_args_threads_values():
     assert cfg.model_sha256 == "a" * 64
     assert cfg.clip_sha256 == "b" * 64
     assert cfg.llm_cache_size == 2
+    assert cfg.llm_context_size == 3072
+    assert cfg.llm_max_tokens == 123
+    assert cfg.llm_verbose is True
 
 
 def test_default_cache_dir_prefers_import_events_cache_dir(tmp_path, monkeypatch):
@@ -739,6 +1042,8 @@ def test_model_config_from_args_uses_cache_dir_for_default_paths(tmp_path):
 
     assert cfg.model_path == str(cache / import_events.MODEL_FILENAME)
     assert cfg.clip_path == str(cache / import_events.CLIP_FILENAME)
+    assert cfg.model_sha256 == import_events.MODEL_SHA256
+    assert cfg.clip_sha256 == import_events.CLIP_SHA256
 
 
 def test_model_config_explicit_paths_override_cache_dir(tmp_path):
@@ -752,6 +1057,8 @@ def test_model_config_explicit_paths_override_cache_dir(tmp_path):
 
     assert cfg.model_path == "custom-model.gguf"
     assert cfg.clip_path == "custom-clip.gguf"
+    assert cfg.model_sha256 is None
+    assert cfg.clip_sha256 is None
 
 
 def test_model_config_defaults_match_module_constants():
@@ -759,7 +1066,11 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.model_path == import_events.MODEL_PATH
     assert cfg.clip_path == import_events.CLIP_PATH
     assert cfg.model_sha256 == import_events.MODEL_SHA256
+    assert cfg.clip_sha256 == import_events.CLIP_SHA256
     assert cfg.llm_cache_size == import_events.DEFAULT_LLM_CACHE_SIZE
+    assert cfg.llm_context_size == import_events.DEFAULT_LLM_CONTEXT_SIZE
+    assert cfg.llm_max_tokens == import_events.DEFAULT_LLM_MAX_TOKENS
+    assert cfg.llm_verbose is False
 
 
 def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
@@ -771,7 +1082,10 @@ def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(import_events, "_download_to_cache",
                         lambda url, path: calls.append((url, path)))
 
-    cfg = import_events.ModelConfig(model_path=str(model), clip_path=str(clip))
+    cfg = import_events.ModelConfig(
+        model_path=str(model), clip_path=str(clip),
+        model_sha256=None, clip_sha256=None,
+    )
     import_events.ensure_models_exist(cfg)
 
     assert calls == []  # both exist, nothing downloaded
@@ -788,7 +1102,8 @@ def test_ensure_models_exist_downloads_missing_from_config(tmp_path, monkeypatch
     monkeypatch.setattr(import_events, "_download_to_cache", fake_download)
 
     cfg = import_events.ModelConfig(
-        model_path=str(model), clip_path=str(clip), model_url="http://x", clip_url="http://y"
+        model_path=str(model), clip_path=str(clip), model_url="http://x", clip_url="http://y",
+        model_sha256=None, clip_sha256=None,
     )
     import_events.ensure_models_exist(cfg)
 
@@ -821,7 +1136,8 @@ def test_ensure_models_exist_validates_downloaded_clip(tmp_path, monkeypatch):
     monkeypatch.setattr(import_events, "_download_to_cache", fake_download)
 
     cfg = import_events.ModelConfig(
-        model_path=str(model), clip_path=str(clip), model_url="http://x", clip_url="http://y"
+        model_path=str(model), clip_path=str(clip), model_url="http://x", clip_url="http://y",
+        model_sha256=None, clip_sha256=None,
     )
     import_events.ensure_models_exist(cfg)
 
@@ -1014,12 +1330,15 @@ def test_get_llm_threads_config_paths(monkeypatch):
     captured = {}
 
     class FakeHandler:
-        def __init__(self, clip_model_path):
+        def __init__(self, clip_model_path, verbose=True):
             captured["clip"] = clip_model_path
+            captured["handler_verbose"] = verbose
 
     class FakeLlama:
-        def __init__(self, model_path, chat_handler, n_ctx):
+        def __init__(self, model_path, chat_handler, n_ctx, verbose=True):
             captured["model"] = model_path
+            captured["n_ctx"] = n_ctx
+            captured["llama_verbose"] = verbose
 
     import types
     fake_llama_cpp = types.ModuleType("llama_cpp")
@@ -1034,18 +1353,24 @@ def test_get_llm_threads_config_paths(monkeypatch):
     cfg = import_events.ModelConfig(model_path="MM.gguf", clip_path="CC.gguf")
     import_events.get_llm(cfg)
 
-    assert captured == {"clip": "CC.gguf", "model": "MM.gguf"}
+    assert captured == {
+        "clip": "CC.gguf",
+        "handler_verbose": False,
+        "llama_verbose": False,
+        "model": "MM.gguf",
+        "n_ctx": import_events.DEFAULT_LLM_CONTEXT_SIZE,
+    }
 
 
 def test_get_llm_caches_per_config(monkeypatch):
     created = []
 
     class FakeHandler:
-        def __init__(self, clip_model_path):
+        def __init__(self, clip_model_path, verbose=True):
             pass
 
     class FakeLlama:
-        def __init__(self, model_path, chat_handler, n_ctx):
+        def __init__(self, model_path, chat_handler, n_ctx, verbose=True):
             created.append(model_path)
 
     import types
@@ -1072,14 +1397,36 @@ def test_get_llm_caches_per_config(monkeypatch):
     assert created == ["A.gguf", "B.gguf"]
 
 
+def test_get_llm_cache_key_includes_context_size(monkeypatch):
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+
+    first = import_events.get_llm(import_events.ModelConfig(
+        model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=2,
+        llm_context_size=2048))
+    second = import_events.get_llm(import_events.ModelConfig(
+        model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=2,
+        llm_context_size=4096))
+
+    assert second is not first
+    assert created == ["A.gguf", "A.gguf"]
+    assert first.n_ctx == 2048
+    assert second.n_ctx == 4096
+
+
 def _install_fake_llama(monkeypatch, created, closed):
     class FakeHandler:
-        def __init__(self, clip_model_path):
+        def __init__(self, clip_model_path, verbose=True):
             self.clip_model_path = clip_model_path
+            self.verbose = verbose
 
     class FakeLlama:
-        def __init__(self, model_path, chat_handler, n_ctx):
+        def __init__(self, model_path, chat_handler, n_ctx, verbose=True):
             self.model_path = model_path
+            self.n_ctx = n_ctx
+            self.verbose = verbose
             created.append(model_path)
 
         def close(self):
@@ -1141,7 +1488,10 @@ def test_get_llm_cache_size_zero_evicts_existing_entry(monkeypatch):
     })()
     monkeypatch.setattr(
         import_events, "_LLM_CACHE",
-        OrderedDict([(("A.gguf", "ca.gguf"), existing)]),
+        OrderedDict([(
+            ("A.gguf", "ca.gguf", import_events.DEFAULT_LLM_CONTEXT_SIZE, False),
+            existing,
+        )]),
     )
     cfg = import_events.ModelConfig(
         model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0)
@@ -1234,8 +1584,36 @@ def test_pdf_to_images_returns_empty_without_pymupdf(monkeypatch):
     assert import_events._pdf_to_images(Path("x.pdf")) == []
 
 
+def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):
+    fake = FakeLlm('[{"title": "PDF Event", "start": "2026-06-22"}]')
+    monkeypatch.setattr(import_events, "_pdf_text", lambda path: "PDF text\nShared")
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path: [b"page"])
+    monkeypatch.setattr(import_events, "_ocr_image_bytes", lambda data: "shared\nOCR text")
+
+    events = import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
+
+    assert events[0]["type"] == "PDF/OCR"
+    prompt = fake.messages[0][1]["content"]
+    assert "PDF text" in prompt
+    assert "OCR text" in prompt
+    assert prompt.count("Shared") == 1
+    assert "image_url" not in json.dumps(fake.messages[0])
+
+
+def test_extract_from_pdf_falls_back_to_vision_after_empty_ocr(monkeypatch):
+    fake = FakeLlm('[{"title": "Vision PDF", "start": "2026-06-22"}]')
+    monkeypatch.setattr(import_events, "_pdf_text", lambda path: "")
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path: [b"page"])
+    monkeypatch.setattr(import_events, "_ocr_image_bytes", lambda data: "")
+
+    events = import_events.extract_from_pdf(Path("scan.pdf"), llm_client=fake)
+
+    assert events[0]["type"] == "PDF/Vision"
+    assert "image_url" in json.dumps(fake.messages[0])
+
+
 class RaisingLlm:
-    def create_chat_completion(self, messages):
+    def create_chat_completion(self, messages, **kwargs):
         raise RuntimeError("model OOM")
 
 
