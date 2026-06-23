@@ -13,6 +13,13 @@ from hypothesis import given, strategies as st
 import import_events
 
 
+@pytest.fixture(autouse=True)
+def _reset_paddle_runtime_state():
+    import_events.reset_paddle_ocr_state()
+    yield
+    import_events.reset_paddle_ocr_state()
+
+
 SAMPLE_TABLE_CALENDAR_PDF = (
     Path(__file__).parent / "fixtures" / "import_events_table_calendar_2026.pdf"
 )
@@ -174,6 +181,33 @@ def test_run_llm_suppresses_fd_output_when_not_verbose(capfd):
         "Text/LLM",
         NoisyLlm(),
         import_events.ModelConfig(llm_verbose=False),
+    )
+
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    assert events[0]["title"] == "Launch"
+
+
+def test_run_llm_suppresses_generation_output_when_verbose(capfd):
+    class NoisyLlm:
+        def create_chat_completion(self, messages, **kwargs):
+            os.write(1, b"add_text: sensitive prompt on stdout\n")
+            os.write(2, b"add_text: sensitive prompt on stderr\n")
+            return {
+                "choices": [{
+                    "message": {
+                        "content": '[{"title": "Launch", "start": "2026-06-06"}]',
+                    },
+                }],
+            }
+
+    events = import_events._run_llm(
+        [{"role": "user", "content": "Launch"}],
+        Path("event.txt"),
+        "Text/LLM",
+        NoisyLlm(),
+        import_events.ModelConfig(llm_verbose=True),
     )
 
     captured = capfd.readouterr()
@@ -1110,6 +1144,53 @@ def test_get_paddle_ocr_explicit_device_is_passed(monkeypatch):
     assert captured["device"] == "gpu:1"
 
 
+def test_get_paddle_ocr_falls_back_to_cpu_when_device_fails(monkeypatch, caplog):
+    import logging
+    import types
+
+    calls = []
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("device") == "gpu:1":
+                raise RuntimeError("gpu init failed")
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
+
+    with caplog.at_level(logging.WARNING):
+        assert isinstance(import_events._get_paddle_ocr(
+            "en", import_events.ModelConfig(paddle_ocr_device="gpu:1")),
+            FakePaddleOCR)
+
+    assert calls == [
+        {"use_textline_orientation": True, "lang": "en", "device": "gpu:1"},
+        {"use_angle_cls": True, "lang": "en", "device": "gpu:1"},
+        {"lang": "en", "device": "gpu:1"},
+        {"use_textline_orientation": True, "lang": "en", "device": "cpu"},
+    ]
+    assert "falling back to CPU" in caplog.text
+
+
+def test_get_paddle_ocr_returns_none_after_runtime_disable(monkeypatch):
+    import types
+
+    class FakePaddleOCR:
+        pass
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
+
+    import_events._disable_paddle_ocr()
+
+    assert import_events._get_paddle_ocr() is None
+
+
 def test_get_paddle_ocr_missing_logs_once(monkeypatch, caplog):
     import builtins
     import logging
@@ -1193,9 +1274,11 @@ def test_ocr_with_paddle_error_logs_once(tmp_path, monkeypatch, caplog):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
     monkeypatch.setattr(import_events, "_OCR_WARNED", set())
+    calls = []
 
     class Engine:
         def ocr(self, *_args, **_kwargs):
+            calls.append("ocr")
             raise RuntimeError("bad image")
 
     monkeypatch.setattr(import_events, "_get_paddle_ocr", lambda language="en", config=None: Engine())
@@ -1205,6 +1288,7 @@ def test_ocr_with_paddle_error_logs_once(tmp_path, monkeypatch, caplog):
         assert import_events._ocr_with_paddle(img) == ""
 
     assert caplog.text.count("PaddleOCR failed") == 1
+    assert calls == ["ocr"]
 
 
 def test_ocr_with_paddle_propagates_keyboard_interrupt(tmp_path, monkeypatch):
@@ -2464,6 +2548,27 @@ def test_get_llm_threads_config_paths(monkeypatch, caplog):
         "n_gpu_layers": import_events.DEFAULT_LLM_GPU_LAYERS,
     }
     assert "Using LLM GPU backend: n_gpu_layers=-1, main_gpu=0." in caplog.text
+
+
+def test_prepare_vulkan_environment_moves_deprecated_radv_flags():
+    env = {
+        "RADV_PERFTEST": "video_decode,nggc,video_encode",
+        "RADV_EXPERIMENTAL": "rt",
+    }
+
+    import_events._prepare_vulkan_environment(env)
+
+    assert env["RADV_PERFTEST"] == "nggc"
+    assert env["RADV_EXPERIMENTAL"] == "rt,video_decode,video_encode"
+
+
+def test_prepare_vulkan_environment_removes_empty_radv_perftest():
+    env = {"RADV_PERFTEST": "video_decode video_encode"}
+
+    import_events._prepare_vulkan_environment(env)
+
+    assert "RADV_PERFTEST" not in env
+    assert env["RADV_EXPERIMENTAL"] == "video_decode,video_encode"
 
 
 def test_get_llm_falls_back_to_cpu_when_gpu_init_fails(monkeypatch, caplog):

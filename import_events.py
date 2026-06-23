@@ -25,7 +25,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from dataclasses import dataclass
 from datetime import datetime, date
-from typing import List, Dict, Any, Optional, Callable, Tuple
+from typing import List, Dict, Any, Optional, Callable, Tuple, MutableMapping
 from pathlib import Path
 
 # Default paths to the local GGUF models.
@@ -63,6 +63,7 @@ MIN_CONTENT_CHARS = 512
 MAX_CONTEXT_TEXT_CHARS = 65536
 GGUF_METADATA_SCAN_BYTES = 1 << 20
 MTMD_PROJECTOR_METADATA = b"clip.projector_type"
+RADV_DEPRECATED_PERFTEST_FLAGS = ("video_decode", "video_encode")
 
 _LANGUAGE_CODE_RE = re.compile(r"^[a-z][a-z0-9_+.-]{0,31}$")
 _LANGUAGE_ALIASES = {
@@ -253,6 +254,35 @@ def _parse_ocr_languages(value: Optional[str]) -> Tuple[str, ...]:
     if not languages:
         raise argparse.ArgumentTypeError("OCR language list must contain at least one concrete language")
     return languages
+
+
+def _env_tokens(value: Optional[str]) -> List[str]:
+    return [token for token in re.split(r"[\s,;:]+", value or "") if token]
+
+
+def _unique_tokens(tokens: List[str]) -> List[str]:
+    seen = set()
+    unique = []
+    for token in tokens:
+        if token in seen:
+            continue
+        seen.add(token)
+        unique.append(token)
+    return unique
+
+
+def _prepare_vulkan_environment(env: MutableMapping[str, str] = os.environ) -> None:
+    perftest = _env_tokens(env.get("RADV_PERFTEST"))
+    deprecated = [token for token in perftest if token in RADV_DEPRECATED_PERFTEST_FLAGS]
+    if not deprecated:
+        return
+    experimental = _unique_tokens(_env_tokens(env.get("RADV_EXPERIMENTAL")) + deprecated)
+    env["RADV_EXPERIMENTAL"] = ",".join(experimental)
+    remaining = [token for token in perftest if token not in RADV_DEPRECATED_PERFTEST_FLAGS]
+    if remaining:
+        env["RADV_PERFTEST"] = ",".join(_unique_tokens(remaining))
+    else:
+        env.pop("RADV_PERFTEST", None)
 
 
 def _ocr_language_chain_with_source(seed_text: str, config: "ModelConfig") -> Tuple[Tuple[str, ...], str]:
@@ -489,10 +519,13 @@ MAX_CONTENT_CHARS = _text_budget_from_context(DEFAULT_LLM_CONTEXT_SIZE,
 _LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
 _LLM_CACHE_LOCK = threading.RLock()
 _LLM_REQUEST_LOCK = threading.Lock()
+_OUTPUT_REDIRECT_LOCK = threading.RLock()
 _OCR_WARNING_LOCK = threading.Lock()
 _PADDLE_OCR_LOCK = threading.Lock()
+_PADDLE_RUN_LOCK = threading.Lock()
 _EXTRACTION_FAILURE_LOCK = threading.Lock()
 _PADDLE_OCR: Optional[Any] = None
+_PADDLE_OCR_DISABLED = False
 _OCR_WARNED = set()
 _OCR_WARNING_COUNTS: Dict[str, int] = {}
 _OCR_WARNING_LABELS = {
@@ -535,6 +568,19 @@ def reset_ocr_warnings() -> None:
         _OCR_WARNING_COUNTS.clear()
 
 
+def reset_paddle_ocr_state() -> None:
+    global _PADDLE_OCR, _PADDLE_OCR_DISABLED
+    with _PADDLE_OCR_LOCK:
+        _PADDLE_OCR = None
+        _PADDLE_OCR_DISABLED = False
+
+
+def _disable_paddle_ocr() -> None:
+    global _PADDLE_OCR_DISABLED
+    with _PADDLE_OCR_LOCK:
+        _PADDLE_OCR_DISABLED = True
+
+
 def _ocr_warning_summary_items() -> List[str]:
     with _OCR_WARNING_LOCK:
         counts = dict(_OCR_WARNING_COUNTS)
@@ -555,19 +601,20 @@ def _report_ocr_warning_summary() -> None:
 
 @contextlib.contextmanager
 def _redirect_stdout_stderr():
-    with open(os.devnull, "w", encoding="utf-8") as devnull:
-        saved_fds = _redirect_process_fds(devnull.fileno())
-        restored = False
-        try:
-            with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
-                try:
-                    yield
-                finally:
+    with _OUTPUT_REDIRECT_LOCK:
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            saved_fds = _redirect_process_fds(devnull.fileno())
+            restored = False
+            try:
+                with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
+                    try:
+                        yield
+                    finally:
+                        _restore_process_fds(saved_fds)
+                        restored = True
+            finally:
+                if not restored:
                     _restore_process_fds(saved_fds)
-                    restored = True
-        finally:
-            if not restored:
-                _restore_process_fds(saved_fds)
 
 
 def _flush_standard_streams() -> None:
@@ -864,6 +911,7 @@ def get_llm(config: Optional[ModelConfig] = None):
                 _trim_llm_cache(cache_limit)
                 return cached
 
+        _prepare_vulkan_environment()
         from llama_cpp import Llama, llama_cpp
         from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
@@ -1787,7 +1835,7 @@ def _build_paddle_ocr_with_kwargs(PaddleOCR: Any, paddle_lang: str,
         try:
             with _redirect_stdout_stderr():
                 return PaddleOCR(**kwargs), None
-        except (TypeError, ValueError) as exc:
+        except Exception as exc:
             last_exc = exc
     return None, last_exc
 
@@ -1817,6 +1865,8 @@ def _get_paddle_ocr(
     runtime_config = config or ModelConfig()
     paddle_lang = _paddle_language(_normalize_language(language))
     with _PADDLE_OCR_LOCK:
+        if _PADDLE_OCR_DISABLED:
+            return None
         if _PADDLE_OCR is None:
             _PADDLE_OCR = {}
         try:
@@ -1865,8 +1915,12 @@ def _ocr_with_paddle(
     if engine is None:
         return ""
     try:
-        result = _run_paddle_ocr(engine, image_path)
+        with _PADDLE_RUN_LOCK:
+            if _PADDLE_OCR_DISABLED:
+                return ""
+            result = _run_paddle_ocr(engine, image_path)
     except Exception as exc:
+        _disable_paddle_ocr()
         _warn_once("paddle-error", "PaddleOCR failed; skipping Paddle OCR: %s", exc)
         return ""
     return "\n".join(_paddle_texts(result))
@@ -1999,7 +2053,9 @@ def _llm_response_text(
     runtime_config = model_config or ModelConfig()
     try:
         client = get_llm(runtime_config) if llm_client is None else llm_client
-        with _quiet_output_context(runtime_config.llm_verbose):
+        # llama.cpp generation diagnostics can include the full prompt; keep
+        # request output quiet even when model-load diagnostics are enabled.
+        with _quiet_output_context(False):
             response: Any = _timed_stage(
                 runtime_config,
                 file_path,
@@ -2546,7 +2602,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=("Max text characters sent to the LLM per file "
                               "(default: computed from --llm-context)."))
     parser.add_argument("--llm-verbose", action="store_true",
-                        help="Enable verbose llama.cpp backend diagnostics.")
+                        help=("Enable verbose llama.cpp model-load diagnostics; "
+                              "generation prompt output remains suppressed."))
     parser.add_argument("--language", type=_normalize_language, default=defaults.language,
                         help=("Content language hint: auto, en, pt, es, it, fr, de, "
                               "or a backend language code (default: auto)."))
