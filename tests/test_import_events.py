@@ -456,6 +456,20 @@ def test_language_detection_handles_portuguese_text():
     assert import_events._language_for_text(text, cfg) == "pt"
 
 
+def test_normalize_language_handles_brazilian_portuguese_alias():
+    assert import_events._normalize_language("Brazilian Portuguese") == "pt-br"
+    assert import_events._parse_ocr_languages("Brazilian Portuguese,English,German") == (
+        "pt-br", "en", "de"
+    )
+
+
+def test_ocr_language_match_score_prefers_target_language():
+    text = "Festa de São João no Porto com música e evento cultural"
+
+    assert import_events._language_match_score(text, "pt-br") >= 0.70
+    assert import_events._language_match_score(text, "en") == 0.0
+
+
 def test_language_config_override_skips_detection():
     cfg = import_events.ModelConfig(language="fr")
 
@@ -466,7 +480,19 @@ def test_language_config_override_skips_detection():
 def test_ocr_language_fallback_never_returns_auto():
     cfg = import_events.ModelConfig(language="auto", ocr_fallback_language="auto")
 
-    assert import_events._language_for_ocr("", cfg) == import_events.DEFAULT_OCR_FALLBACK_LANGUAGE
+    assert import_events._language_for_ocr("", cfg) == import_events.DEFAULT_OCR_LANGUAGES[0]
+
+
+def test_ocr_language_chain_uses_default_order_without_seed_text():
+    cfg = import_events.ModelConfig()
+
+    assert import_events._ocr_language_chain("", cfg) == import_events.DEFAULT_OCR_LANGUAGES
+
+
+def test_ocr_language_chain_keeps_explicit_fallback_first():
+    cfg = import_events.ModelConfig(ocr_fallback_language="it")
+
+    assert import_events._ocr_language_chain("", cfg)[:2] == ("it", "pt-br")
 
 
 def test_merge_text_blocks_dedupes_normalized_lines():
@@ -686,6 +712,43 @@ def test_ocr_image_path_merges_paddle_and_tesseract(tmp_path, monkeypatch):
     assert text.splitlines() == ["Alpha", "Shared", "Beta"]
 
 
+def test_ocr_image_path_skips_chain_when_first_language_scores_high(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    calls = []
+
+    def fake_once(path, config=None, language="en"):
+        calls.append(language)
+        return "Festa de São João no Porto com música e evento cultural"
+
+    monkeypatch.setattr(import_events, "_ocr_image_path_once", fake_once)
+    cfg = import_events.ModelConfig(ocr_language_score=0.70)
+
+    text = import_events._ocr_image_path(img, cfg, "pt-br", ("pt-br", "en"), "image OCR")
+
+    assert calls == ["pt-br"]
+    assert "Festa de São João" in text
+
+
+def test_ocr_image_path_exhausts_chain_when_first_language_scores_low(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    calls = []
+    texts = {"pt-br": "Launch party with event", "en": "Launch party with event"}
+
+    def fake_once(path, config=None, language="en"):
+        calls.append(language)
+        return texts[language]
+
+    monkeypatch.setattr(import_events, "_ocr_image_path_once", fake_once)
+    cfg = import_events.ModelConfig(ocr_language_score=0.70)
+
+    text = import_events._ocr_image_path(img, cfg, "pt-br", ("pt-br", "en"), "image OCR")
+
+    assert calls == ["pt-br", "en"]
+    assert text == "Launch party with event"
+
+
 def test_ocr_image_bytes_uses_temp_file_and_cleans_it(monkeypatch):
     seen = []
 
@@ -842,7 +905,7 @@ def test_extract_from_image_uses_ocr_before_llm(tmp_path, monkeypatch):
     img.write_bytes(b"image")
     fake = FakeLlm('[{"title": "OCR Event", "start": "2026-06-22"}]')
     monkeypatch.setattr(import_events, "_ocr_image_path",
-                        lambda path, config=None, language="en": "OCR calendar text")
+                        lambda path, config=None, language="en", *a, **k: "OCR calendar text")
 
     events = import_events.extract_from_image(img, llm_client=fake)
 
@@ -859,7 +922,7 @@ def test_extract_from_image_passes_fallback_language_to_ocr_and_detects_llm_lang
     fake = FakeLlm('[{"title": "Festa", "start": "2026-06-22"}]')
     seen = {}
 
-    def fake_ocr(path, config=None, language="en"):
+    def fake_ocr(path, config=None, language="en", *args, **kwargs):
         seen["language"] = language
         return "Festa de São João no Porto"
 
@@ -881,7 +944,7 @@ def test_extract_from_image_logs_ocr_and_post_ocr_languages(tmp_path, monkeypatc
     fake = FakeLlm('[{"title": "Festa", "start": "2026-06-22"}]')
     monkeypatch.setattr(
         import_events, "_ocr_image_path",
-        lambda path, config=None, language="en": "Festa de São João no Porto",
+        lambda path, config=None, language="en", *a, **k: "Festa de São João no Porto",
     )
 
     with caplog.at_level(logging.INFO):
@@ -900,7 +963,7 @@ def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypat
     img.write_bytes(b"image")
     fake = FakeLlm('[{"title": "Vision Event", "start": "2026-06-22"}]')
     monkeypatch.setattr(import_events, "_ocr_image_path",
-                        lambda path, config=None, language="en": "")
+                        lambda path, config=None, language="en", *a, **k: "")
 
     events = import_events.extract_from_image(img, llm_client=fake)
 
@@ -915,7 +978,7 @@ def test_extract_from_image_logs_vision_auto_language(tmp_path, monkeypatch, cap
     img.write_bytes(b"image")
     fake = FakeLlm('[{"title": "Vision Event", "start": "2026-06-22"}]')
     monkeypatch.setattr(import_events, "_ocr_image_path",
-                        lambda path, config=None, language="en": "")
+                        lambda path, config=None, language="en", *a, **k: "")
 
     with caplog.at_level(logging.INFO):
         import_events.extract_from_image(img, llm_client=fake)
@@ -928,7 +991,7 @@ def test_extract_from_image_passes_language_to_vision_prompt(tmp_path, monkeypat
     img.write_bytes(b"image")
     fake = FakeLlm('[{"title": "Vision Event", "start": "2026-06-22"}]')
     monkeypatch.setattr(import_events, "_ocr_image_path",
-                        lambda path, config=None, language="en": "")
+                        lambda path, config=None, language="en", *a, **k: "")
 
     import_events.extract_from_image(
         img,
@@ -944,7 +1007,7 @@ def test_process_folder_handles_images_with_various_formats(tmp_path, monkeypatc
         (tmp_path / name).write_bytes(b"fake-image-bytes")
     fake = FakeLlm('[{"title": "Expo", "start": "2026-06-22T10:00"}]')
     monkeypatch.setattr(import_events, "_ocr_image_path",
-                        lambda path, config=None, language="en": "Expo 2026-06-22")
+                        lambda path, config=None, language="en", *a, **k: "Expo 2026-06-22")
 
     events = import_events.process_folder(str(tmp_path), llm_client=fake)
 
@@ -1292,6 +1355,8 @@ def test_model_config_from_args_threads_values():
          "--llm-max-tokens", "123", "--max-content-chars", "456",
          "--llm-verbose", "--language", "Portuguese",
          "--ocr-fallback-language", "Spanish", "--ocr-timeout", "9",
+         "--ocr-languages", "Brazilian Portuguese,English,German",
+         "--ocr-language-score", "0.65",
          "--tesseract-psm", "11", "--pdf-vision-pages", "3",
          "--pdf-vision-dpi", "200"]
     )
@@ -1309,6 +1374,8 @@ def test_model_config_from_args_threads_values():
     assert cfg.max_content_chars == 456
     assert cfg.language == "pt"
     assert cfg.ocr_fallback_language == "es"
+    assert cfg.ocr_languages == ("pt-br", "en", "de")
+    assert cfg.ocr_language_score == 0.65
     assert cfg.ocr_timeout_seconds == 9
     assert cfg.tesseract_psm == "11"
     assert cfg.pdf_vision_max_pages == 3
@@ -1375,6 +1442,8 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.max_content_chars is None
     assert cfg.language == import_events.DEFAULT_LANGUAGE
     assert cfg.ocr_fallback_language == import_events.DEFAULT_OCR_FALLBACK_LANGUAGE
+    assert cfg.ocr_languages == import_events.DEFAULT_OCR_LANGUAGES
+    assert cfg.ocr_language_score == import_events.DEFAULT_OCR_LANGUAGE_SCORE
     assert cfg.ocr_timeout_seconds == import_events.OCR_TIMEOUT_SECONDS
     assert cfg.tesseract_psm == import_events.DEFAULT_TESSERACT_PSM
     assert cfg.pdf_vision_max_pages == import_events.PDF_VISION_MAX_PAGES

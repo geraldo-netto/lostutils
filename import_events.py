@@ -19,7 +19,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from dataclasses import dataclass
 from datetime import datetime, date
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable, Tuple
 from pathlib import Path
 
 # Default paths to the local GGUF models.
@@ -35,6 +35,8 @@ DOWNLOAD_TIMEOUT_SECONDS = 30
 OCR_TIMEOUT_SECONDS = 120
 DEFAULT_LANGUAGE = "auto"
 DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
+DEFAULT_OCR_LANGUAGES = ("pt-br", "en", "es", "it", "fr", "de")
+DEFAULT_OCR_LANGUAGE_SCORE = 0.70
 DEFAULT_TESSERACT_PSM = "6"
 PDF_VISION_MAX_PAGES = 5
 PDF_VISION_DPI = 150
@@ -49,11 +51,15 @@ _LANGUAGE_CODE_RE = re.compile(r"^[a-z][a-z0-9_+.-]{0,31}$")
 _LANGUAGE_ALIASES = {
     "automatic": "auto",
     "detect": "auto",
+    "brazilian": "pt-br",
+    "brazilian-portuguese": "pt-br",
     "eng": "en",
     "english": "en",
     "por": "pt",
     "portuguese": "pt",
+    "portuguese-br": "pt-br",
     "portugues": "pt",
+    "portugues-brasileiro": "pt-br",
     "spa": "es",
     "spanish": "es",
     "espanol": "es",
@@ -69,15 +75,17 @@ _LANGUAGE_ALIASES = {
 _LANGUAGE_NAMES = {
     "en": "English",
     "pt": "Portuguese",
+    "pt-br": "Brazilian Portuguese",
     "es": "Spanish",
     "it": "Italian",
     "fr": "French",
     "de": "German",
 }
-_PADDLE_LANGUAGE_CODES = {"de": "german"}
+_PADDLE_LANGUAGE_CODES = {"de": "german", "pt-br": "pt"}
 _TESSERACT_LANGUAGE_CODES = {
     "en": "eng",
     "pt": "por",
+    "pt-br": "por",
     "es": "spa",
     "it": "ita",
     "fr": "fra",
@@ -115,7 +123,7 @@ def _default_cache_dir() -> Path:
 
 
 def _normalize_language(value: Optional[str]) -> str:
-    raw = (value or DEFAULT_LANGUAGE).strip().lower().replace("_", "-")
+    raw = re.sub(r"[\s_]+", "-", (value or DEFAULT_LANGUAGE).strip().lower())
     if not raw:
         return DEFAULT_LANGUAGE
     normalized = _LANGUAGE_ALIASES.get(raw, raw)
@@ -136,17 +144,99 @@ def _tesseract_language(language: str) -> str:
     return _TESSERACT_LANGUAGE_CODES.get(language, language)
 
 
-def _detect_language_from_text(text: str) -> Optional[str]:
+def _language_family(language: str) -> str:
+    normalized = _normalize_language(language)
+    return normalized.split("-", 1)[0]
+
+
+def _language_scores(text: str) -> Dict[str, int]:
     folded = text.casefold()
     tokens = re.findall(r"[a-zà-ÿœ]+", folded)
     if not tokens:
-        return None
+        return {}
     scores = {lang: sum(1 for token in tokens if token in words)
               for lang, words in _LANGUAGE_STOPWORDS.items()}
     for lang, markers in _LANGUAGE_MARKERS.items():
         scores[lang] += sum(2 for char in folded if char in markers)
+    return scores
+
+
+def _detect_language_from_text(text: str) -> Optional[str]:
+    scores = _language_scores(text)
+    if not scores:
+        return None
     language, score = max(scores.items(), key=lambda item: item[1])
     return language if score > 0 else None
+
+
+def _language_match_score(text: str, language: str) -> float:
+    scores = _language_scores(text)
+    if not scores:
+        return 0.0
+    target = _language_family(language)
+    target_score = scores.get(target, 0)
+    if target_score <= 0:
+        return 0.0
+    best_other = max((score for lang, score in scores.items() if lang != target), default=0)
+    if best_other <= 0:
+        return 1.0
+    return target_score / (target_score + best_other)
+
+
+def _ocr_language_backend_key(language: str) -> Tuple[str, str]:
+    normalized = _normalize_language(language)
+    return _paddle_language(normalized), _tesseract_language(normalized)
+
+
+def _unique_ocr_languages(languages: List[str]) -> Tuple[str, ...]:
+    seen = set()
+    unique: List[str] = []
+    for language in languages:
+        normalized = _normalize_language(language)
+        if normalized == DEFAULT_LANGUAGE:
+            continue
+        backend_key = _ocr_language_backend_key(normalized)
+        if backend_key in seen:
+            continue
+        seen.add(backend_key)
+        unique.append(normalized)
+    return tuple(unique)
+
+
+def _parse_ocr_languages(value: Optional[str]) -> Tuple[str, ...]:
+    if value is None:
+        return DEFAULT_OCR_LANGUAGES
+    languages = _unique_ocr_languages([item for item in value.split(",") if item.strip()])
+    if not languages:
+        raise argparse.ArgumentTypeError("OCR language list must contain at least one concrete language")
+    return languages
+
+
+def _ocr_language_chain_with_source(seed_text: str, config: "ModelConfig") -> Tuple[Tuple[str, ...], str]:
+    language, source = _language_for_text_with_source(seed_text, config)
+    candidates: List[str] = []
+    chain_source = source
+    if language != DEFAULT_LANGUAGE:
+        candidates.append(language)
+    else:
+        fallback = _normalize_language(config.ocr_fallback_language)
+        if fallback not in (DEFAULT_LANGUAGE, DEFAULT_OCR_FALLBACK_LANGUAGE):
+            candidates.append(fallback)
+            chain_source = "ocr-fallback"
+        else:
+            chain_source = "ocr-languages"
+        candidates.extend(config.ocr_languages)
+        if fallback != DEFAULT_LANGUAGE:
+            candidates.append(fallback)
+    chain = _unique_ocr_languages(candidates)
+    if chain:
+        return chain, chain_source
+    return (DEFAULT_OCR_FALLBACK_LANGUAGE,), "ocr-default"
+
+
+def _ocr_language_chain(seed_text: str, config: "ModelConfig") -> Tuple[str, ...]:
+    chain, _source = _ocr_language_chain_with_source(seed_text, config)
+    return chain
 
 
 def _language_for_text_with_source(text: str, config: "ModelConfig") -> tuple:
@@ -165,13 +255,8 @@ def _language_for_text(text: str, config: "ModelConfig") -> str:
 
 
 def _language_for_ocr_with_source(seed_text: str, config: "ModelConfig") -> tuple:
-    language, source = _language_for_text_with_source(seed_text, config)
-    if language != DEFAULT_LANGUAGE:
-        return language, source
-    fallback = _normalize_language(config.ocr_fallback_language)
-    if fallback != DEFAULT_LANGUAGE:
-        return fallback, "ocr-fallback"
-    return DEFAULT_OCR_FALLBACK_LANGUAGE, "ocr-default"
+    chain, source = _ocr_language_chain_with_source(seed_text, config)
+    return chain[0], source
 
 
 def _language_for_ocr(seed_text: str, config: "ModelConfig") -> str:
@@ -186,6 +271,17 @@ def _log_language_preanalysis(file_path: Path, stage: str, language: str, source
         return
     logger.info("Language pre-analysis for %s [%s]: %s (%s) via %s",
                 file_path.name, stage, _language_name(language), language, source)
+
+
+def _log_ocr_language_chain(
+    file_path: Path,
+    stage: str,
+    languages: Tuple[str, ...],
+    threshold: float,
+) -> None:
+    names = ", ".join(f"{_language_name(language)} ({language})" for language in languages)
+    logger.info("OCR language chain for %s [%s]: %s; first-pass threshold %.2f",
+                file_path.name, stage, names, threshold)
 
 
 def _language_instruction(language: str) -> str:
@@ -237,6 +333,8 @@ class ModelConfig:
     max_content_chars: Optional[int] = None
     language: str = DEFAULT_LANGUAGE
     ocr_fallback_language: str = DEFAULT_OCR_FALLBACK_LANGUAGE
+    ocr_languages: Tuple[str, ...] = DEFAULT_OCR_LANGUAGES
+    ocr_language_score: float = DEFAULT_OCR_LANGUAGE_SCORE
     ocr_timeout_seconds: int = OCR_TIMEOUT_SECONDS
     tesseract_psm: str = DEFAULT_TESSERACT_PSM
     pdf_vision_max_pages: int = PDF_VISION_MAX_PAGES
@@ -269,6 +367,9 @@ class ModelConfig:
                                if args.max_content_chars is not None else None),
             language=_normalize_language(args.language),
             ocr_fallback_language=_normalize_language(args.ocr_fallback_language),
+            ocr_languages=(args.ocr_languages if isinstance(args.ocr_languages, tuple)
+                           else _parse_ocr_languages(args.ocr_languages)),
+            ocr_language_score=min(1.0, max(0.0, args.ocr_language_score)),
             ocr_timeout_seconds=max(1, args.ocr_timeout),
             tesseract_psm=str(args.tesseract_psm),
             pdf_vision_max_pages=max(1, args.pdf_vision_pages),
@@ -903,7 +1004,7 @@ def _ocr_with_tesseract(
     return result.stdout
 
 
-def _ocr_image_path(
+def _ocr_image_path_once(
     image_path: Path,
     config: Optional[ModelConfig] = None,
     language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
@@ -915,16 +1016,57 @@ def _ocr_image_path(
     ], runtime_config.text_budget_chars())
 
 
+def _ocr_chain_text(
+    read_language: Callable[[str], str],
+    languages: Tuple[str, ...],
+    config: ModelConfig,
+    subject: str,
+    stage: str,
+) -> str:
+    blocks: List[str] = []
+    for index, language in enumerate(languages):
+        text = read_language(language)
+        blocks.append(text)
+        score = _language_match_score(text, language)
+        logger.info("OCR language result for %s [%s]: %s (%s), score %.2f, chars %d",
+                    subject, stage, _language_name(language), language, score, len(text.strip()))
+        if index == 0 and score >= config.ocr_language_score:
+            break
+    return _merge_text_blocks(blocks, config.text_budget_chars())
+
+
+def _ocr_image_path(
+    image_path: Path,
+    config: Optional[ModelConfig] = None,
+    language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
+    language_chain: Optional[Tuple[str, ...]] = None,
+    stage: str = "OCR",
+) -> str:
+    runtime_config = config or ModelConfig()
+    languages = language_chain or (language,)
+    return _ocr_chain_text(
+        lambda selected: _ocr_image_path_once(image_path, runtime_config, selected),
+        tuple(languages),
+        runtime_config,
+        image_path.name,
+        stage,
+    )
+
+
 def _ocr_image_bytes(
     image_data: bytes,
     config: Optional[ModelConfig] = None,
     language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
+    language_chain: Optional[Tuple[str, ...]] = None,
+    stage: str = "OCR",
 ) -> str:
     fd, tmp_name = tempfile.mkstemp(suffix=".png")
     try:
         with os.fdopen(fd, "wb") as tmp:
             tmp.write(image_data)
-        return _ocr_image_path(Path(tmp_name), config, language)
+        if language_chain is None and stage == "OCR":
+            return _ocr_image_path(Path(tmp_name), config, language)
+        return _ocr_image_path(Path(tmp_name), config, language, language_chain, stage)
     finally:
         try:
             os.unlink(tmp_name)
@@ -980,9 +1122,11 @@ def extract_from_image(
     model_config: Optional[ModelConfig] = None,
 ) -> List[Dict[str, Any]]:
     runtime_config = model_config or ModelConfig()
-    ocr_language, ocr_source = _language_for_ocr_with_source("", runtime_config)
+    ocr_chain, ocr_source = _ocr_language_chain_with_source("", runtime_config)
+    ocr_language = ocr_chain[0]
     _log_language_preanalysis(file_path, "image OCR", ocr_language, ocr_source)
-    text = _ocr_image_path(file_path, runtime_config, ocr_language)
+    _log_ocr_language_chain(file_path, "image OCR", ocr_chain, runtime_config.ocr_language_score)
+    text = _ocr_image_path(file_path, runtime_config, ocr_language, ocr_chain, "image OCR")
     if text.strip():
         language, source = _language_for_text_with_source(text, runtime_config)
         _log_language_preanalysis(file_path, "image OCR text", language, source)
@@ -1034,11 +1178,22 @@ def _pdf_ocr_text(
     images: List[bytes],
     config: Optional[ModelConfig] = None,
     language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
+    language_chain: Optional[Tuple[str, ...]] = None,
+    subject: str = "PDF",
 ) -> str:
     runtime_config = config or ModelConfig()
-    return _merge_text_blocks(
-        [_ocr_image_bytes(data, runtime_config, language) for data in images],
-        runtime_config.text_budget_chars(),
+    if not images:
+        return ""
+    languages = language_chain or (language,)
+    return _ocr_chain_text(
+        lambda selected: _merge_text_blocks(
+            [_ocr_image_bytes(data, runtime_config, selected) for data in images],
+            runtime_config.text_budget_chars(),
+        ),
+        tuple(languages),
+        runtime_config,
+        subject,
+        "PDF OCR",
     )
 
 
@@ -1053,10 +1208,12 @@ def extract_from_pdf(
     pdf_text = _pdf_text(file_path, text_budget)
     language, source = _language_for_text_with_source(pdf_text, runtime_config)
     _log_language_preanalysis(file_path, "PDF text", language, source)
-    ocr_language, ocr_source = _language_for_ocr_with_source(pdf_text, runtime_config)
+    ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, runtime_config)
+    ocr_language = ocr_chain[0]
     _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
+    _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, runtime_config.ocr_language_score)
     images = _pdf_to_images(file_path, runtime_config)
-    ocr_text = _pdf_ocr_text(images, runtime_config, ocr_language)
+    ocr_text = _pdf_ocr_text(images, runtime_config, ocr_language, ocr_chain, file_path.name)
     text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
     if text.strip():
         language, source = _language_for_text_with_source(text, runtime_config)
@@ -1280,6 +1437,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         default=defaults.ocr_fallback_language,
                         help=("OCR language used when --language=auto and no text can "
                               "be detected before OCR (default: en)."))
+    parser.add_argument("--ocr-languages", type=_parse_ocr_languages,
+                        default=defaults.ocr_languages,
+                        help=("Comma-separated OCR language chain used when no text can "
+                              "be detected before OCR (default: Brazilian Portuguese, "
+                              "English, Spanish, Italian, French, German)."))
+    parser.add_argument("--ocr-language-score", type=float,
+                        default=defaults.ocr_language_score,
+                        help=("First OCR language confidence threshold from 0.0 to 1.0; "
+                              "when met, remaining OCR languages are skipped "
+                              f"(default: {DEFAULT_OCR_LANGUAGE_SCORE:.2f})."))
     parser.add_argument("--ocr-timeout", type=int, default=defaults.ocr_timeout_seconds,
                         help=f"Seconds before one OCR engine call times out (default: {OCR_TIMEOUT_SECONDS}).")
     parser.add_argument("--tesseract-psm", default=defaults.tesseract_psm,
