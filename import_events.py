@@ -799,6 +799,15 @@ _DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}$")
 _TIME_SHAPE = re.compile(r"\d{2}:\d{2}(:\d{2})?$")
 _LOOSE_TIME = re.compile(r"^\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\.?\s*$", re.IGNORECASE)
 _CALENDAR_DAY_RE = re.compile(r"^(\d{1,2})(?:[.)])?\s*(.*)$")
+_CALENDAR_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
+_TABLE_DATE_FIND_RE = re.compile(
+    r"\b\d{1,4}\s*[/.-]\s*[0-9A-Za-zÀ-ÿ]{1,12}"
+    r"(?:\s*[/.-]\s*\d{2,4})?\b"
+)
+_TABLE_DATE_RE = re.compile(
+    r"^(\d{1,4}\s*[/.-]\s*[0-9A-Za-zÀ-ÿ]{1,12}"
+    r"(?:\s*[/.-]\s*\d{2,4})?)\s*(.*)$"
+)
 _CALENDAR_MONTHS = {
     "january": 1, "jan": 1, "janeiro": 1, "janvier": 1, "gennaio": 1, "enero": 1, "januar": 1,
     "february": 2, "feb": 2, "fevereiro": 2, "fevrier": 2, "febbraio": 2, "febrero": 2, "februar": 2,
@@ -822,6 +831,20 @@ _CALENDAR_WEEKDAYS = {
     "saturday", "sat", "sabado", "samedi", "sabato", "samstag",
     "sunday", "sun", "domingo", "dimanche", "domenica", "sonntag",
 }
+_TABLE_DAY_LABELS = {"day", "d", "dd", "dia", "jour", "giorno", "tag"}
+_TABLE_MONTH_LABELS = {"month", "m", "mm", "mes", "mois", "mese", "monat"}
+_TABLE_YEAR_LABELS = {"year", "y", "yy", "yyyy", "ano", "annee", "anno", "jahr"}
+_TABLE_HOUR_LABELS = {
+    "hour", "hours", "h", "hh", "hora", "horas", "horario", "heure", "ora", "uhr",
+}
+_TABLE_MINUTE_LABELS = {"minute", "minutes", "min", "mins", "minuto", "minutos", "minuti", "minuten"}
+_TABLE_SECOND_LABELS = {"second", "seconds", "sec", "secs", "segundo", "segundos", "secondes", "secondi", "sekunden"}
+_TABLE_ACTIVITY_LABELS = {
+    "activity", "activities", "atividade", "atividades", "actividad", "actividades",
+    "activite", "activites", "attivita", "aktivitat", "aktivitaten", "event",
+    "events", "evento", "eventos", "agenda", "programa", "description",
+}
+_TABLE_DATE_WORDS = {"date", "data", "fecha", "datum"}
 
 
 def _normalize_loose_time(clock: str) -> Optional[str]:
@@ -879,8 +902,58 @@ def _calendar_month_year(line: str) -> Optional[Tuple[int, int]]:
     return year, month
 
 
+def _calendar_document_year(text: str) -> Optional[int]:
+    match = _CALENDAR_YEAR_RE.search(text)
+    return int(match.group(1)) if match else None
+
+
+def _month_value(value: str) -> Optional[int]:
+    token = _calendar_token(value)
+    if token.isdigit():
+        month = int(token)
+        return month if 1 <= month <= 12 else None
+    return _CALENDAR_MONTHS.get(token)
+
+
 def _is_calendar_weekday(line: str) -> bool:
     return _calendar_token(line) in _CALENDAR_WEEKDAYS
+
+
+def _table_unit(token: str) -> Optional[str]:
+    if token in _TABLE_DAY_LABELS:
+        return "day"
+    if token in _TABLE_MONTH_LABELS:
+        return "month"
+    if token in _TABLE_YEAR_LABELS:
+        return "year"
+    if token in _TABLE_HOUR_LABELS:
+        return "hour"
+    if token in _TABLE_MINUTE_LABELS:
+        return "minute"
+    if token in _TABLE_SECOND_LABELS:
+        return "second"
+    return None
+
+
+def _table_date_order(line: str) -> Tuple[str, ...]:
+    order: List[str] = []
+    for token in _calendar_token(line).split():
+        unit = _table_unit(token)
+        if unit and unit not in order:
+            order.append(unit)
+    return tuple(order)
+
+
+def _is_table_activity_header(line: str) -> bool:
+    tokens = set(_calendar_token(line).split())
+    return bool(tokens & _TABLE_ACTIVITY_LABELS)
+
+
+def _table_header_order(line: str) -> Tuple[str, ...]:
+    order = _table_date_order(line)
+    tokens = set(_calendar_token(line).split())
+    has_date = bool(order) or bool(tokens & _TABLE_DATE_WORDS)
+    return (order or ("day", "month")) if has_date and _is_table_activity_header(line) else ()
 
 
 def _calendar_day_title(line: str) -> Optional[Tuple[int, str]]:
@@ -899,6 +972,99 @@ def _calendar_event_line(year: int, month: int, day: int, title: str) -> str:
     except ValueError:
         return ""
     return f"{start} - {title}"
+
+
+def _date_parts_from_values(values: List[str], order: Tuple[str, ...],
+                            default_year: Optional[int]) -> Optional[Tuple[int, int, int]]:
+    mapped: Dict[str, str] = {}
+    for unit, value in zip((unit for unit in order if unit in {"day", "month", "year"}), values):
+        mapped[unit] = value
+    if "year" not in mapped and default_year is not None:
+        mapped["year"] = str(default_year)
+    if not {"day", "month", "year"} <= set(mapped):
+        return None
+    month = _month_value(mapped["month"])
+    if month is None:
+        return None
+    year = int(mapped["year"])
+    year = 2000 + year if year < 100 else year
+    return year, month, int(mapped["day"])
+
+
+def _split_table_date(line: str, order: Tuple[str, ...],
+                      default_year: Optional[int]) -> Optional[Tuple[Tuple[int, int, int], str]]:
+    match = _TABLE_DATE_RE.match(line)
+    date_units = tuple(unit for unit in order if unit in {"day", "month", "year"}) or ("day", "month")
+    if match:
+        values = [part.strip() for part in re.split(r"[/.-]", match.group(1))]
+        parts = _date_parts_from_values(values, date_units, default_year)
+        return (parts, match.group(2).strip()) if parts else None
+    tokens = line.split()
+    needed = len(date_units) if "year" in date_units else min(2, len(date_units))
+    if len(tokens) < needed:
+        return None
+    parts = _date_parts_from_values(tokens[:needed], date_units, default_year)
+    return (parts, " ".join(tokens[needed:])) if parts else None
+
+
+def _split_table_time(text: str, has_time_columns: bool) -> Tuple[str, str]:
+    if not text:
+        return "", ""
+    if has_time_columns:
+        parts = text.split(maxsplit=3)
+        if parts and parts[0].isdigit() and 0 <= int(parts[0]) <= 23:
+            minute = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            consumed = 2 if len(parts) > 1 and parts[1].isdigit() else 1
+            second = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            consumed = 3 if len(parts) > 2 and parts[2].isdigit() else consumed
+            if minute <= 59 and second <= 59 and len(parts) > consumed:
+                suffix = f"T{int(parts[0]):02d}:{minute:02d}" + (f":{second:02d}" if second else "")
+                return suffix, " ".join(parts[consumed:])
+    explicit = re.match(r"^(\d{1,2})(?:(?:[:hH])(\d{2}))?(?:[:mM](\d{2}))?\s+(.+)$", text)
+    if explicit and (has_time_columns or ":" in explicit.group(0) or "h" in explicit.group(0).lower()):
+        hour = int(explicit.group(1))
+        minute = int(explicit.group(2) or 0)
+        second = int(explicit.group(3) or 0)
+        suffix = f"T{hour:02d}:{minute:02d}" + (f":{second:02d}" if second else "")
+        return suffix, explicit.group(4).strip()
+    return "", text
+
+
+def _table_row_event(line: str, order: Tuple[str, ...],
+                     default_year: Optional[int]) -> Optional[Tuple[str, str]]:
+    parsed = _split_table_date(line, order, default_year)
+    if parsed is None:
+        return None
+    date_parts, title = parsed
+    has_time = bool({unit for unit in order if unit in {"hour", "minute", "second"}})
+    time_suffix, title = _split_table_time(title, has_time)
+    dated = _calendar_event_line(*date_parts, title)
+    if not dated:
+        return None
+    if time_suffix:
+        start, sep, rest = dated.partition(" - ")
+        dated = f"{start}{time_suffix}{sep}{rest}"
+    return dated, title
+
+
+def _table_data_after_header(line: str) -> str:
+    match = _TABLE_DATE_FIND_RE.search(line)
+    return line[match.start():] if match else ""
+
+
+def _table_rows_from_line(line: str, order: Tuple[str, ...],
+                          default_year: Optional[int]) -> List[Tuple[str, str]]:
+    matches = list(_TABLE_DATE_FIND_RE.finditer(line))
+    if len(matches) <= 1:
+        row = _table_row_event(line, order, default_year)
+        return [row] if row is not None else []
+    rows: List[Tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+        row = _table_row_event(line[match.start():end].strip(), order, default_year)
+        if row is not None:
+            rows.append(row)
+    return rows
 
 
 def _calendar_hierarchy_lines(text: str) -> List[str]:
@@ -928,8 +1094,61 @@ def _calendar_hierarchy_lines(text: str) -> List[str]:
     return [line for line in out if line]
 
 
+def _calendar_table_lines(text: str) -> List[str]:
+    year = _calendar_document_year(text)
+    active_order: Tuple[str, ...] = ()
+    pending_order: Tuple[str, ...] = ()
+    pending_start = ""
+    out: List[str] = []
+    for raw in text.splitlines():
+        line = " ".join(raw.split())
+        if not line:
+            continue
+        header_order = _table_header_order(line)
+        if header_order:
+            active_order, pending_order, pending_start = header_order, (), ""
+            for dated, title in _table_rows_from_line(
+                    _table_data_after_header(line), active_order, year):
+                if title:
+                    out.append(dated)
+            continue
+        date_order = _table_date_order(line)
+        parses_as_row = _split_table_date(line, active_order or ("day", "month"), year)
+        if date_order and not _is_table_activity_header(line) and parses_as_row is None:
+            pending_order = date_order
+            continue
+        if pending_order and _is_table_activity_header(line):
+            active_order, pending_order, pending_start = pending_order, (), ""
+            continue
+        if pending_start:
+            out.append(f"{pending_start} - {line}")
+            pending_start = ""
+            continue
+        rows = _table_rows_from_line(line, active_order or ("day", "month"), year)
+        if not rows:
+            continue
+        if len(rows) == 1 and not rows[0][1]:
+            dated, _title = rows[0]
+            pending_start = dated.split(" - ", 1)[0]
+            continue
+        out.extend(dated for dated, title in rows if title)
+    return out
+
+
+def _dedupe_lines(lines: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for line in lines:
+        if line in seen:
+            continue
+        seen.add(line)
+        out.append(line)
+    return out
+
+
 def _prepare_text_for_llm(content: str, max_chars: int) -> str:
-    expanded = _calendar_hierarchy_lines(content)
+    expanded = _dedupe_lines(
+        _calendar_hierarchy_lines(content) + _calendar_table_lines(content))
     if not expanded:
         return content[:max_chars]
     prefix = "Expanded calendar hierarchy inferred from the source layout:\n"

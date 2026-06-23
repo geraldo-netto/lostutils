@@ -12,6 +12,11 @@ from hypothesis import given, strategies as st
 import import_events
 
 
+SAMPLE_TABLE_CALENDAR_PDF = (
+    Path(__file__).parent / "fixtures" / "import_events_table_calendar_2026.pdf"
+)
+
+
 class FakeLlm:
     def __init__(self, content='[{"title": "Launch", "start": "2026-06-06"}]'):
         self.messages = []
@@ -548,6 +553,65 @@ def test_calendar_hierarchy_lines_expands_portuguese_month_day_pairs():
     ]
 
 
+def test_calendar_table_lines_expands_day_month_activity_rows():
+    text = """
+    CALENDARIO DE ATIVIDADES BOTECUM 2026
+    DIA/MES ATIVIDADES BOTECUM
+    19/06 astrologia - cap 4
+    20/07
+    oficina de leitura
+    """
+
+    lines = import_events._calendar_table_lines(text)
+
+    assert lines == [
+        "2026-06-19 - astrologia - cap 4",
+        "2026-07-20 - oficina de leitura",
+    ]
+
+
+def test_calendar_table_lines_expands_compact_extracted_table_line():
+    text = (
+        "CALENDARIO DE ATIVIDADES BOTECUM 2026\n"
+        "DIA/MES ATIVIDADES BOTECUM 19/06 Topic Alpha 26/06 Topic Beta "
+        "03/07 Topic Gamma"
+    )
+
+    lines = import_events._calendar_table_lines(text)
+
+    assert lines == [
+        "2026-06-19 - Topic Alpha",
+        "2026-06-26 - Topic Beta",
+        "2026-07-03 - Topic Gamma",
+    ]
+
+
+def test_calendar_table_lines_handles_multilingual_headers_and_time_units():
+    text = """
+    Activities Calendar 2026
+    day/month hour minute activities
+    5/04 10 30 Garden Day
+    Día/Mes Actividades
+    11/05 Feria Local
+    Giorno/Mese Attività
+    7/06 Laboratorio
+    Jour/Mois Activités
+    12/07 Atelier
+    Tag/Monat Aktivitäten
+    18/10 Sommer Treffen
+    """
+
+    lines = import_events._calendar_table_lines(text)
+
+    assert lines == [
+        "2026-04-05T10:30 - Garden Day",
+        "2026-05-11 - Feria Local",
+        "2026-06-07 - Laboratorio",
+        "2026-07-12 - Atelier",
+        "2026-10-18 - Sommer Treffen",
+    ]
+
+
 def test_prepare_text_for_llm_prepends_inferred_calendar_hierarchy():
     text = "Março 2026\nDomingo\n8\nCommunity Fair"
 
@@ -556,6 +620,14 @@ def test_prepare_text_for_llm_prepends_inferred_calendar_hierarchy():
     assert prepared.startswith("Expanded calendar hierarchy inferred")
     assert "2026-03-08 - Community Fair" in prepared
     assert "Original content:\nMarço 2026" in prepared
+
+
+def test_prepare_text_for_llm_prepends_inferred_table_rows():
+    text = "CALENDARIO 2026\nDIA/MES ATIVIDADES\n19/06 astrologia - cap 4"
+
+    prepared = import_events._prepare_text_for_llm(text, 1000)
+
+    assert "2026-06-19 - astrologia - cap 4" in prepared
 
 
 def test_prepare_text_for_llm_leaves_non_hierarchical_text_unchanged():
@@ -2269,6 +2341,69 @@ def test_extract_from_synthetic_calendar_pdf_expands_hierarchy(tmp_path, monkeyp
     assert "2026-06-07 - Laboratorio" in prompt
     assert "2026-07-12 - Atelier" in prompt
     assert "2026-10-18 - Sommer Treffen" in prompt
+    assert events[0]["type"] == "PDF"
+
+
+def test_extract_from_synthetic_table_pdf_expands_day_month_rows(tmp_path, monkeypatch):
+    pdf = tmp_path / "table-calendar-2026-like.pdf"
+    _write_calendar_like_pdf(
+        pdf,
+        [
+            "CALENDARIO DE ATIVIDADES BOTECUM 2026",
+            "DIA/MES ATIVIDADES BOTECUM",
+            "19/06 astrologia - cap 4",
+            "20/07",
+            "oficina de leitura",
+        ],
+    )
+    fake = FakeLlm('[{"title": "astrologia - cap 4", "start": "2026-06-19"}]')
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+
+    events = import_events.extract_from_pdf(pdf, llm_client=fake)
+
+    prompt = fake.messages[0][1]["content"]
+    assert "2026-06-19 - astrologia - cap 4" in prompt
+    assert "2026-07-20 - oficina de leitura" in prompt
+    assert events[0]["type"] == "PDF"
+
+
+def test_extract_from_synthetic_compact_table_pdf_expands_rows(tmp_path, monkeypatch):
+    pdf = tmp_path / "compact-table-calendar-2026-like.pdf"
+    _write_calendar_like_pdf(
+        pdf,
+        [
+            "CALENDARIO DE ATIVIDADES BOTECUM 2026",
+            ("DIA/MES ATIVIDADES BOTECUM 19/06 Topic Alpha "
+             "26/06 Topic Beta 03/07 Topic Gamma"),
+        ],
+    )
+    fake = FakeLlm('[{"title": "Topic Alpha", "start": "2026-06-19"}]')
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+
+    import_events.extract_from_pdf(pdf, llm_client=fake)
+
+    prompt = fake.messages[0][1]["content"]
+    assert "2026-06-19 - Topic Alpha" in prompt
+    assert "2026-06-26 - Topic Beta" in prompt
+    assert "2026-07-03 - Topic Gamma" in prompt
+
+
+def test_sample_table_calendar_pdf_expands_multilingual_rows(monkeypatch):
+    fake = FakeLlm('[{"title": "Topic Alpha", "start": "2026-06-19"}]')
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+
+    events = import_events.extract_from_pdf(SAMPLE_TABLE_CALENDAR_PDF, llm_client=fake)
+
+    prompt = fake.messages[0][1]["content"]
+    assert "2026-06-19 - Topic Alpha" in prompt
+    assert "2026-06-26 - Topic Beta" in prompt
+    assert "2026-07-03 - Topic Gamma" in prompt
+    assert "2026-04-05T10:30 - Garden Day" in prompt
+    assert "2026-05-11 - Feria Local" in prompt
+    assert "2026-06-07 - Laboratorio" in prompt
+    assert "2026-07-12 - Atelier" in prompt
+    assert "2026-10-18 - Sommer Treffen" in prompt
+    assert "2026-03-08 - Mystic Fair BH" in prompt
     assert events[0]["type"] == "PDF"
 
 
