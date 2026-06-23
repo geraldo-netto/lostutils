@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 from collections import OrderedDict
 from pathlib import Path
 from datetime import date, datetime, timezone
@@ -1632,6 +1633,49 @@ def test_process_folder_recursive(tmp_path):
     assert [e["title"] for e in deep] == ["Launch"]
 
 
+def test_process_folder_uses_configured_worker_threads(tmp_path, monkeypatch):
+    for index in range(8):
+        (tmp_path / f"event-{index}.txt").write_text("Launch", encoding="utf-8")
+    seen_threads = set()
+    lock = threading.Lock()
+    barrier = threading.Barrier(4)
+
+    def fake_extract(file, llm_client=None, default_tz=None, model_config=None):
+        with lock:
+            seen_threads.add(threading.current_thread().name)
+        barrier.wait(timeout=2)
+        return [{
+            "title": file.name,
+            "start": "2026-06-06",
+            "end": "",
+            "location": "",
+            "source": file.name,
+            "type": "Text/LLM",
+        }]
+
+    monkeypatch.setattr(import_events, "extract_from_file", fake_extract)
+
+    events = import_events.process_folder(
+        str(tmp_path),
+        model_config=import_events.ModelConfig(workers=4),
+    )
+
+    assert len(seen_threads) == 4
+    assert [event["source"] for event in events] == [f"event-{index}.txt" for index in range(8)]
+
+
+def test_process_folder_propagates_keyboard_interrupt_from_worker(tmp_path, monkeypatch):
+    (tmp_path / "event.txt").write_text("Launch", encoding="utf-8")
+
+    def interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(import_events, "extract_from_file", interrupt)
+
+    with pytest.raises(KeyboardInterrupt):
+        import_events.process_folder(str(tmp_path))
+
+
 def test_dedupe_events_drops_same_title_and_start():
     events = [
         {"title": "A", "start": "2026-06-22"},
@@ -1933,7 +1977,7 @@ def test_model_config_from_args_threads_values():
          "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
          "--tentative-events", "skip", "--no-activity-events", "keep",
          "--pdf-vision-dpi", "200", "--stage-cache", "refresh",
-         "--stage-cache-dir", "cache", "--benchmark"]
+         "--stage-cache-dir", "cache", "--benchmark", "--workers", "2"]
     )
 
     cfg = import_events.ModelConfig.from_args(args)
@@ -1962,6 +2006,7 @@ def test_model_config_from_args_threads_values():
     assert cfg.stage_cache == "refresh"
     assert cfg.stage_cache_dir == "cache"
     assert cfg.benchmark is True
+    assert cfg.workers == 2
 
 
 def test_model_config_text_budget_uses_context_when_not_overridden():
@@ -2035,6 +2080,7 @@ def test_model_config_defaults_match_module_constants():
     assert cfg.no_activity_events == import_events.DEFAULT_NO_ACTIVITY_EVENTS
     assert cfg.pdf_vision_max_pages == import_events.PDF_VISION_MAX_PAGES
     assert cfg.pdf_vision_dpi == import_events.PDF_VISION_DPI
+    assert cfg.workers == import_events.DEFAULT_WORKERS
 
 
 def test_ensure_models_exist_uses_config_paths(tmp_path, monkeypatch):
@@ -2534,12 +2580,13 @@ def _install_fake_fitz(monkeypatch, pages):
     monkeypatch.setitem(__import__("sys").modules, "fitz", fake)
 
 
-def test_pdf_to_images_caps_page_count(monkeypatch):
+def test_pdf_to_images_scans_all_pages_by_default(monkeypatch):
     _install_fake_fitz(monkeypatch, pages=50)
 
     images = import_events._pdf_to_images(Path("big.pdf"))
 
-    assert len(images) == import_events.PDF_VISION_MAX_PAGES
+    assert import_events.PDF_VISION_MAX_PAGES == 0
+    assert len(images) == 50
 
 
 def test_pdf_to_images_uses_configured_dpi(monkeypatch):

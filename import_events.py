@@ -18,6 +18,8 @@ import unicodedata
 import contextlib
 import subprocess
 import time
+import queue
+import threading
 from collections import OrderedDict
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -48,8 +50,9 @@ DEFAULT_PDF_OCR_MODE = "auto"
 DEFAULT_TENTATIVE_EVENTS = "keep"
 DEFAULT_NO_ACTIVITY_EVENTS = "skip"
 DEFAULT_STAGE_CACHE = "off"
+DEFAULT_WORKERS = 4
 STAGE_CACHE_VERSION = 1
-PDF_VISION_MAX_PAGES = 5
+PDF_VISION_MAX_PAGES = 0
 PDF_VISION_DPI = 150
 TEXT_CHARS_PER_TOKEN = 4
 TEXT_PROMPT_RESERVED_TOKENS = 768
@@ -399,6 +402,7 @@ class ModelConfig:
     stage_cache: str = DEFAULT_STAGE_CACHE
     stage_cache_dir: Optional[str] = None
     benchmark: bool = False
+    workers: int = DEFAULT_WORKERS
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ModelConfig":
@@ -436,11 +440,12 @@ class ModelConfig:
             pdf_ocr_mode=args.pdf_ocr_mode,
             tentative_events=args.tentative_events,
             no_activity_events=args.no_activity_events,
-            pdf_vision_max_pages=max(1, args.pdf_vision_pages),
+            pdf_vision_max_pages=max(0, args.pdf_vision_pages),
             pdf_vision_dpi=max(36, args.pdf_vision_dpi),
             stage_cache=args.stage_cache,
             stage_cache_dir=(args.stage_cache_dir or str(cache_dir / "stage-cache")),
             benchmark=args.benchmark,
+            workers=max(1, args.workers),
         )
 
     def text_budget_chars(self) -> int:
@@ -469,11 +474,15 @@ PDF_EXTENSIONS = {".pdf"}
 MAX_CONTENT_CHARS = _text_budget_from_context(DEFAULT_LLM_CONTEXT_SIZE,
                                               DEFAULT_LLM_MAX_TOKENS)
 
-# Scanned-PDF vision fallback: render at most this many pages, at this DPI.
-# The page cap bounds time/memory on large scans; 150 DPI is legible enough for
-# vision OCR without the memory blow-up of full-resolution pixmaps.
+# Scanned-PDF vision fallback: 0 pages means no page cap. 150 DPI is legible
+# enough for vision OCR without the memory blow-up of full-resolution pixmaps.
 
 _LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
+_LLM_CACHE_LOCK = threading.RLock()
+_LLM_REQUEST_LOCK = threading.Lock()
+_OCR_WARNING_LOCK = threading.Lock()
+_PADDLE_OCR_LOCK = threading.Lock()
+_EXTRACTION_FAILURE_LOCK = threading.Lock()
 _PADDLE_OCR: Optional[Any] = None
 _OCR_WARNED = set()
 _OCR_WARNING_COUNTS: Dict[str, int] = {}
@@ -495,28 +504,34 @@ _extraction_failures = 0
 
 def reset_extraction_failures() -> None:
     global _extraction_failures
-    _extraction_failures = 0
+    with _EXTRACTION_FAILURE_LOCK:
+        _extraction_failures = 0
 
 
 def extraction_failure_count() -> int:
-    return _extraction_failures
+    with _EXTRACTION_FAILURE_LOCK:
+        return _extraction_failures
 
 
 def _record_extraction_failure(file_path: Path, exc: Exception, action: str) -> None:
     global _extraction_failures
-    _extraction_failures += 1
+    with _EXTRACTION_FAILURE_LOCK:
+        _extraction_failures += 1
     logger.exception("%s %s: %s", action, file_path.name, exc)
 
 
 def reset_ocr_warnings() -> None:
-    _OCR_WARNED.clear()
-    _OCR_WARNING_COUNTS.clear()
+    with _OCR_WARNING_LOCK:
+        _OCR_WARNED.clear()
+        _OCR_WARNING_COUNTS.clear()
 
 
 def _ocr_warning_summary_items() -> List[str]:
+    with _OCR_WARNING_LOCK:
+        counts = dict(_OCR_WARNING_COUNTS)
     items = []
-    for key in sorted(_OCR_WARNING_COUNTS):
-        count = _OCR_WARNING_COUNTS[key]
+    for key in sorted(counts):
+        count = counts[key]
         if count > 1:
             label = _OCR_WARNING_LABELS.get(key, key)
             items.append(f"{label}={count}")
@@ -753,15 +768,17 @@ def _close_cached_llm(client: Any) -> None:
 
 
 def _trim_llm_cache(max_entries: int) -> None:
-    while len(_LLM_CACHE) > max_entries:
-        _key, client = _LLM_CACHE.popitem(last=False)
-        _close_cached_llm(client)
+    with _LLM_CACHE_LOCK:
+        while len(_LLM_CACHE) > max_entries:
+            _key, client = _LLM_CACHE.popitem(last=False)
+            _close_cached_llm(client)
 
 
 def reset_llm_cache() -> None:
-    while _LLM_CACHE:
-        _key, client = _LLM_CACHE.popitem(last=False)
-        _close_cached_llm(client)
+    with _LLM_CACHE_LOCK:
+        while _LLM_CACHE:
+            _key, client = _LLM_CACHE.popitem(last=False)
+            _close_cached_llm(client)
 
 
 atexit.register(reset_llm_cache)
@@ -772,36 +789,37 @@ def get_llm(config: Optional[ModelConfig] = None):
     config = config or ModelConfig()
     key = (config.model_path, config.clip_path, config.llm_context_size, config.llm_verbose)
     cache_limit = max(0, config.llm_cache_size)
-    if cache_limit == 0:
-        cached = _LLM_CACHE.pop(key, None)
-        if cached is not None:
-            _close_cached_llm(cached)
-    else:
-        cached = _LLM_CACHE.get(key)
-        if cached is not None:
-            _LLM_CACHE.move_to_end(key)
+    with _LLM_CACHE_LOCK:
+        if cache_limit == 0:
+            cached = _LLM_CACHE.pop(key, None)
+            if cached is not None:
+                _close_cached_llm(cached)
+        else:
+            cached = _LLM_CACHE.get(key)
+            if cached is not None:
+                _LLM_CACHE.move_to_end(key)
+                _trim_llm_cache(cache_limit)
+                return cached
+
+        from llama_cpp import Llama
+        from llama_cpp.llama_chat_format import Qwen25VLChatHandler
+
+        ensure_models_exist(config)
+        with _quiet_output_context(config.llm_verbose):
+            chat_handler = Qwen25VLChatHandler(
+                clip_model_path=config.clip_path,
+                verbose=config.llm_verbose,
+            )
+            cached = Llama(
+                model_path=config.model_path,
+                chat_handler=chat_handler,
+                n_ctx=config.llm_context_size,
+                verbose=config.llm_verbose,
+            )
+        if cache_limit > 0:
+            _LLM_CACHE[key] = cached
             _trim_llm_cache(cache_limit)
-            return cached
-
-    from llama_cpp import Llama
-    from llama_cpp.llama_chat_format import Qwen25VLChatHandler
-
-    ensure_models_exist(config)
-    with _quiet_output_context(config.llm_verbose):
-        chat_handler = Qwen25VLChatHandler(
-            clip_model_path=config.clip_path,
-            verbose=config.llm_verbose,
-        )
-        cached = Llama(
-            model_path=config.model_path,
-            chat_handler=chat_handler,
-            n_ctx=config.llm_context_size,
-            verbose=config.llm_verbose,
-        )
-    if cache_limit > 0:
-        _LLM_CACHE[key] = cached
-        _trim_llm_cache(cache_limit)
-    return cached
+        return cached
 
 
 # --------------------------------------------------------------------------- #
@@ -1534,10 +1552,11 @@ def _read_text(file_path: Path, max_chars: int = MAX_CONTENT_CHARS) -> str:
 
 
 def _warn_once(key: str, message: str, *args: Any) -> None:
-    _OCR_WARNING_COUNTS[key] = _OCR_WARNING_COUNTS.get(key, 0) + 1
-    if key in _OCR_WARNED:
-        return
-    _OCR_WARNED.add(key)
+    with _OCR_WARNING_LOCK:
+        _OCR_WARNING_COUNTS[key] = _OCR_WARNING_COUNTS.get(key, 0) + 1
+        if key in _OCR_WARNED:
+            return
+        _OCR_WARNED.add(key)
     logger.warning(message, *args)
 
 
@@ -1698,27 +1717,28 @@ def _build_paddle_ocr(PaddleOCR: Any, paddle_lang: str) -> Any:
 
 def _get_paddle_ocr(language: str = DEFAULT_OCR_FALLBACK_LANGUAGE) -> Optional[Any]:
     global _PADDLE_OCR
-    if _PADDLE_OCR is None:
-        _PADDLE_OCR = {}
     paddle_lang = _paddle_language(_normalize_language(language))
-    if paddle_lang in _PADDLE_OCR:
+    with _PADDLE_OCR_LOCK:
+        if _PADDLE_OCR is None:
+            _PADDLE_OCR = {}
+        if paddle_lang in _PADDLE_OCR:
+            return _PADDLE_OCR[paddle_lang]
+        try:
+            import paddleocr as paddleocr_module
+            PaddleOCR = paddleocr_module.PaddleOCR
+        except ImportError:
+            _warn_once("paddle-missing", "PaddleOCR not installed; skipping Paddle OCR.")
+            return None
+        try:
+            _PADDLE_OCR[paddle_lang] = _build_paddle_ocr(PaddleOCR, paddle_lang)
+        except Exception as exc:
+            _warn_once(f"paddle-init-{paddle_lang}",
+                       "PaddleOCR failed to initialize for language %s: %s",
+                       paddle_lang, exc)
+            return None
+        version = getattr(paddleocr_module, "__version__", "unknown")
+        logger.info("Using PaddleOCR %s with language %s.", version, paddle_lang)
         return _PADDLE_OCR[paddle_lang]
-    try:
-        import paddleocr as paddleocr_module
-        PaddleOCR = paddleocr_module.PaddleOCR
-    except ImportError:
-        _warn_once("paddle-missing", "PaddleOCR not installed; skipping Paddle OCR.")
-        return None
-    try:
-        _PADDLE_OCR[paddle_lang] = _build_paddle_ocr(PaddleOCR, paddle_lang)
-    except Exception as exc:
-        _warn_once(f"paddle-init-{paddle_lang}",
-                   "PaddleOCR failed to initialize for language %s: %s",
-                   paddle_lang, exc)
-        return None
-    version = getattr(paddleocr_module, "__version__", "unknown")
-    logger.info("Using PaddleOCR %s with language %s.", version, paddle_lang)
-    return _PADDLE_OCR[paddle_lang]
 
 
 def _run_paddle_ocr(engine: Any, image_path: Path) -> Any:
@@ -1850,6 +1870,17 @@ def _ocr_image_bytes(
             pass
 
 
+def _create_chat_completion(client: Any, messages: List[Any], config: ModelConfig) -> Any:
+    with _LLM_REQUEST_LOCK:
+        return client.create_chat_completion(
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=config.llm_max_tokens,
+            temperature=0.0,
+            top_p=1.0,
+        )
+
+
 def _llm_response_text(
     messages: List[Any],
     file_path: Path,
@@ -1864,13 +1895,7 @@ def _llm_response_text(
                 runtime_config,
                 file_path,
                 "llm",
-                lambda: client.create_chat_completion(
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    max_tokens=runtime_config.llm_max_tokens,
-                    temperature=0.0,
-                    top_p=1.0,
-                ),
+                lambda: _create_chat_completion(client, messages, runtime_config),
             )
         return response.get("choices", [{}])[0].get("message", {}).get("content", "")
     except Exception as e:
@@ -2007,7 +2032,8 @@ def _pdf_to_images(file_path: Path, config: Optional[ModelConfig] = None) -> Lis
     images: List[bytes] = []
     with fitz.open(str(file_path)) as doc:
         for page in doc:
-            if len(images) >= runtime_config.pdf_vision_max_pages:
+            if (runtime_config.pdf_vision_max_pages > 0 and
+                    len(images) >= runtime_config.pdf_vision_max_pages):
                 logger.info("Capping vision scan of %s at %d pages",
                             file_path.name, runtime_config.pdf_vision_max_pages)
                 break
@@ -2123,6 +2149,18 @@ def extract_from_pdf(
 # --------------------------------------------------------------------------- #
 # Folder scan
 # --------------------------------------------------------------------------- #
+def _scan_files(path: Path, recursive: bool) -> List[Path]:
+    files = path.rglob("*") if recursive else path.iterdir()
+    selected: List[Path] = []
+    for file in sorted(files):
+        if file.is_symlink():
+            logger.warning("Skipping symlink %s", file)
+            continue
+        if file.is_file():
+            selected.append(file)
+    return selected
+
+
 def extract_from_file(
     file: Path,
     llm_client: Optional[Any] = None,
@@ -2147,6 +2185,89 @@ def extract_from_file(
     return []
 
 
+def _extract_file_events(
+    file: Path,
+    runtime_config: ModelConfig,
+    llm_client: Optional[Any],
+    default_tz: Optional[str],
+) -> List[Dict[str, Any]]:
+    events = _timed_stage(
+        runtime_config,
+        file,
+        "total",
+        lambda: extract_from_file(
+            file, llm_client=llm_client, default_tz=default_tz,
+            model_config=runtime_config,
+        ),
+    )
+    return _filter_events_by_policy(events, runtime_config)
+
+
+def _file_worker(
+    work_queue: queue.Queue,
+    done_queue: queue.Queue,
+    stop_event: threading.Event,
+    runtime_config: ModelConfig,
+    llm_client: Optional[Any],
+    default_tz: Optional[str],
+) -> None:
+    while not stop_event.is_set():
+        try:
+            index, file = work_queue.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            events = _extract_file_events(file, runtime_config, llm_client, default_tz)
+            done_queue.put((index, events, None))
+        except BaseException as exc:
+            stop_event.set()
+            done_queue.put((index, [], exc))
+        finally:
+            work_queue.task_done()
+
+
+def _run_file_workers(
+    files: List[Path],
+    runtime_config: ModelConfig,
+    llm_client: Optional[Any],
+    default_tz: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not files:
+        return []
+    work_queue: queue.Queue = queue.Queue()
+    done_queue: queue.Queue = queue.Queue()
+    stop_event = threading.Event()
+    results: List[List[Dict[str, Any]]] = [[] for _ in files]
+    for index, file in enumerate(files):
+        work_queue.put((index, file))
+    workers = min(runtime_config.workers, len(files))
+    threads = [
+        threading.Thread(
+            target=_file_worker,
+            args=(work_queue, done_queue, stop_event, runtime_config, llm_client, default_tz),
+            name=f"import-events-worker-{index + 1}",
+            daemon=True,
+        )
+        for index in range(workers)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        for _ in files:
+            index, events, exc = done_queue.get()
+            if exc is not None:
+                raise exc
+            results[index] = events
+    except KeyboardInterrupt:
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=0.2)
+        raise
+    for thread in threads:
+        thread.join()
+    return [event for events in results for event in events]
+
+
 def process_folder(
     folder_path: str,
     llm_client: Optional[Any] = None,
@@ -2161,24 +2282,7 @@ def process_folder(
         logger.error("Error: %s is not a valid directory.", folder_path)
         return []
 
-    files = path.rglob("*") if recursive else path.iterdir()
-    all_events: List[Dict[str, Any]] = []
-    for file in sorted(files):
-        if file.is_symlink():
-            logger.warning("Skipping symlink %s", file)
-            continue
-        if file.is_file():
-            events = _timed_stage(
-                runtime_config,
-                file,
-                "total",
-                lambda file=file: extract_from_file(
-                    file, llm_client=llm_client, default_tz=default_tz,
-                    model_config=runtime_config,
-                ),
-            )
-            all_events.extend(_filter_events_by_policy(events, runtime_config))
-    return all_events
+    return _run_file_workers(_scan_files(path, recursive), runtime_config, llm_client, default_tz)
 
 
 def dedupe_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2366,7 +2470,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=("Policy for no-activity rows such as SEM ATIVIDADE "
                               f"(default: {DEFAULT_NO_ACTIVITY_EVENTS})."))
     parser.add_argument("--pdf-vision-pages", type=int, default=defaults.pdf_vision_max_pages,
-                        help=f"Max rendered PDF pages for OCR/vision fallback (default: {PDF_VISION_MAX_PAGES}).")
+                        help=("Max rendered PDF pages for OCR/vision fallback; 0 scans all pages "
+                              f"(default: {PDF_VISION_MAX_PAGES})."))
     parser.add_argument("--pdf-vision-dpi", type=int, default=defaults.pdf_vision_dpi,
                         help=f"PDF render DPI for OCR/vision fallback (default: {PDF_VISION_DPI}).")
     parser.add_argument("--stage-cache", choices=("off", "on", "refresh"),
@@ -2378,6 +2483,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Directory for --stage-cache entries (default: model cache/stage-cache).")
     parser.add_argument("--benchmark", action="store_true",
                         help="Log per-file stage timings for precision/speed tuning.")
+    parser.add_argument("--workers", type=int, default=defaults.workers,
+                        help=f"Parallel file worker threads (default: {DEFAULT_WORKERS}).")
     parser.add_argument("--model-sha256", default=None,
                         help="Expected SHA-256 of the language model (integrity check).")
     parser.add_argument("--clip-sha256", default=None,
