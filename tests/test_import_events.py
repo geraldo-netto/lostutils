@@ -2341,7 +2341,9 @@ def test_download_to_cache_keeps_part_when_416_is_not_complete(tmp_path, monkeyp
     assert part.read_bytes() == b"old"
 
 
-def test_get_llm_threads_config_paths(monkeypatch):
+def test_get_llm_threads_config_paths(monkeypatch, caplog):
+    import logging
+
     captured = {}
 
     class FakeHandler:
@@ -2372,7 +2374,8 @@ def test_get_llm_threads_config_paths(monkeypatch):
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
 
     cfg = import_events.ModelConfig(model_path="MM.gguf", clip_path="CC.gguf")
-    import_events.get_llm(cfg)
+    with caplog.at_level(logging.INFO):
+        import_events.get_llm(cfg)
 
     assert captured == {
         "clip": "CC.gguf",
@@ -2383,6 +2386,7 @@ def test_get_llm_threads_config_paths(monkeypatch):
         "n_ctx": import_events.DEFAULT_LLM_CONTEXT_SIZE,
         "n_gpu_layers": import_events.DEFAULT_LLM_GPU_LAYERS,
     }
+    assert "Using LLM GPU backend: n_gpu_layers=-1, main_gpu=0." in caplog.text
 
 
 def test_get_llm_falls_back_to_cpu_when_gpu_init_fails(monkeypatch, caplog):
@@ -2415,13 +2419,14 @@ def test_get_llm_falls_back_to_cpu_when_gpu_init_fails(monkeypatch, caplog):
     monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         client = import_events.get_llm(import_events.ModelConfig(
             model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0))
 
     assert created == [import_events.DEFAULT_LLM_GPU_LAYERS, 0]
     assert client.n_gpu_layers == 0
     assert "falling back to CPU" in caplog.text
+    assert "Using LLM CPU backend." in caplog.text
 
 
 def test_get_llm_uses_cpu_when_gpu_backend_missing(monkeypatch, caplog):
@@ -2451,12 +2456,13 @@ def test_get_llm_uses_cpu_when_gpu_backend_missing(monkeypatch, caplog):
     monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         import_events.get_llm(import_events.ModelConfig(
             model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0))
 
     assert created == [0]
     assert "no GPU backend" in caplog.text
+    assert "Using LLM CPU backend." in caplog.text
 
 
 def test_get_llm_preserves_keyboard_interrupt_during_gpu_init(monkeypatch):

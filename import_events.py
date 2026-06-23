@@ -812,18 +812,29 @@ def _llm_supports_gpu_offload(llama_cpp: Any) -> bool:
     return bool(supports()) if callable(supports) else False
 
 
+def _log_llm_device(config: ModelConfig, effective_gpu_layers: int) -> None:
+    if effective_gpu_layers == 0:
+        logger.info("Using LLM CPU backend.")
+        return
+    logger.info("Using LLM GPU backend: n_gpu_layers=%s, main_gpu=%d.",
+                effective_gpu_layers, config.llm_main_gpu)
+
+
 def _load_llm_client(config: ModelConfig, Llama: Any,
-                     Qwen25VLChatHandler: Any, llama_cpp: Any) -> Any:
+                     Qwen25VLChatHandler: Any, llama_cpp: Any) -> Tuple[Any, int]:
     if config.llm_gpu_layers == 0:
-        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0)
+        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0), 0
     if not _llm_supports_gpu_offload(llama_cpp):
         logger.warning("LLM GPU offload requested, but llama.cpp has no GPU backend; falling back to CPU.")
-        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0)
+        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0), 0
     try:
-        return _new_llm_client(config, Llama, Qwen25VLChatHandler, config.llm_gpu_layers)
+        return (
+            _new_llm_client(config, Llama, Qwen25VLChatHandler, config.llm_gpu_layers),
+            config.llm_gpu_layers,
+        )
     except Exception as exc:
         logger.warning("LLM GPU offload failed; falling back to CPU: %s", exc)
-        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0)
+        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0), 0
 
 
 def get_llm(config: Optional[ModelConfig] = None):
@@ -854,7 +865,9 @@ def get_llm(config: Optional[ModelConfig] = None):
         from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
         ensure_models_exist(config)
-        cached = _load_llm_client(config, Llama, Qwen25VLChatHandler, llama_cpp)
+        cached, effective_gpu_layers = _load_llm_client(
+            config, Llama, Qwen25VLChatHandler, llama_cpp)
+        _log_llm_device(config, effective_gpu_layers)
         if cache_limit > 0:
             _LLM_CACHE[key] = cached
             _trim_llm_cache(cache_limit)
