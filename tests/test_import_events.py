@@ -28,6 +28,58 @@ def valid_clip_bytes():
     return b"GGUF..." + import_events.MTMD_PROJECTOR_METADATA + b"..."
 
 
+def _pdf_literal(text):
+    out = bytearray()
+    for byte in text.encode("latin-1"):
+        if byte in b"()\\":
+            out.extend(b"\\" + bytes([byte]))
+        elif byte < 32 or byte > 126:
+            out.extend(f"\\{byte:03o}".encode("ascii"))
+        else:
+            out.append(byte)
+    return b"(" + bytes(out) + b")"
+
+
+def _text_pdf_bytes(lines):
+    ops = [b"BT", b"/F1 12 Tf", b"72 760 Td", b"14 TL"]
+    for index, line in enumerate(lines):
+        if index:
+            ops.append(b"T*")
+        ops.append(_pdf_literal(line) + b" Tj")
+    ops.append(b"ET")
+    stream = b"\n".join(ops) + b"\n"
+    objects = [
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        (b"3 0 obj\n<< /Type /Page /Parent 2 0 R "
+         b"/MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> "
+         b"/Contents 5 0 R >>\nendobj\n"),
+        (b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+         b"/Encoding /WinAnsiEncoding >>\nendobj\n"),
+        (b"5 0 obj\n<< /Length " + str(len(stream)).encode("ascii") +
+         b" >>\nstream\n" + stream + b"endstream\nendobj\n"),
+    ]
+    body = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for obj in objects:
+        offsets.append(len(body))
+        body.extend(obj)
+    xref_at = len(body)
+    body.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    body.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        body.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    body.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+        f"startxref\n{xref_at}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(body)
+
+
+def _write_calendar_like_pdf(path, lines):
+    path.write_bytes(_text_pdf_bytes(lines))
+
+
 def test_extract_with_llm_uses_injected_client(tmp_path):
     source = tmp_path / "event.txt"
     source.write_text("Launch party tomorrow", encoding="utf-8")
@@ -471,6 +523,47 @@ def test_parse_llm_events_synthesizes_missing_title():
     assert events[0]["title"] == "No Title"
 
 
+def test_calendar_hierarchy_lines_expands_portuguese_month_day_pairs():
+    text = """
+    Março 2026
+    Domingo
+    8
+    Community Fair
+    15
+    Support Group T5 10h
+    22
+    Prep Meeting T1M4 AR
+    Abril 2026
+    Sunday
+    5 Garden Day
+    """
+
+    lines = import_events._calendar_hierarchy_lines(text)
+
+    assert lines == [
+        "2026-03-08 - Community Fair",
+        "2026-03-15 - Support Group T5 10h",
+        "2026-03-22 - Prep Meeting T1M4 AR",
+        "2026-04-05 - Garden Day",
+    ]
+
+
+def test_prepare_text_for_llm_prepends_inferred_calendar_hierarchy():
+    text = "Março 2026\nDomingo\n8\nCommunity Fair"
+
+    prepared = import_events._prepare_text_for_llm(text, 1000)
+
+    assert prepared.startswith("Expanded calendar hierarchy inferred")
+    assert "2026-03-08 - Community Fair" in prepared
+    assert "Original content:\nMarço 2026" in prepared
+
+
+def test_prepare_text_for_llm_leaves_non_hierarchical_text_unchanged():
+    text = "ARRIVO\n24\nLUGLIO\nvenerdì\n15:00 - 00:00"
+
+    assert import_events._prepare_text_for_llm(text, 1000) == text
+
+
 def test_text_messages_uses_random_nonce_delimiter():
     msg = import_events._text_messages("hello")
     user = msg[1]["content"]
@@ -483,6 +576,7 @@ def test_text_messages_include_language_hint():
     msg = import_events._text_messages("olá", "pt")
 
     assert "Portuguese (pt)" in msg[1]["content"]
+    assert "month/year heading applies" in msg[1]["content"]
 
 
 def test_text_messages_nonce_differs_per_call():
@@ -2108,6 +2202,74 @@ def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):
     assert "OCR text" in prompt
     assert prompt.count("Shared") == 1
     assert "image_url" not in json.dumps(fake.messages[0])
+
+
+def test_extract_from_pdf_expands_calendar_hierarchy_before_llm(monkeypatch):
+    fake = FakeLlm('[{"title": "Community Fair", "start": "2026-03-08"}]')
+    calendar_text = "Março 2026\nDomingo\n8\nCommunity Fair"
+    monkeypatch.setattr(
+        import_events, "_pdf_text",
+        lambda path, max_chars=import_events.MAX_CONTENT_CHARS: calendar_text,
+    )
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+
+    events = import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=fake)
+
+    prompt = fake.messages[0][1]["content"]
+    assert "2026-03-08 - Community Fair" in prompt
+    assert "Original content:\nMarço 2026" in prompt
+    assert events[0]["type"] == "PDF"
+
+
+def test_extract_from_synthetic_calendar_pdf_expands_hierarchy(tmp_path, monkeypatch):
+    pdf = tmp_path / "calendario-2026-like.pdf"
+    _write_calendar_like_pdf(
+        pdf,
+        [
+            "Calendário 2026",
+            "Março 2026",
+            "Domingo",
+            "8",
+            "Mystic Fair BH",
+            "15",
+            "Grupo de Apoio T5 10h",
+            "22",
+            "Encontro Pre. T1M4 AR",
+            "April 2026",
+            "Sunday",
+            "5",
+            "Garden Day",
+            "Mayo 2026",
+            "Lunes",
+            "11 Feria Local",
+            "Giugno 2026",
+            "Domenica",
+            "7 Laboratorio",
+            "Juillet 2026",
+            "Dimanche",
+            "12 Atelier",
+            "Oktober 2026",
+            "Sonntag",
+            "18 Sommer Treffen",
+        ],
+    )
+    fake = FakeLlm('[{"title": "Mystic Fair BH", "start": "2026-03-08"}]')
+    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+
+    events = import_events.extract_from_pdf(pdf, llm_client=fake)
+
+    extracted_text = import_events._pdf_text(pdf)
+    prompt = fake.messages[0][1]["content"]
+    assert "Calendário 2026" in extracted_text
+    assert "2026-03-08 - Mystic Fair BH" in prompt
+    assert "2026-03-15 - Grupo de Apoio T5 10h" in prompt
+    assert "2026-03-22 - Encontro Pre. T1M4 AR" in prompt
+    assert "2026-04-05 - Garden Day" in prompt
+    assert "2026-05-11 - Feria Local" in prompt
+    assert "2026-06-07 - Laboratorio" in prompt
+    assert "2026-07-12 - Atelier" in prompt
+    assert "2026-10-18 - Sommer Treffen" in prompt
+    assert events[0]["type"] == "PDF"
 
 
 def test_extract_from_pdf_detects_language_before_ocr(monkeypatch):
