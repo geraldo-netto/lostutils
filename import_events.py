@@ -1051,6 +1051,8 @@ def _date_parts_from_values(values: List[str], order: Tuple[str, ...],
     month = _month_value(mapped["month"])
     if month is None:
         return None
+    if not mapped["day"].isdigit() or not mapped["year"].isdigit():
+        return None
     year = int(mapped["year"])
     year = 2000 + year if year < 100 else year
     return year, month, int(mapped["day"])
@@ -1183,7 +1185,8 @@ def _calendar_table_lines(text: str) -> List[str]:
                     out.append(dated)
             continue
         date_order = _table_date_order(line)
-        parses_as_row = _split_table_date(line, active_order or ("day", "month"), year)
+        parses_as_row = (_split_table_date(line, active_order or date_order, year)
+                         if date_order else None)
         if date_order and not _is_table_activity_header(line) and parses_as_row is None:
             pending_order = date_order
             continue

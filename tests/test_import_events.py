@@ -654,6 +654,19 @@ def test_calendar_table_lines_handles_multilingual_headers_and_time_units():
     ]
 
 
+def test_calendar_table_lines_ignore_malformed_date_candidates():
+    text = """
+    Calendario 2026
+    (per giugno, vedere condizioni tariffarie)
+    DIA/MES ATIVIDADES
+    19/06 Cena social
+    """
+
+    lines = import_events._calendar_table_lines(text)
+
+    assert lines == ["2026-06-19 - Cena social"]
+
+
 def test_prepare_text_for_llm_prepends_inferred_calendar_hierarchy():
     text = "Março 2026\nDomingo\n8\nCommunity Fair"
 
