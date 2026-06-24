@@ -561,7 +561,7 @@ def test_close_reattaches_and_disposes(monkeypatch):
     assert d.dev is None and d._detached is False
 
 
-def test_close_dispose_exception_swallowed(monkeypatch):
+def test_close_dispose_exception_is_logged(monkeypatch):
     usb, _ = make_usb()
     _install_usb(monkeypatch, usb)
 
@@ -569,13 +569,15 @@ def test_close_dispose_exception_swallowed(monkeypatch):
         raise RuntimeError("nope")
 
     usb.util.dispose_resources = boom
-    d = minikeypad.KeypadDevice()
+    logs = []
+    d = minikeypad.KeypadDevice(log=logs.append)
     d.dev = FakeUsbDev()
     d.close()
     assert d.dev is None
+    assert any("dispose_resources failed" in m for m in logs)
 
 
-def test_reattach_swallows_exception(monkeypatch):
+def test_reattach_failure_is_logged(monkeypatch):
     usb, _ = make_usb()
     _install_usb(monkeypatch, usb)
     dev = FakeUsbDev()
@@ -584,11 +586,13 @@ def test_reattach_swallows_exception(monkeypatch):
         raise RuntimeError("nope")
 
     dev.attach_kernel_driver = boom
-    d = minikeypad.KeypadDevice()
+    logs = []
+    d = minikeypad.KeypadDevice(log=logs.append)
     d.dev = dev
     d._detached = True
     d.close()
     assert d._detached is False
+    assert any("re-attach kernel driver" in m for m in logs)
 
 
 def test_write_device_none_dev():
@@ -686,6 +690,12 @@ def test_write_device_retries_then_succeeds(monkeypatch):
 def test_flash_buf_mapping():
     assert minikeypad.App._flash_buf("kbd")[1] == 0xAA
     assert minikeypad.App._flash_buf("led")[1] == 0xA1
+
+
+def test_version_constant_is_used_by_cli():
+    assert minikeypad.__version__
+    with pytest.raises(SystemExit):
+        minikeypad.main(["--version"])
 
 
 # ===========================================================================
@@ -916,6 +926,18 @@ def test_download_failure(app):
     app._download()
     _wait_drain(app)
     assert "failed" in app.dl_status.cget("text").lower()
+    assert "partial" in app.log_box.get("1.0", "end").lower()
+
+
+def test_handlers_log_dropped_clicks_when_buffer_full(app):
+    app._select_key(1)
+    app.kp.KEY_Char_Num = len(app.kp.data)      # buffer pointer past the end
+    app._basic_key(4, "A")
+    app._shift_and(30, "!")
+    app._multimedia(("Vol +", (0, 2), (0, 64), (0, 233)))
+    app._mouse(("L Click", (1, 0, 0, 0)))
+    _drain(app)
+    assert app.log_box.get("1.0", "end").lower().count("ignored") == 4
 
 
 def test_download_truncated_logs(app):

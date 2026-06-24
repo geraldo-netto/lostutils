@@ -14,6 +14,10 @@ Faithful 1:1 re-implementation of the original device protocol:
 Device I/O uses pyusb (libusb backend).  The GUI runs even without pyusb /
 without the device attached; it just reports "Not connected".
 
+Programming a key sends several reports followed by a flash-commit; this is
+NOT atomic.  If a write fails mid-sequence the key may be left partially
+programmed -- just press Download again to re-send the full sequence.
+
 Dependencies:
     pip install pyusb        # and a libusb backend (libusb-1.0)
     If pyusb is missing the app offers to install it for you on first run
@@ -92,6 +96,8 @@ def _ensure_pyusb():
         print("pyusb installed but import still failed: %s" % _USB_ERR)
         return False
 
+
+__version__ = "1.0"
 
 LOG = logging.getLogger("minikeypad")
 
@@ -208,8 +214,8 @@ class KeypadDevice:
                 self._reattach_kernel_driver()
                 try:
                     usb.util.dispose_resources(self.dev)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log(f"dispose_resources failed: {e}")
             self.dev = None
             self.ep_out = None
             self.intf = None
@@ -220,8 +226,10 @@ class KeypadDevice:
             return
         try:
             self.dev.attach_kernel_driver(HID_INTERFACE)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log(f"Failed to re-attach kernel driver on interface "
+                     f"{HID_INTERFACE}; the keypad may stay inactive until you "
+                     f"replug it: {e}")
         self._detached = False
 
     def write_device(self, report_id, buf8):
@@ -229,13 +237,23 @@ class KeypadDevice:
 
         Mirrors HidLib.WriteDevice (Data[0..7]) -> HID output report.  Output
         reports are idempotent, so a transient USBError is retried with a short
-        backoff before giving up.  Returns True on success.
+        backoff before giving up.  The backoff sleeps *outside* the device lock
+        so the connection poller is not blocked while a write is retrying.
+        Returns True on success.
         """
-        with self._lock:
-            if self.dev is None:
-                return False
-            data = self._frame(report_id, buf8)
-            return self._send_with_retry(report_id, data)
+        data = self._frame(report_id, buf8)
+        reason = "unknown"
+        for attempt in range(WRITE_RETRIES + 1):
+            ok, reason = self._attempt_send(report_id, data)
+            if ok:
+                return True
+            if reason == "not connected":
+                return False                # no point retrying a missing device
+            if attempt < WRITE_RETRIES:
+                self.log(f"write retry {attempt + 1}/{WRITE_RETRIES}: {reason}")
+                time.sleep(WRITE_RETRY_BACKOFF_S * (attempt + 1))
+        self.log(f"write failed after {WRITE_RETRIES + 1} attempts: {reason}")
+        return False
 
     @staticmethod
     def _frame(report_id, buf8):
@@ -245,8 +263,20 @@ class KeypadDevice:
             data[1 + i] = buf8[i] & 0xFF
         return data
 
+    def _attempt_send(self, report_id, data):
+        """One lock-held send attempt.  Returns (ok, reason)."""
+        with self._lock:
+            if self.dev is None:
+                return False, "not connected"
+            try:
+                if self._send_once(report_id, data) > 0:
+                    return True, ""
+                return False, "device returned 0 bytes"
+            except usb.core.USBError as e:
+                return False, str(e)
+
     def _send_once(self, report_id, data):
-        assert self.dev is not None        # guarded by write_device under the lock
+        assert self.dev is not None        # guarded by _attempt_send under the lock
         if self.ep_out is not None:
             return self.ep_out.write(bytes(data), WRITE_TIMEOUT_MS)
         # No OUT endpoint -> HID SET_REPORT over control (output report=0x02).
@@ -255,21 +285,6 @@ class KeypadDevice:
             0x21, 0x09, wValue,
             self.intf.bInterfaceNumber if self.intf else HID_INTERFACE,
             bytes(data), WRITE_TIMEOUT_MS)
-
-    def _send_with_retry(self, report_id, data):
-        reason = "unknown"
-        for attempt in range(WRITE_RETRIES + 1):
-            try:
-                if self._send_once(report_id, data) > 0:
-                    return True
-                reason = "device returned 0 bytes"
-            except usb.core.USBError as e:
-                reason = str(e)
-            if attempt < WRITE_RETRIES:
-                self.log(f"write retry {attempt + 1}/{WRITE_RETRIES}: {reason}")
-                time.sleep(WRITE_RETRY_BACKOFF_S * (attempt + 1))
-        self.log(f"write failed after {WRITE_RETRIES + 1} attempts: {reason}")
-        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -855,10 +870,15 @@ class App(tk.Tk):
             return False
         return True
 
+    def _dropped(self, label):
+        """A mutator refused the click (buffer full); tell the user."""
+        self.log("Key buffer full; '%s' ignored." % label)
+
     def _basic_key(self, code, label):
         if not self._need_key():
             return
-        self.kp.basic_key(code, label)
+        if not self.kp.basic_key(code, label):
+            self._dropped(label)
         self._refresh_display()
 
     def _basic_mod(self, bit, name):
@@ -876,21 +896,24 @@ class App(tk.Tk):
     def _shift_and(self, code, label):
         if not self._need_key():
             return
-        self.kp.shift_and(code, label)
+        if not self.kp.shift_and(code, label):
+            self._dropped(label)
         self._refresh_display()
 
     def _multimedia(self, item):
         if not self._need_key():
             return
         name, r0, r2, ro = item
-        self.kp.multimedia(name, r0, r2, ro)
+        if not self.kp.multimedia(name, r0, r2, ro):
+            self._dropped(name)
         self._refresh_display()
 
     def _mouse(self, item):
         if not self._need_key():
             return
         name, vals = item
-        self.kp.mouse(name, *vals)
+        if not self.kp.mouse(name, *vals):
+            self._dropped(name)
         self._refresh_display()
 
     def _led(self, item):
@@ -1032,6 +1055,10 @@ class App(tk.Tk):
     def _download_done(self, ok):
         self._io_busy = False
         self.dl_btn.configure(state="normal")
+        if not ok:
+            # The report sequence is not atomic; a mid-sequence failure can
+            # leave the key half-programmed.  Re-running resends the whole set.
+            self.log("Remap may be partial; press Download again to retry.")
         self._dl_result(ok)
 
     def destroy(self):
@@ -1062,7 +1089,8 @@ def _install_signal_handlers(app):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="MINI-KeyBoard configurator")
-    parser.add_argument("--version", action="version", version="minikeypad 1.0")
+    parser.add_argument("--version", action="version",
+                        version="minikeypad %s" % __version__)
     parser.add_argument("--no-auto-install", action="store_true",
                         help="do not try to pip install pyusb when it is missing")
     parser.add_argument("-v", "--verbose", action="store_true",
