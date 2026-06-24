@@ -34,6 +34,11 @@ This file defines the expected behavior and usage model for AI agents working in
 - ALWAYS record review findings in `TODO.md` — never report them only in chat. Any time you
   scan, review, audit, or "look for issues" (not just major changes), add each finding to the
   matching category table in `TODO.md` before/while reporting it.
+- Commit directly on `develop` for this project — no feature branch required.
+- ONE commit per `TODO.md` item — when you implement an item, make exactly one dedicated commit
+  for it (the code change, its tests, and the `TODO.md` edit together). Fully completed: delete the
+  item's row in the same commit. Partial: leave the row and append a note to its `notes` column
+  stating what shipped and why the rest is deferred — never silently leave it unchanged.
 - ALWAYS remove completed items from `TODO.md` — once a finding is implemented + tested + merged,
   delete its row from the table outright. No "shipped" sub-sections, no struck-through entries.
   `git log` is the durable record. Exceptions: the "Open — parked" section keeps open-but-deferred
