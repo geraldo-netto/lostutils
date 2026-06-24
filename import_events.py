@@ -49,6 +49,9 @@ DOWNLOAD_TIMEOUT_SECONDS = 30
 # new bytes land for this long. 300s tolerates brief CDN hiccups on a ~4GB pull
 # while still bounding a wedged transfer.
 DOWNLOAD_STALL_SECONDS = 300
+# A required model that won't download/verify is retried this many times before
+# the run aborts with a partial result (ie-robust-01).
+MODEL_DOWNLOAD_ATTEMPTS = 3
 OCR_TIMEOUT_SECONDS = 120
 # Heartbeat cadence for a blocking create_chat_completion call. The native
 # llama_cpp call cannot be cancelled from Python without killing the process,
@@ -918,6 +921,11 @@ def _verify_sha256(path: str, expected: Optional[str]) -> None:
             h.update(chunk)
     actual = h.hexdigest()
     if actual != expected:
+        logger.warning(
+            "SHA-256 mismatch for %s (expected %s, got %s); deleting corrupt "
+            "download so the next attempt re-fetches it.",
+            _display_path(path), expected, actual,
+        )
         os.remove(path)
         raise ValueError(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
 
@@ -1057,21 +1065,60 @@ def _download_to_cache(url: str, path_str: str) -> None:
         raise
 
 
+class ModelUnavailableError(RuntimeError):
+    """A required model could not be downloaded/verified after retries.
+
+    Carries the events extracted before the failure (ie-robust-01) so the run
+    can still emit a partial result before aborting instead of losing all
+    in-flight progress.
+    """
+
+    def __init__(self, message: str,
+                 partial_events: Optional[List[Dict[str, Any]]] = None) -> None:
+        super().__init__(message)
+        self.partial_events: List[Dict[str, Any]] = partial_events or []
+
+
+def _ensure_one_model(path_str: str, url: str, expected: Optional[str]) -> None:
+    """Download (if missing) and verify one model, retrying transient failures.
+
+    A SHA mismatch deletes the corrupt file (in _verify_sha256) and counts as a
+    failed attempt, so the next attempt re-downloads. After
+    MODEL_DOWNLOAD_ATTEMPTS exhausted failures the model is treated as
+    unavailable — raise ModelUnavailableError so the run aborts with a partial
+    result rather than looping forever (ie-robust-01).
+    """
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, MODEL_DOWNLOAD_ATTEMPTS + 1):
+        try:
+            if not Path(path_str).exists():
+                logger.info("Downloading model %s (attempt %d/%d).",
+                            _display_path(path_str), attempt, MODEL_DOWNLOAD_ATTEMPTS)
+                _download_to_cache(url, path_str)
+            _verify_sha256(path_str, expected)
+            return
+        except (OSError, ValueError) as exc:
+            last_exc = exc
+            logger.warning("Model %s attempt %d/%d failed: %s",
+                           _display_path(path_str), attempt, MODEL_DOWNLOAD_ATTEMPTS, exc)
+    raise ModelUnavailableError(
+        f"could not obtain model {_display_path(path_str)} after "
+        f"{MODEL_DOWNLOAD_ATTEMPTS} attempts: {last_exc}")
+
+
 def ensure_models_exist(config: Optional[ModelConfig] = None) -> None:
-    """Checks if models exist locally, downloads them if missing, and verifies them."""
+    """Ensure every required model is present and verified, retrying downloads.
+
+    Raises ModelUnavailableError when a model can't be obtained after
+    MODEL_DOWNLOAD_ATTEMPTS attempts (ie-robust-01).
+    """
     config = config or ModelConfig()
     models = [
         (config.model_path, config.model_url, config.model_sha256),
         (config.clip_path, config.clip_url, config.clip_sha256),
     ]
     for path_str, url, expected in models:
-        if not Path(path_str).exists():
-            print(f"--- Model not found: {path_str} ---")
-            print(f"Downloading from {url}...")
-            print("This may take several minutes depending on your connection (approx 4GB)...")
-            _download_to_cache(url, path_str)
-            print(f"Successfully downloaded {path_str}")
-        _verify_sha256(path_str, expected)
+        _ensure_one_model(path_str, url, expected)
         if path_str == config.clip_path:
             _validate_clip_projector(path_str)
 
@@ -2878,6 +2925,15 @@ def _run_file_workers(
             if exc is not None:
                 raise exc
             results[index] = events
+    except ModelUnavailableError as model_exc:
+        # ie-robust-01: preserve the events gathered before the model failed so
+        # the caller can emit a partial result before aborting.
+        stop_event.set()
+        for thread in threads:
+            thread.join(timeout=0.2)
+        model_exc.partial_events = [
+            event for index in sorted(results) for event in results[index]]
+        raise
     except KeyboardInterrupt:
         stop_event.set()
         for thread in threads:
@@ -3212,8 +3268,22 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
         print(f"Created {folder}. Place your files there and run again.")
         return 0
 
-    events = process_folder(str(folder), recursive=args.recursive,
-                            default_tz=args.timezone, model_config=model_config)
+    try:
+        events = process_folder(str(folder), recursive=args.recursive,
+                                default_tz=args.timezone, model_config=model_config)
+    except ModelUnavailableError as exc:
+        # ie-robust-01: the model could not be run; emit whatever was extracted
+        # before the failure, warn loudly, and abort with a distinct exit code.
+        partial = exc.partial_events
+        if not args.no_dedup:
+            partial = dedupe_events(partial)
+        logger.error(
+            "Model could not be run (%s). Emitting PARTIAL output with %d "
+            "event(s) and aborting.", exc, len(partial))
+        write_events_json(partial, Path(args.output))
+        if args.emit_ics:
+            write_events_ics(partial, Path(args.emit_ics))
+        return 2
     if not args.no_dedup:
         events = dedupe_events(events)
 

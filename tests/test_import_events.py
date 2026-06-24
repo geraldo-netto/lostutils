@@ -4074,3 +4074,63 @@ def test_main_writes_json_and_ics(tmp_path, monkeypatch):
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data and data[0]["title"] == "Launch"
     assert "SUMMARY:Launch" in ics.read_text(encoding="utf-8")
+
+
+# --- ie-robust-01: model download retry + abort-with-partial -----------------
+
+def test_verify_sha256_mismatch_deletes_and_raises(tmp_path):
+    """A digest mismatch deletes the corrupt file and raises (delete + log)."""
+    f = tmp_path / "model.gguf"
+    f.write_bytes(b"corrupt")
+    with pytest.raises(ValueError):
+        import_events._verify_sha256(str(f), "0" * 64)
+    assert not f.exists(), "corrupt download not deleted"
+
+
+def test_ensure_one_model_retries_then_succeeds(monkeypatch, tmp_path):
+    """A transient download failure is retried; a later success returns cleanly."""
+    path = tmp_path / "model.gguf"
+    attempts = {"n": 0}
+
+    def fake_download(url, path_str):
+        attempts["n"] += 1
+        if attempts["n"] < 2:
+            raise OSError("transient network error")
+        Path(path_str).write_bytes(b"ok")
+
+    monkeypatch.setattr(import_events, "_download_to_cache", fake_download)
+    monkeypatch.setattr(import_events, "_verify_sha256", lambda p, e: None)
+    import_events._ensure_one_model(str(path), "http://x", "deadbeef")
+    assert attempts["n"] == 2
+    assert path.exists()
+
+
+def test_ensure_one_model_raises_model_unavailable_after_retries(monkeypatch, tmp_path):
+    """All attempts failing raises ModelUnavailableError (no infinite loop)."""
+    path = tmp_path / "model.gguf"
+
+    def always_fail(url, path_str):
+        raise OSError("network down")
+
+    monkeypatch.setattr(import_events, "_download_to_cache", always_fail)
+    with pytest.raises(import_events.ModelUnavailableError):
+        import_events._ensure_one_model(str(path), "http://x", "deadbeef")
+
+
+def test_run_main_emits_partial_json_on_model_unavailable(monkeypatch, tmp_path):
+    """When the model can't be run, _run_main writes the partial events and
+    aborts with exit code 2 instead of losing in-flight progress."""
+    folder = tmp_path / "events_data"
+    folder.mkdir()
+    out = tmp_path / "events.json"
+    partial = [{"title": "Before failure", "start": "2026-01-01", "end": "",
+                "location": "", "source": "a.txt"}]
+
+    def boom(*a, **k):
+        raise import_events.ModelUnavailableError("model gone", partial_events=partial)
+
+    monkeypatch.setattr(import_events, "process_folder", boom)
+    rc = import_events._run_main([str(folder), "--output", str(out)])
+    assert rc == 2
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data == partial, "partial events not emitted on model-unavailable abort"

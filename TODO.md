@@ -111,7 +111,6 @@ rdv3-rel-02 | open | low | remove-deduplv3.py:109 — when the same path appears
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-robust-01 | open | low | import_events.py:482 — _verify_sha256 deletes a mismatched cached model immediately, losing the artifact and forcing a full redownload even for transient/provenance issues. Move it aside as .bad.<digest> and keep diagnostics. | partial-state recovery
 rf-robust-04 | open | low | relocate_folder.py:605 — tracking_copy2 adds stat_fn(s).st_size of the SOURCE post-copy for progress; a concurrent writer changing the source between copytree's read and this stat makes done diverge from total (bar exceeds 100% or stalls). Account bytes written to the dst instead. | progress-only
 rf-robust-02 | open | med | relocate_folder.py:622/1737 — copy_tree and _copy_and_verify only clean partial targets on `Exception`; Ctrl-C raises `KeyboardInterrupt` and can leave a partially copied target that blocks retry. Handle KeyboardInterrupt/BaseException with best-effort cleanup or a surfaced recovery instruction. | Ctrl-C cleanup
 rf-robust-03 | open | med | relocate_folder.py:1300 — _backup_target only rolls back on `Exception`; Ctrl-C/SystemExit while the source is renamed aside bypasses the restore path and can leave `<source>` missing with only `<source>.relocate-backup`. Roll back on BaseException and re-raise, leaving SIGKILL/power-loss to --recover. | Ctrl-C rollback
