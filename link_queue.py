@@ -232,7 +232,8 @@ DEFAULT_CONFIG = {
                                        # file:/magnet: links is dropped-with-warning
                                        # past this rather than pinning N QueueItems
                                        # in RAM. 0 = unbounded.
-    "failure_sleep_seconds": 300,   # 5 minutes — global cooldown after a failure
+    "failure_sleep_seconds": 300,   # 5 minutes — per-domain cooldown after a failure
+                                    # (only the failed item's domain pauses; others run)
     "command_timeout_seconds": 0,   # scal-04: per-item subprocess wall-time cap;
                                     # 0 = off (wait forever). When > 0, a hung
                                     # yt-dlp / aria2c gets terminate-then-kill so
@@ -754,7 +755,10 @@ class Dispatcher:
         self._metrics_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
-        self._cooldown_until: float = 0.0
+        # Per-domain failure cooldown: domain -> until-timestamp. A failed
+        # item arms a cooldown for ITS domain only, so other domains keep
+        # flowing. Expired entries are pruned lazily by `_active_cooldowns`.
+        self._cooldown_until: dict[str, float] = {}
         # conc-04: RLock so the LinkQueueApp property accessor can acquire
         # this lock even when an outer scope (e.g. `_update_status`) already
         # holds it. With a plain Lock, the property re-entry deadlocks.
@@ -2062,6 +2066,9 @@ class Dispatcher:
         if by_domain is None:  # plain-list fallback (defensive)
             return self.queue_items[0] if self.queue_items else None  # pragma: no cover - queue head with empty list
         seq_of = self.queue_items.seq_of
+        # Per-domain failure cooldown: skip any domain still cooling down so a
+        # failed host pauses while every other domain keeps being claimed.
+        cooling = self._active_cooldowns()
         best = None
         best_active: int | None = None
         best_seq: int | None = None
@@ -2075,6 +2082,8 @@ class Dispatcher:
             if not bucket:
                 empty_domains.append(domain)
                 continue  # pragma: no cover - worker continue on cooldown
+            if domain in cooling:
+                continue
             active = self._domain_active.get(domain, 0)
             if cap > 0 and active >= cap:
                 continue
@@ -2200,26 +2209,30 @@ class Dispatcher:
 
         if exit_code != 0:
             self._record_metric("failures")
-            self._trigger_failure_cooldown(idx, exit_code)  # pragma: no cover - trigger cooldown after failure
+            self._trigger_failure_cooldown(idx, item, exit_code)  # pragma: no cover - trigger cooldown after failure
         else:
             self._record_metric("completions")
         self._update_status()
         self._maybe_inter_item_sleep(stop_self, other_free)
 
-    def _trigger_failure_cooldown(self, idx: int, exit_code: int) -> None:
-        """A queued item failed: arm the global cooldown that all queue
-        workers will respect at the top of their loop. Immediate-mode
-        runners are unaffected."""
+    def _trigger_failure_cooldown(
+        self, idx: int, item: QueueItem, exit_code: int
+    ) -> None:
+        """A queued item failed: arm a cooldown for THAT item's domain only.
+        Other domains keep being claimed normally — only items on the failed
+        domain are skipped (in _pick_next_item) until the cooldown expires.
+        Immediate-mode runners are unaffected."""
         fail_s = self._get_failure_sleep()
         if fail_s <= 0:
             return
+        domain = self._domain_of(item)
         new_until = time.time() + fail_s
         with self._cooldown_lock:
-            if new_until > self._cooldown_until:  # pragma: no cover - withdrawn-root Tk early-exit
-                self._cooldown_until = new_until
+            if new_until > self._cooldown_until.get(domain, 0.0):
+                self._cooldown_until[domain] = new_until
         self._log(
             f"[cooldown] queue#{idx} item failed (exit {exit_code}) "
-            f"— pausing queue workers for {self._format_duration(fail_s)}"
+            f"— pausing domain '{domain}' for {self._format_duration(fail_s)}"
         )
         # Wake other workers so they immediately observe cooldown rather
         # than continuing to poll on the cv.
@@ -2314,15 +2327,28 @@ class Dispatcher:
 
 
     def _is_blocked(self) -> tuple[bool, float]:
-        """Whether queue workers should hold off on grabbing new work.
+        """Whether queue workers should hold off on grabbing ANY new work.
+        Only a global pause blocks unconditionally; per-domain failure
+        cooldowns are NOT global — they are enforced in `_pick_next_item`,
+        which skips a cooled domain's items while letting other domains flow.
         Returns (blocked, suggested_sleep_seconds)."""
         if self.pause_event.is_set():
             return True, 0.25
-        with self._cooldown_lock:
-            remaining = self._cooldown_until - time.time()
-        if remaining > 0:
-            return True, min(remaining, 0.25)
         return False, 0.0
+
+    def _active_cooldowns(self, now: "float | None" = None) -> "dict[str, float]":
+        """Per-domain failure cooldowns still in effect: {domain: until_ts}.
+        Prunes expired entries so the dict can't grow unbounded over a
+        long-running session that fails on many distinct hosts. Caller need
+        not hold any lock."""
+        if now is None:
+            now = time.time()
+        with self._cooldown_lock:
+            expired = [d for d, until in self._cooldown_until.items()
+                       if until <= now]
+            for d in expired:
+                del self._cooldown_until[d]
+            return dict(self._cooldown_until)
 
 
 # ---------------------------------------------------------------------------
@@ -2902,17 +2928,18 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         raise AttributeError(name)
 
     @property
-    def _cooldown_until(self) -> float:
+    def _cooldown_until(self) -> "dict[str, float]":
         # conc-04: read under the lock that `_trigger_failure_cooldown`
         # writes under, so a stale read can't survive a write that
-        # happened on another worker before this thread's load.
+        # happened on another worker before this thread's load. Returns a
+        # copy of the per-domain {domain: until_ts} map.
         with self.dispatcher._cooldown_lock:
-            return self.dispatcher._cooldown_until
+            return dict(self.dispatcher._cooldown_until)
 
     @_cooldown_until.setter
-    def _cooldown_until(self, value: float) -> None:
+    def _cooldown_until(self, value: "dict[str, float]") -> None:
         with self.dispatcher._cooldown_lock:
-            self.dispatcher._cooldown_until = value
+            self.dispatcher._cooldown_until = dict(value)
 
     # lq-cmplx-01: the pure Dispatcher/ConfigStore helpers are NOT re-exported
     # as ~25 static class attributes any more. Class-level call sites
@@ -3559,8 +3586,9 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             running = sum(1 for v in self.current_items.values() if v is not None)
             pending = len(self.queue_items)
         target = int(self.config.get("worker_count", 1))
-        with self._cooldown_lock:
-            cd_remaining = max(0.0, self._cooldown_until - time.time())
+        now = time.time()
+        cooling = self._active_cooldowns(now)
+        cd_remaining = max((u - now for u in cooling.values()), default=0.0)
 
         # Worker fragment: surfaces transitional states so the user always
         # sees the truth (alive count vs target) instead of a count that
@@ -3575,15 +3603,17 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         if self.pause_event.is_set():
             text = f"Paused — {worker_text}, {pending} pending"
             state, color = "● PAUSED", "#c0392b"
+        elif running > 0:
+            # Other domains keep flowing while some domain cools down, so a
+            # live worker means ACTIVE — the cooldown is only a per-domain skip.
+            text = f"{running} working • {pending} pending • {worker_text}"
+            state, color = "● ACTIVE", "#1e8449"
         elif cd_remaining > 0:
             text = (
                 f"Cooling down {self._format_duration(int(cd_remaining + 0.5))} "
-                f"after failure • {pending} pending"
+                f"({len(cooling)} domain(s)) • {pending} pending"
             )
             state, color = "● COOLDOWN", "#e67e22"
-        elif running > 0:
-            text = f"{running} working • {pending} pending • {worker_text}"
-            state, color = "● ACTIVE", "#1e8449"
         elif pending > 0:
             text = f"0 working • {pending} pending • {worker_text}"
             state, color = "● ACTIVE", "#1e8449"

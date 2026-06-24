@@ -1178,18 +1178,43 @@ def test_maybe_inter_item_sleep(app):
 
 def test_failure_cooldown(app):
     app.cooldown_var.set("0")
-    app._trigger_failure_cooldown(1, 7)  # fail_s<=0 -> no-op
-    assert app._cooldown_until == 0.0
+    app._trigger_failure_cooldown(1, q("http://host/x"), 7)  # fail_s<=0 -> no-op
+    assert app._cooldown_until == {}
     app.cooldown_var.set("300")
-    app._trigger_failure_cooldown(1, 7)
-    assert app._cooldown_until > time.time()
-    blocked, _ = app._is_blocked()
-    assert blocked is True
-    app._cooldown_until = 0.0
+    item = q("http://host/x")
+    app._trigger_failure_cooldown(1, item, 7)
+    domain = app._domain_of(item)
+    assert app._cooldown_until[domain] > time.time()
+    # Per-domain cooldown no longer blocks ALL workers — only a global pause
+    # does. The failed domain is skipped inside _pick_next_item instead.
+    assert app._is_blocked()[0] is False
     app.pause_event.set()
     assert app._is_blocked()[0] is True
     app.pause_event.clear()
     assert app._is_blocked()[0] is False
+    app._cooldown_until = {}
+
+
+def test_failure_cooldown_skips_only_failed_domain(app):
+    """A failed domain is skipped by the picker while other domains are
+    still claimable."""
+    stop_bg_workers(app)
+    app.cooldown_var.set("300")
+    a = q("http://aaa/1")
+    b = q("http://bbb/1")
+    with app._dispatch_cv:
+        app.queue_items.append(a)
+        app.queue_items.append(b)
+    app._trigger_failure_cooldown(1, a, 7)  # cool ONLY a's domain
+    with app._dispatch_cv:
+        picked = app._pick_next_item(0)
+    assert picked is not None
+    assert app._domain_of(picked) == app._domain_of(b)
+    # Cool b's domain too -> nothing claimable.
+    app._trigger_failure_cooldown(1, b, 7)
+    with app._dispatch_cv:
+        assert app._pick_next_item(0) is None
+    app._cooldown_until = {}
 
 
 def test_end_to_end_workers(app):
@@ -1235,9 +1260,9 @@ def test_update_status_states(app):
     app.pause_event.set()
     app._update_status(); pump(app, 0.05)
     app.pause_event.clear()
-    app._cooldown_until = time.time() + 100
+    app._cooldown_until = {"host": time.time() + 100}
     app._update_status(); pump(app, 0.05)
-    app._cooldown_until = 0.0
+    app._cooldown_until = {}
     app.current_items[1] = q("http://a/1")  # running
     app._update_status(); pump(app, 0.05)
     app.current_items.clear()
