@@ -253,6 +253,74 @@ def test_fun_text_joins_modifier_names():
 
 
 # ===========================================================================
+#  KeyParam — Unicode-entry macros
+# ===========================================================================
+def test_unicode_macro_linux_holds_ctrl_shift_over_u_and_hex():
+    kp = _select(KeyParam())
+    assert kp.unicode_macro(0x03B1, "linux") is True       # Greek alpha
+    d = kp.data
+    # 5 keystrokes: U, '0','3','b','1' -- each with Ctrl|Shift (=3) held
+    assert d[kp.KeyGroupCharNum] == 5
+    assert d[4] == 3 and d[5] == 24                         # Ctrl+Shift + 'u'
+    assert d[6] == 3 and d[7] == minikeypad.HEX_HID["0"]
+    assert d[8] == 3 and d[9] == minikeypad.HEX_HID["3"]
+    assert d[10] == 3 and d[11] == minikeypad.HEX_HID["b"]
+    assert d[12] == 3 and d[13] == minikeypad.HEX_HID["1"]
+    reports, flash, _ = _built(kp)
+    assert flash == "kbd" and reports[0][0] == 1
+
+
+def test_unicode_macro_darwin_holds_option_over_4_hex():
+    kp = _select(KeyParam())
+    assert kp.unicode_macro(0x05D0, "darwin") is True       # Hebrew alef
+    d = kp.data
+    assert d[kp.KeyGroupCharNum] == 4                        # 4 hex, no 'u'
+    assert d[4] == 4 and d[5] == minikeypad.HEX_HID["0"]    # Option held
+    assert d[6] == 4 and d[7] == minikeypad.HEX_HID["5"]
+    assert d[8] == 4 and d[9] == minikeypad.HEX_HID["d"]
+    assert d[10] == 4 and d[11] == minikeypad.HEX_HID["0"]
+
+
+def test_unicode_macro_unsupported_platform_returns_false():
+    kp = _select(KeyParam())
+    assert kp.unicode_macro(0x03B1, "win32") is False
+
+
+def test_unicode_macro_rejects_non_bmp():
+    kp = _select(KeyParam())
+    assert kp.unicode_macro(0x10348, "linux") is False      # outside the BMP
+
+
+def test_add_keystroke_refuses_when_buffer_full():
+    kp = _select(KeyParam())
+    kp.KEY_Char_Num = len(kp.data)
+    assert kp._add_keystroke(3, 24, "x") is False
+
+
+def test_unicode_macro_aborts_if_keystroke_rejected(monkeypatch):
+    kp = _select(KeyParam())
+    monkeypatch.setattr(kp, "_add_keystroke", lambda *_a: False)
+    assert kp.unicode_macro(0x03B1, "linux") is False
+
+
+def test_unicode_platform_detection(monkeypatch):
+    monkeypatch.setattr(minikeypad.sys, "platform", "linux")
+    assert minikeypad._unicode_platform() == "linux"
+    monkeypatch.setattr(minikeypad.sys, "platform", "darwin")
+    assert minikeypad._unicode_platform() == "darwin"
+    monkeypatch.setattr(minikeypad.sys, "platform", "win32")
+    assert minikeypad._unicode_platform() is None
+
+
+def test_script_tables_scancodes_are_valid_hid():
+    for _title, entries in minikeypad.SCRIPT_TABS:
+        assert entries, "script table must not be empty"
+        for glyph, scancode in entries:
+            assert len(glyph) == 1
+            assert 0 < scancode < 256
+
+
+# ===========================================================================
 #  fuzz — random op streams must never raise or emit out-of-range bytes
 # ===========================================================================
 def test_fuzz_keyparam_operations_stay_in_bounds():
@@ -1041,6 +1109,49 @@ def test_update_state_disconnected(app):
     app.dev = FakeDev(connected=False)
     app._update_state()
     assert app.state_lbl.cget("text") == "Not connected"
+
+
+def test_script_key_scancode_mode(app):
+    app._select_key(1)
+    app.unicode_var.set(False)
+    app._script_key("α", 4)
+    assert app.kp.data[5] == 4              # raw scancode written
+
+
+def test_script_key_unicode_mode(app):
+    app._select_key(1)
+    app.unicode_var.set(True)
+    app._script_key("α", 4)                 # ord -> macro on this (linux) host
+    _drain(app)
+    assert app.kp.data[KeyParam.KeyType_Num] & 0xF == 1
+    assert "U+03B1" in app.log_box.get("1.0", "end")
+
+
+def test_unicode_char_blocks_without_key(app):
+    app._clear()
+    app._unicode_char("α")                  # no key selected -> no-op
+    assert app.set_text.get() == ""
+
+
+def test_unicode_char_logs_unsupported_os(app, monkeypatch):
+    monkeypatch.setattr(minikeypad.sys, "platform", "win32")
+    app._select_key(1)
+    app._unicode_char("α")
+    _drain(app)
+    assert "not supported" in app.log_box.get("1.0", "end").lower()
+
+
+def test_unicode_char_drops_non_bmp(app):
+    app._select_key(1)
+    app._unicode_char("𐍈")                  # U+10348, outside the BMP
+    _drain(app)
+    assert "ignored" in app.log_box.get("1.0", "end").lower()
+
+
+def test_destroy_is_idempotent(app):
+    app.destroy()
+    app.destroy()                           # second call must not raise TclError
+    assert app._destroyed is True
 
 
 def test_connect_done_clears_busy(app):

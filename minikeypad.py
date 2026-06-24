@@ -406,6 +406,53 @@ class KeyParam:
         self.FunKEY_Char_Num += 1
         return True
 
+    # -- Unicode-entry macro (keyboard page; OS types the glyph) -------------
+    def _add_keystroke(self, mods, keycode, label):
+        """Append one keystroke with held modifiers; False if the buffer is full."""
+        if not self._fits(self.KEY_Char_Num):
+            return False
+        self.data[self.KEY_Char_Num - 1] |= mods & 0xFF
+        return self.basic_key(keycode, label)
+
+    @staticmethod
+    def _unicode_seq(cp, platform):
+        """Keystrokes [(mods, keycode, label), ...] for one codepoint, or None.
+
+        Both supported methods hold a modifier across the digits and commit on
+        release, so they fit the firmware's 5-keystroke ceiling:
+          linux  -- Ctrl+Shift held over U + 4 hex (GTK/IBus)
+          darwin -- Option held over 4 hex (Unicode Hex Input)
+        Only the Basic Multilingual Plane (4 hex digits) is supported.
+        """
+        if cp > 0xFFFF:
+            return None
+        digits = format(cp, "04x")
+        if platform == "linux":
+            mods = 1 | 2                       # Ctrl + Shift
+            seq = [(mods, HID_U, chr(cp))]
+            seq += [(mods, HEX_HID[h], "") for h in digits]
+            return seq
+        if platform == "darwin":
+            mods = 4                            # Alt / Option
+            return [(mods, HEX_HID[h], chr(cp) if i == 0 else "")
+                    for i, h in enumerate(digits)]
+        return None
+
+    def unicode_macro(self, cp, platform):
+        """Program the selected key as the OS Unicode-entry macro for `cp`.
+
+        Returns False if the platform is unsupported or the macro will not fit.
+        """
+        seq = self._unicode_seq(cp, platform)   # BMP -> at most 5 keystrokes
+        if not seq:
+            return False
+        self.set_key_init()
+        self.clear_key_char()
+        for mods, keycode, label in seq:
+            if not self._add_keystroke(mods, keycode, label):
+                return False
+        return True
+
     # -- Multimedia page (MULKey) -------------------------------------------
     def _mul_general_char_set(self):
         self.data[self.KeyType_Num] |= 2
@@ -630,6 +677,58 @@ PHYS_KEYS = [("KEY%d" % i, i) for i in range(1, 13)]
 KNOB1 = [("◀", 13), ("●", 14), ("▶", 15)]
 KNOB2 = [("◀", 16), ("●", 17), ("▶", 18)]
 
+# --------------------------------------------------------------------------- #
+#  Extended-script keycaps.  A USB HID keyboard sends *scancodes*, not Unicode,
+#  so each glyph is the HID usage code of the US-QWERTY key POSITION that yields
+#  that glyph under the standard national layout.  Sent as-is they produce the
+#  glyph only when the matching OS keyboard layout is active; "Unicode mode"
+#  (below) instead replays an OS Unicode-entry macro so the glyph appears
+#  regardless of the active layout.  (glyph, scancode) pairs.
+# --------------------------------------------------------------------------- #
+GREEK_KEYS = [
+    ("α", 4), ("β", 5), ("γ", 10), ("δ", 7), ("ε", 8), ("ζ", 29), ("η", 11),
+    ("θ", 24), ("ι", 12), ("κ", 14), ("λ", 15), ("μ", 16), ("ν", 17), ("ξ", 13),
+    ("ο", 18), ("π", 19), ("ρ", 21), ("σ", 22), ("ς", 26), ("τ", 23), ("υ", 28),
+    ("φ", 9), ("χ", 27), ("ψ", 6), ("ω", 25),
+]
+RUSSIAN_KEYS = [
+    ("а", 9), ("б", 54), ("в", 7), ("г", 24), ("д", 15), ("е", 23), ("ё", 53),
+    ("ж", 51), ("з", 19), ("и", 5), ("й", 20), ("к", 21), ("л", 14), ("м", 25),
+    ("н", 28), ("о", 13), ("п", 10), ("р", 11), ("с", 6), ("т", 17), ("у", 8),
+    ("ф", 4), ("х", 47), ("ц", 26), ("ч", 27), ("ш", 12), ("щ", 18), ("ъ", 48),
+    ("ы", 22), ("ь", 16), ("э", 52), ("ю", 55), ("я", 29),
+]
+HEBREW_KEYS = [
+    ("א", 23), ("ב", 6), ("ג", 7), ("ד", 22), ("ה", 25), ("ו", 24), ("ז", 29),
+    ("ח", 13), ("ט", 28), ("י", 11), ("כ", 9), ("ל", 14), ("מ", 17), ("נ", 5),
+    ("ס", 27), ("ע", 10), ("פ", 19), ("צ", 16), ("ק", 8), ("ר", 21), ("ש", 4),
+    ("ת", 54), ("ך", 15), ("ם", 18), ("ן", 12), ("ף", 51), ("ץ", 55),
+]
+# Germanic / Latin-ext: the QWERTZ glyphs the basic US page lacks.
+GERMAN_KEYS = [("ä", 52), ("ö", 51), ("ü", 47), ("ß", 45)]
+
+SCRIPT_TABS = [
+    ("Greek", GREEK_KEYS),
+    ("Russian", RUSSIAN_KEYS),
+    ("Hebrew", HEBREW_KEYS),
+    ("Latin-ext", GERMAN_KEYS),
+]
+
+# HID usage codes for the hex digits used by Unicode-entry macros.
+HEX_HID = {"0": 39, "1": 30, "2": 31, "3": 32, "4": 33, "5": 34, "6": 35,
+           "7": 36, "8": 37, "9": 38,
+           "a": 4, "b": 5, "c": 6, "d": 7, "e": 8, "f": 9}
+HID_U = 24            # 'u' key, for the Linux Ctrl+Shift+U entry method
+
+
+def _unicode_platform():
+    """Which OS Unicode-entry method to use, or None if unsupported here."""
+    if sys.platform.startswith("linux"):
+        return "linux"      # GTK/IBus: hold Ctrl+Shift, press U then 4 hex
+    if sys.platform == "darwin":
+        return "darwin"     # macOS Unicode Hex Input: hold Option, 4 hex
+    return None             # Windows hex-alt is unreliable for these scripts
+
 
 # --------------------------------------------------------------------------- #
 #  Application
@@ -650,6 +749,7 @@ class App(tk.Tk):
         self.dev = KeypadDevice(log=self.log)
         self._phys_buttons = {}     # key_id -> Button
         self._selected_id = None
+        self._destroyed = False
 
         self._build_ui()
         self._drain_ui()
@@ -684,6 +784,14 @@ class App(tk.Tk):
             ttk.Radiobutton(lf, text="Layer %d" % i, value=i,
                             variable=self.layer_var,
                             command=self._on_layer).pack(side="left", padx=4, pady=2)
+
+        uf = ttk.LabelFrame(left, text="Unicode mode")
+        uf.pack(fill="x", pady=(0, 6))
+        self.unicode_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(uf, variable=self.unicode_var,
+                        text="Type glyph via OS (%s)"
+                        % (_unicode_platform() or "unsupported")
+                        ).pack(anchor="w", padx=4, pady=2)
 
         kf = ttk.LabelFrame(left, text="Keys")
         kf.pack(fill="x", pady=(0, 6))
@@ -745,6 +853,11 @@ class App(tk.Tk):
         nb.add(self.tab_mouse, text="Mouse")
         # page index -> KEY_Cur_Page value used by the firmware
         self._page_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
+
+        # Extended-script tabs behave like the KEY page (keyboard scancodes /
+        # Unicode macros), so they fall through to the default page value 1.
+        for title, entries in SCRIPT_TABS:
+            nb.add(self._build_script_tab(nb, entries), text=title)
 
         if not _USB_OK:
             self.log("pyusb not available: %s" % _USB_ERR)
@@ -848,6 +961,22 @@ class App(tk.Tk):
                            lambda it: self._led(it), per_row=1, width=20)
         return tab
 
+    def _build_script_tab(self, nb, entries):
+        tab, body = self._scroll_tab(nb)
+        note = ttk.Label(
+            body, wraplength=520, foreground="#555",
+            text="Sends the national-layout scancode (needs that OS layout "
+                 "active).  Turn on Unicode mode to type the glyph on any layout.")
+        note.pack(anchor="w", padx=6, pady=(6, 2))
+        grid = ttk.Frame(body)
+        grid.pack(anchor="w", padx=6, pady=4)
+        for i, (glyph, scancode) in enumerate(entries):
+            r, c = divmod(i, 11)
+            tk.Button(grid, text=glyph, width=4, height=2,
+                      command=lambda g=glyph, s=scancode: self._script_key(g, s)
+                      ).grid(row=r, column=c, padx=2, pady=2)
+        return tab
+
     # ---- cross-thread UI plumbing ----------------------------------------
     def log(self, msg):
         """Thread-safe: mirror to the terminal logger and the GUI log pane."""
@@ -917,6 +1046,26 @@ class App(tk.Tk):
             return
         if not self.kp.basic_key(code, label):
             self._dropped(label)
+        self._refresh_display()
+
+    def _script_key(self, glyph, scancode):
+        """Extended-script keycap: scancode, or Unicode macro when toggled on."""
+        if self.unicode_var.get():
+            self._unicode_char(glyph)
+        else:
+            self._basic_key(scancode, glyph)
+
+    def _unicode_char(self, glyph):
+        if not self._need_key():
+            return
+        platform = _unicode_platform()
+        if platform is None:
+            self.log("Unicode mode not supported on this OS (%s)." % sys.platform)
+            return
+        if not self.kp.unicode_macro(ord(glyph), platform):
+            self._dropped(glyph)
+        else:
+            self.log("Unicode %s -> U+%04X macro (%s)" % (glyph, ord(glyph), platform))
         self._refresh_display()
 
     def _basic_mod(self, bit, name):
@@ -1111,6 +1260,12 @@ class App(tk.Tk):
         self._dl_result(outcome == "ok")
 
     def destroy(self):
+        # Idempotent: closing the window already calls destroy(), and main()'s
+        # finally calls it again -- without this guard the second call raises
+        # TclError ("application has been destroyed").
+        if self._destroyed:
+            return
+        self._destroyed = True
         try:
             self.dev.close()
         finally:
