@@ -1136,12 +1136,28 @@ def _load_llm_client(config: ModelConfig, Llama: Any,
         return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0), 0
 
 
+def _llm_file_identity(path: str) -> Tuple[Any, ...]:
+    """Cheap content-identity for a model file so a swapped GGUF re-keys.
+
+    Returns a sentinel when the file is absent (download happens later in
+    get_llm) so a not-yet-downloaded model keys deterministically and
+    re-keys automatically once the real file lands on disk.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return (None,)
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 def get_llm(config: Optional[ModelConfig] = None):
     """Lazily initializes the local Qwen2.5-VL model with a bounded LRU cache."""
     config = config or ModelConfig()
     key = (
         config.model_path,
         config.clip_path,
+        _llm_file_identity(config.model_path),
+        _llm_file_identity(config.clip_path),
         config.llm_context_size,
         config.llm_gpu_layers,
         config.llm_main_gpu,

@@ -2949,6 +2949,46 @@ def test_get_llm_cache_key_includes_context_and_gpu_settings(monkeypatch):
     assert third.main_gpu == 1
 
 
+def test_llm_file_identity_changes_with_mtime_and_size(tmp_path):
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"abc")
+    first = import_events._llm_file_identity(str(model))
+    os.utime(model, (1000, 1000))
+    after_touch = import_events._llm_file_identity(str(model))
+    model.write_bytes(b"abcdef")
+    after_grow = import_events._llm_file_identity(str(model))
+
+    assert first != after_touch  # mtime advance re-keys
+    assert after_touch != after_grow  # size change re-keys
+    assert import_events._llm_file_identity(str(tmp_path / "missing.gguf")) == (None,)
+
+
+def test_get_llm_reloads_when_model_file_swapped(tmp_path, monkeypatch):
+    import time
+
+    model = tmp_path / "model.gguf"
+    clip = tmp_path / "clip.gguf"
+    model.write_bytes(b"v1")
+    clip.write_bytes(b"c")
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+
+    cfg = import_events.ModelConfig(model_path=str(model), clip_path=str(clip),
+                                    llm_cache_size=2)
+    first = import_events.get_llm(cfg)
+    again = import_events.get_llm(cfg)
+    assert first is again  # unchanged file reuses the cached client
+
+    time.sleep(0.01)
+    model.write_bytes(b"v2-replaced-gguf")  # same path, new identity
+    swapped = import_events.get_llm(cfg)
+
+    assert swapped is not first  # stale client not reused after swap
+    assert created == [str(model), str(model)]
+
+
 def _install_fake_llama(monkeypatch, created, closed):
     class FakeHandler:
         def __init__(self, clip_model_path, verbose=True):
@@ -3101,6 +3141,8 @@ def test_get_llm_cache_size_zero_evicts_existing_entry(monkeypatch):
             (
                 "A.gguf",
                 "ca.gguf",
+                (None,),  # model file absent -> sentinel identity
+                (None,),  # clip file absent -> sentinel identity
                 import_events.DEFAULT_LLM_CONTEXT_SIZE,
                 import_events.DEFAULT_LLM_GPU_LAYERS,
                 import_events.DEFAULT_LLM_MAIN_GPU,

@@ -169,7 +169,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cache-01 | open | med | import_events.py:414 — _LLM_CACHE cache keys ignore model file identity, so replacing a GGUF at the same path can reuse a stale loaded model. Include digest/mtime identity or clear on verification changes. | key shape + invalidation
 
 ## memory and cpu management
 
