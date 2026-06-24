@@ -2589,6 +2589,39 @@ def test_download_to_cache_keeps_part_on_keyboard_interrupt(tmp_path, monkeypatc
     assert (dest.parent / ".m.gguf.part").read_bytes() == b"partial"
 
 
+def test_stream_download_raises_and_keeps_part_on_stall(tmp_path):
+    part = tmp_path / ".m.gguf.part"
+    response = _FakeDownloadResponse([b"a", b"b", b"c"])
+    # Clock jumps past the stall window between the first received chunk and
+    # the next read, simulating a trickle that delivers tiny chunks too slowly.
+    ticks = iter([0.0, 1.0, 1.0 + import_events.DOWNLOAD_STALL_SECONDS + 1])
+
+    with pytest.raises(TimeoutError, match="stalled"):
+        import_events._stream_download(
+            response, part, "wb", 0, monotonic=lambda: next(ticks))
+
+    assert part.read_bytes() == b"a"  # bytes received before the stall are kept
+
+
+def test_download_to_cache_keeps_part_when_stream_stalls(tmp_path, monkeypatch):
+    dest = tmp_path / "cache" / "m.gguf"
+
+    monkeypatch.setattr(import_events, "urlopen",
+                        lambda *_a, **_k: _FakeDownloadResponse([b"x"]))
+
+    def stalling_stream(_response, part, _mode, _downloaded, monotonic=None):
+        part.write_bytes(b"partial")  # bytes received before the stall
+        raise TimeoutError("Download stalled (overall stall guard).")
+
+    monkeypatch.setattr(import_events, "_stream_download", stalling_stream)
+
+    with pytest.raises(TimeoutError, match="stalled"):
+        import_events._download_to_cache("http://example/model", str(dest))
+
+    assert not dest.exists()  # nothing published
+    assert (dest.parent / ".m.gguf.part").read_bytes() == b"partial"  # retained for resume
+
+
 def test_download_to_cache_resumes_existing_part(tmp_path, monkeypatch):
     dest = tmp_path / "cache" / "m.gguf"
     dest.parent.mkdir()

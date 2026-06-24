@@ -157,7 +157,6 @@ ie-watch-01 | open | med | import_events.py:1129 — _run_llm has no per-file ti
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-time-01 | open | low | import_events.py:586 — download timeout is per socket operation, not an overall monotonic deadline, so slow trickle responses can run indefinitely while still resetting the timeout. Add total deadline/stall elapsed checks with time.monotonic(). | monotonic deadline
 lq-time-01 | open | med | link_queue.py:1990 — worker claim deadlines, failure cooldowns, and shutdown joins use time.time(), so wall-clock jumps can make waits expire early or stall. Use time.monotonic() for elapsed deadlines and keep wall time only for display timestamps. | monotonic deadline
 
 ## platform

@@ -44,6 +44,11 @@ LLM_MLOCK_MEMORY_FRACTION = 0.70
 DOWNLOAD_CHUNK_SIZE = 1 << 20
 DOWNLOAD_PROGRESS_BYTES = 256 << 20
 DOWNLOAD_TIMEOUT_SECONDS = 30
+# Overall stall guard: the per-socket timeout above resets on every read, so a
+# slow trickle that keeps delivering tiny chunks never trips it. Abort when no
+# new bytes land for this long. 300s tolerates brief CDN hiccups on a ~4GB pull
+# while still bounding a wedged transfer.
+DOWNLOAD_STALL_SECONDS = 300
 OCR_TIMEOUT_SECONDS = 120
 LLM_RESPONSE_LOG_EXCERPT_CHARS = 160
 DEFAULT_LANGUAGE = "auto"
@@ -968,24 +973,42 @@ def _publish_complete_part(part: Path, path: Path) -> None:
     logger.info("Cached %s (%d bytes).", path, _path_size(path))
 
 
-def _stream_download(response: Any, part: Path, mode: str, downloaded: int) -> int:
+def _stream_download(
+    response: Any,
+    part: Path,
+    mode: str,
+    downloaded: int,
+    monotonic: Any = time.monotonic,
+) -> int:
     total = _content_range_total(response.headers.get("Content-Range"))
     if total is None:
         length = response.headers.get("Content-Length")
         total = downloaded + int(length) if length and length.isdigit() else None
 
     next_report = downloaded + DOWNLOAD_PROGRESS_BYTES
+    last_progress_at = monotonic()
     with open(part, mode) as handle:
         while True:
             chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+            now = monotonic()
+            _guard_download_stall(part, now, last_progress_at)
             if not chunk:
                 break
             handle.write(chunk)
             downloaded += len(chunk)
+            last_progress_at = now
             if downloaded >= next_report:
                 _log_download_progress(part, downloaded, total)
                 next_report = downloaded + DOWNLOAD_PROGRESS_BYTES
     return downloaded
+
+
+def _guard_download_stall(part: Path, now: float, last_progress_at: float) -> None:
+    if now - last_progress_at > DOWNLOAD_STALL_SECONDS:
+        raise TimeoutError(
+            f"Download stalled for {part}: no progress for "
+            f"{DOWNLOAD_STALL_SECONDS}s (overall stall guard)."
+        )
 
 
 def _download_to_cache(url: str, path_str: str) -> None:
