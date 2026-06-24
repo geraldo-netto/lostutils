@@ -1545,8 +1545,12 @@ def plan_moves(
     callers that forget (oze-decl-02).
 
     Returning an iterator means the plan can be inspected (or unit-tested)
-    without running any moves, and a million-file run never materialises the
-    full plan in memory (oze-scal-01).
+    without running any moves, and moves stream out one at a time rather than
+    buffering the executed plan. The serial collision pre-pass does hold an
+    O(files) list of ``(source, ext_dir)`` pairs — unavoidable for a global
+    cross-worker collision view — but it no longer retains head bytes for the
+    whole tree: those are evicted as each ext is resolved (oze-scal-01), so peak
+    head_cache RSS tracks the in-flight move window, not the file count.
     """
     if ctx is None:
         ctx = _DEFAULT_SNIFF_CTX
@@ -1611,9 +1615,19 @@ def _preplan_resolve_collisions(
     """
     # Compute the target ext-dir for every file once; build a set of every
     # ancestor path that any plan needs to exist as a directory.
-    pairs: list[tuple[Path, Path]] = [
-        (f, root / resolve_real_extension(f, ctx=ctx)) for f in files
-    ]
+    #
+    # oze-scal-01: the global collision pass must know every file's resolved
+    # ext, but nothing downstream re-sniffs (choose()/move_file work off the
+    # ext-dir computed here). Evict each file's head bytes as soon as the ext is
+    # captured so the pre-pass does NOT prime head_cache for the whole tree —
+    # that restores the bounded per-window cache the drain-side pop assumes and
+    # keeps peak RSS off the file count.
+    pairs: list[tuple[Path, Path]] = []
+    for f in files:
+        ext_dir = root / resolve_real_extension(f, ctx=ctx)
+        pairs.append((f, ext_dir))
+        if ctx.head_cache is not None:
+            ctx.head_cache.pop(f, None)
     needed_dirs: set[Path] = set()
     for _, ext_dir in pairs:
         cur = ext_dir
@@ -1694,11 +1708,9 @@ def _resolve_one_planning_collision(
         "ancestor; renamed to %s before any worker starts",
         source, candidate,
     )
-    # oze-conc-01: re-key the head_cache entry from the original source to the
-    # renamed candidate so the worker's later `resolve_real_extension` calls
-    # don't re-open the file AND no stale entry survives under the old key.
-    if ctx.head_cache is not None and source in ctx.head_cache:
-        ctx.head_cache[candidate] = ctx.head_cache.pop(source)
+    # oze-scal-01: no head_cache re-key needed — the caller evicts each file's
+    # head bytes as soon as its ext is resolved (the move path never re-sniffs),
+    # so there is no entry under the old key to carry over.
     return candidate
 
 

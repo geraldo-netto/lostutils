@@ -46,7 +46,6 @@ ie-perf-02 | open | med | import_events.py:1257 — extract_from_pdf renders and
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-scal-01 | open | med | organize_by_extension.py:1527 — _preplan_resolve_collisions materializes list(files) and builds pairs with a resolve_real_extension call for EVERY file up front, priming head_cache for the whole tree before the first move and contradicting the per-window pop and the streaming docstring. Restrict the pre-pass to needed_dirs members, or stream it in windows. | streaming claim vs reality
 
 ## N+1 / call efficiency
 

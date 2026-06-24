@@ -1088,9 +1088,11 @@ class PlanMovesTests(unittest.TestCase):
             # Reservations recorded in manager.
             self.assertIn(root / "txt" / "a00000", mgr.state_cache)
 
-    def test_plan_moves_keeps_head_cache_until_drain(self):
-        # oze-cmplx-01: plan_moves no longer pops head_cache; the entries are
-        # primed by the scan stage and only the drain side removes them.
+    def test_plan_moves_evicts_head_cache_after_resolving(self):
+        # oze-scal-01: the serial collision pre-pass resolves each file's ext
+        # then evicts its head bytes, so plan_moves does NOT leave head_cache
+        # primed for the whole tree. (Nothing downstream re-sniffs; the
+        # drain-side pop becomes a harmless no-op for already-evicted entries.)
         with TemporaryDirectory() as d:
             root = Path(d)
             files = [root / "a.pdf", root / "b.pdf"]
@@ -1103,7 +1105,7 @@ class PlanMovesTests(unittest.TestCase):
             mgr = BucketManager(root=root)
             list(plan_moves(root, sorted(files), mgr, ctx=ctx))
             for p in files:
-                self.assertIn(p, head_cache)
+                self.assertNotIn(p, head_cache)
 
 
 class HeadCacheTests(unittest.TestCase):
@@ -2446,10 +2448,11 @@ class SourceCollisionResolution(unittest.TestCase):
                 _oze._resolve_one_planning_collision(link, ctx, preview=False))
             self.assertTrue(link.is_symlink())
 
-    def test_planning_collision_migrates_head_cache_no_stale(self):
-        # oze-conc-01: when a planning collision renames a source, its
-        # head_cache entry must move to the renamed path — no stale entry
-        # keyed on the original source may survive.
+    def test_planning_collision_leaves_head_cache_to_caller(self):
+        # oze-scal-01: _resolve_one_planning_collision no longer re-keys
+        # head_cache on rename — eviction is the pre-pass's job (it drops each
+        # file's head bytes once the ext is resolved, since the move path never
+        # re-sniffs). Called in isolation the helper leaves the cache untouched.
         with TemporaryDirectory() as d:
             root = Path(d)
             source = root / "avi"
@@ -2457,12 +2460,11 @@ class SourceCollisionResolution(unittest.TestCase):
             cache: dict = {}
             ctx = _oze.SniffContext(sniff=True, head_cache=cache)
             _oze.read_head_bytes(source, head_cache=cache)
-            self.assertIn(source, cache)
             candidate = _oze._resolve_one_planning_collision(
                 source, ctx, preview=False)
             self.assertIsNotNone(candidate)
-            self.assertNotIn(source, cache)       # no stale entry
-            self.assertIn(candidate, cache)       # migrated
+            self.assertIn(source, cache)          # helper left the seed alone
+            self.assertNotIn(candidate, cache)    # and added no new key
 
     def test_planning_collision_head_cache_clean_after_full_run(self):
         # oze-conc-01 end-to-end: after organize() the head_cache holds no
@@ -3303,20 +3305,21 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             self.assertIn(root / "avi", paths)
             self.assertIn(root / "avi" / "inner.bin", paths)
 
-    def test_preplan_moves_head_cache_entry(self):
+    def test_preplan_evicts_head_cache_on_rename(self):
+        # oze-scal-01: the pre-pass evicts each file's head bytes once its ext is
+        # resolved, so a renamed-aside source leaves NO head_cache entry under
+        # either the old or the new path (the move path never re-sniffs).
         with TemporaryDirectory() as d:
             root = Path(d)
             (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             cache: dict = {}
             ctx = _oze.SniffContext(sniff=True, head_cache=cache,
                                     extra_zip_family=frozenset())
-            # Seed cache with the source's head bytes.
             cache[root / "avi"] = b"RIFF\x00\x00\x00\x00AVI "
             result = _oze._preplan_resolve_collisions(root, [root / "avi"], ctx)
-            # New source path should now hold the head_cache entry.
             new_path = result[0][0]
             self.assertNotEqual(new_path, root / "avi")
-            self.assertIn(new_path, cache)
+            self.assertNotIn(new_path, cache)
             self.assertNotIn(root / "avi", cache)
 
 
@@ -3644,6 +3647,22 @@ def test_preplan_reserves_bucket_level_blocker(tmp_path):
     renamed = [p for p in sources if p.parent == blocker.parent]
     assert renamed and renamed[0].name.startswith("a00000.collision"), \
         "blocker not renamed to a .collision sibling in place"
+
+
+def test_preplan_evicts_head_bytes_after_resolving(tmp_path):
+    """oze-scal-01: the collision pre-pass must not leave head bytes primed for
+    the whole tree — each file's head bytes are evicted once its ext is known,
+    so peak head_cache tracks the in-flight window, not the file count."""
+    root = tmp_path
+    files = []
+    for i in range(5):
+        f = root / f"f{i}.bin"
+        f.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(64))
+        files.append(f)
+    head_cache: dict = {}
+    ctx = oze.SniffContext(sniff=True, head_cache=head_cache)
+    oze._preplan_resolve_collisions(root, sorted(files), ctx)
+    assert head_cache == {}, "preplan primed head_cache for the whole tree"
 
 
 def test_preplan_leaves_non_blocker_untouched(tmp_path):
