@@ -164,7 +164,6 @@ lq-time-01 | open | med | link_queue.py:1990 — worker claim deadlines, failure
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-plat-01 | open | low | import_events.py:1027 — OCR assumes a `tesseract` executable name on PATH and POSIX-like process behavior; Windows/package-manager installs may use a different binary path. Add a configurable executable path and startup validation. | external binary portability
 
 ## caching strategy
 
