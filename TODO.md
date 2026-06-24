@@ -60,7 +60,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-conc-01 | open | med | import_events.py:1353 — atomic replace protects a single writer from partial files but concurrent runs targeting the same output still race and the last writer silently wins. Add an advisory output lock or refuse when a sibling lock exists. | shared output race
 lq-conc-01 | open | low | link_queue.py:1380 — _note_immediate_depth samples depth = _immediate_q.qsize() BEFORE taking _immediate_lock, then makes the edge-trigger warn decision under the lock using that pre-lock sample; two dispatchers can sample different depths and interleave so the latched over/under transition disagrees with the true depth. Sample qsize inside the locked region. | edge-trigger sample/decision race
-oze-conc-01 | open | high | organize_by_extension.py:1537-1542 — _preplan_resolve_collisions builds needed_dirs only from each file's ext-dir ancestor chain (stops at <root>/<ext>), never the bucket dir <root>/<ext>/<prefix>NNNNN/ chosen later by choose(); a source whose own path equals a bucket dir another file needs is resolved at runtime inside move_file -> _resolve_source_collision, which can rename a DIFFERENT worker's in-flight source — the cross-worker rename race the preplan (oze-rel-14) claims to close. Reserve bucket-level blockers in the serial preplan. | bucket dirs chosen post-preplan, invisible to the serial pass
 
 ## multithreading
 

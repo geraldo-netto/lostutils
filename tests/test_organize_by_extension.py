@@ -3626,6 +3626,41 @@ def test_move_worker_reports_actual_dest_from_move_file(tmp_path, monkeypatch):
     assert destination == landed, "worker logged precomputed dest, not real landing"
 
 
+def test_preplan_reserves_bucket_level_blocker(tmp_path):
+    """oze-conc-01: a source occupying a bucket-dir path (root/<ext>/<prefix>NNNNN)
+    is renamed aside in the serial preplan, not left for a racing worker to
+    resolve mid-flight."""
+    root = tmp_path
+    (root / "avi").mkdir()
+    blocker = root / "avi" / "a00000"   # regular file at a bucket-dir path
+    blocker.write_bytes(b"x")
+    mover = root / "a_movie.avi"        # needs root/avi (prefix 'a')
+    mover.write_bytes(b"y")
+    ctx = oze.SniffContext(sniff=False, head_cache={})
+    pairs = oze._preplan_resolve_collisions(root, sorted([blocker, mover]), ctx)
+    sources = {src for src, _ in pairs}
+    assert blocker not in sources, "bucket-dir blocker left in plan unrenamed"
+    assert not blocker.exists(), "bucket-dir blocker not renamed on disk"
+    renamed = [p for p in sources if p.parent == blocker.parent]
+    assert renamed and renamed[0].name.startswith("a00000.collision"), \
+        "blocker not renamed to a .collision sibling in place"
+
+
+def test_preplan_leaves_non_blocker_untouched(tmp_path):
+    """oze-conc-01 guard: a bucket-shaped name NOT under a needed ext-dir is not
+    renamed."""
+    root = tmp_path
+    (root / "avi").mkdir()
+    plain = root / "avi" / "notabucket.txt"  # not bucket-pattern shaped
+    plain.write_bytes(b"x")
+    mover = root / "a_movie.avi"
+    mover.write_bytes(b"y")
+    ctx = oze.SniffContext(sniff=False, head_cache={})
+    pairs = oze._preplan_resolve_collisions(root, sorted([plain, mover]), ctx)
+    assert plain in {src for src, _ in pairs}, "non-bucket file wrongly renamed"
+    assert plain.exists()
+
+
 def test_parse_extra_zip_family_canonicalises_aliases():
     """oze-arch-01: an aliased synonym is stored canonical so it matches the
     declared_canon resolve_real_extension compares against."""

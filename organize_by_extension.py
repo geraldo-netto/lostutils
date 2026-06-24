@@ -1622,12 +1622,34 @@ def _preplan_resolve_collisions(
             cur = cur.parent
     rename_map: dict[Path, Path] = {}
     for source, _ext_dir in pairs:
-        if source not in needed_dirs:
+        if not _blocks_a_needed_dir(source, needed_dirs):
             continue
         candidate = _resolve_one_planning_collision(source, ctx, preview)
         if candidate is not None:
             rename_map[source] = candidate
     return [(rename_map.get(src, src), ext_dir) for src, ext_dir in pairs]
+
+
+def _blocks_a_needed_dir(source: Path, needed_dirs: set[Path]) -> bool:
+    """True when ``source``'s own path occupies a directory another file needs.
+
+    Two shapes block bucket creation:
+
+    * **ext-dir** (oze-rel-14): ``source`` IS a needed ``root/<ext>`` dir.
+    * **bucket-dir** (oze-conc-01): ``source`` sits at ``root/<ext>/<prefix>NNNNN``
+      — a bucket dir whose index ``choose()`` picks *after* this serial pass, so
+      it's invisible to the ext-only ``needed_dirs`` set. Detect it structurally:
+      the parent is a needed ext-dir and the name matches the bucket pattern.
+      Reserving it here keeps the runtime ``_resolve_source_collision`` from
+      renaming a different worker's in-flight source (the cross-worker race the
+      preplan exists to close).
+    """
+    if source in needed_dirs:
+        return True
+    return (
+        source.parent in needed_dirs
+        and BUCKET_NAME_PATTERN.match(source.name) is not None
+    )
 
 
 def _resolve_one_planning_collision(
