@@ -3565,6 +3565,25 @@ def test_cross_device_late_interrupt_keeps_completed_target(tmp_path, monkeypatc
     assert not src.exists() and dst.read_bytes() == b"payload"
 
 
+def test_cross_device_source_unlink_failure_surfaced_not_raised(tmp_path, monkeypatch, caplog):
+    """oze-robust-01: a failed source removal after a committed cross-device
+    copy is logged loudly (duplicate left) and does NOT raise — the target is
+    complete, so the move succeeded."""
+    src = tmp_path / "src.bin"; src.write_bytes(b"payload")
+    dst = tmp_path / "dst.bin"
+
+    def boom(path):
+        raise OSError(errno.EROFS, "read-only filesystem")
+    monkeypatch.setattr(oze.os, "unlink", boom)  # only the trailing source unlink runs here
+
+    with caplog.at_level("WARNING"):
+        oze._move_cross_device(src, dst)  # must not raise
+    assert dst.read_bytes() == b"payload", "target copy not committed"
+    assert src.exists(), "source removed despite unlink failure"
+    assert any("duplicate left" in r.getMessage() for r in caplog.records), \
+        "orphaned duplicate not surfaced"
+
+
 def test_move_file_rejects_symlink_source(tmp_path):
     """oze-rel-01: a symlink handed straight to move_file is refused, never
     hardlinked into the bucket (the scanner refuses to follow symlinks)."""

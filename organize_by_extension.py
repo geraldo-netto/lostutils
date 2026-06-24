@@ -1351,7 +1351,20 @@ def _move_cross_device(source: Path, target: Path) -> None:
                     leftover, unlink_exc,
                 )
         raise
-    os.unlink(source)
+    # oze-robust-01: the copy is committed at `target`; source removal has no
+    # rollback (cross-fs target is an independent copy, not a hardlink). If the
+    # unlink fails the file exists at BOTH paths as full copies — surface it
+    # loudly instead of as a bare OSError so the orphaned duplicate is visible.
+    # The move itself succeeded, so don't re-raise; an idempotent re-run reclaims
+    # the source via the same-content check above.
+    try:
+        os.unlink(source)
+    except OSError as unlink_exc:
+        logger.warning(
+            "moved %s -> %s but could not remove source (%s); "
+            "duplicate left at %s — remove it manually",
+            source, target, unlink_exc, source,
+        )
 
 
 def _walk_prunable_dirs(
