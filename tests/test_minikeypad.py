@@ -1,14 +1,26 @@
 #!/usr/bin/env python3
-"""Unit tests for minikeypad's pure working-buffer + download assembly.
+"""Unit + fuzz tests for minikeypad.
 
-No Tk window and no USB device are created: every test drives KeyParam, the
-device-independent buffer packer, directly.
+The pure working-buffer/download logic and the install helpers run without any
+GUI or USB hardware (the device layer is exercised through a fake `usb`
+module).  The App tests need a Tk display; they are skipped automatically when
+none is available.
 """
+
+import random
+import sys
+import time
+import types
+
+import pytest
 
 import minikeypad
 from minikeypad import KeyParam, MAX_KBD_GROUPS
 
 
+# --------------------------------------------------------------------------- #
+#  helpers
+# --------------------------------------------------------------------------- #
 def _select(kp, key_id=1):
     assert kp.select_physical_key(key_id) is True
     return kp
@@ -20,9 +32,9 @@ def _built(kp):
     return result
 
 
-# --------------------------------------------------------------------------- #
-#  selection / clearing
-# --------------------------------------------------------------------------- #
+# ===========================================================================
+#  KeyParam — selection / clearing
+# ===========================================================================
 def test_select_physical_key_disabled_on_led_page():
     kp = KeyParam()
     kp.KEY_Cur_Page = 4
@@ -38,12 +50,12 @@ def test_key_cleared_resets_selection_and_buffer():
     assert kp.build_download_reports() is None
 
 
-# --------------------------------------------------------------------------- #
-#  keyboard packing
-# --------------------------------------------------------------------------- #
+# ===========================================================================
+#  KeyParam — keyboard packing
+# ===========================================================================
 def test_basic_key_packs_code_and_advances_pointer():
     kp = _select(KeyParam())
-    kp.basic_key(4, "A")
+    assert kp.basic_key(4, "A") is True
     assert kp.data[5] == 4
     assert kp.KeyChar[0] == "A"
     assert kp.KEY_Char_Num == 7
@@ -58,13 +70,25 @@ def test_basic_modifier_sets_bit_on_current_char():
     assert kp.data[4] == 1                 # Ctrl modifier byte for char 0
 
 
+def test_basic_key_masks_oversized_code():
+    kp = _select(KeyParam())
+    kp.basic_key(0x1FF, "x")
+    assert kp.data[5] == 0xFF
+
+
+def test_basic_key_refuses_when_buffer_full():
+    kp = _select(KeyParam())
+    kp.KEY_Char_Num = len(kp.data)        # past the end
+    assert kp.basic_key(4, "A") is False
+
+
 def test_kbd_download_reports_round_trip():
     kp = _select(KeyParam())
     kp.basic_key(4, "A")
     reports, flash, truncated = _built(kp)
     assert flash == "kbd"
     assert truncated is False
-    # one group -> probe (b=0) + the real group (b=1) + flush handled by caller
+    # one group -> probe (b=0) + the real group (b=1); flush handled by caller
     assert len(reports) == 2
     assert reports[0][3] == 0              # group index b
     assert reports[1][3] == 1
@@ -78,32 +102,91 @@ def test_kbd_download_truncates_oversized_macro():
         kp.basic_key(4, "A")
     reports, _flash, truncated = _built(kp)
     assert truncated is True
-    # groups clamped to MAX_KBD_GROUPS -> MAX_KBD_GROUPS+1 reports (b=0..MAX)
     assert len(reports) == MAX_KBD_GROUPS + 1
     assert all(r[2] == MAX_KBD_GROUPS for r in reports)
 
 
-# --------------------------------------------------------------------------- #
-#  multimedia / mouse / led
-# --------------------------------------------------------------------------- #
+# ===========================================================================
+#  KeyParam — fun page / shift
+# ===========================================================================
+def test_fun_combo_applies_each_modifier():
+    kp = _select(KeyParam())
+    kp.fun_combo([(1, "Ctrl"), (4, "Alt")])
+    assert kp.FunKeyChar[0] == "Ctrl"
+    assert kp.FunKeyChar[1] == "Alt"
+
+
+def test_shift_and_packs_shift_bit_and_code():
+    kp = _select(KeyParam())
+    assert kp.shift_and(30, "!") is True
+    assert kp.data[4] & 2                  # shift bit on the modifier byte
+    assert kp.data[5] == 30
+
+
+def test_shift_and_advances_when_slot_used():
+    kp = _select(KeyParam())
+    kp.shift_and(30, "!")
+    before = kp.KEY_Char_Num
+    kp.shift_and(31, "@")
+    assert kp.KEY_Char_Num == before + 2
+
+
+def test_shift_and_refuses_when_buffer_full():
+    kp = _select(KeyParam())
+    kp.KEY_Char_Num = len(kp.data)
+    assert kp.shift_and(30, "!") is False
+
+
+# ===========================================================================
+#  KeyParam — multimedia / mouse / led
+# ===========================================================================
 def test_multimedia_selects_value_by_report_id():
     kp = _select(KeyParam())
     kp.ReportID = 0
-    kp.multimedia("Vol +", (0, 2), (0, 64), (0, 233))
+    assert kp.multimedia("Vol +", (0, 2), (0, 64), (0, 233)) is True
     reports, flash, _ = _built(kp)
     assert flash == "kbd"
     assert reports[0][2] == 2             # rid0 value
     assert kp.data[KeyParam.KeyType_Num] & 0xF == 2
 
 
+def test_multimedia_report_id_two_and_other():
+    kp = _select(KeyParam())
+    kp.ReportID = 2
+    kp.multimedia("Play", (0, 64), (1, 4), (0, 205))
+    assert kp.data[kp.KEY_Char_Num + 1] == 4   # rid2 offset/value
+    kp2 = _select(KeyParam())
+    kp2.ReportID = 5
+    kp2.multimedia("Play", (0, 64), (1, 4), (0, 205))
+    assert kp2.data[kp2.KEY_Char_Num] == 205   # "other" branch
+
+
+def test_multimedia_refuses_out_of_range():
+    kp = _select(KeyParam())
+    kp.KEY_Char_Num = len(kp.data) - 1
+    assert kp.multimedia("x", (1, 9), (1, 9), (1, 9)) is False
+
+
 def test_mouse_masks_all_bytes_to_one_byte():
     kp = _select(KeyParam())
-    kp.mouse("Wheel -", 0, 0, 0, 0x1FF, 0x102)   # over-wide values
+    assert kp.mouse("Wheel -", 0, 0, 0, 0x1FF, 0x102) is True
     reports, flash, _ = _built(kp)
     assert flash == "kbd"
     assert kp.data[8] == 0xFF                      # b3 masked
     assert kp.data[9] == 0x02                      # b4 masked
     assert reports[0][5] == 0xFF
+
+
+def test_mouse_without_b4():
+    kp = _select(KeyParam())
+    assert kp.mouse("L Click", 1, 0, 0, 0) is True
+    assert kp.data[5] == 1
+
+
+def test_mouse_refuses_out_of_range():
+    kp = _select(KeyParam())
+    kp.KEY_Char_Num = len(kp.data) - 2
+    assert kp.mouse("x", 1, 1, 1, 1, 1) is False
 
 
 def test_led_uses_led_flash_and_mode_byte():
@@ -127,11 +210,27 @@ def test_layer_switch_report_prepended_when_report_id_nonzero():
     assert reports[1][1] == ((3 << 4) | (kp.data[KeyParam.KeyType_Num])) & 0xFF
 
 
-# --------------------------------------------------------------------------- #
-#  display helpers
-# --------------------------------------------------------------------------- #
+def test_swlayer_defaults_layer_to_one_when_zero():
+    kp = _select(KeyParam())
+    kp.KEY_Cur_Layer = 0
+    assert kp._swlayer_buf()[1] == 1
+
+
+def test_build_returns_none_for_unknown_kind():
+    kp = _select(KeyParam())
+    kp.data[KeyParam.KeyType_Num] = 4                # nibble 4 -> no builder
+    assert kp.build_download_reports() is None
+
+
+# ===========================================================================
+#  KeyParam — display helpers
+# ===========================================================================
 def test_key_text_empty_without_selection():
     assert KeyParam().key_text() == ""
+
+
+def test_fun_text_empty_without_selection():
+    assert KeyParam().fun_text() == ""
 
 
 def test_key_text_joins_assigned_labels():
@@ -140,14 +239,52 @@ def test_key_text_joins_assigned_labels():
     assert kp.key_text() == "A"
 
 
-def test_flash_buf_mapping():
-    assert minikeypad.App._flash_buf("kbd")[1] == 0xAA
-    assert minikeypad.App._flash_buf("led")[1] == 0xA1
+def test_fun_text_joins_modifier_names():
+    kp = _select(KeyParam())
+    kp.fun_combo([(1, "Ctrl"), (4, "Alt")])
+    assert kp.fun_text() == "Ctrl Alt"
 
 
-# --------------------------------------------------------------------------- #
-#  pyusb auto-install (mocked: never touches the network)
-# --------------------------------------------------------------------------- #
+# ===========================================================================
+#  fuzz — random op streams must never raise or emit out-of-range bytes
+# ===========================================================================
+def test_fuzz_keyparam_operations_stay_in_bounds():
+    rnd = random.Random(20240625)
+    kp = _select(KeyParam())
+    for _ in range(6000):
+        op = rnd.randrange(8)
+        if op == 0:
+            kp.select_physical_key(rnd.randint(1, 18))
+        elif op == 1:
+            kp.basic_key(rnd.randint(0, 511), "x")
+        elif op == 2:
+            kp.basic_modifier(rnd.choice([1, 2, 4, 8]), "m")
+        elif op == 3:
+            kp.fun_combo(rnd.choice(minikeypad.FUN_MODS)[1])
+        elif op == 4:
+            kp.shift_and(rnd.randint(0, 511), "s")
+        elif op == 5:
+            name, r0, r2, ro = rnd.choice(minikeypad.MULTIMEDIA)
+            kp.multimedia(name, r0, r2, ro)
+        elif op == 6:
+            entry = rnd.choice(minikeypad.MOUSE)
+            kp.mouse(entry[0], *entry[1])
+        else:
+            kp.key_cleared()
+            kp.select_physical_key(rnd.randint(1, 18))
+        kp.ReportID = rnd.choice([0, 2, 5])
+        result = kp.build_download_reports()
+        if result is not None:
+            reports, flash, _trunc = result
+            assert flash in ("kbd", "led")
+            for r in reports:
+                assert len(r) == 8
+                assert all(0 <= b <= 255 for b in r)
+
+
+# ===========================================================================
+#  install helpers (mocked: never touch the network)
+# ===========================================================================
 def test_pip_install_uses_argv_list_no_shell(monkeypatch):
     seen = {}
 
@@ -190,3 +327,659 @@ def test_ensure_pyusb_returns_false_when_install_fails(monkeypatch):
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
     monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: False)
     assert minikeypad._ensure_pyusb() is False
+
+
+def test_ensure_pyusb_success_reimports(monkeypatch):
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: True)
+    monkeypatch.setitem(sys.modules, "usb", types.ModuleType("usb"))
+    monkeypatch.setitem(sys.modules, "usb.core", types.ModuleType("usb.core"))
+    monkeypatch.setitem(sys.modules, "usb.util", types.ModuleType("usb.util"))
+    assert minikeypad._ensure_pyusb() is True
+    assert minikeypad._USB_OK is True
+
+
+def test_ensure_pyusb_install_then_import_fails(monkeypatch):
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: True)
+    monkeypatch.setitem(sys.modules, "usb", None)   # forces ImportError
+    assert minikeypad._ensure_pyusb() is False
+
+
+# ===========================================================================
+#  KeypadDevice — exercised through a fake `usb` module
+# ===========================================================================
+class FakeEP:
+    def __init__(self, addr=0x81, n=9):
+        self.bEndpointAddress = addr
+        self._n = n
+        self.written = []
+
+    def write(self, data, timeout):
+        self.written.append((bytes(data), timeout))
+        return self._n
+
+
+class FakeIntf:
+    def __init__(self, num=1):
+        self.bInterfaceNumber = num
+
+
+class FakeUsbDev:
+    def __init__(self, *, kernel_active=True, cfg=None, detach_exc=None,
+                 cfg_exc=None, ctrl_n=9):
+        self.kernel_active = kernel_active
+        self.detached = self.attached = False
+        self.detach_exc = detach_exc
+        self.cfg_exc = cfg_exc
+        self.cfg = cfg if cfg is not None else {}
+        self.ctrl_n = ctrl_n
+        self.ctrl_calls = []
+
+    def is_kernel_driver_active(self, _i):
+        return self.kernel_active
+
+    def detach_kernel_driver(self, _i):
+        if self.detach_exc:
+            raise self.detach_exc
+        self.detached = True
+
+    def attach_kernel_driver(self, _i):
+        self.attached = True
+
+    def get_active_configuration(self):
+        if self.cfg_exc:
+            raise self.cfg_exc
+        return self.cfg
+
+    def ctrl_transfer(self, *a):
+        self.ctrl_calls.append(a)
+        return self.ctrl_n
+
+
+def make_usb(find_dev=None, ep=None):
+    ns = types.SimpleNamespace()
+
+    class USBError(Exception):
+        pass
+
+    core = types.SimpleNamespace()
+    core.USBError = USBError
+    core._find_dev = find_dev
+    core.find = lambda **kw: core._find_dev
+    util = types.SimpleNamespace()
+    util.ENDPOINT_OUT = 0
+    util.endpoint_direction = lambda addr: 0
+    util.find_descriptor = lambda intf, custom_match=None: ep
+    util.disposed = []
+    util.dispose_resources = util.disposed.append
+    ns.core = core
+    ns.util = util
+    return ns, USBError
+
+
+def _install_usb(monkeypatch, usb):
+    monkeypatch.setattr(minikeypad, "usb", usb, raising=False)
+    monkeypatch.setattr(minikeypad, "_USB_OK", True)
+
+
+def test_connect_returns_false_without_pyusb(monkeypatch):
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    assert minikeypad.KeypadDevice().connect() is False
+
+
+def test_connect_idempotent(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    d = minikeypad.KeypadDevice()
+    d.dev = object()
+    assert d.connect() is True
+
+
+def test_connect_no_device(monkeypatch):
+    usb, _ = make_usb(find_dev=None)
+    _install_usb(monkeypatch, usb)
+    assert minikeypad.KeypadDevice().connect() is False
+
+
+def test_connect_success_with_endpoint(monkeypatch):
+    ep = FakeEP()
+    dev = FakeUsbDev(cfg={(1, 0): FakeIntf(1)})
+    usb, _ = make_usb(find_dev=dev, ep=ep)
+    _install_usb(monkeypatch, usb)
+    logs = []
+    d = minikeypad.KeypadDevice(log=logs.append)
+    assert d.connect() is True
+    assert d.connected and d.ep_out is ep
+    assert dev.detached is True
+    assert any("Connected" in m for m in logs)
+
+
+def test_connect_interface_fallback(monkeypatch):
+    dev = FakeUsbDev(cfg={(0, 0): FakeIntf(0)})        # no (1,0) -> fallback
+    usb, _ = make_usb(find_dev=dev, ep=FakeEP())
+    _install_usb(monkeypatch, usb)
+    d = minikeypad.KeypadDevice()
+    assert d.connect() is True
+    assert d.intf is not None
+    assert d.intf.bInterfaceNumber == 0
+
+
+def test_connect_control_path_when_no_endpoint(monkeypatch):
+    dev = FakeUsbDev(cfg={(1, 0): FakeIntf(1)})
+    usb, _ = make_usb(find_dev=dev, ep=None)
+    _install_usb(monkeypatch, usb)
+    d = minikeypad.KeypadDevice()
+    assert d.connect() is True
+    assert d.ep_out is None
+
+
+def test_detach_not_implemented_is_ignored(monkeypatch):
+    dev = FakeUsbDev(cfg={(1, 0): FakeIntf(1)}, detach_exc=NotImplementedError())
+    usb, _ = make_usb(find_dev=dev, ep=FakeEP())
+    _install_usb(monkeypatch, usb)
+    d = minikeypad.KeypadDevice()
+    assert d.connect() is True
+    assert d._detached is False
+
+
+def test_detach_usberror_logged(monkeypatch):
+    usb, USBError = make_usb(ep=FakeEP())
+    dev = FakeUsbDev(cfg={(1, 0): FakeIntf(1)}, detach_exc=USBError("denied"))
+    usb.core._find_dev = dev
+    _install_usb(monkeypatch, usb)
+    logs = []
+    d = minikeypad.KeypadDevice(log=logs.append)
+    assert d.connect() is True
+    assert any("detach" in m.lower() for m in logs)
+
+
+def test_connect_usberror_returns_false(monkeypatch):
+    usb, USBError = make_usb(ep=FakeEP())
+    dev = FakeUsbDev(kernel_active=False, cfg_exc=USBError("boom"))
+    usb.core._find_dev = dev
+    _install_usb(monkeypatch, usb)
+    logs = []
+    d = minikeypad.KeypadDevice(log=logs.append)
+    assert d.connect() is False
+    assert d.dev is None
+    assert any("USB error" in m for m in logs)
+
+
+def test_still_connected_none_when_no_dev():
+    assert minikeypad.KeypadDevice().still_connected() is False
+
+
+def test_still_connected_true(monkeypatch):
+    usb, _ = make_usb(find_dev=object())
+    _install_usb(monkeypatch, usb)
+    d = minikeypad.KeypadDevice()
+    d.dev = object()
+    assert d.still_connected() is True
+
+
+def test_still_connected_drops_when_absent(monkeypatch):
+    usb, _ = make_usb(find_dev=None)
+    _install_usb(monkeypatch, usb)
+    d = minikeypad.KeypadDevice()
+    d.dev = FakeUsbDev()
+    assert d.still_connected() is False
+    assert d.dev is None
+
+
+def test_still_connected_exception_drops(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+
+    def boom(**kw):
+        raise RuntimeError("x")
+
+    usb.core.find = boom
+    d = minikeypad.KeypadDevice()
+    d.dev = FakeUsbDev()
+    assert d.still_connected() is False
+    assert d.dev is None
+
+
+def test_close_reattaches_and_disposes(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    dev = FakeUsbDev()
+    d = minikeypad.KeypadDevice()
+    d.dev = dev
+    d._detached = True
+    d.close()
+    assert dev.attached is True
+    assert dev in usb.util.disposed
+    assert d.dev is None and d._detached is False
+
+
+def test_close_dispose_exception_swallowed(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+
+    def boom(_x):
+        raise RuntimeError("nope")
+
+    usb.util.dispose_resources = boom
+    d = minikeypad.KeypadDevice()
+    d.dev = FakeUsbDev()
+    d.close()
+    assert d.dev is None
+
+
+def test_reattach_swallows_exception(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    dev = FakeUsbDev()
+
+    def boom(_i):
+        raise RuntimeError("nope")
+
+    dev.attach_kernel_driver = boom
+    d = minikeypad.KeypadDevice()
+    d.dev = dev
+    d._detached = True
+    d.close()
+    assert d._detached is False
+
+
+def test_write_device_none_dev():
+    assert minikeypad.KeypadDevice().write_device(0, bytearray(8)) is False
+
+
+def test_write_device_endpoint(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    ep = FakeEP(n=9)
+    d = minikeypad.KeypadDevice()
+    d.dev = object()
+    d.ep_out = ep
+    assert d.write_device(2, bytes(range(1, 9))) is True
+    sent = ep.written[0][0]
+    assert sent[0] == 2 and sent[1] == 1
+    assert len(sent) == minikeypad.REPORT_LEN + 1
+
+
+def test_write_device_endpoint_zero_is_failure(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    d = minikeypad.KeypadDevice()
+    d.dev = object()
+    d.ep_out = FakeEP(n=0)
+    assert d.write_device(0, bytearray(8)) is False
+
+
+def test_write_device_control_path(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    dev = FakeUsbDev(ctrl_n=9)
+    d = minikeypad.KeypadDevice()
+    d.dev = dev
+    d.ep_out = None
+    d.intf = FakeIntf(1)
+    assert d.write_device(3, bytearray(8)) is True
+    assert dev.ctrl_calls
+
+
+def test_write_device_control_path_without_intf(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    dev = FakeUsbDev(ctrl_n=9)
+    d = minikeypad.KeypadDevice()
+    d.dev = dev
+    d.ep_out = None
+    d.intf = None
+    assert d.write_device(3, bytearray(8)) is True
+
+
+def test_write_device_usberror(monkeypatch):
+    usb, USBError = make_usb()
+    _install_usb(monkeypatch, usb)
+    ep = FakeEP()
+
+    def boom(data, timeout):
+        raise USBError("fail")
+
+    ep.write = boom
+    logs = []
+    d = minikeypad.KeypadDevice(log=logs.append)
+    d.dev = object()
+    d.ep_out = ep
+    assert d.write_device(0, bytearray(8)) is False
+    assert any("write failed" in m for m in logs)
+
+
+# ===========================================================================
+#  flash buffer
+# ===========================================================================
+def test_flash_buf_mapping():
+    assert minikeypad.App._flash_buf("kbd")[1] == 0xAA
+    assert minikeypad.App._flash_buf("led")[1] == 0xA1
+
+
+# ===========================================================================
+#  App — needs a Tk display
+# ===========================================================================
+def _has_display():
+    try:
+        import tkinter
+        root = tkinter.Tk()
+        root.destroy()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark_app = pytest.mark.skipif(not _has_display(), reason="no Tk display")
+
+
+class FakeDev:
+    """Stand-in for KeypadDevice in App tests."""
+
+    def __init__(self, connected=True, write_ok=True):
+        self._connected = connected
+        self.write_ok = write_ok
+        self.writes = []
+        self.closed = False
+
+    @property
+    def connected(self):
+        return self._connected
+
+    def connect(self):
+        return self._connected
+
+    def still_connected(self):
+        return self._connected
+
+    def write_device(self, rid, buf):
+        self.writes.append((rid, bytes(buf)))
+        return self.write_ok
+
+    def close(self):
+        self.closed = True
+
+
+class FlakyDev(FakeDev):
+    """Reports connected but fails the liveness re-check."""
+
+    def still_connected(self):
+        return False
+
+
+def _drain(app):
+    while not app._ui_q.empty():
+        app._ui_q.get_nowait()()
+
+
+def _wait_drain(app, timeout=2.0):
+    end = time.time() + timeout
+    while time.time() < end and app._ui_q.empty():
+        time.sleep(0.005)
+    _drain(app)
+
+
+@pytest.fixture
+def app():
+    if not _has_display():
+        pytest.skip("no Tk display")
+    a = minikeypad.App()
+    _drain(a)                       # flush the startup connect attempt
+    try:
+        yield a
+    finally:
+        a.destroy()
+
+
+def test_select_key_and_basic(app):
+    app._select_key(1)
+    app._basic_key(4, "A")
+    assert app.set_text.get() == "A"
+    assert app._selected_id == 1
+
+
+def test_need_key_blocks_every_handler_without_selection(app):
+    app._clear()
+    app._basic_key(4, "A")
+    app._basic_mod(1, "Ctrl")
+    app._fun_combo([(1, "Ctrl")])
+    app._shift_and(30, "!")
+    app._multimedia(("Vol +", (0, 2), (0, 64), (0, 233)))
+    app._mouse(("L Click", (1, 0, 0, 0)))
+    assert app.set_text.get() == "" and app.fun_text.get() == ""
+
+
+def test_append_log_falls_back_to_print(app, capsys):
+    app.log_box.destroy()                 # make widget ops raise -> print path
+    app._append_log("boom-line")
+    assert "boom-line" in capsys.readouterr().out
+
+
+def test_select_disabled_on_led_page(app):
+    app.kp.KEY_Cur_Page = 4
+    app._select_key(2)
+    assert app._selected_id is None
+
+
+def test_basic_mod_handler(app):
+    app._select_key(1)
+    app._basic_key(4, "A")
+    app._basic_mod(1, "Ctrl")
+    assert "Ctrl" in app.fun_text.get()
+
+
+def test_fun_combo_handler(app):
+    app._select_key(1)
+    app._fun_combo([(1, "Ctrl"), (4, "Alt")])
+    assert "Ctrl" in app.fun_text.get()
+
+
+def test_shift_and_handler(app):
+    app._select_key(1)
+    app._shift_and(30, "!")
+    assert "!" in app.set_text.get()
+
+
+def test_multimedia_handler(app):
+    app._select_key(1)
+    app._multimedia(("Vol +", (0, 2), (0, 64), (0, 233)))
+    assert "Vol +" in app.set_text.get()
+
+
+def test_mouse_handler(app):
+    app._select_key(1)
+    app._mouse(("L Click", (1, 0, 0, 0)))
+    assert "L Click" in app.set_text.get()
+
+
+def test_led_handler(app):
+    app.kp.KEY_Cur_Page = 4
+    app._led(("LED Mode 1", 1))
+    assert "LED Mode 1" in app.set_text.get()
+
+
+def test_on_page_clears_on_led(app):
+    app._select_key(1)
+    app._basic_key(4, "A")
+    app.nb.select(app.tab_led)
+    app._on_page()
+    assert app.kp.KEY_Cur_Page == 4
+    assert app.set_text.get() == ""
+
+
+def test_on_layer(app):
+    app.layer_var.set(2)
+    app._on_layer()
+    assert app.kp.KEY_Cur_Layer == 2
+
+
+def test_clear_handler(app):
+    app._select_key(1)
+    app._basic_key(4, "A")
+    app._clear()
+    assert app.set_text.get() == "" and app._selected_id is None
+
+
+def test_log_appends(app):
+    app.log("hello-log")
+    _drain(app)
+    assert "hello-log" in app.log_box.get("1.0", "end")
+
+
+def test_download_not_connected(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=False)
+    app._download()
+    assert "failed" in app.dl_status.cget("text").lower()
+
+
+def test_download_busy(app):
+    app._io_busy = True
+    app._download()
+    assert "busy" in app.dl_status.cget("text").lower()
+
+
+def test_download_nothing_assigned(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True)
+    app._clear()
+    app._download()
+    assert "nothing" in app.dl_status.cget("text").lower()
+
+
+def test_download_success(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=True)
+    app.kp.select_physical_key(1)
+    app.kp.basic_key(4, "A")
+    app._download()
+    _wait_drain(app)
+    assert "success" in app.dl_status.cget("text").lower()
+    assert app.dev.writes
+
+
+def test_download_failure(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=False)
+    app.kp.select_physical_key(1)
+    app.kp.basic_key(4, "A")
+    app._download()
+    _wait_drain(app)
+    assert "failed" in app.dl_status.cget("text").lower()
+
+
+def test_download_truncated_logs(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=True)
+    app.kp.select_physical_key(1)
+    for _ in range(minikeypad.MAX_KBD_GROUPS + 3):
+        app.kp.basic_key(4, "A")
+    app._download()
+    _wait_drain(app)
+    assert "first %d" % minikeypad.MAX_KBD_GROUPS in app.log_box.get("1.0", "end")
+
+
+def test_version_check_sets_report_id(app):
+    app.dev = FakeDev(connected=True, write_ok=True)
+    app._version_check()
+    _drain(app)
+    assert app.kp.ReportID == 3
+
+
+def test_version_check_defaults_zero(app):
+    app.dev = FakeDev(connected=True, write_ok=False)
+    app._version_check()
+    _drain(app)
+    assert app.kp.ReportID == 0
+
+
+def test_update_state_connected(app):
+    app.dev = FakeDev(connected=True)
+    app._update_state()
+    assert app.state_lbl.cget("text") == "Connected"
+
+
+def test_update_state_disconnected(app):
+    app.dev = FakeDev(connected=False)
+    app._update_state()
+    assert app.state_lbl.cget("text") == "Not connected"
+
+
+def test_connect_done_clears_busy(app):
+    app._io_busy = True
+    app._connect_done(True)
+    assert app._io_busy is False
+
+
+def test_try_connect_runs_version_check(app):
+    app._io_busy = True
+    app.dev = FakeDev(connected=True, write_ok=True)
+    app._try_connect()
+    _wait_drain(app)
+    assert app._io_busy is False
+    assert app.kp.ReportID == 3
+
+
+def test_poll_connection_connected_branch(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True)
+    app._poll_connection()
+    assert app.state_lbl.cget("text") == "Connected"
+
+
+def test_poll_connection_disconnected_spawns(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=False)
+    app._poll_connection()
+    _wait_drain(app)
+    assert app.state_lbl.cget("text") == "Not connected"
+
+
+def test_poll_connection_logs_lost_device(app):
+    app._io_busy = False
+    app.dev = FlakyDev(connected=True)     # connected, but liveness check fails
+    app._poll_connection()
+    _drain(app)
+    assert "Device disconnected" in app.log_box.get("1.0", "end")
+
+
+# ===========================================================================
+#  main()
+# ===========================================================================
+class _FakeApp:
+    created = 0
+
+    def __init__(self):
+        _FakeApp.created += 1
+
+    def mainloop(self):
+        pass
+
+
+def test_main_skips_install_with_flag(monkeypatch):
+    monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    called = []
+    monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
+    minikeypad.main(["--no-auto-install"])
+    assert called == []
+
+
+def test_main_auto_installs_when_missing(monkeypatch):
+    monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    monkeypatch.delenv("MINIKEYPAD_NO_AUTO_INSTALL", raising=False)
+    called = []
+    monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
+    minikeypad.main([])
+    assert called == [True]
+
+
+def test_main_skips_install_when_usb_ok(monkeypatch):
+    monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_USB_OK", True)
+    called = []
+    monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
+    minikeypad.main([])
+    assert called == []

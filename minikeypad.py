@@ -45,7 +45,7 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import scrolledtext
 
-try:
+try:  # pragma: no cover - import guard (env-dependent: pyusb present)
     import usb.core
     import usb.util
     _USB_OK = True
@@ -297,6 +297,15 @@ class KeyParam:
         self.set_key_init()
         self.data[self.KeySet_KeyNum] = 0
 
+    # -- bounds guards (the C# buffer is fixed-size; clicking past it is a
+    #    no-op here instead of an IndexError) --------------------------------
+    def _fits(self, idx):
+        return 0 <= idx < len(self.data)
+
+    def _store_char(self, arr, idx, value):
+        if 0 <= idx < len(arr):
+            arr[idx] = value
+
     # -- KEY page (BasicKeys) ------------------------------------------------
     def _general_char_set(self):
         self.data[self.KeyType_Num] |= 1
@@ -304,14 +313,17 @@ class KeyParam:
         self.data[self.KeyGroupCharNum] += 1
 
     def basic_key(self, keycode, label):
-        self.data[self.KEY_Char_Num] = keycode
-        self.KeyChar[self.KEY_Char_Num - 5] = label
+        if not self._fits(self.KEY_Char_Num):
+            return False
+        self.data[self.KEY_Char_Num] = keycode & 0xFF
+        self._store_char(self.KeyChar, self.KEY_Char_Num - 5, label)
         self._general_char_set()
+        return True
 
     def basic_modifier(self, bit, name):
         """Key_Ctrl/Shift/Alt/Win on the KEY page."""
         self.data[self.KEY_Char_Num - 1] |= bit
-        self.FunKeyChar[self.FunKEY_Char_Num] = name
+        self._store_char(self.FunKeyChar, self.FunKEY_Char_Num, name)
         self.data[self.KeyType_Num] |= 1
         self.FunKEY_Char_Num += 1
 
@@ -322,7 +334,7 @@ class KeyParam:
 
     def fun_modifier(self, bit, name):
         self.data[self.KEY_Char_Num - 1] |= bit
-        self.FunKeyChar[self.FunKEY_Char_Num] = name
+        self._store_char(self.FunKeyChar, self.FunKEY_Char_Num, name)
         self._fun_general_char_set()
 
     def fun_combo(self, mods):
@@ -332,16 +344,21 @@ class KeyParam:
 
     def shift_and(self, keycode, label):
         """Shift+<symbol> buttons."""
-        if self.data[self.KEY_Char_Num - 1] != 0:
-            self.KEY_Char_Num += 2
-        self.data[self.KEY_Char_Num - 1] |= 2          # Shift
-        self.data[self.KEY_Char_Num] = keycode
-        self.KeyChar[self.KEY_Char_Num - 5] = label
+        kc = self.KEY_Char_Num
+        if self.data[kc - 1] != 0:
+            kc += 2
+        if not self._fits(kc):
+            return False
+        self.KEY_Char_Num = kc
+        self.data[kc - 1] |= 2                          # Shift
+        self.data[kc] = keycode & 0xFF
+        self._store_char(self.KeyChar, kc - 5, label)
         # ShiftGeneral_Char_Set2
         self.data[self.KeyType_Num] |= 1
         self.KEY_Char_Num += 2
         self.data[self.KeyGroupCharNum] += 1
         self.FunKEY_Char_Num += 1
+        return True
 
     # -- Multimedia page (MULKey) -------------------------------------------
     def _mul_general_char_set(self):
@@ -356,9 +373,12 @@ class KeyParam:
             off, val = v_rid2
         else:
             off, val = v_rid_other
-        self.data[kc + off] = val
-        self.KeyChar[kc - 5] = name
+        if not self._fits(kc + off):
+            return False
+        self.data[kc + off] = val & 0xFF
+        self._store_char(self.KeyChar, kc - 5, name)
         self._mul_general_char_set()
+        return True
 
     # -- Mouse page (MouseKey) ----------------------------------------------
     def _mouse_general_char_set(self):
@@ -366,6 +386,8 @@ class KeyParam:
 
     def mouse(self, name, b0, b1, b2, b3, b4=None):
         kc = self.KEY_Char_Num
+        if not self._fits(kc + 4):
+            return False
         self._mouse_general_char_set()
         self.data[kc] = b0 & 0xFF
         self.data[kc + 1] = b1 & 0xFF
@@ -373,14 +395,15 @@ class KeyParam:
         self.data[kc + 3] = b3 & 0xFF
         if b4 is not None:
             self.data[kc + 4] = b4 & 0xFF
-        self.KeyChar[kc - 5] = name
+        self._store_char(self.KeyChar, kc - 5, name)
+        return True
 
     # -- LED page (LEDkey) ---------------------------------------------------
     def led(self, mode, name):
         self.data[self.KeySet_KeyNum] = 176
         self.data[self.KeyType_Num] |= 8
-        self.data[2] = mode
-        self.KeyChar[self.KEY_Char_Num - 5] = name
+        self.data[2] = mode & 0xFF
+        self._store_char(self.KeyChar, self.KEY_Char_Num - 5, name)
 
     # -- display helpers -----------------------------------------------------
     def key_text(self):
@@ -985,5 +1008,5 @@ def main(argv=None):
     app.mainloop()
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()
