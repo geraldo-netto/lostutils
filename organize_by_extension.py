@@ -1495,8 +1495,11 @@ def make_worker(preview: bool) -> WorkerFn:
         if preview:
             return source, dest, None
         try:
-            move_file(source, bucket_dir)
-            return source, dest, None
+            # oze-obs-01: log where the file actually landed. move_file may
+            # rename the source aside to `<name>.collision<n>`, so the precomputed
+            # `dest` can diverge from reality — use its return value.
+            actual = move_file(source, bucket_dir)
+            return source, actual, None
         except (OSError, RuntimeError, ValueError) as exc:
             return source, dest, exc
     return _move_worker

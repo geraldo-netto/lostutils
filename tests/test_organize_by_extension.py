@@ -3577,6 +3577,19 @@ def test_move_file_rejects_symlink_source(tmp_path):
     assert link.is_symlink(), "symlink source disturbed"
 
 
+def test_move_worker_reports_actual_dest_from_move_file(tmp_path, monkeypatch):
+    """oze-obs-01: the worker reports the Path move_file returns, not the
+    precomputed dest, which is wrong after a `.collision<n>` source rename."""
+    src = tmp_path / "src.bin"; src.write_bytes(b"x")
+    bucket = tmp_path / "bucket"
+    landed = bucket / "src.bin.collision1"
+    monkeypatch.setattr(oze, "move_file", lambda s, d: landed)
+    worker = oze.make_worker(preview=False)
+    source, destination, error = worker(src, bucket)
+    assert error is None
+    assert destination == landed, "worker logged precomputed dest, not real landing"
+
+
 # --- oze-sec-03: _parse_extra_zip_family validates content ----------------
 
 def test_parse_extra_zip_family_rejects_nul_byte():
