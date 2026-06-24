@@ -1021,18 +1021,27 @@ class App(tk.Tk):
         self._run_download(reports, flash)
 
     def _send_reports(self, reports, flash_buf, rid):
-        """Push every report + the flash commit, logging which step fails."""
+        """Push every report, ACK-checked, then the flash commit.
+
+        Each write_device must ACK (the device returned >0 bytes) before the
+        next is sent, so a report that did not land aborts the sequence.
+        Returns the stage that failed:
+          'ok'      -- every report + the flash commit ACKed
+          'reports' -- a report failed BEFORE the commit; nothing persisted,
+                       the previous flash mapping is still intact
+          'flash'   -- the commit itself failed; persisted state is ambiguous
+        """
         total = len(reports)
         for i, buf in enumerate(reports, 1):
             if not self.dev.write_device(rid, buf):
-                self.log("Download: report %d/%d failed" % (i, total))
-                return False
-            LOG.debug("report %d/%d sent", i, total)
+                self.log("Download: report %d/%d not acknowledged" % (i, total))
+                return "reports"
+            LOG.debug("report %d/%d acked", i, total)
         if not self.dev.write_device(rid, flash_buf):
-            self.log("Download: flash commit failed")
-            return False
-        self.log("Download: %d reports + flash committed" % total)
-        return True
+            self.log("Download: flash commit not acknowledged")
+            return "flash"
+        self.log("Download: %d reports + flash committed and acknowledged" % total)
+        return "ok"
 
     def _run_download(self, reports, flash):
         """Send all reports on a worker thread; the UI stays responsive."""
@@ -1043,23 +1052,25 @@ class App(tk.Tk):
 
         def worker():
             try:
-                ok = self._send_reports(reports, flash_buf, rid)
+                outcome = self._send_reports(reports, flash_buf, rid)
             except Exception as e:             # never strand the disabled button
                 LOG.exception("download worker crashed")
                 self.log("Download error: %s" % e)
-                ok = False
-            self._ui_q.put(lambda: self._download_done(ok))
+                outcome = "error"
+            self._ui_q.put(lambda: self._download_done(outcome))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _download_done(self, ok):
+    def _download_done(self, outcome):
         self._io_busy = False
         self.dl_btn.configure(state="normal")
-        if not ok:
-            # The report sequence is not atomic; a mid-sequence failure can
-            # leave the key half-programmed.  Re-running resends the whole set.
-            self.log("Remap may be partial; press Download again to retry.")
-        self._dl_result(ok)
+        if outcome == "reports":
+            # Failure before the (last) flash commit: nothing was persisted.
+            self.log("Not committed -- previous mapping intact. Press Download to retry.")
+        elif outcome in ("flash", "error"):
+            # Commit step ambiguous: re-downloading resends the whole sequence.
+            self.log("Commit may be partial -- re-download to be safe.")
+        self._dl_result(outcome == "ok")
 
     def destroy(self):
         try:

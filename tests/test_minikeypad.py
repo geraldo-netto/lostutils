@@ -918,9 +918,22 @@ def test_download_success(app):
     assert app.dev.writes
 
 
-def test_download_failure(app):
+def test_download_pre_flash_failure_says_intact(app):
     app._io_busy = False
-    app.dev = FakeDev(connected=True, write_ok=False)
+    app.dev = FakeDev(connected=True, write_ok=False)   # first report never ACKs
+    app.kp.select_physical_key(1)
+    app.kp.basic_key(4, "A")
+    app._download()
+    _wait_drain(app)
+    log = app.log_box.get("1.0", "end").lower()
+    assert "failed" in app.dl_status.cget("text").lower()
+    assert "intact" in log and "partial" not in log
+
+
+def test_download_flash_failure_warns_partial(app):
+    app._io_busy = False
+    # one basic_key -> 2 reports (b0, b1); flash is the 3rd write -> fail it
+    app.dev = FakeDev(connected=True, write_ok=True, fail_index=3)
     app.kp.select_physical_key(1)
     app.kp.basic_key(4, "A")
     app._download()
@@ -953,22 +966,22 @@ def test_download_truncated_logs(app):
 
 def test_send_reports_all_ok(app):
     app.dev = FakeDev(write_ok=True)
-    assert app._send_reports([bytearray(8), bytearray(8)], bytearray(8), 0) is True
+    assert app._send_reports([bytearray(8), bytearray(8)], bytearray(8), 0) == "ok"
     assert len(app.dev.writes) == 3        # 2 reports + flash
 
 
-def test_send_reports_report_failure_logged(app):
+def test_send_reports_report_stage_failure(app):
     app.dev = FakeDev(fail_index=1)
-    assert app._send_reports([bytearray(8)], bytearray(8), 0) is False
+    assert app._send_reports([bytearray(8)], bytearray(8), 0) == "reports"
     _drain(app)
-    assert "report 1/1 failed" in app.log_box.get("1.0", "end").lower()
+    assert "report 1/1 not acknowledged" in app.log_box.get("1.0", "end").lower()
 
 
-def test_send_reports_flash_failure_logged(app):
+def test_send_reports_flash_stage_failure(app):
     app.dev = FakeDev(fail_index=2)        # report ok, flash (2nd call) fails
-    assert app._send_reports([bytearray(8)], bytearray(8), 0) is False
+    assert app._send_reports([bytearray(8)], bytearray(8), 0) == "flash"
     _drain(app)
-    assert "flash commit failed" in app.log_box.get("1.0", "end").lower()
+    assert "flash commit not acknowledged" in app.log_box.get("1.0", "end").lower()
 
 
 def test_download_worker_crash_recovers(app):
