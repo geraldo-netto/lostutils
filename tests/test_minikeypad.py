@@ -886,6 +886,19 @@ def test_log_appends(app):
     assert "hello-log" in app.log_box.get("1.0", "end")
 
 
+def test_build_ui_logs_missing_pyusb(monkeypatch):
+    if not _has_display():
+        pytest.skip("no Tk display")
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    monkeypatch.setattr(minikeypad, "_USB_ERR", "no backend")
+    a = minikeypad.App()
+    try:
+        _drain(a)
+        assert "pyusb not available" in a.log_box.get("1.0", "end")
+    finally:
+        a.destroy()
+
+
 def test_download_not_connected(app):
     app._io_busy = False
     app.dev = FakeDev(connected=False)

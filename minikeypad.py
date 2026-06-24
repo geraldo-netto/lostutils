@@ -37,6 +37,9 @@ Linux note:
 # pyusb is an optional runtime dependency: the GUI runs without it and `usb`
 # is only ever touched after the `_USB_OK` guard succeeds.  Silence the type
 # checker's missing-import / possibly-unbound noise for that intentional shape.
+# The opaque pyusb handles themselves are typed `Any` in the device adapter so
+# this stays clean whether or not pyusb (with its loose Union return types) is
+# installed.
 # pyright: reportMissingImports=false, reportPossiblyUnboundVariable=false
 
 import argparse
@@ -51,6 +54,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 from tkinter import scrolledtext
+from typing import Any
 
 try:  # pragma: no cover - import guard (env-dependent: pyusb present)
     import usb.core
@@ -130,9 +134,9 @@ class KeypadDevice:
 
     def __init__(self, log=lambda *a: None):
         self.log = log
-        self.dev = None
-        self.ep_out = None
-        self.intf = None
+        self.dev: Any = None       # opaque pyusb Device handle (loosely typed)
+        self.ep_out: Any = None    # OUT endpoint, or None -> control SET_REPORT
+        self.intf: Any = None
         self._detached = False
         self._lock = threading.RLock()
 
@@ -148,12 +152,12 @@ class KeypadDevice:
             if self.dev is not None:
                 return True
             try:
-                dev = usb.core.find(idVendor=VID, idProduct=PID)
+                dev: Any = usb.core.find(idVendor=VID, idProduct=PID)
                 if dev is None:
                     return False
                 self._detach_kernel_driver(dev)
                 intf = self._claim_interface(dev)
-                ep_out = usb.util.find_descriptor(
+                ep_out: Any = usb.util.find_descriptor(
                     intf,
                     custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
                     == usb.util.ENDPOINT_OUT,
@@ -174,7 +178,7 @@ class KeypadDevice:
                 self.dev = None
                 return False
 
-    def _detach_kernel_driver(self, dev):
+    def _detach_kernel_driver(self, dev: Any):
         """Detach usbhid from the HID interface so we can claim it (Linux)."""
         try:
             if dev.is_kernel_driver_active(HID_INTERFACE):
@@ -187,7 +191,7 @@ class KeypadDevice:
                      f"(need root or a udev rule?): {e}")
 
     @staticmethod
-    def _claim_interface(dev):
+    def _claim_interface(dev: Any) -> Any:
         cfg = dev.get_active_configuration()
         try:
             return cfg[(HID_INTERFACE, 0)]
@@ -653,8 +657,16 @@ class App(tk.Tk):
 
     # ---- UI construction --------------------------------------------------
     def _build_ui(self):
+        # Pack the log FIRST at the bottom so it reserves a fixed strip; the
+        # main area then expands above it instead of squeezing the keypad.
+        logf = ttk.LabelFrame(self, text="Log")
+        logf.pack(fill="x", side="bottom", padx=6, pady=(0, 6))
+        self.log_box = scrolledtext.ScrolledText(logf, height=7, state="disabled",
+                                                 font=("TkFixedFont", 9))
+        self.log_box.pack(fill="both", expand=True, padx=4, pady=4)
+
         root = ttk.Frame(self, padding=6)
-        root.pack(fill="both", expand=True)
+        root.pack(side="top", fill="both", expand=True)
 
         # ---- left column: device, layers, physical keys ----
         left = ttk.Frame(root)
@@ -734,16 +746,42 @@ class App(tk.Tk):
         # page index -> KEY_Cur_Page value used by the firmware
         self._page_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
 
-        # ---- log ----
-        logf = ttk.LabelFrame(self, text="Log")
-        logf.pack(fill="both", expand=False, side="bottom", padx=6, pady=(0, 6))
-        self.log_box = scrolledtext.ScrolledText(logf, height=7, state="disabled",
-                                                 font=("TkFixedFont", 9))
-        self.log_box.pack(fill="both", expand=True, padx=4, pady=4)
-
         if not _USB_OK:
             self.log("pyusb not available: %s" % _USB_ERR)
             self.log("Install with:  pip install pyusb   (needs a libusb backend)")
+
+    def _scroll_tab(self, nb):
+        """A notebook tab whose body scrolls vertically so no keycap is clipped.
+
+        Returns (outer, body): add `outer` to the notebook, fill `body`.
+        """
+        outer = ttk.Frame(nb)
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        vbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        body = ttk.Frame(canvas)
+        body.bind("<Configure>",
+                  lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        win = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
+        canvas.configure(yscrollcommand=vbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        vbar.pack(side="right", fill="y")
+        self._bind_wheel(canvas)
+        return outer, body
+
+    def _bind_wheel(self, canvas):
+        """Route the mouse wheel to `canvas` while the pointer is over it."""
+        def scroll(amount):
+            canvas.yview_scroll(amount, "units")  # pragma: no cover - wheel glue
+        canvas.bind("<Enter>", lambda _e: (
+            canvas.bind_all("<MouseWheel>",
+                            lambda ev: scroll(-1 if ev.delta > 0 else 1)),
+            canvas.bind_all("<Button-4>", lambda _ev: scroll(-1)),
+            canvas.bind_all("<Button-5>", lambda _ev: scroll(1))))
+        canvas.bind("<Leave>", lambda _e: (
+            canvas.unbind_all("<MouseWheel>"),
+            canvas.unbind_all("<Button-4>"),
+            canvas.unbind_all("<Button-5>")))
 
     def _grid_buttons(self, parent, items, on_click, per_row=8, width=11):
         frame = ttk.Frame(parent)
@@ -757,16 +795,16 @@ class App(tk.Tk):
         return frame
 
     def _build_key_tab(self, nb):
-        tab = ttk.Frame(nb)
+        tab, body = self._scroll_tab(nb)
         # letters/numbers/specials
         for row in BASIC_ROWS:
-            rf = ttk.Frame(tab)
+            rf = ttk.Frame(body)
             rf.pack(anchor="w", padx=6, pady=1)
             for label, code in row:
                 tk.Button(rf, text=label, width=6, height=2,
                           command=lambda lbl=label, c=code: self._basic_key(c, lbl)
                           ).pack(side="left", padx=1, pady=1)
-        mf = ttk.LabelFrame(tab, text="Modifiers (combine with a key)")
+        mf = ttk.LabelFrame(body, text="Modifiers (combine with a key)")
         mf.pack(anchor="w", padx=6, pady=6)
         for bit, name in BASIC_MODS:
             tk.Button(mf, text=name, width=8, height=2,
@@ -775,15 +813,15 @@ class App(tk.Tk):
         return tab
 
     def _build_fun_tab(self, nb):
-        tab = ttk.Frame(nb)
-        mf = ttk.LabelFrame(tab, text="Modifiers & combos")
+        tab, body = self._scroll_tab(nb)
+        mf = ttk.LabelFrame(body, text="Modifiers & combos")
         mf.pack(anchor="w", fill="x", padx=6, pady=6)
         for i, (label, mods) in enumerate(FUN_MODS):
             r, c = divmod(i, 5)
             tk.Button(mf, text=label, width=14, height=2,
                       command=lambda m=mods: self._fun_combo(m)
                       ).grid(row=r, column=c, padx=2, pady=2)
-        sf = ttk.LabelFrame(tab, text="Shift + symbol")
+        sf = ttk.LabelFrame(body, text="Shift + symbol")
         sf.pack(anchor="w", fill="x", padx=6, pady=6)
         for i, (label, code) in enumerate(FUN_SHIFTED):
             r, c = divmod(i, 11)
@@ -793,20 +831,20 @@ class App(tk.Tk):
         return tab
 
     def _build_mul_tab(self, nb):
-        tab = ttk.Frame(nb)
-        self._grid_buttons(tab, MULTIMEDIA,
+        tab, body = self._scroll_tab(nb)
+        self._grid_buttons(body, MULTIMEDIA,
                            lambda it: self._multimedia(it), per_row=3, width=14)
         return tab
 
     def _build_mouse_tab(self, nb):
-        tab = ttk.Frame(nb)
-        self._grid_buttons(tab, MOUSE,
+        tab, body = self._scroll_tab(nb)
+        self._grid_buttons(body, MOUSE,
                            lambda it: self._mouse(it), per_row=4, width=13)
         return tab
 
     def _build_led_tab(self, nb):
-        tab = ttk.Frame(nb)
-        self._grid_buttons(tab, LED_MODES,
+        tab, body = self._scroll_tab(nb)
+        self._grid_buttons(body, LED_MODES,
                            lambda it: self._led(it), per_row=1, width=20)
         return tab
 
