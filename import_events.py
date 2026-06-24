@@ -50,6 +50,11 @@ DOWNLOAD_TIMEOUT_SECONDS = 30
 # while still bounding a wedged transfer.
 DOWNLOAD_STALL_SECONDS = 300
 OCR_TIMEOUT_SECONDS = 120
+# Heartbeat cadence for a blocking create_chat_completion call. The native
+# llama_cpp call cannot be cancelled from Python without killing the process,
+# so instead of a false timeout we emit a WARNING at this interval to make a
+# stall visible. 60s is long enough to stay quiet on healthy runs.
+LLM_HEARTBEAT_SECONDS = 60
 LLM_RESPONSE_LOG_EXCERPT_CHARS = 160
 DEFAULT_LANGUAGE = "auto"
 DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
@@ -2356,15 +2361,44 @@ def _ocr_image_bytes(
             pass
 
 
-def _create_chat_completion(client: Any, messages: List[Any], config: ModelConfig) -> Any:
+@contextlib.contextmanager
+def _llm_heartbeat(label: str, interval: float = LLM_HEARTBEAT_SECONDS,
+                   monotonic: Any = time.monotonic):
+    """Logs a WARNING every `interval`s while a blocking LLM call runs.
+
+    create_chat_completion is a native (C) call that cannot be cancelled
+    from Python without killing the process, so a true per-file timeout is
+    infeasible. This watchdog only makes a stall visible; it never aborts
+    the call. The daemon thread is always stopped in finally.
+    """
+    stop = threading.Event()
+    start = monotonic()
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            logger.warning("LLM still running for %s after %.0fs",
+                           label, monotonic() - start)
+
+    thread = threading.Thread(target=beat, name="llm-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=interval)
+
+
+def _create_chat_completion(client: Any, messages: List[Any], config: ModelConfig,
+                            label: str = "LLM request") -> Any:
     with _LLM_REQUEST_LOCK:
-        return client.create_chat_completion(
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=config.llm_max_tokens,
-            temperature=0.0,
-            top_p=1.0,
-        )
+        with _llm_heartbeat(label):
+            return client.create_chat_completion(
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_tokens=config.llm_max_tokens,
+                temperature=0.0,
+                top_p=1.0,
+            )
 
 
 def _llm_response_text(
@@ -2385,7 +2419,8 @@ def _llm_response_text(
                 runtime_config,
                 file_path,
                 "llm",
-                lambda: _create_chat_completion(client, messages, runtime_config),
+                lambda: _create_chat_completion(
+                    client, messages, runtime_config, file_path.name),
             )
         text = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         _log_llm_request_done(file_path, event_type, runtime_config, text)

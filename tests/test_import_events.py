@@ -2025,6 +2025,47 @@ def test_output_lock_releases_on_write_error(tmp_path):
     assert not lock.exists()  # cleaned up on the error path
 
 
+def test_llm_heartbeat_warns_while_running_and_stops(caplog):
+    import logging
+    import threading as _threading
+    import time as _time
+
+    started = _threading.active_count()
+    with caplog.at_level(logging.WARNING):
+        with import_events._llm_heartbeat("slow.pdf", interval=0.01):
+            _time.sleep(0.05)  # long enough for several heartbeats
+
+    warnings = [r.getMessage() for r in caplog.records
+                if "LLM still running for slow.pdf" in r.getMessage()]
+    assert warnings  # heartbeat fired at least once
+    # Heartbeat thread is stopped on exit (allow a brief join window).
+    _time.sleep(0.05)
+    assert _threading.active_count() <= started
+
+
+def test_create_chat_completion_passes_label_to_heartbeat(monkeypatch):
+    import contextlib
+
+    captured = {}
+
+    @contextlib.contextmanager
+    def fake_heartbeat(label, interval=None, monotonic=None):
+        captured["label"] = label
+        yield
+
+    monkeypatch.setattr(import_events, "_llm_heartbeat", fake_heartbeat)
+
+    class FakeClient:
+        def create_chat_completion(self, **_kw):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    result = import_events._create_chat_completion(
+        FakeClient(), [], import_events.ModelConfig(), "invoice.pdf")
+
+    assert captured["label"] == "invoice.pdf"
+    assert result["choices"][0]["message"]["content"] == "ok"
+
+
 def test_atomic_write_removes_temp_on_keyboard_interrupt(tmp_path, monkeypatch):
     out = tmp_path / "events.json"
     out.write_bytes(b"old")

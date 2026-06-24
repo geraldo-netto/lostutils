@@ -150,7 +150,7 @@ rdv3-obs-01 | open | low | remove-deduplv3.py:101-112 — groups with all-identi
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-watch-01 | open | med | import_events.py:1129 — _run_llm has no per-file timeout/stall heartbeat around client.create_chat_completion, so a stuck llama_cpp call can block the whole run until Ctrl-C. Add a monotonic deadline/worker timeout or watchdog progress log. | stall detection
+ie-watch-01 | open | med | import_events.py:1129 — _run_llm has no per-file timeout/stall heartbeat around client.create_chat_completion, so a stuck llama_cpp call can block the whole run until Ctrl-C. Add a monotonic deadline/worker timeout or watchdog progress log. | stall detection. PARTIAL: added _llm_heartbeat watchdog (LLM_HEARTBEAT_SECONDS) emitting a WARNING every interval around _create_chat_completion and stopping in finally, so a stall is visible; true per-file cancellation infeasible — create_chat_completion is a blocking native llama_cpp call that cannot be cancelled from Python without killing the process.
 
 ## time & scheduling correctness
 
