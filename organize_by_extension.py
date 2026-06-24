@@ -2025,7 +2025,10 @@ def _parse_extra_zip_family(raw: str) -> frozenset[str]:
                 "(must be 1..%d chars of [a-z0-9])",
                 item, _EXTRA_ZIP_FAMILY_MAX_LEN)
             continue
-        out.add(normalised)
+        # oze-arch-01: canonicalise synonyms so membership matches the
+        # `declared_canon` resolve_real_extension compares against — otherwise an
+        # aliased item (e.g. `jpeg`) is stored un-canonicalised and never matches.
+        out.add(EXTENSION_ALIASES.get(normalised, normalised))
     return frozenset(out)
 
 

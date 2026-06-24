@@ -3626,6 +3626,15 @@ def test_move_worker_reports_actual_dest_from_move_file(tmp_path, monkeypatch):
     assert destination == landed, "worker logged precomputed dest, not real landing"
 
 
+def test_parse_extra_zip_family_canonicalises_aliases():
+    """oze-arch-01: an aliased synonym is stored canonical so it matches the
+    declared_canon resolve_real_extension compares against."""
+    assert oze._parse_extra_zip_family("jpeg") == frozenset({"jpg"})
+    assert oze._parse_extra_zip_family("TIF, htm") == frozenset({"tiff", "html"})
+    # Non-aliased items pass through unchanged.
+    assert oze._parse_extra_zip_family("usdz") == frozenset({"usdz"})
+
+
 # --- oze-sec-03: _parse_extra_zip_family validates content ----------------
 
 def test_parse_extra_zip_family_rejects_nul_byte():

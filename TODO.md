@@ -95,7 +95,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-arch-01 | open | low | organize_by_extension.py:1929 — _parse_extra_zip_family normalises items but does not apply EXTENSION_ALIASES, so `--extra-zip-family jpeg` (or any aliased synonym) is stored un-canonicalised while resolve_real_extension compares against declared_canon, so the synonym silently never matches. Map each parsed item through EXTENSION_ALIASES. |
 
 ## reliability/correctness
 
