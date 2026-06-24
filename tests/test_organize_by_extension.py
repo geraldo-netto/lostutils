@@ -3521,6 +3521,50 @@ def test_cross_device_tmp_uses_random_suffix(tmp_path, monkeypatch):
         "tmp name still includes PID (oze-sec-01 regression)"
 
 
+# --- oze-di-01: cross-device move is kill-safe / idempotent ----------------
+
+def test_cross_device_recovers_when_target_holds_same_content(tmp_path):
+    """oze-di-01: a target left by an interrupted run (same bytes) finishes the
+    move by removing the source instead of failing the reservation forever."""
+    src = tmp_path / "src.bin"; src.write_bytes(b"payload")
+    dst = tmp_path / "dst.bin"; dst.write_bytes(b"payload")  # leftover from prior crash
+    oze._move_cross_device(src, dst)
+    assert dst.read_bytes() == b"payload"
+    assert not src.exists(), "source not removed during idempotent recovery"
+
+
+def test_cross_device_different_content_still_collides(tmp_path):
+    """oze-di-01: a target with DIFFERENT content is a real collision and must
+    raise — never silently drop the source."""
+    src = tmp_path / "src.bin"; src.write_bytes(b"new")
+    dst = tmp_path / "dst.bin"; dst.write_bytes(b"existing")
+    with pytest.raises(FileExistsError):
+        oze._move_cross_device(src, dst)
+    assert src.read_bytes() == b"new", "source lost on genuine collision"
+    assert dst.read_bytes() == b"existing", "target clobbered on genuine collision"
+
+
+def test_cross_device_late_interrupt_keeps_completed_target(tmp_path, monkeypatch):
+    """oze-di-01: Ctrl+C in the replace->unlink(source) window must keep the
+    just-completed target (not delete it) and leave the source for re-run
+    recovery — both paths survive, no data loss."""
+    src = tmp_path / "src.bin"; src.write_bytes(b"payload")
+    dst = tmp_path / "dst.bin"
+
+    def boom(path):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(oze.os, "unlink", boom)  # fires on unlink(source) after replace
+
+    with pytest.raises(KeyboardInterrupt):
+        oze._move_cross_device(src, dst)
+    monkeypatch.undo()
+    assert dst.read_bytes() == b"payload", "completed target deleted by late interrupt"
+    assert src.read_bytes() == b"payload", "source lost after late interrupt"
+    # Re-run recovers idempotently.
+    oze._move_cross_device(src, dst)
+    assert not src.exists() and dst.read_bytes() == b"payload"
+
+
 # --- oze-sec-03: _parse_extra_zip_family validates content ----------------
 
 def test_parse_extra_zip_family_rejects_nul_byte():

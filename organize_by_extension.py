@@ -1256,14 +1256,57 @@ def _link_with_transient_retry(src: Path, dst: Path) -> None:
     raise last_exc
 
 
+# oze-di-01: byte-compare chunk for recognising a target left behind by an
+# interrupted cross-device move. 64 KiB balances syscall count against the
+# transient read buffer.
+_CONTENT_CMP_CHUNK = 1 << 16
+
+
+def _same_file_content(a: Path, b: Path) -> bool:
+    """True when ``a`` and ``b`` are byte-identical (oze-di-01).
+
+    Cross-device copies land on different inodes, so ``os.path.samefile`` can't
+    recognise a completed-but-not-finalised move; we compare size then bytes.
+    Any stat/read failure answers False — the caller then treats the target as
+    a genuine collision rather than silently dropping the source.
+    """
+    try:
+        if a.stat().st_size != b.stat().st_size:
+            return False
+        with open(a, "rb") as fa, open(b, "rb") as fb:
+            while True:
+                chunk_a = fa.read(_CONTENT_CMP_CHUNK)
+                chunk_b = fb.read(_CONTENT_CMP_CHUNK)
+                if chunk_a != chunk_b:
+                    return False
+                if not chunk_a:
+                    return True
+    except OSError:
+        return False
+
+
 def _move_cross_device(source: Path, target: Path) -> None:
-    """Move a file across filesystems atomically, then remove the source.
+    """Move a file across filesystems, kill-safe and idempotent (oze-di-01).
 
     Reserves the final name with O_EXCL (no-overwrite), copies to a temp file,
-    then atomically renames it into place. Any failure rolls back the temp and
-    reservation so no partial file survives.
+    then atomically renames it into place. Any failure before the rename rolls
+    back the temp and reservation so no partial file survives.
+
+    The window between ``os.replace`` and ``os.unlink(source)`` is NOT
+    crash-atomic: a kill there (Ctrl+C at any moment, SIGKILL, power loss)
+    leaves the file at BOTH paths. Recovery is idempotent — a re-run finds the
+    target already holding this exact content and finishes the move by removing
+    the leftover source, instead of failing the O_EXCL reservation forever and
+    endlessly re-suffixing ``.collision<n>``. A target with *different* content
+    is a real name collision and still raises.
     """
-    _reserve_target(target)
+    try:
+        _reserve_target(target)
+    except FileExistsError:
+        if _same_file_content(source, target):
+            os.unlink(source)
+            return
+        raise
     # oze-sec-01: replace the PID-based suffix with cryptographically
     # random bytes. The previous `.{name}.{pid}.tmp` pattern was
     # predictable: an attacker with write access to the bucket dir
@@ -1271,14 +1314,19 @@ def _move_cross_device(source: Path, target: Path) -> None:
     # race `shutil.copy2` into clobbering the wrong target. 8 bytes
     # of `secrets.token_hex` collapse that race to ~2^-64 odds.
     tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+    replaced = False
     try:
         shutil.copy2(source, tmp)
         os.replace(tmp, target)  # atomic: target only ever holds the complete file
+        replaced = True
     except BaseException:
         # oze-cx-03: cleanup must never mask the real failure. Narrow to OSError
         # (the only thing os.unlink can raise on a missing/locked leftover) and
-        # log at debug so unexpected exception classes still surface.
-        for leftover in (tmp, target):
+        # log at debug so unexpected exception classes still surface. Once the
+        # rename succeeded the target IS the completed file — never unlink it on
+        # a late interrupt; leave it for the idempotent re-run above.
+        leftovers = (tmp,) if replaced else (tmp, target)
+        for leftover in leftovers:
             try:
                 os.unlink(leftover)
             except OSError as unlink_exc:
