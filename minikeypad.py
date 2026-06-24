@@ -36,11 +36,14 @@ Linux note:
 # pyright: reportMissingImports=false, reportPossiblyUnboundVariable=false
 
 import argparse
+import logging
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 from tkinter import scrolledtext
@@ -90,12 +93,16 @@ def _ensure_pyusb():
         return False
 
 
+LOG = logging.getLogger("minikeypad")
+
 VID = 0x1189
 PID = 0x8890
 HID_INTERFACE = 1          # "mi_01"
 REPORT_LEN = 64            # data bytes following the report ID
 WRITE_TIMEOUT_MS = 500
 MAX_KBD_GROUPS = 5         # firmware accepts groups 0..5 (6 keystrokes)
+WRITE_RETRIES = 2          # extra attempts after the first on a transient USBError
+WRITE_RETRY_BACKOFF_S = 0.05
 
 # Colours mirroring the original WinForms app.
 COL_KEY_IDLE = "#98fb98"   # 152,251,152  pale green
@@ -220,29 +227,49 @@ class KeypadDevice:
     def write_device(self, report_id, buf8):
         """Send one output report: reportID + 8 data bytes padded to REPORT_LEN.
 
-        Mirrors HidLib.WriteDevice (Data[0..7]) -> HID output report.
-        Returns True on success.
+        Mirrors HidLib.WriteDevice (Data[0..7]) -> HID output report.  Output
+        reports are idempotent, so a transient USBError is retried with a short
+        backoff before giving up.  Returns True on success.
         """
         with self._lock:
             if self.dev is None:
                 return False
-            data = bytearray(REPORT_LEN + 1)
-            data[0] = report_id & 0xFF
-            for i in range(8):
-                data[1 + i] = buf8[i] & 0xFF
+            data = self._frame(report_id, buf8)
+            return self._send_with_retry(report_id, data)
+
+    @staticmethod
+    def _frame(report_id, buf8):
+        data = bytearray(REPORT_LEN + 1)
+        data[0] = report_id & 0xFF
+        for i in range(8):
+            data[1 + i] = buf8[i] & 0xFF
+        return data
+
+    def _send_once(self, report_id, data):
+        assert self.dev is not None        # guarded by write_device under the lock
+        if self.ep_out is not None:
+            return self.ep_out.write(bytes(data), WRITE_TIMEOUT_MS)
+        # No OUT endpoint -> HID SET_REPORT over control (output report=0x02).
+        wValue = (0x02 << 8) | (report_id & 0xFF)
+        return self.dev.ctrl_transfer(
+            0x21, 0x09, wValue,
+            self.intf.bInterfaceNumber if self.intf else HID_INTERFACE,
+            bytes(data), WRITE_TIMEOUT_MS)
+
+    def _send_with_retry(self, report_id, data):
+        reason = "unknown"
+        for attempt in range(WRITE_RETRIES + 1):
             try:
-                if self.ep_out is not None:
-                    n = self.ep_out.write(bytes(data), WRITE_TIMEOUT_MS)
-                    return n > 0
-                # No OUT endpoint -> HID SET_REPORT over control (output report=0x02).
-                wValue = (0x02 << 8) | (report_id & 0xFF)
-                n = self.dev.ctrl_transfer(0x21, 0x09, wValue,
-                                           self.intf.bInterfaceNumber if self.intf else HID_INTERFACE,
-                                           bytes(data), WRITE_TIMEOUT_MS)
-                return n > 0
+                if self._send_once(report_id, data) > 0:
+                    return True
+                reason = "device returned 0 bytes"
             except usb.core.USBError as e:
-                self.log(f"write failed: {e}")
-                return False
+                reason = str(e)
+            if attempt < WRITE_RETRIES:
+                self.log(f"write retry {attempt + 1}/{WRITE_RETRIES}: {reason}")
+                time.sleep(WRITE_RETRY_BACKOFF_S * (attempt + 1))
+        self.log(f"write failed after {WRITE_RETRIES + 1} attempts: {reason}")
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -770,8 +797,10 @@ class App(tk.Tk):
 
     # ---- cross-thread UI plumbing ----------------------------------------
     def log(self, msg):
-        """Thread-safe: enqueue text; the Tk thread appends it."""
-        self._ui_q.put(lambda m=str(msg): self._append_log(m))
+        """Thread-safe: mirror to the terminal logger and the GUI log pane."""
+        text = str(msg)
+        LOG.info("%s", text)
+        self._ui_q.put(lambda m=text: self._append_log(m))
 
     def _append_log(self, msg):
         try:
@@ -896,9 +925,14 @@ class App(tk.Tk):
 
     def _try_connect(self):
         """Runs off the Tk thread so the connect/version probe never freezes UI."""
-        ok = self.dev.connect()
-        if ok:
-            self._version_check()
+        try:
+            ok = self.dev.connect()
+            if ok:
+                self._version_check()
+        except Exception as e:                 # never strand _io_busy True
+            LOG.exception("connect worker crashed")
+            self.log("Connect error: %s" % e)
+            ok = False
         self._ui_q.put(lambda: self._connect_done(ok))
 
     def _connect_done(self, ok):
@@ -963,6 +997,20 @@ class App(tk.Tk):
                      % (MAX_KBD_GROUPS, MAX_KBD_GROUPS))
         self._run_download(reports, flash)
 
+    def _send_reports(self, reports, flash_buf, rid):
+        """Push every report + the flash commit, logging which step fails."""
+        total = len(reports)
+        for i, buf in enumerate(reports, 1):
+            if not self.dev.write_device(rid, buf):
+                self.log("Download: report %d/%d failed" % (i, total))
+                return False
+            LOG.debug("report %d/%d sent", i, total)
+        if not self.dev.write_device(rid, flash_buf):
+            self.log("Download: flash commit failed")
+            return False
+        self.log("Download: %d reports + flash committed" % total)
+        return True
+
     def _run_download(self, reports, flash):
         """Send all reports on a worker thread; the UI stays responsive."""
         self._io_busy = True
@@ -971,13 +1019,12 @@ class App(tk.Tk):
         flash_buf = self._flash_buf(flash)
 
         def worker():
-            ok = True
-            for buf in reports:
-                if not self.dev.write_device(rid, buf):
-                    ok = False
-                    break
-            if ok:
-                ok = self.dev.write_device(rid, flash_buf)
+            try:
+                ok = self._send_reports(reports, flash_buf, rid)
+            except Exception as e:             # never strand the disabled button
+                LOG.exception("download worker crashed")
+                self.log("Download error: %s" % e)
+                ok = False
             self._ui_q.put(lambda: self._download_done(ok))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -994,18 +1041,46 @@ class App(tk.Tk):
             super().destroy()
 
 
+def _configure_logging(verbose):
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S")
+
+
+def _install_signal_handlers(app):
+    """Ctrl-C / SIGTERM break the Tk loop so destroy() re-attaches usbhid."""
+    def handler(signum, _frame):
+        LOG.info("signal %d received; shutting down", signum)
+        app.quit()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, handler)
+        except (ValueError, OSError):  # not the main thread / unsupported
+            pass
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="MINI-KeyBoard configurator")
     parser.add_argument("--version", action="version", version="minikeypad 1.0")
     parser.add_argument("--no-auto-install", action="store_true",
                         help="do not try to pip install pyusb when it is missing")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="verbose (DEBUG) terminal logging")
     args = parser.parse_args(argv)
+    _configure_logging(args.verbose)
     auto = (not args.no_auto_install
             and os.environ.get("MINIKEYPAD_NO_AUTO_INSTALL") != "1")
     if not _USB_OK and auto:
         _ensure_pyusb()
     app = App()
-    app.mainloop()
+    _install_signal_handlers(app)
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:           # Ctrl-C delivered inside an after() tick
+        LOG.info("interrupted")
+    finally:
+        app.destroy()                   # closes the device -> re-attaches usbhid
 
 
 if __name__ == "__main__":  # pragma: no cover

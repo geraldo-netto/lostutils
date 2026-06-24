@@ -7,6 +7,7 @@ module).  The App tests need a Tk display; they are skipped automatically when
 none is available.
 """
 
+import logging
 import random
 import sys
 import time
@@ -16,6 +17,12 @@ import pytest
 
 import minikeypad
 from minikeypad import KeyParam, MAX_KBD_GROUPS
+
+
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """Keep write-retry backoff from slowing the suite."""
+    monkeypatch.setattr(minikeypad.time, "sleep", lambda _s: None)
 
 
 # --------------------------------------------------------------------------- #
@@ -648,6 +655,29 @@ def test_write_device_usberror(monkeypatch):
     d.ep_out = ep
     assert d.write_device(0, bytearray(8)) is False
     assert any("write failed" in m for m in logs)
+    assert any("retry" in m for m in logs)
+
+
+def test_write_device_retries_then_succeeds(monkeypatch):
+    usb, USBError = make_usb()
+    _install_usb(monkeypatch, usb)
+    ep = FakeEP()
+    n = {"v": 0}
+
+    def flaky(data, timeout):
+        n["v"] += 1
+        if n["v"] < 2:
+            raise USBError("transient")
+        return 9
+
+    ep.write = flaky
+    logs = []
+    d = minikeypad.KeypadDevice(log=logs.append)
+    d.dev = object()
+    d.ep_out = ep
+    assert d.write_device(0, bytearray(8)) is True
+    assert n["v"] == 2
+    assert any("retry" in m for m in logs)
 
 
 # ===========================================================================
@@ -677,10 +707,12 @@ pytestmark_app = pytest.mark.skipif(not _has_display(), reason="no Tk display")
 class FakeDev:
     """Stand-in for KeypadDevice in App tests."""
 
-    def __init__(self, connected=True, write_ok=True):
+    def __init__(self, connected=True, write_ok=True, fail_index=None):
         self._connected = connected
         self.write_ok = write_ok
+        self.fail_index = fail_index      # 1-based write call that returns False
         self.writes = []
+        self._calls = 0
         self.closed = False
 
     @property
@@ -695,6 +727,9 @@ class FakeDev:
 
     def write_device(self, rid, buf):
         self.writes.append((rid, bytes(buf)))
+        self._calls += 1
+        if self.fail_index is not None and self._calls == self.fail_index:
+            return False
         return self.write_ok
 
     def close(self):
@@ -706,6 +741,20 @@ class FlakyDev(FakeDev):
 
     def still_connected(self):
         return False
+
+
+class CrashDev(FakeDev):
+    """write_device raises -> exercises the download worker's crash guard."""
+
+    def write_device(self, rid, buf):
+        raise RuntimeError("boom")
+
+
+class ConnCrashDev(FakeDev):
+    """connect() raises -> exercises the connect worker's crash guard."""
+
+    def connect(self):
+        raise RuntimeError("boom")
 
 
 def _drain(app):
@@ -880,6 +929,46 @@ def test_download_truncated_logs(app):
     assert "first %d" % minikeypad.MAX_KBD_GROUPS in app.log_box.get("1.0", "end")
 
 
+def test_send_reports_all_ok(app):
+    app.dev = FakeDev(write_ok=True)
+    assert app._send_reports([bytearray(8), bytearray(8)], bytearray(8), 0) is True
+    assert len(app.dev.writes) == 3        # 2 reports + flash
+
+
+def test_send_reports_report_failure_logged(app):
+    app.dev = FakeDev(fail_index=1)
+    assert app._send_reports([bytearray(8)], bytearray(8), 0) is False
+    _drain(app)
+    assert "report 1/1 failed" in app.log_box.get("1.0", "end").lower()
+
+
+def test_send_reports_flash_failure_logged(app):
+    app.dev = FakeDev(fail_index=2)        # report ok, flash (2nd call) fails
+    assert app._send_reports([bytearray(8)], bytearray(8), 0) is False
+    _drain(app)
+    assert "flash commit failed" in app.log_box.get("1.0", "end").lower()
+
+
+def test_download_worker_crash_recovers(app):
+    app._io_busy = False
+    app.dev = CrashDev(connected=True)
+    app.kp.select_physical_key(1)
+    app.kp.basic_key(4, "A")
+    app._download()
+    _wait_drain(app)
+    assert "failed" in app.dl_status.cget("text").lower()
+    assert app._io_busy is False
+    assert str(app.dl_btn.cget("state")) == "normal"
+
+
+def test_try_connect_crash_recovers(app):
+    app._io_busy = True
+    app.dev = ConnCrashDev(connected=False)
+    app._try_connect()
+    _wait_drain(app)
+    assert app._io_busy is False
+
+
 def test_version_check_sets_report_id(app):
     app.dev = FakeDev(connected=True, write_ok=True)
     app._version_check()
@@ -952,13 +1041,21 @@ class _FakeApp:
 
     def __init__(self):
         _FakeApp.created += 1
+        self.destroyed = False
 
     def mainloop(self):
         pass
 
+    def quit(self):
+        pass
+
+    def destroy(self):
+        self.destroyed = True
+
 
 def test_main_skips_install_with_flag(monkeypatch):
     monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_install_signal_handlers", lambda a: None)
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
     called = []
     monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
@@ -968,6 +1065,7 @@ def test_main_skips_install_with_flag(monkeypatch):
 
 def test_main_auto_installs_when_missing(monkeypatch):
     monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_install_signal_handlers", lambda a: None)
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
     monkeypatch.delenv("MINIKEYPAD_NO_AUTO_INSTALL", raising=False)
     called = []
@@ -978,8 +1076,66 @@ def test_main_auto_installs_when_missing(monkeypatch):
 
 def test_main_skips_install_when_usb_ok(monkeypatch):
     monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_install_signal_handlers", lambda a: None)
     monkeypatch.setattr(minikeypad, "_USB_OK", True)
     called = []
     monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
     minikeypad.main([])
     assert called == []
+
+
+def test_main_installs_signals_and_destroys(monkeypatch):
+    monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_USB_OK", True)
+    installed = []
+    monkeypatch.setattr(minikeypad, "_install_signal_handlers",
+                        lambda a: installed.append(a))
+    minikeypad.main([])
+    assert installed and installed[0].destroyed is True
+
+
+def test_main_handles_keyboard_interrupt(monkeypatch):
+    class KApp(_FakeApp):
+        def mainloop(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(minikeypad, "App", KApp)
+    monkeypatch.setattr(minikeypad, "_install_signal_handlers", lambda a: None)
+    monkeypatch.setattr(minikeypad, "_USB_OK", True)
+    minikeypad.main([])          # must not propagate
+
+
+# ===========================================================================
+#  logging + signal helpers
+# ===========================================================================
+def test_configure_logging_attaches_handler():
+    minikeypad._configure_logging(False)
+    minikeypad._configure_logging(True)
+    assert logging.getLogger().handlers
+
+
+def test_install_signal_handlers_registers_and_quits(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(minikeypad.signal, "signal",
+                        lambda sig, h: captured.__setitem__(sig, h))
+
+    class A:
+        def __init__(self):
+            self.quit_called = False
+
+        def quit(self):
+            self.quit_called = True
+
+    a = A()
+    minikeypad._install_signal_handlers(a)
+    assert minikeypad.signal.SIGINT in captured
+    captured[minikeypad.signal.SIGINT](minikeypad.signal.SIGINT, None)
+    assert a.quit_called is True
+
+
+def test_install_signal_handlers_swallows_failure(monkeypatch):
+    def boom(_sig, _h):
+        raise ValueError("not the main thread")
+
+    monkeypatch.setattr(minikeypad.signal, "signal", boom)
+    minikeypad._install_signal_handlers(object())   # must not raise
