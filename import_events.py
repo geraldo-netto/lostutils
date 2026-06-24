@@ -2893,6 +2893,38 @@ def dedupe_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Output
 # --------------------------------------------------------------------------- #
+@contextlib.contextmanager
+def _output_lock(output_path: Path):
+    """Advisory cross-process lock guarding a single output path.
+
+    _atomic_write_bytes makes one writer atomic, but two concurrent runs
+    targeting the same output silently last-writer-wins. Reserve a sibling
+    <output>.lock via O_CREAT|O_EXCL so a second run refuses instead of
+    racing; the lock is always unlinked in finally so a crash leaves a
+    removable, self-describing file rather than a wedged run.
+    """
+    lock_path = output_path.with_name(f"{output_path.name}.lock")
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError as exc:
+        raise FileExistsError(
+            f"Another run is already writing {output_path} "
+            f"(lock {lock_path}). Wait for it to finish, or remove the lock "
+            f"file if it is stale."
+        ) from exc
+    try:
+        try:
+            os.write(fd, f"pid={os.getpid()}\n".encode("utf-8"))
+        finally:
+            os.close(fd)
+        yield
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+
 def _atomic_write_bytes(output_path: Path, data: bytes) -> None:
     tmp = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
     try:
@@ -2912,7 +2944,8 @@ def _atomic_write_bytes(output_path: Path, data: bytes) -> None:
 def write_events_json(events: List[Dict[str, Any]], output_path: Path) -> None:
     """Writes the extracted events to a JSON file."""
     payload = json.dumps(events, ensure_ascii=False, indent=2).encode("utf-8")
-    _atomic_write_bytes(output_path, payload)
+    with _output_lock(output_path):
+        _atomic_write_bytes(output_path, payload)
 
 
 _ISO_NO_SECONDS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})((?:[+-]\d{2}:\d{2}|Z)?)$")
@@ -2991,7 +3024,8 @@ def build_ics(events: List[Dict[str, Any]]) -> bytes:
 
 
 def write_events_ics(events: List[Dict[str, Any]], output_path: Path) -> None:
-    _atomic_write_bytes(output_path, build_ics(events))
+    with _output_lock(output_path):
+        _atomic_write_bytes(output_path, build_ics(events))
 
 
 # --------------------------------------------------------------------------- #

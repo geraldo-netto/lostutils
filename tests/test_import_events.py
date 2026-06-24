@@ -1991,6 +1991,40 @@ def test_write_events_json_roundtrips(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8")) == events
 
 
+def test_write_events_json_refuses_when_output_locked(tmp_path):
+    out = tmp_path / "events.json"
+    lock = tmp_path / "events.json.lock"
+    lock.write_text("pid=999\n")  # simulate a concurrent run holding the lock
+
+    with pytest.raises(FileExistsError, match="Another run is already writing"):
+        import_events.write_events_json([{"title": "X"}], out)
+
+    assert not out.exists()  # locked run did not clobber output
+    assert lock.exists()  # other run's lock left intact
+
+
+def test_write_events_json_creates_and_removes_lock(tmp_path):
+    out = tmp_path / "events.json"
+
+    import_events.write_events_json(
+        [{"title": "X", "start": "2026-06-22"}], out)
+
+    assert out.exists()
+    assert not (tmp_path / "events.json.lock").exists()  # lock released after write
+
+
+def test_output_lock_releases_on_write_error(tmp_path):
+    out = tmp_path / "events.json"
+    lock = tmp_path / "events.json.lock"
+
+    with pytest.raises(RuntimeError):
+        with import_events._output_lock(out):
+            assert lock.exists()  # held during the critical section
+            raise RuntimeError("boom")
+
+    assert not lock.exists()  # cleaned up on the error path
+
+
 def test_atomic_write_removes_temp_on_keyboard_interrupt(tmp_path, monkeypatch):
     out = tmp_path / "events.json"
     out.write_bytes(b"old")

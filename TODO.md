@@ -56,7 +56,6 @@ lq-nplus1-01 | open | low | link_queue.py:1084 — _restore_queue_from_state cal
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-conc-01 | open | med | import_events.py:1353 — atomic replace protects a single writer from partial files but concurrent runs targeting the same output still race and the last writer silently wins. Add an advisory output lock or refuse when a sibling lock exists. | shared output race
 lq-conc-01 | open | low | link_queue.py:1380 — _note_immediate_depth samples depth = _immediate_q.qsize() BEFORE taking _immediate_lock, then makes the edge-trigger warn decision under the lock using that pre-lock sample; two dispatchers can sample different depths and interleave so the latched over/under transition disagrees with the true depth. Sample qsize inside the locked region. | edge-trigger sample/decision race
 
 ## multithreading
