@@ -2043,6 +2043,18 @@ def test_llm_heartbeat_warns_while_running_and_stops(caplog):
     assert _threading.active_count() <= started
 
 
+def test_llm_heartbeat_escalates_to_error_past_deadline(caplog):
+    import logging
+    import time as _time
+
+    with caplog.at_level(logging.ERROR):
+        with import_events._llm_heartbeat("wedged.pdf", interval=0.01, deadline=0.0):
+            _time.sleep(0.05)
+    errors = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.ERROR and "wedged.pdf" in r.getMessage()]
+    assert errors, "heartbeat did not escalate to ERROR past the deadline"
+
+
 def test_create_chat_completion_passes_label_to_heartbeat(monkeypatch):
     import contextlib
 

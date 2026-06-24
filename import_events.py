@@ -58,6 +58,10 @@ OCR_TIMEOUT_SECONDS = 120
 # so instead of a false timeout we emit a WARNING at this interval to make a
 # stall visible. 60s is long enough to stay quiet on healthy runs.
 LLM_HEARTBEAT_SECONDS = 60
+# Past this, the heartbeat escalates WARNING -> ERROR: the call is almost
+# certainly wedged. We still can't cancel a native llama_cpp call, but the
+# louder log tells the operator to abort.
+LLM_STALL_DEADLINE_SECONDS = 600
 LLM_RESPONSE_LOG_EXCERPT_CHARS = 160
 DEFAULT_LANGUAGE = "auto"
 DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
@@ -2457,21 +2461,29 @@ def _ocr_image_bytes(
 
 @contextlib.contextmanager
 def _llm_heartbeat(label: str, interval: float = LLM_HEARTBEAT_SECONDS,
+                   deadline: float = LLM_STALL_DEADLINE_SECONDS,
                    monotonic: Any = time.monotonic):
-    """Logs a WARNING every `interval`s while a blocking LLM call runs.
+    """Watchdog for a blocking LLM call: heartbeat WARNING every `interval`s,
+    escalating to ERROR once a monotonic `deadline` is exceeded.
 
     create_chat_completion is a native (C) call that cannot be cancelled
     from Python without killing the process, so a true per-file timeout is
-    infeasible. This watchdog only makes a stall visible; it never aborts
-    the call. The daemon thread is always stopped in finally.
+    infeasible. This watchdog only makes a stall visible (and louder past the
+    deadline); it never aborts the call. The daemon thread is always stopped in
+    finally.
     """
     stop = threading.Event()
     start = monotonic()
 
     def beat() -> None:
         while not stop.wait(interval):
-            logger.warning("LLM still running for %s after %.0fs",
-                           label, monotonic() - start)
+            elapsed = monotonic() - start
+            if elapsed >= deadline:
+                logger.error("LLM appears wedged for %s: %.0fs exceeds the %ds "
+                             "deadline; press Ctrl-C to abort the run.",
+                             label, elapsed, deadline)
+            else:
+                logger.warning("LLM still running for %s after %.0fs", label, elapsed)
 
     thread = threading.Thread(target=beat, name="llm-heartbeat", daemon=True)
     thread.start()
