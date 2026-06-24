@@ -956,6 +956,21 @@ def _unlink_with_rollback(source: Path, target: Path) -> None:
         raise
 
 
+def _require_regular_source(path: Path) -> None:
+    """Reject a non-regular move source (oze-rel-01).
+
+    ``move_file``/``plan_moves`` are public and can be handed an arbitrary
+    path. The scanner deliberately refuses to follow symlinks, so a symlink (or
+    device/fifo/socket) passed straight to ``move_file`` must not be hardlinked
+    into a bucket — that would relocate link semantics the scan skips. Classify
+    via ``lstat`` so the link itself is inspected, never its target; a vanished
+    source surfaces as the underlying ``OSError`` (per-file skip).
+    """
+    st = os.lstat(path)
+    if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
+        raise ValueError(f"refusing to move non-regular source: {path}")
+
+
 def move_file(path: Path, destination: Path) -> Path:
     """Move a file into the destination directory without overwriting an existing target.
 
@@ -981,6 +996,7 @@ def move_file(path: Path, destination: Path) -> Path:
     collision-resolved sibling before the dir is created so the data is
     preserved and the move proceeds.
     """
+    _require_regular_source(path)
     path = _resolve_source_collision(path, destination)
     ensure_directory(destination)
     target = destination / path.name

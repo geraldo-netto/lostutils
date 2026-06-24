@@ -3565,6 +3565,18 @@ def test_cross_device_late_interrupt_keeps_completed_target(tmp_path, monkeypatc
     assert not src.exists() and dst.read_bytes() == b"payload"
 
 
+def test_move_file_rejects_symlink_source(tmp_path):
+    """oze-rel-01: a symlink handed straight to move_file is refused, never
+    hardlinked into the bucket (the scanner refuses to follow symlinks)."""
+    real = tmp_path / "real.bin"; real.write_bytes(b"data")
+    link = tmp_path / "link.bin"; link.symlink_to(real)
+    dest = tmp_path / "bucket"; dest.mkdir()
+    with pytest.raises(ValueError):
+        oze.move_file(link, dest)
+    assert not (dest / "link.bin").exists(), "symlink hardlinked into bucket"
+    assert link.is_symlink(), "symlink source disturbed"
+
+
 # --- oze-sec-03: _parse_extra_zip_family validates content ----------------
 
 def test_parse_extra_zip_family_rejects_nul_byte():
