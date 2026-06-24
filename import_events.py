@@ -22,6 +22,7 @@ import time
 import queue
 import threading
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -440,14 +441,6 @@ def _has_usable_extracted_text(text: str) -> bool:
         return False
     alpha = sum(1 for ch in compact if ch.isalpha())
     return alpha >= 30 and (alpha / max(1, len(compact))) >= 0.20
-
-
-def _has_usable_ocr_text(text: str) -> bool:
-    compact = "".join(ch for ch in text if not ch.isspace())
-    if len(compact) < 20:
-        return False
-    alpha = sum(1 for ch in compact if ch.isalpha())
-    return alpha >= 8 and (alpha / max(1, len(compact))) >= 0.20
 
 
 def _should_pdf_ocr(config: "ModelConfig", pdf_text: str) -> bool:
@@ -2392,13 +2385,37 @@ def _ocr_image_path_once(
         return _ocr_with_paddle(image_path, language, runtime_config)[:runtime_config.text_budget_chars()]
     if engine == "tesseract":
         return _ocr_with_tesseract(image_path, language, runtime_config)[:runtime_config.text_budget_chars()]
-    paddle_text = _ocr_with_paddle(image_path, language, runtime_config)
-    if engine == "auto" and _has_usable_ocr_text(paddle_text):
-        return paddle_text[:runtime_config.text_budget_chars()]
-    return _merge_text_blocks([
-        paddle_text,
-        _ocr_with_tesseract(image_path, language, runtime_config),
-    ], runtime_config.text_budget_chars())
+    return _merge_text_blocks(
+        _ocr_backend_texts(("paddle", "tesseract"), image_path, language, runtime_config),
+        runtime_config.text_budget_chars(),
+    )
+
+
+def _ocr_backend_text(
+    backend: str,
+    image_path: Path,
+    language: str,
+    config: ModelConfig,
+) -> str:
+    if backend == "paddle":
+        return _ocr_with_paddle(image_path, language, config)
+    return _ocr_with_tesseract(image_path, language, config)
+
+
+def _ocr_backend_texts(
+    backends: Tuple[str, ...],
+    image_path: Path,
+    language: str,
+    config: ModelConfig,
+) -> List[str]:
+    if len(backends) == 1:
+        return [_ocr_backend_text(backends[0], image_path, language, config)]
+    with ThreadPoolExecutor(max_workers=len(backends), thread_name_prefix="ocr") as pool:
+        futures = [
+            pool.submit(_ocr_backend_text, backend, image_path, language, config)
+            for backend in backends
+        ]
+        return [future.result() for future in futures]
 
 
 def _ocr_chain_text(
@@ -2415,7 +2432,7 @@ def _ocr_chain_text(
         score = _language_match_score(text, language)
         logger.info("OCR language result for %s [%s]: %s (%s), score %.2f, chars %d",
                     subject, stage, _language_name(language), language, score, len(text.strip()))
-        if index == 0 and score >= config.ocr_language_score:
+        if score >= config.ocr_language_score:
             break
     return _merge_text_blocks(blocks, config.text_budget_chars())
 

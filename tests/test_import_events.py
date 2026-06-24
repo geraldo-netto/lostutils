@@ -1469,6 +1469,29 @@ def test_ocr_image_path_exhausts_chain_when_first_language_scores_low(tmp_path, 
     assert text == "Launch party with event"
 
 
+def test_ocr_image_path_stops_chain_when_later_language_scores_high(tmp_path, monkeypatch):
+    img = tmp_path / "scan.png"
+    img.write_bytes(b"image")
+    calls = []
+    texts = {
+        "en": "Festa musica cultura",
+        "pt-br": "Festa de São João no Porto com música e evento cultural",
+        "es": "Fiesta con musica",
+    }
+
+    def fake_once(path, config=None, language="en"):
+        calls.append(language)
+        return texts[language]
+
+    monkeypatch.setattr(import_events, "_ocr_image_path_once", fake_once)
+    cfg = import_events.ModelConfig(ocr_language_score=0.70)
+
+    text = import_events._ocr_image_path(img, cfg, "en", ("en", "pt-br", "es"), "image OCR")
+
+    assert calls == ["en", "pt-br"]
+    assert "Festa de São João" in text
+
+
 def test_ocr_image_bytes_uses_temp_file_and_cleans_it(monkeypatch):
     seen = []
 
@@ -1559,23 +1582,25 @@ def test_resolve_tesseract_path_caches_shutil_lookup(monkeypatch):
     assert calls == ["tesseract"]
 
 
-def test_ocr_image_path_auto_skips_tesseract_when_paddle_is_usable(tmp_path, monkeypatch):
+def test_ocr_image_path_auto_runs_paddle_and_tesseract_in_parallel(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
-    calls = []
-    monkeypatch.setattr(import_events, "_ocr_with_paddle",
-                        lambda path, language="en", config=None: "Readable Paddle OCR text")
+    tesseract_started = threading.Event()
+
+    def paddle(path, language="en", config=None):
+        assert tesseract_started.wait(1)
+        return "Readable Paddle OCR text"
 
     def tesseract(path, language="en", config=None):
-        calls.append(path)
+        tesseract_started.set()
         return "Tesseract text"
 
+    monkeypatch.setattr(import_events, "_ocr_with_paddle", paddle)
     monkeypatch.setattr(import_events, "_ocr_with_tesseract", tesseract)
 
     text = import_events._ocr_image_path_once(img, import_events.ModelConfig(ocr_engine="auto"))
 
-    assert text == "Readable Paddle OCR text"
-    assert calls == []
+    assert text == "Readable Paddle OCR text\nTesseract text"
 
 
 def test_ocr_image_path_auto_falls_back_to_tesseract_when_paddle_is_weak(tmp_path, monkeypatch):
@@ -1604,9 +1629,11 @@ def test_ocr_image_path_engine_modes_call_requested_backend(tmp_path, monkeypatc
         img, import_events.ModelConfig(ocr_engine="paddle")) == "Paddle text"
     assert import_events._ocr_image_path_once(
         img, import_events.ModelConfig(ocr_engine="tesseract")) == "Tesseract text"
+    assert calls == ["paddle", "tesseract"]
+    calls.clear()
     assert import_events._ocr_image_path_once(
         img, import_events.ModelConfig(ocr_engine="both")) == "Paddle text\nTesseract text"
-    assert calls == ["paddle", "tesseract", "paddle", "tesseract"]
+    assert sorted(calls) == ["paddle", "tesseract"]
 
 
 def test_ocr_with_tesseract_missing_logs_once(tmp_path, monkeypatch, caplog):
