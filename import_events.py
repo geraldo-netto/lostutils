@@ -757,6 +757,7 @@ MAX_CONTENT_CHARS = _text_budget_from_context(DEFAULT_LLM_CONTEXT_SIZE,
 _LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
 _LLM_CACHE_LOCK = threading.RLock()
 _LLM_REQUEST_LOCK = threading.Lock()
+_LLM_STALL_CONTEXT = threading.local()
 _APP_LOG_FILE: Optional[Any] = None
 _FAULT_TRACEBACK_FILE: Optional[Any] = None
 _FAULT_TRACEBACKS_ENABLED = False
@@ -2476,6 +2477,44 @@ def _ocr_image_bytes(
             pass
 
 
+def _current_llm_stall_callback() -> Optional[Callable[[str, float, float], None]]:
+    callback = getattr(_LLM_STALL_CONTEXT, "callback", None)
+    return callback if callable(callback) else None
+
+
+def _run_llm_stall_callback(
+    callback: Optional[Callable[[str, float, float], None]],
+    label: str,
+    elapsed: float,
+    deadline: float,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(label, elapsed, deadline)
+    except Exception as exc:
+        logger.warning("LLM stall callback failed for %s: %s", label, exc)
+
+
+@contextlib.contextmanager
+def _llm_stall_callback(callback: Optional[Callable[[str, float, float], None]]):
+    previous = getattr(_LLM_STALL_CONTEXT, "callback", None)
+    if callback is None:
+        yield
+        return
+    _LLM_STALL_CONTEXT.callback = callback
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                del _LLM_STALL_CONTEXT.callback
+            except AttributeError:
+                pass
+        else:
+            _LLM_STALL_CONTEXT.callback = previous
+
+
 @contextlib.contextmanager
 def _llm_heartbeat(label: str, interval: float = LLM_HEARTBEAT_SECONDS,
                    deadline: float = LLM_STALL_DEADLINE_SECONDS,
@@ -2491,14 +2530,20 @@ def _llm_heartbeat(label: str, interval: float = LLM_HEARTBEAT_SECONDS,
     """
     stop = threading.Event()
     start = monotonic()
+    callback = _current_llm_stall_callback()
+    notified = False
 
     def beat() -> None:
+        nonlocal notified
         while not stop.wait(interval):
             elapsed = monotonic() - start
             if elapsed >= deadline:
                 logger.error("LLM appears wedged for %s: %.0fs exceeds the %ds "
                              "deadline; press Ctrl-C to abort the run.",
                              label, elapsed, deadline)
+                if not notified:
+                    notified = True
+                    _run_llm_stall_callback(callback, label, elapsed, deadline)
             else:
                 logger.warning("LLM still running for %s after %.0fs", label, elapsed)
 
@@ -2906,6 +2951,7 @@ def _file_worker(
     runtime_config: ModelConfig,
     llm_client: Optional[Any],
     default_tz: Optional[str],
+    on_llm_stall: Optional[Callable[[str, float, float], None]],
 ) -> None:
     while True:
         item = work_queue.get()
@@ -2915,7 +2961,8 @@ def _file_worker(
             index, file = item
             if stop_event.is_set():
                 continue
-            events = _extract_file_events(file, runtime_config, llm_client, default_tz)
+            with _llm_stall_callback(on_llm_stall):
+                events = _extract_file_events(file, runtime_config, llm_client, default_tz)
             done_queue.put((index, events, None))
         except BaseException as exc:
             stop_event.set()
@@ -2969,17 +3016,39 @@ def _run_file_workers(
     done_queue: queue.Queue = queue.Queue()
     stop_event = threading.Event()
     results: Dict[int, List[Dict[str, Any]]] = {}
-    threads = [
-        threading.Thread(
-            target=_file_worker,
-            args=(work_queue, done_queue, stop_event, runtime_config, llm_client, default_tz),
-            name=f"import-events-worker-{index + 1}",
-            daemon=True,
-        )
-        for index in range(workers)
-    ]
-    for thread in threads:
+    threads: List[threading.Thread] = []
+    threads_lock = threading.Lock()
+    next_worker_id = 0
+
+    def start_worker(reason: str = "") -> None:
+        nonlocal next_worker_id
+        if stop_event.is_set():
+            return
+        with threads_lock:
+            next_worker_id += 1
+            name = f"import-events-worker-{next_worker_id}"
+            thread = threading.Thread(
+                target=_file_worker,
+                args=(
+                    work_queue, done_queue, stop_event, runtime_config,
+                    llm_client, default_tz, on_llm_stall,
+                ),
+                name=name,
+                daemon=True,
+            )
+            threads.append(thread)
         thread.start()
+        if reason:
+            logger.warning("Started replacement file worker %s after %s.", name, reason)
+
+    def on_llm_stall(label: str, elapsed: float, deadline: float) -> None:
+        start_worker(
+            f"LLM stall in {label} ({elapsed:.0f}s >= {int(deadline)}s); "
+            "the stalled extraction remains running unbounded"
+        )
+
+    for _index in range(workers):
+        start_worker()
     feeder = threading.Thread(
         target=_feed_file_queue,
         args=(files, work_queue, done_queue, stop_event, workers),
@@ -3005,23 +3074,34 @@ def _run_file_workers(
         # ie-robust-01: preserve the events gathered before the model failed so
         # the caller can emit a partial result before aborting.
         stop_event.set()
-        for thread in threads:
+        with threads_lock:
+            running_threads = list(threads)
+        for thread in running_threads:
             thread.join(timeout=0.2)
         model_exc.partial_events = [
             event for index in sorted(results) for event in results[index]]
         raise
     except KeyboardInterrupt:
         stop_event.set()
-        for thread in threads:
+        with threads_lock:
+            running_threads = list(threads)
+        for thread in running_threads:
             thread.join(timeout=0.2)
         raise
     except BaseException:
         stop_event.set()
-        for thread in threads:
+        with threads_lock:
+            running_threads = list(threads)
+        for thread in running_threads:
             thread.join(timeout=0.2)
         raise
     feeder.join()
-    for thread in threads:
+    with threads_lock:
+        extra_workers = max(0, len(threads) - workers)
+        running_threads = list(threads)
+    for _index in range(extra_workers):
+        work_queue.put(None)
+    for thread in running_threads:
         thread.join()
     return [event for index in sorted(results) for event in results[index]]
 

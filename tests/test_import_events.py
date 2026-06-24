@@ -1983,6 +1983,44 @@ def test_process_folder_uses_configured_worker_threads(tmp_path, monkeypatch):
     assert [event["source"] for event in events] == [f"event-{index}.txt" for index in range(8)]
 
 
+def test_process_folder_replaces_worker_after_llm_stall(tmp_path, monkeypatch):
+    for index in range(2):
+        (tmp_path / f"event-{index}.txt").write_text("Launch", encoding="utf-8")
+    second_started = threading.Event()
+    seen_threads = set()
+    lock = threading.Lock()
+
+    def fake_extract(file, llm_client=None, default_tz=None, model_config=None):
+        with lock:
+            seen_threads.add(threading.current_thread().name)
+        if file.name == "event-0.txt":
+            callback = import_events._current_llm_stall_callback()
+            assert callback is not None
+            callback(file.name, 600.0, 600.0)
+            assert second_started.wait(2)
+        else:
+            second_started.set()
+        return [{
+            "title": file.name,
+            "start": "2026-06-06",
+            "end": "",
+            "location": "",
+            "source": file.name,
+            "type": "Text/LLM",
+        }]
+
+    monkeypatch.setattr(import_events, "extract_from_file", fake_extract)
+
+    events = import_events.process_folder(
+        str(tmp_path),
+        model_config=import_events.ModelConfig(workers=1, deterministic_order=True),
+    )
+
+    assert second_started.is_set()
+    assert len(seen_threads) >= 2
+    assert [event["source"] for event in events] == ["event-0.txt", "event-1.txt"]
+
+
 def test_process_folder_propagates_keyboard_interrupt_from_worker(tmp_path, monkeypatch):
     (tmp_path / "event.txt").write_text("Launch", encoding="utf-8")
 
@@ -2080,6 +2118,21 @@ def test_llm_heartbeat_escalates_to_error_past_deadline(caplog):
     errors = [r.getMessage() for r in caplog.records
               if r.levelno == logging.ERROR and "wedged.pdf" in r.getMessage()]
     assert errors, "heartbeat did not escalate to ERROR past the deadline"
+
+
+def test_llm_heartbeat_notifies_stall_callback_once():
+    import time as _time
+
+    calls = []
+
+    with import_events._llm_stall_callback(
+        lambda label, elapsed, deadline: calls.append((label, elapsed, deadline))
+    ):
+        with import_events._llm_heartbeat("wedged.pdf", interval=0.01, deadline=0.0):
+            _time.sleep(0.05)
+
+    assert len(calls) == 1
+    assert calls[0][0] == "wedged.pdf"
 
 
 def test_create_chat_completion_passes_label_to_heartbeat(monkeypatch):
