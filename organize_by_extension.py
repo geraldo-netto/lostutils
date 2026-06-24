@@ -1698,9 +1698,20 @@ def _drain_futures(
     the head_cache for finished sources (oze-conc-03 / oze-scal-05)."""
     done, _ = wait(futures, return_when=FIRST_COMPLETED)
     for fut in done:
-        source, destination, error = fut.result()
-        del futures[fut]
+        source = futures.pop(fut)
         head_cache.pop(source, None)
+        try:
+            _, destination, error = fut.result()
+        except Exception as exc:
+            # oze-obs-02: _move_worker only traps OSError/RuntimeError/ValueError;
+            # an unexpected class (KeyError, MemoryError, ...) would otherwise
+            # re-raise here, escape _run_moves, and abort the whole batch with no
+            # summary, losing all in-flight progress. Treat it as a per-file skip
+            # so one rogue file can't kill every move. BaseException
+            # (KeyboardInterrupt/SystemExit) still propagates for prompt cancel.
+            logger.warning("Skipped %s: unexpected worker error: %s", source, exc)
+            stats.skipped += 1
+            continue
         if error:
             logger.warning(f"Skipped {source}: {error}")
             stats.skipped += 1

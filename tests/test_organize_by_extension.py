@@ -3565,6 +3565,23 @@ def test_cross_device_late_interrupt_keeps_completed_target(tmp_path, monkeypatc
     assert not src.exists() and dst.read_bytes() == b"payload"
 
 
+def test_drain_futures_skips_unexpected_worker_exception(tmp_path):
+    """oze-obs-02: an exception class the worker did not trap (KeyError, etc.)
+    is treated as a per-file skip in _drain_futures, never propagated to abort
+    the whole batch."""
+    from concurrent.futures import Future
+    src = tmp_path / "rogue.bin"
+    fut: Future = Future()
+    fut.set_exception(KeyError("boom"))
+    futures = {fut: src}
+    stats = oze._RunStats()
+    head_cache = {src: object()}
+    oze._drain_futures(futures, stats, preview=False, head_cache=head_cache)  # must not raise
+    assert stats.skipped == 1 and stats.processed == 0
+    assert fut not in futures, "drained future not removed"
+    assert src not in head_cache, "head_cache not pruned for failed source"
+
+
 def test_cross_device_source_unlink_failure_surfaced_not_raised(tmp_path, monkeypatch, caplog):
     """oze-robust-01: a failed source removal after a committed cross-device
     copy is logged loudly (duplicate left) and does NOT raise — the target is
