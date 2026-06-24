@@ -25,7 +25,6 @@ dnv3-val-01 | open | low | deduplicate-by-namev3.py:66 — --workers accepts any
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-gov-01 | open | low | import_events.py:601 — download and cache warnings log absolute local cache/model paths, which can leak private home-directory names when users paste logs. Redact to cache-relative paths or basename+digest while keeping enough context for diagnosis. | local path disclosure
 
 ## data integrity
 

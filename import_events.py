@@ -913,7 +913,7 @@ def _quiet_output_context(verbose: bool):
 def _verify_sha256(path: str, expected: Optional[str]) -> None:
     """Verifies a downloaded model against its pinned digest; deletes on mismatch."""
     if not expected:
-        logger.warning("No SHA-256 pinned for %s; skipping integrity check.", path)
+        logger.warning("No SHA-256 pinned for %s; skipping integrity check.", _display_path(path))
         return
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -974,16 +974,18 @@ def _download_request(url: str, start_at: int) -> Request:
 
 
 def _log_download_progress(path: Path, downloaded: int, total: Optional[int]) -> None:
+    # ie-gov-01: redact the cache path so pasted logs don't leak the home dir.
+    shown = _display_path(str(path))
     if total:
         pct = (downloaded / total) * 100
-        logger.info("Downloading %s: %d/%d bytes (%.1f%%)", path, downloaded, total, pct)
+        logger.info("Downloading %s: %d/%d bytes (%.1f%%)", shown, downloaded, total, pct)
     else:
-        logger.info("Downloading %s: %d bytes", path, downloaded)
+        logger.info("Downloading %s: %d bytes", shown, downloaded)
 
 
 def _publish_complete_part(part: Path, path: Path) -> None:
     os.replace(part, path)
-    logger.info("Cached %s (%d bytes).", path, _path_size(path))
+    logger.info("Cached %s (%d bytes).", _display_path(str(path)), _path_size(path))
 
 
 def _stream_download(
@@ -1029,11 +1031,14 @@ def _download_to_cache(url: str, path_str: str) -> None:
     path = Path(path_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     part = path.with_name(f".{path.name}.part")
+    # ie-gov-01: log cache-relative paths so pasted logs don't disclose the home dir.
+    shown_path = _display_path(str(path))
+    shown_part = _display_path(str(part))
     start_at = _path_size(part)
     if start_at:
-        logger.info("Resuming %s from %d bytes in %s.", path, start_at, part)
+        logger.info("Resuming %s from %d bytes in %s.", shown_path, start_at, shown_part)
     else:
-        logger.info("Downloading %s to %s.", url, path)
+        logger.info("Downloading %s to %s.", url, shown_path)
 
     request = _download_request(url, start_at)
     try:
@@ -1041,7 +1046,7 @@ def _download_to_cache(url: str, path_str: str) -> None:
             status = _response_status(response)
             mode = "ab" if start_at and status == 206 else "wb"
             if start_at and status != 206:
-                logger.warning("Server did not honor resume for %s; restarting download.", path)
+                logger.warning("Server did not honor resume for %s; restarting download.", shown_path)
                 start_at = 0
             downloaded = _stream_download(response, part, mode, start_at)
         _publish_complete_part(part, path)
@@ -1053,15 +1058,15 @@ def _download_to_cache(url: str, path_str: str) -> None:
                 _publish_complete_part(part, path)
                 return
         logger.warning("Download failed for %s; keeping partial %s (%d bytes): %s",
-                       path, part, _path_size(part), exc)
+                       shown_path, shown_part, _path_size(part), exc)
         raise
     except KeyboardInterrupt:
         logger.warning("Interrupted download for %s; keeping partial %s (%d bytes).",
-                       path, part, _path_size(part))
+                       shown_path, shown_part, _path_size(part))
         raise
     except Exception as exc:
         logger.warning("Download failed for %s; keeping partial %s (%d bytes): %s",
-                       path, part, _path_size(part), exc)
+                       shown_path, shown_part, _path_size(part), exc)
         raise
 
 

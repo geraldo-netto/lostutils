@@ -4134,3 +4134,19 @@ def test_run_main_emits_partial_json_on_model_unavailable(monkeypatch, tmp_path)
     assert rc == 2
     data = json.loads(out.read_text(encoding="utf-8"))
     assert data == partial, "partial events not emitted on model-unavailable abort"
+
+
+# --- ie-gov-01: download/cache logs redact the home directory ----------------
+
+def test_download_logs_redact_home_path(tmp_path, monkeypatch, caplog):
+    """ie-gov-01: cache paths in download logs are shown ~-relative, never with
+    the absolute home directory that leaks the username."""
+    fake_home = tmp_path / "home" / "alice"
+    cache_file = fake_home / ".cache" / "import-events" / "model.gguf"
+    cache_file.parent.mkdir(parents=True)
+    cache_file.write_bytes(b"data")
+    monkeypatch.setattr(import_events.Path, "home", classmethod(lambda cls: fake_home))
+    with caplog.at_level("INFO"):
+        import_events._log_download_progress(cache_file, 4, 4)
+    msg = caplog.records[-1].getMessage()
+    assert "~" in msg and str(fake_home) not in msg, f"home dir leaked: {msg}"
