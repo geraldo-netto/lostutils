@@ -40,7 +40,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
 dnv3-perf-01 | open | med | deduplicate-by-namev3.py:113 — each row block recomputes cdist of its rows against ALL n columns including the already-emitted lower triangle, doubling work; only columns >= start are kept. Pass cleaned_strs[start:] as the column set and offset cols by start. | wasted lower-triangle compute
-ie-perf-02 | open | med | import_events.py:1257 — extract_from_pdf renders and OCRs pages even after _pdf_text found enough text, so text-native PDFs still pay PyMuPDF + Paddle/Tesseract cost. Skip OCR when parsed text is sufficient, or make "always OCR" an explicit flag. | avoid unnecessary OCR
 
 ## scalability
 
