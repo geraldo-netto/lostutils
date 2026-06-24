@@ -1995,9 +1995,51 @@ def _image_messages(
         return _image_messages_from_bytes(f.read(), mime, language, config)
 
 
+def _sniff_text_encoding(raw: bytes) -> Optional[str]:
+    """Best-guess encoding via charset-normalizer/chardet when either is
+    installed; None otherwise (ie-i18n-02). Optional deps — never required."""
+    try:
+        from charset_normalizer import from_bytes
+        match = from_bytes(raw).best()
+        return match.encoding if match else None
+    except ImportError:
+        pass
+    try:
+        import chardet
+        return chardet.detect(raw).get("encoding")
+    except ImportError:
+        return None
+
+
+def _decode_text_bytes(raw: bytes, source: str) -> str:
+    """Decode untrusted document bytes, preferring real encodings over the old
+    lossy UTF-8 (ie-i18n-02). Clean UTF-8 (the common case) is unchanged and
+    silent; a non-UTF-8 document is decoded via a sniffed encoding when a
+    detector is available, else lossily with a WARNING so mangling is visible
+    rather than silent. latin-1 / errors='replace' never raise."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    encoding = _sniff_text_encoding(raw)
+    if encoding:
+        try:
+            text = raw.decode(encoding)
+            logger.warning("Decoded %s as %s (non-UTF-8 text).", source, encoding)
+            return text
+        except (UnicodeDecodeError, LookupError):
+            pass
+    logger.warning("Could not determine encoding for %s; decoding UTF-8 lossily "
+                   "— some characters may be mangled.", source)
+    return raw.decode("utf-8", errors="replace")
+
+
 def _read_text(file_path: Path, max_chars: int = MAX_CONTENT_CHARS) -> str:
-    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        return f.read(max_chars)
+    # Read a bounded byte window (≤4 bytes/UTF-8 char) so the budget stays
+    # bounded, then decode with encoding detection before truncating to chars.
+    with open(file_path, "rb") as f:
+        raw = f.read(max(1, max_chars) * 4)
+    return _decode_text_bytes(raw, file_path.name)[:max_chars]
 
 
 def _warn_once(key: str, message: str, *args: Any) -> None:

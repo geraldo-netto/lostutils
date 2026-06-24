@@ -210,7 +210,6 @@ hr-doc-01 | open | low | hash-recursive-ai5.py:607 — the SamplingStrategy base
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-i18n-02 | open | low | import_events.py:904 — _read_text hardcodes UTF-8 with `errors="ignore"`, so cp1251, Shift-JIS, Big5, ISO-8859, and other non-UTF-8 text can be silently mangled before language detection and LLM extraction. Add encoding detection or a --text-encoding/strict warning path. | non-UTF8 document handling
 
 ## release & deploy engineering
 

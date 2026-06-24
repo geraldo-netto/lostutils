@@ -4150,3 +4150,39 @@ def test_download_logs_redact_home_path(tmp_path, monkeypatch, caplog):
         import_events._log_download_progress(cache_file, 4, 4)
     msg = caplog.records[-1].getMessage()
     assert "~" in msg and str(fake_home) not in msg, f"home dir leaked: {msg}"
+
+
+# --- ie-i18n-02: _read_text encoding handling --------------------------------
+
+def test_read_text_utf8_unchanged(tmp_path):
+    """Clean UTF-8 decodes identically (the common path is unchanged)."""
+    f = tmp_path / "a.txt"
+    f.write_text("héllo wörld", encoding="utf-8")
+    assert import_events._read_text(f) == "héllo wörld"
+
+
+def test_read_text_non_utf8_decoded_with_detector(tmp_path, monkeypatch):
+    """A sniffed non-UTF-8 encoding is honored instead of mangling the text."""
+    f = tmp_path / "a.txt"
+    f.write_bytes("Привет".encode("cp1251"))
+    monkeypatch.setattr(import_events, "_sniff_text_encoding", lambda raw: "cp1251")
+    assert import_events._read_text(f) == "Привет"
+
+
+def test_read_text_non_utf8_lossy_fallback_warns(tmp_path, monkeypatch, caplog):
+    """With no detector, invalid UTF-8 falls back to a lossy decode + WARNING
+    (no crash, no silent drop)."""
+    f = tmp_path / "a.txt"
+    f.write_bytes(b"\xff\xfe caf\xe9")
+    monkeypatch.setattr(import_events, "_sniff_text_encoding", lambda raw: None)
+    with caplog.at_level("WARNING"):
+        out = import_events._read_text(f)
+    assert isinstance(out, str)
+    assert any("mangled" in r.getMessage() for r in caplog.records)
+
+
+def test_read_text_truncates_to_max_chars(tmp_path):
+    """The char budget is still honored after byte-window decoding."""
+    f = tmp_path / "a.txt"
+    f.write_text("a" * 100, encoding="utf-8")
+    assert import_events._read_text(f, max_chars=10) == "a" * 10
