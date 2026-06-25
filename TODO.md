@@ -130,7 +130,6 @@ _clean — `pyright *.py` reports 0 errors / 0 warnings across all root files (r
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnv3-obs-01 | open | low | deduplicate-by-namev3.py:76 — lines whose cleaned form is empty (blank, or only REPLACEMENTS/WORD_TOKENS chars) are dropped with no count or notice, so the user can't tell input was discarded. Track and report a dropped count to stderr. | silent data loss
-lq-obs-02 | open | low | link_queue.py:3595 — _update_status reads _immediate_q.qsize() and compares to _immediate_pool_size without _immediate_lock, racing a concurrent _resize_immediate_queue_locked swap; under the swap the qsize can be read off the orphaned old queue, so "N immediate waiting" can show a stale/zero depth while the new queue has a backlog. Read depth under the lock. | status reads unsynchronized state
 lq-obs-10 | open | low | link_queue.py:4644 — `_shutdown` calls the pre-stop state save BEFORE `stop_event.set()`, so a save failure there routes through `self._log` → `_safe_after` → the Tk job queue (not stderr); with the poller about to be cancelled, that warning is never drained and the failure is invisible. `_save_state`'s stderr fallback only triggers once `stop_event` is set. Set `stop_event` before the pre-stop save, or force the stderr path there. | silent-failure audit: dropped shutdown-save warning
 
 ## watchdog

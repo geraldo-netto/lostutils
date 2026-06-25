@@ -3720,7 +3720,12 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             state, color = "● IDLE", "#7f8c8d"
         # lq-obs-02: surface the immediate backlog when it exceeds the pool
         # size so a saturated bounded pool isn't invisible in the status bar.
-        imm_depth = self._immediate_q.qsize()
+        # Read qsize under _immediate_lock so a concurrent
+        # _resize_immediate_queue_locked swap can't make us sample the orphaned
+        # old queue (showing a stale/zero depth while the new queue has a
+        # backlog).
+        with self._immediate_lock:
+            imm_depth = self._immediate_q.qsize()
         if imm_depth > self._immediate_pool_size:
             text = f"{text} • {imm_depth} immediate waiting"
         metrics_text = self._metrics_summary()
