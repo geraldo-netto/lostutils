@@ -2992,15 +2992,23 @@ def _feed_file_queue(
     count = 0
     error: Optional[BaseException] = None
     try:
-        for count, file in enumerate(files, start=1):
+        for file in files:
+            # ie-rel-01: only count a file once its enqueue actually succeeds.
+            # Incrementing before the put (the old enumerate-based count) let a
+            # stop between increment and a successful put inflate `expected`, so
+            # the consumer's `completed < expected` loop waited forever on a
+            # result that was never produced.
+            put_ok = False
             while not stop_event.is_set():
                 try:
-                    work_queue.put((count - 1, file), timeout=0.1)
+                    work_queue.put((count, file), timeout=0.1)
+                    put_ok = True
                     break
                 except queue.Full:
                     continue
-            if stop_event.is_set():
+            if not put_ok:
                 break
+            count += 1
     except BaseException as exc:
         error = exc
         stop_event.set()

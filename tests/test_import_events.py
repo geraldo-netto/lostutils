@@ -4298,3 +4298,28 @@ def test_ocr_image_bytes_closes_fd_on_fdopen_failure(monkeypatch):
     with pytest.raises(OSError):
         import_events._ocr_image_bytes(b"\x89PNG")
     assert closed, "descriptor was not explicitly closed on fdopen failure"
+
+
+def test_feed_file_queue_count_excludes_unqueued_on_early_stop():
+    """When stop is requested before a file is enqueued, the sentinel count
+    must reflect files ACTUALLY enqueued, not the loop index — else the
+    consumer waits forever on a never-produced result (ie-rel-01)."""
+    import queue as _queue
+    from pathlib import Path as _Path
+    wq: _queue.Queue = _queue.Queue(maxsize=10)
+    dq: _queue.Queue = _queue.Queue()
+    stop = threading.Event()
+    stop.set()  # stop before any put -> zero files enqueued
+    import_events._feed_file_queue(
+        [_Path("a"), _Path("b"), _Path("c")], wq, dq, stop, workers=2)
+    sentinel = None
+    while not dq.empty():
+        item = dq.get()
+        if item[0] is None:
+            sentinel = item
+    assert sentinel is not None and sentinel[1] == 0
+    # work_queue holds only the None shutdown markers, never a real (idx, file)
+    drained = []
+    while not wq.empty():
+        drained.append(wq.get())
+    assert all(x is None for x in drained)
