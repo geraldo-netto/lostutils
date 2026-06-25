@@ -91,7 +91,6 @@ dnp-rel-02 | open | med | dedupl_numpy.py:13 — PATH_OFFSET=26 is hardcoded ("p
 dnp-rel-03 | open | med | dedupl_numpy.py:21-24 — mmap is used as the np.frombuffer source after the file handle closes at with-exit and is never closed (leak); an empty file also makes mmap raise. Keep the file open (or copy), close mm, and guard zero-length files. | resource
 dnp-rel-04 | open | low | dedupl_numpy.py:25 — a file whose last line lacks a trailing newline drops that final record (no 0x0A, so line_starts/n_lines never include it); confirmed 0/1 on a 2-duplicate file. Append a virtual line start at EOF when data[-1] != 0x0A. | opposite of the line-36 overrun case
 dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None] + arange(32) assumes every line is ≥32+PATH_OFFSET bytes with the hash exactly 32 chars at offset 0; a short/blank/final line reads across the newline or past buffer end, corrupting grouping. Validate line length / derive hash width. | array-bounds
-rf-rel-30 | open | low | relocate_folder.py:191 — `Plan.from_args` derives `target = dst_root / src.name`; when `source` has an empty basename (`/` or trailing-slash root) `src.name == ''`, so `target == dst_root`, the `src == target` guard doesn't fire, and the run proceeds on a root-shaped path. Reject empty `src.name` in `from_args` with a typed ValueError. | empty-basename
 
 ## robustness / recovery
 

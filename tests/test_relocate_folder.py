@@ -3710,3 +3710,12 @@ def test_execute_aborts_when_source_swapped_before_copy(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="replaced during the migration"):
         rf.execute(plan)
     assert not (tmp_path / "dst").exists()
+
+
+def test_plan_from_args_rejects_empty_basename(tmp_path):
+    """rf-rel-30: a root-shaped source (empty basename) must be rejected, not
+    proceed with target == dest_root."""
+    import argparse as _ap
+    ns = _ap.Namespace(source="/", dest_root=str(tmp_path))
+    with pytest.raises(ValueError, match="no basename"):
+        rf.Plan.from_args(ns)

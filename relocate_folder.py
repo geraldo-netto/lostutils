@@ -190,6 +190,11 @@ class Plan:
         # if we already migrated, otherwise the idempotency check breaks.
         src = Path(args.source).expanduser().absolute()
         dst_root = Path(args.dest_root).expanduser().resolve()
+        # rf-rel-30: a root-shaped source ("/" or a trailing-slash root) has an
+        # empty basename, so `dst_root / src.name == dst_root` and the src==target
+        # guard below would not fire — the run would proceed on a root path.
+        if not src.name:
+            raise ValueError(f"source has no basename to relocate: {src}")
         target = dst_root / src.name
         if src == target:
             raise ValueError(f"source equals computed target: {src}")
