@@ -48,7 +48,6 @@ lq-scal-04 | open | low | link_queue.py:1219 — `_immediate_concurrency` return
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-nplus1-01 | open | low | link_queue.py:1084 — _restore_queue_from_state calls _load_immediate_items() and _load_state_items(), each independently calling _read_state_dict() → the entire state file is opened, read, and YAML-parsed TWICE at startup. Read+parse the dict once and pass it to both _parse_state_list calls. | redundant file read+parse
 
 ## concurrency
 

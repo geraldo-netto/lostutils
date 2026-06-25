@@ -1046,23 +1046,26 @@ class Dispatcher:
             )
         return out
 
-    def _load_immediate_items(self) -> "list[QueueItem]":
+    def _load_immediate_items(self, data: "dict | None" = None) -> "list[QueueItem]":
         """Read the persisted immediate-queue backlog (lq-rel-01). Returns []
         for missing/corrupt files and for older state files that predate the
-        "immediate" bucket (back-compatible)."""
-        data = self._read_state_dict()
+        "immediate" bucket (back-compatible). lq-nplus1-01: callers that already
+        read the state dict pass it in to avoid a second file read+parse."""
+        if data is None:
+            data = self._read_state_dict()
         if data is None:
             return []
         return self._parse_state_list(data, "immediate")
 
-    def _load_state_items(self) -> "tuple[list[QueueItem], list[QueueItem]]":
+    def _load_state_items(self, data: "dict | None" = None) -> "tuple[list[QueueItem], list[QueueItem]]":
         """Read STATE_FILE if present and return (in_flight, pending).
 
         Tolerates missing/corrupt files (returns ([], [])). Files written
         by an older version that only had the "queue" key still load
         cleanly; in_flight will simply be empty.
         """
-        data = self._read_state_dict()
+        if data is None:
+            data = self._read_state_dict()
         if data is None:
             return ([], [])
         return (self._parse_state_list(data, "in_flight"),
@@ -1080,12 +1083,15 @@ class Dispatcher:
         that was in effect when it was originally enqueued, so re-routing
         through the protocol config is unnecessary (and would be wrong if
         the user has since edited that protocol)."""
-        in_flight, pending = self._load_state_items()
+        # lq-nplus1-01: read+parse the state file ONCE and feed the shared dict
+        # to both loaders instead of each re-opening and re-parsing it.
+        state = self._read_state_dict()
+        in_flight, pending = self._load_state_items(state)
         # lq-rel-01: re-dispatch any persisted immediate backlog so an
         # unprocessed paste of file:/magnet: links survives a restart instead
         # of being silently lost. Done first so consumers can start draining
         # while the pending queue is restored.
-        immediate = self._load_immediate_items()
+        immediate = self._load_immediate_items(state)
         for it in immediate:
             self._dispatch_immediate(it)
         items = in_flight + pending  # in-flight retries go FIRST

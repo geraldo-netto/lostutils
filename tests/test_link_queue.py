@@ -2484,13 +2484,13 @@ def _force_restored_log_branches(app, monkeypatch, kind: str) -> list[str]:
     monkeypatch.setattr(disp, "_update_status", lambda: None)
     if kind == "inflight":
         monkeypatch.setattr(disp, "_load_state_items",
-                            lambda: ([q("http://in/1")], []))
+                            lambda data=None: ([q("http://in/1")], []))
     elif kind == "pending":
         monkeypatch.setattr(disp, "_load_state_items",
-                            lambda: ([], [q("http://p/1")]))
+                            lambda data=None: ([], [q("http://p/1")]))
     else:
         monkeypatch.setattr(disp, "_load_state_items",
-                            lambda: ([q("http://in/1")], [q("http://p/1")]))
+                            lambda data=None: ([q("http://in/1")], [q("http://p/1")]))
     disp._restore_queue_from_state()
     return msgs
 
@@ -3736,3 +3736,25 @@ def test_logsink_eaccess_uses_generic_message(tmp_path, capsys, monkeypatch):
     # Non-ELOOP path takes the generic branch.
     assert "cannot be opened" in err
     assert "is a symlink" not in err
+
+
+def test_restore_reads_state_file_once(headless_dispatcher, monkeypatch):
+    """lq-nplus1-01: restore reads+parses the state file once, not twice."""
+    state = {"queue": [headless_dispatcher._serialize_item(q("http://wait/1"))],
+             "immediate": [headless_dispatcher._serialize_item(q("magnet:?x"))]}
+    with open(link_queue.STATE_FILE, "w", encoding="utf-8") as fh:
+        link_queue._yaml_dump(state, fh, allow_unicode=True)
+    calls = [0]
+    real = headless_dispatcher._read_state_dict
+
+    def counting():
+        calls[0] += 1
+        return real()
+
+    monkeypatch.setattr(headless_dispatcher, "_read_state_dict", counting)
+    monkeypatch.setattr(headless_dispatcher, "_refresh_queue_list", lambda: None)
+    monkeypatch.setattr(headless_dispatcher, "_update_status", lambda: None)
+    monkeypatch.setattr(headless_dispatcher, "_dispatch_immediate", lambda it: None)
+    monkeypatch.setattr(headless_dispatcher, "_log", lambda m: None)
+    headless_dispatcher._restore_queue_from_state()
+    assert calls[0] == 1
