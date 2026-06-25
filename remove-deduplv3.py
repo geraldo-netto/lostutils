@@ -65,7 +65,13 @@ def main():
                          "surrogateescape).")
     args = ap.parse_args()
 
-    encoding = args.encoding or detect_encoding(args.file)
+    try:
+        encoding = args.encoding or detect_encoding(args.file)
+    except OSError as e:
+        # Same clean contract as the read loop below: a missing/unreadable
+        # input gets `error:` + exit 2, not an uncaught traceback (rdv3-robust-01).
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
     err_mode = "strict" if args.strict else "surrogateescape"
 
     # Reconfigure stdout to round-trip surrogateescape bytes losslessly

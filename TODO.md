@@ -131,7 +131,6 @@ rf-robust-05 | open | low | relocate_folder.py:273 — `_warn_if_not_traversable
 rf-robust-04 | open | low | relocate_folder.py:605 — tracking_copy2 adds stat_fn(s).st_size of the SOURCE post-copy for progress; a concurrent writer changing the source between copytree's read and this stat makes done diverge from total (bar exceeds 100% or stalls). Account bytes written to the dst instead. | progress-only
 rf-robust-02 | open | med | relocate_folder.py:622/1737 — copy_tree and _copy_and_verify only clean partial targets on `Exception`; Ctrl-C raises `KeyboardInterrupt` and can leave a partially copied target that blocks retry. Handle KeyboardInterrupt/BaseException with best-effort cleanup or a surfaced recovery instruction. | Ctrl-C cleanup
 rf-robust-03 | open | med | relocate_folder.py:1300 — _backup_target only rolls back on `Exception`; Ctrl-C/SystemExit while the source is renamed aside bypasses the restore path and can leave `<source>` missing with only `<source>.relocate-backup`. Roll back on BaseException and re-raise, leaving SIGKILL/power-loss to --recover. | Ctrl-C rollback
-rdv3-robust-01 | open | low | remove-deduplv3.py:68 — detect_encoding() opens the file BEFORE the OSError-guarded with block (101-112), so a missing/unreadable input throws an uncaught FileNotFoundError traceback + exit 1 instead of the documented `error:` message + exit 2. Wrap the detect_encoding call in the same guard. | docstring promises clean error + exit code
 
 ## state machine integrity
 
