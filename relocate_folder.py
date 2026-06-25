@@ -286,7 +286,8 @@ def _warn_if_not_traversable(dest_root: Path, source: Path) -> None:
                 return
             _log().warning(
                 "path %s may not be traversable by uid=%d "
-                "(mode=%s, owner_uid=%d)",
+                "(mode=%s, owner_uid=%d); note: supplementary-group "
+                "membership is not checked, so this may be a false positive",
                 cur, st.st_uid, oct(cur_st.st_mode & 0o777), cur_st.st_uid,
             )
             return
@@ -294,6 +295,14 @@ def _warn_if_not_traversable(dest_root: Path, source: Path) -> None:
 
 
 def _can_traverse(path: Path, uid: int, gid: int) -> bool:
+    """Best-effort traversability check for ``uid``/``gid`` over ``path``.
+
+    rf-ux-01: this only considers the source's PRIMARY gid. A uid whose execute
+    access actually comes from a supplementary group (group-exec on a group the
+    uid belongs to but which isn't its primary gid) is reported as
+    non-traversable, producing a false warning. We don't resolve the uid's full
+    group list (its membership on this host may differ from the source host), so
+    the caller's warning is explicitly advisory — see its message."""
     if uid == 0:
         return True
     st = path.stat()

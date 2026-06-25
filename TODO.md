@@ -227,7 +227,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-ux-01 | open | low | relocate_folder.py:290 — `_can_traverse` checks only the dir's primary gid (`st.st_gid`) against the source gid; a source uid whose access comes via a supplementary group with group-exec is reported as "may not be traversable", emitting a false warning that misleads the operator. Note the limitation or check group membership (`os.getgrouplist`) before warning. | Jakob's Law — misleading status; supplementary-group blind spot
 
 ## i18n
 
