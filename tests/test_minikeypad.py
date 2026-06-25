@@ -316,7 +316,7 @@ def test_layout_tables_scancodes_are_valid_hid():
     scripts = [(n, e) for n, e in minikeypad.LAYOUTS if e is not None]
     assert minikeypad.LAYOUTS[0][1] is None          # "US (basic)" sentinel
     names = [n for n, _ in minikeypad.LAYOUTS]
-    for expected in ("Greek", "Russian", "Hebrew", "Portuguese", "French", "Spanish"):
+    for expected in ("Greek", "Russian", "Hebrew", "German", "Latin (accents)"):
         assert expected in names
     for _title, entries in scripts:
         assert entries, "layout table must not be empty"
@@ -325,11 +325,12 @@ def test_layout_tables_scancodes_are_valid_hid():
             assert 0 < scancode < 256
 
 
-def test_accented_latin_present_for_pt_fr_es():
-    by_name = dict(minikeypad.LAYOUTS)
-    assert any(g == "é" for g, _ in by_name["Portuguese"])
-    assert any(g == "ç" for g, _ in by_name["French"])
-    assert any(g == "ñ" for g, _ in by_name["Spanish"])
+def test_merged_latin_covers_pt_fr_es_it():
+    latin = {g for g, _ in dict(minikeypad.LAYOUTS)["Latin (accents)"]}
+    # Portuguese ã, French ç/œ, Spanish ñ/¿, Italian ì/ò all in one block
+    for glyph in ("ã", "ç", "œ", "ñ", "¿", "ì", "ò", "é"):
+        assert glyph in latin
+    assert len(latin) == len([g for g, _ in dict(minikeypad.LAYOUTS)["Latin (accents)"]])
 
 
 # ===========================================================================
@@ -1190,7 +1191,7 @@ def test_app_without_unicode_method_loads_us_only(monkeypatch):
 def test_switching_layout_rerenders_body(app):
     app.layout_var.set("Greek")
     app._render_layout()
-    app.layout_var.set("Spanish")
+    app.layout_var.set("Latin (accents)")
     app._render_layout()
     # script view present -> the note Label sits directly under the body
     kinds = {w.winfo_class() for w in app._keys_body.winfo_children()}

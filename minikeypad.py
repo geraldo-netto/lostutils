@@ -708,21 +708,17 @@ HEBREW_KEYS = [
 # Germanic / Latin-ext: the QWERTZ glyphs the basic US page lacks.
 GERMAN_KEYS = [("ä", 52), ("ö", 51), ("ü", 47), ("ß", 45)]
 
-# Accented Latin (Portuguese / French / Spanish).  Most of these come from
-# dead-key sequences that vary per layout and cannot be one scancode, so the
-# scancode here is the BASE letter (typed in scancode mode); Unicode mode types
-# the real accented glyph on any layout.
-PORTUGUESE_KEYS = [
-    ("á", 4), ("à", 4), ("â", 4), ("ã", 4), ("é", 8), ("ê", 8), ("í", 12),
-    ("ó", 18), ("ô", 18), ("õ", 18), ("ú", 24), ("ç", 6),
-]
-FRENCH_KEYS = [
-    ("à", 4), ("â", 4), ("ç", 6), ("é", 8), ("è", 8), ("ê", 8), ("ë", 8),
-    ("î", 12), ("ï", 12), ("ô", 18), ("œ", 18), ("ù", 24), ("û", 24), ("ü", 24),
-]
-SPANISH_KEYS = [
-    ("ñ", 17), ("á", 4), ("é", 8), ("í", 12), ("ó", 18), ("ú", 24), ("ü", 24),
-    ("¿", 56), ("¡", 30),
+# Accented Latin merged across Portuguese / French / Spanish / Italian.  Most
+# come from dead-key sequences that vary per layout and cannot be one scancode,
+# so the scancode here is the BASE letter (typed in scancode mode); Unicode mode
+# types the real accented glyph on any layout.
+LATIN_KEYS = [
+    ("á", 4), ("à", 4), ("â", 4), ("ã", 4),
+    ("é", 8), ("è", 8), ("ê", 8), ("ë", 8),
+    ("í", 12), ("ì", 12), ("î", 12), ("ï", 12),
+    ("ó", 18), ("ò", 18), ("ô", 18), ("õ", 18),
+    ("ú", 24), ("ù", 24), ("û", 24), ("ü", 24),
+    ("ç", 6), ("ñ", 17), ("œ", 18), ("¿", 56), ("¡", 30),
 ]
 
 # Layouts offered by the Keys-tab combobox; None == the US basic keyboard page.
@@ -732,9 +728,7 @@ LAYOUTS = [
     ("Russian", RUSSIAN_KEYS),
     ("Hebrew", HEBREW_KEYS),
     ("German", GERMAN_KEYS),
-    ("Portuguese", PORTUGUESE_KEYS),
-    ("French", FRENCH_KEYS),
-    ("Spanish", SPANISH_KEYS),
+    ("Latin (accents)", LATIN_KEYS),
 ]
 
 # HID usage codes for the hex digits used by Unicode-entry macros.
@@ -1008,15 +1002,20 @@ class App(tk.Tk):
     def _render_basic(self, body):
         grid = ttk.Frame(body)
         grid.pack(fill="both", expand=True)
-        rows = []
-        for row in BASIC_ROWS:
-            rows.append([tk.Button(grid, text=label,
-                                   command=lambda lbl=label, c=code: self._basic_key(c, lbl))
-                         for label, code in row])
-        rows.append([tk.Button(grid, text=name,
-                               command=lambda b=bit, n=name: self._basic_mod(b, n))
-                     for bit, name in BASIC_MODS])
+        rows = [[tk.Button(grid, text=label,
+                           command=lambda lbl=label, c=code: self._basic_key(c, lbl))
+                 for label, code in row]
+                for row in BASIC_ROWS]
         self._fill_grid(grid, rows)
+        # Modifiers stay a distinct labelled panel below the key grid.
+        mf = ttk.LabelFrame(body, text="Modifiers (combine with a key)")
+        mf.pack(fill="x", padx=4, pady=(6, 0))
+        mgrid = ttk.Frame(mf)
+        mgrid.pack(fill="x", padx=2, pady=2)
+        mods = [tk.Button(mgrid, text=name,
+                          command=lambda b=bit, n=name: self._basic_mod(b, n))
+                for bit, name in BASIC_MODS]
+        self._fill_grid(mgrid, [mods])
 
     def _render_script(self, body, entries):
         note = ttk.Label(
