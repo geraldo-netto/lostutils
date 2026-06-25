@@ -3799,3 +3799,23 @@ def test_organize_clamps_runaway_thread_count(tmp_path, caplog):
         oze.organize(str(tmp_path), num_threads=1_000_000)
     assert captured["max_workers"] == oze.MAX_NUM_THREADS
     assert any("clamping" in r.message for r in caplog.records)
+
+
+def test_collision_slot_rolls_back_candidate_on_interrupt(tmp_path, monkeypatch):
+    """oze-robust-02: a KeyboardInterrupt at the source unlink (between link and
+    unlink) must roll back the leaked candidate hardlink, not leave the file at
+    both paths."""
+    from pathlib import Path as _P
+    src = tmp_path / "f.bin"; src.write_bytes(b"data")
+    real_unlink = oze.os.unlink
+
+    def boom_unlink(p):
+        if _P(p) == src:
+            raise KeyboardInterrupt
+        return real_unlink(p)
+
+    monkeypatch.setattr(oze.os, "unlink", boom_unlink)
+    with pytest.raises(KeyboardInterrupt):
+        oze._atomic_rename_to_free_slot(src)
+    assert src.exists()
+    assert not (tmp_path / "f.bin.collision1").exists()

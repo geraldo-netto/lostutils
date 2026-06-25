@@ -1245,7 +1245,20 @@ def _atomic_rename_to_free_slot(source: Path) -> Path:
             if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
                 return _reserve_slot_via_rename(source)
             raise
-        _unlink_source_or_rollback_candidate(source, candidate)
+        try:
+            _unlink_source_or_rollback_candidate(source, candidate)
+        except BaseException:
+            # oze-robust-02: a late interrupt (e.g. KeyboardInterrupt) between
+            # the link and the source unlink would otherwise leave the file at
+            # both <name> and <name>.collisionN — a leaked hardlink. If the
+            # source is still present the unlink didn't happen, so roll back the
+            # candidate; if it's gone the candidate IS the moved file — keep it.
+            if source.exists():
+                try:
+                    os.unlink(candidate)
+                except OSError:
+                    pass
+            raise
         return candidate
     _raise_collision_exhausted(source, last_exc)
 
