@@ -107,6 +107,10 @@ def main():
 
     out = sys.stdout.write
     for h, paths in groups.items():
+        # rdv3-rel-01: collapse byte-identical path strings within a group (a
+        # duplicate input line) so the same file can't be picked as survivor AND
+        # emitted for removal. dict.fromkeys preserves first-seen order.
+        paths = list(dict.fromkeys(paths))
         if len(paths) < 2:
             continue
         # max key: (basename_length, path). Computing basename length via

@@ -29,3 +29,21 @@ def test_unreadable_input_clean_error_exit2(monkeypatch, tmp_path, capsys):
         rd.main()
     assert exc.value.code == 2
     assert capsys.readouterr().err.startswith("error:")
+
+
+def _run(monkeypatch, tmp_path, text):
+    f = tmp_path / "hashes.txt"
+    f.write_text(text, encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["remove-deduplv3.py", str(f)])
+    out = []
+    monkeypatch.setattr("sys.stdout.write", lambda s: out.append(s) or len(s))
+    rd.main()
+    return "".join(out)
+
+
+def test_identical_path_collapsed_not_removed(monkeypatch, tmp_path):
+    """rdv3-rel-01: a path duplicated in a group must not be both kept and
+    emitted for removal."""
+    out = _run(monkeypatch, tmp_path, "h /a\nh /a\n")
+    # Only one unique file in the group -> nothing to remove.
+    assert "rm -f" not in out
