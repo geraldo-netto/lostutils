@@ -1491,7 +1491,11 @@ class App(tk.Tk):
             return
         try:  # pragma: no cover - dialog glue
             self.log("Loaded %d key(s) from %s" % (self._load_profile(path), path))
-        except (OSError, ValueError, KeyError, json.JSONDecodeError) as e:  # pragma: no cover
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as e:  # pragma: no cover
+            # mkp-rel-01: a profile with a JSON null/list where an int/hex string
+            # is expected raises TypeError from int()/bytes.fromhex(); catch it
+            # too so a malformed profile reports "Load failed" instead of
+            # crashing the handler.
             self.log("Load failed: %s" % e)
 
     def _reports_for(self, layer, data):

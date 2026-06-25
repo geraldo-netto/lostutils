@@ -18,7 +18,6 @@ rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-rel-01 | open | low | minikeypad.py:1462 — _load_profile does `int(item["layer"])`/`int(item["key_id"])`; a profile with a JSON null (or list) value raises TypeError, which _load_dialog (catches OSError/ValueError/KeyError/JSONDecodeError, NOT TypeError) lets escape and crash the handler. Add TypeError to the caught set or coerce defensively. | uncaught TypeError on malformed profile
 rf-sec-10 | open | low | relocate_folder.py:1632 — `_rename_noreplace` calls `libc.renameat2` without setting `restype`/`argtypes`; the 5 args (two int fds, two char*, one unsigned-int flag) rely on ctypes default int marshalling, which can mis-pass pointers/flags on some ABIs. Set `renameat2.restype = ctypes.c_int` and `argtypes = [c_int, c_char_p, c_int, c_char_p, c_uint]`. | ctypes-no-argtypes
 
 ## data governance

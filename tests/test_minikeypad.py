@@ -1612,3 +1612,18 @@ def test_probe_alive_offthread_reports_alive(app):
     app._probe_alive()
     _wait_drain(app)
     assert app._io_busy is False
+
+
+def test_load_dialog_handles_malformed_profile_typeerror(app, tmp_path, monkeypatch):
+    """mkp-rel-01: a JSON null where an int is expected raises TypeError from
+    _load_profile; _load_dialog must catch it and log 'Load failed', not crash."""
+    import json as _json
+    data_hex = bytes(len(minikeypad.KeyParam().data)).hex()
+    bad = tmp_path / "bad.json"
+    bad.write_text(_json.dumps({"version": 1, "assignments": [
+        {"layer": None, "key_id": 1, "desc": "x", "data": data_hex}]}))
+    monkeypatch.setattr(minikeypad.filedialog, "askopenfilename", lambda **k: str(bad))
+    logs = []
+    monkeypatch.setattr(app, "log", logs.append)
+    app._load_dialog()   # must not raise
+    assert any("Load failed" in m for m in logs)
