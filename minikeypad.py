@@ -686,13 +686,14 @@ KNOB2 = [("◀", 16), ("●", 17), ("▶", 18)]
 #  (below) instead replays an OS Unicode-entry macro so the glyph appears
 #  regardless of the active layout.  (glyph, scancode) pairs.
 # --------------------------------------------------------------------------- #
-GREEK_KEYS = [
+# Greek + Russian Cyrillic share one block (distinct scripts, no overlap).
+GREEK_CYRILLIC_KEYS = [
+    # Greek (standard layout positions)
     ("α", 4), ("β", 5), ("γ", 10), ("δ", 7), ("ε", 8), ("ζ", 29), ("η", 11),
     ("θ", 24), ("ι", 12), ("κ", 14), ("λ", 15), ("μ", 16), ("ν", 17), ("ξ", 13),
     ("ο", 18), ("π", 19), ("ρ", 21), ("σ", 22), ("ς", 26), ("τ", 23), ("υ", 28),
     ("φ", 9), ("χ", 27), ("ψ", 6), ("ω", 25),
-]
-RUSSIAN_KEYS = [
+    # Russian Cyrillic (ЙЦУКЕН layout positions)
     ("а", 9), ("б", 54), ("в", 7), ("г", 24), ("д", 15), ("е", 23), ("ё", 53),
     ("ж", 51), ("з", 19), ("и", 5), ("й", 20), ("к", 21), ("л", 14), ("м", 25),
     ("н", 28), ("о", 13), ("п", 10), ("р", 11), ("с", 6), ("т", 17), ("у", 8),
@@ -729,8 +730,7 @@ LATIN_KEYS = [
 # Layouts offered by the Keys-tab combobox; None == the US basic keyboard page.
 LAYOUTS = [
     ("US (basic)", None),
-    ("Greek", GREEK_KEYS),
-    ("Russian", RUSSIAN_KEYS),
+    ("Greek / Cyrillic", GREEK_CYRILLIC_KEYS),
     ("Hebrew", HEBREW_KEYS),
     ("German / Nordic", GERMANIC_KEYS),
     ("Latin (accents)", LATIN_KEYS),

@@ -316,8 +316,10 @@ def test_layout_tables_scancodes_are_valid_hid():
     scripts = [(n, e) for n, e in minikeypad.LAYOUTS if e is not None]
     assert minikeypad.LAYOUTS[0][1] is None          # "US (basic)" sentinel
     names = [n for n, _ in minikeypad.LAYOUTS]
-    for expected in ("Greek", "Russian", "Hebrew", "German / Nordic", "Latin (accents)"):
+    for expected in ("Greek / Cyrillic", "Hebrew", "German / Nordic", "Latin (accents)"):
         assert expected in names
+    gc = {g for g, _ in dict(minikeypad.LAYOUTS)["Greek / Cyrillic"]}
+    assert "α" in gc and "я" in gc        # Greek + Cyrillic merged
     nordic = {g for g, _ in dict(minikeypad.LAYOUTS)["German / Nordic"]}
     assert {"ä", "ö", "ü", "ß", "å", "æ", "ø"} <= nordic
     for _title, entries in scripts:
@@ -1191,7 +1193,7 @@ def test_app_without_unicode_method_loads_us_only(monkeypatch):
 
 
 def test_switching_layout_rerenders_body(app):
-    app.layout_var.set("Greek")
+    app.layout_var.set("Greek / Cyrillic")
     app._render_layout()
     app.layout_var.set("Latin (accents)")
     app._render_layout()
@@ -1201,7 +1203,7 @@ def test_switching_layout_rerenders_body(app):
 
 
 def test_script_key_scancode_mode(app):
-    app.layout_var.set("Greek")
+    app.layout_var.set("Greek / Cyrillic")
     app._render_layout()
     app._select_key(1)
     app.unicode_var.set(False)
