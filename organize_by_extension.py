@@ -1826,10 +1826,15 @@ def _maybe_log_progress(
 ) -> None:
     """Emit the periodic ``progress:`` line once every ``PROGRESS_EVERY``
     completed items (oze-obs-01). ``progress["last"]`` tracks the count at the
-    previous emission so submit-loop and drain-loop calls share one cadence."""
+    previous emission so submit-loop and drain-loop calls share one cadence.
+
+    oze-obs-10: ``total_files`` is the SCAN-stage count; the plan can drop files
+    (bucket-selection failure) and add ``.collision`` renames, so the final
+    processed+skipped tally need not equal it. The denominator is rendered with
+    a leading ``~`` to mark it as an estimate, not a hard target."""
     done_so_far = stats.processed + stats.skipped
     if (done_so_far - progress["last"]) >= PROGRESS_EVERY:
-        logger.info("progress: processed %d/%d, skipped %d",
+        logger.info("progress: processed %d/~%d, skipped %d",
                     stats.processed, total_files, stats.skipped)
         progress["last"] = done_so_far
 

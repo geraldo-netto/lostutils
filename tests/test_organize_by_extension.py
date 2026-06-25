@@ -2929,6 +2929,8 @@ class SourceCollisionResolution(unittest.TestCase):
                 msgs = [str(c.args[0]) if c.args else ""
                         for c in info_log.call_args_list]
                 assert any("progress: processed" in m for m in msgs), msgs
+                # oze-obs-10: denominator marked approximate with a leading ~
+                assert any("/~%d" in m or "/~" in m for m in msgs), msgs
 
 
     def test_progress_line_fires_during_drain_phase(self):
