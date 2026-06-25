@@ -1221,11 +1221,13 @@ class Dispatcher:
         if raw in (None, "", 0):
             # Sentinel: follow worker_count (queue parallelism).
             raw = fallback
+        # lq-scal-04: clamp to WorkerPool.MAX_WORKERS so a runaway
+        # immediate_worker_count can't spawn an unbounded consumer pool.
         try:
-            return max(1, int(raw))
+            return max(1, min(WorkerPool.MAX_WORKERS, int(raw)))
         except (TypeError, ValueError):
             try:
-                return max(1, int(fallback))
+                return max(1, min(WorkerPool.MAX_WORKERS, int(fallback)))
             except (TypeError, ValueError):
                 return 1
 

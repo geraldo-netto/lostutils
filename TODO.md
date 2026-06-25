@@ -42,7 +42,6 @@ lq-perf-03 | open | low | link_queue.py:2004 — when every pending domain is in
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-scal-04 | open | low | link_queue.py:1219 — `_immediate_concurrency` returns `max(1, int(raw))` with no upper clamp (unlike the queue pool's `MAX_WORKERS=32`); config `immediate_worker_count: 100000` spawns 100k consumer threads via `_ensure_immediate_pool`. Clamp to `WorkerPool.MAX_WORKERS`. | missing upper bound on thread-pool size
 
 ## N+1 / call efficiency
 

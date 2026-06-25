@@ -3758,3 +3758,10 @@ def test_restore_reads_state_file_once(headless_dispatcher, monkeypatch):
     monkeypatch.setattr(headless_dispatcher, "_log", lambda m: None)
     headless_dispatcher._restore_queue_from_state()
     assert calls[0] == 1
+
+
+def test_immediate_concurrency_clamps_runaway_upper_bound(headless_dispatcher):
+    """lq-scal-04: a runaway immediate_worker_count is capped at MAX_WORKERS."""
+    disp = headless_dispatcher
+    disp.config["immediate_worker_count"] = 100000
+    assert disp._immediate_concurrency() == link_queue.WorkerPool.MAX_WORKERS
