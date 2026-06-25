@@ -150,7 +150,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-time-02 | open | low | link_queue.py:4567/4619 — `_shutdown` sets `deadline = time.time() + timeout` and `_join_threads` computes `remaining = deadline - time.time()` on the wall clock; a forward clock jump between them zeroes `remaining`, abandoning worker threads unjoined (the Tcl_AsyncDelete hazard the join prevents). Use `time.monotonic()` for the deadline pair. | non-monotonic elapsed-time math (distinct site from lq-time-01)
 
 ## platform
 

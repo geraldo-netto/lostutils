@@ -3870,3 +3870,20 @@ def test_dispatch_wait_remaining_uses_monotonic_clock():
     # Block caps remaining by sleep_for.
     rem2 = link_queue.Dispatcher._dispatch_wait_remaining(deadline, True, 2.0)
     assert rem2 == 2.0
+
+
+def test_join_threads_honors_monotonic_deadline():
+    """lq-time-02: _join_threads bounds the join by a monotonic deadline — a
+    prompt thread is joined, a stuck one returns within the budget."""
+    import time as _time
+    import threading as _th
+    done = _th.Thread(target=lambda: None); done.start()
+    link_queue.LinkQueueApp._join_threads([done], _time.monotonic() + 1.0)
+    assert not done.is_alive()
+    # Stuck thread: past deadline -> immediate return, no indefinite block.
+    ev = _th.Event()
+    stuck = _th.Thread(target=ev.wait, daemon=True); stuck.start()
+    start = _time.monotonic()
+    link_queue.LinkQueueApp._join_threads([stuck], _time.monotonic() - 1.0)
+    assert _time.monotonic() - start < 0.5
+    ev.set(); stuck.join()

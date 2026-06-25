@@ -4627,7 +4627,10 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             self._dispatch_cv.notify_all()
         self._cancel_tk_poller()
 
-        deadline = time.time() + timeout
+        # lq-time-02: monotonic deadline so a forward wall-clock jump between
+        # arming it and the join can't zero `remaining` and abandon worker
+        # threads unjoined (the Tcl_AsyncDelete hazard the join exists to avoid).
+        deadline = time.monotonic() + timeout
         self._join_threads(self._snapshot_worker_threads(), deadline)
         self._join_threads(self._snapshot_immediate_threads(), deadline)
 
@@ -4677,9 +4680,10 @@ class LinkQueueApp(metaclass=_FacadeMeta):
 
     @staticmethod
     def _join_threads(threads: list, deadline: float) -> None:
-        """Join each thread, capping the total wall-clock time at `deadline`."""
+        """Join each thread, capping the total elapsed time at `deadline`
+        (lq-time-02: `deadline` is a `time.monotonic()` value)."""
         for t in threads:
-            remaining = max(0.0, deadline - time.time())
+            remaining = max(0.0, deadline - time.monotonic())
             try:
                 t.join(timeout=remaining)
             except Exception:
