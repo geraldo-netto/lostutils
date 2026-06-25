@@ -1944,15 +1944,31 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
         # the first place.
         #
         # rf-rel-06: log the destruction. A transient verify failure otherwise
-        # silently wipes a half-good target with no audit trail (unlike the
-        # copy_tree cleanup path, which logs rmtree failures). The operator
-        # needs to know the partial copy is gone before re-running.
+        # silently wipes a half-good target with no audit trail. The operator
+        # needs to know the partial copy is being removed before re-running.
         _log().warning(
-            "removing target %s after verification failed; the partial copy "
-            "has been deleted and the source is untouched — re-run to retry",
-            plan.target,
+            "removing target %s after verification failed; the source is "
+            "untouched — re-run to retry", plan.target,
         )
-        shutil.rmtree(plan.target, ignore_errors=True)
+        # rf-obs-02: record rmtree failures (like the copy_tree cleanup) instead
+        # of ignore_errors=True silently dropping them and the log above claiming
+        # a deletion that may not have happened.
+        rmtree_failures: list[tuple[str, OSError]] = []
+
+        def _record(_fn, path, excinfo):
+            exc = excinfo[1] if isinstance(excinfo, tuple) else excinfo
+            if isinstance(exc, OSError):  # pragma: no branch
+                rmtree_failures.append((str(path), exc))
+
+        shutil.rmtree(plan.target, onerror=_record)
+        for path, exc in rmtree_failures[:10]:
+            _log().warning(
+                "cleanup after verify failure: could not remove %s: %s",
+                path, exc)
+        if rmtree_failures:
+            _log().warning(
+                "partial target %s may still exist after a failed cleanup; "
+                "manual removal may be needed before re-running", plan.target)
         raise
 
 

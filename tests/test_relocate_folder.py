@@ -3751,3 +3751,24 @@ def test_iter_verify_tasks_logs_unstatable_entry(tmp_path, monkeypatch, caplog):
     with pytest.raises(Exception):
         for t in tasks:
             t()
+
+
+def test_copy_and_verify_logs_cleanup_failure(tmp_path, monkeypatch, caplog):
+    """rf-obs-02: a failed rmtree during post-verify cleanup must be logged, not
+    silently dropped by ignore_errors."""
+    import logging as _logging
+    src = tmp_path / "src"; _make_tree(src)
+    plan = rf.Plan(source=src, target=tmp_path / "dst")
+    monkeypatch.setattr(rf, "verify_copy",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("verify failed")))
+
+    def boom_rmtree(path, onerror=None, **k):
+        if onerror is not None:
+            onerror(os.rmdir, str(path), (OSError, OSError(16, "EBUSY"), None))
+
+    monkeypatch.setattr(rf.shutil, "rmtree", boom_rmtree)
+    with caplog.at_level(_logging.WARNING):
+        with pytest.raises(RuntimeError):
+            rf._copy_and_verify(plan)
+    assert any("could not remove" in r.message for r in caplog.records)
+    assert any("may still exist" in r.message for r in caplog.records)
