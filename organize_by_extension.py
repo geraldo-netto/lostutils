@@ -506,6 +506,7 @@ def list_files(
     skip = {str(p) for p in skip_paths}   # O(1) membership; compare on path string (oze-perf-01)
     files: list[Path] = []
     already_bucketed = 0
+    scanned = 0   # oze-obs-04: regular files examined so far (for scan progress)
     symlink_resolve_cache: dict[Path, Path | None] = {}
     for entry in _walk_scandir(root):
         # oze-conc-04: single `stat(follow_symlinks=False)` and branch on
@@ -528,6 +529,18 @@ def list_files(
         path = Path(entry.path)
         if entry.path in skip:
             continue
+        # oze-obs-04: the scan can run for minutes on a large tree (every file
+        # is opened for header sniffing) and previously emitted nothing until
+        # the single "Scanning complete" line at the end. Emit a heartbeat every
+        # PROGRESS_EVERY regular files so `--verbose` shows the scan is alive and
+        # a Ctrl+C isn't mistaken for a freeze. Logs at INFO (visible under -v),
+        # matching the move-stage progress cadence.
+        scanned += 1
+        if scanned % PROGRESS_EVERY == 0:
+            logger.info(
+                "scanning: %d files seen (%d to move, %d already bucketed)",
+                scanned, len(files), already_bucketed,
+            )
         if is_bucketed_file(root, path, ctx=ctx):
             already_bucketed += 1
             # oze-scal-02: an already-bucketed file is dropped from the plan, so
@@ -2108,7 +2121,14 @@ def main() -> None:
             prune_empty=args.prune_empty,
         )
     except KeyboardInterrupt:
-        pass
+        # oze-obs-05: a Ctrl+C during the scan / plan / prune stages reaches
+        # here (the move stage prints its own summary and exits non-zero via
+        # SystemExit, bypassing this handler). Surface a single line so an
+        # interrupt during a long silent scan isn't mistaken for a clean no-op.
+        # Logged at WARNING so it shows even without --verbose. Return quietly
+        # (exit 0) per the established contract — no partial-write to recover
+        # from in those stages.
+        logger.warning("Interrupted.")
 
 
 if __name__ == '__main__':  # pragma: no cover

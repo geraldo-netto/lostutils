@@ -3732,3 +3732,30 @@ def test_main_help_path_exits_cleanly(monkeypatch, capsys):
     out = capsys.readouterr().out
     # argparse printed help — verify it ran.
     assert "Organize" in out or "Number of worker threads" in out
+
+
+# --- oze-obs-04: scan-stage progress heartbeat ----------------------------
+
+def test_list_files_emits_scan_progress(tmp_path, monkeypatch, caplog):
+    """oze-obs-04: list_files emits a periodic 'scanning:' heartbeat every
+    PROGRESS_EVERY regular files so a long silent scan shows it is alive."""
+    monkeypatch.setattr(oze, "PROGRESS_EVERY", 2)
+    for i in range(3):
+        (tmp_path / f"f{i}.txt").write_text("x")
+    with caplog.at_level(logging.INFO, logger="organize_by_extension"):
+        oze.list_files(tmp_path, skip_paths=set())
+    assert any("scanning:" in r.getMessage() for r in caplog.records), \
+        "no scan-progress heartbeat emitted"
+
+
+# --- oze-obs-05: main surfaces a message on interrupt ---------------------
+
+def test_main_logs_interrupted_message(tmp_path, monkeypatch, caplog):
+    """oze-obs-05: a KeyboardInterrupt during scan/plan/prune reaches main and
+    is surfaced as a single 'Interrupted.' line (returns quietly, no raise)."""
+    monkeypatch.setattr(sys, "argv", ["prog", str(tmp_path)])
+    monkeypatch.setattr(oze, "organize",
+                        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt))
+    with caplog.at_level(logging.WARNING, logger="organize_by_extension"):
+        oze.main()  # must not raise
+    assert any("Interrupted." in r.getMessage() for r in caplog.records)
