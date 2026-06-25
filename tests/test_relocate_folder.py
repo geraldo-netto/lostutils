@@ -3719,3 +3719,12 @@ def test_plan_from_args_rejects_empty_basename(tmp_path):
     ns = _ap.Namespace(source="/", dest_root=str(tmp_path))
     with pytest.raises(ValueError, match="no basename"):
         rf.Plan.from_args(ns)
+
+
+def test_positive_jobs_validator():
+    """rf-cli-01: --jobs must reject non-positive values."""
+    import argparse as _ap
+    assert rf._positive_jobs("4") == 4
+    for bad in ("0", "-4", "x"):
+        with pytest.raises(_ap.ArgumentTypeError):
+            rf._positive_jobs(bad)

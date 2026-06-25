@@ -870,6 +870,20 @@ _OWNERSHIP_WORKERS = _default_worker_count()
 _OWNERSHIP_INFLIGHT = _OWNERSHIP_WORKERS * 4  # bound on queued+running futures (rf-scal-03)
 
 
+def _positive_jobs(value: str) -> int:
+    """argparse `type=` validator (rf-cli-01): reject `--jobs <= 0` with a clear
+    CLI error instead of silently falling back to the default in _resolved_jobs
+    (which let `-j 0`/`-j -4` run at the default while the user believed
+    concurrency was constrained)."""
+    try:
+        iv = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"--jobs must be an integer, got {value!r}")
+    if iv < 1:
+        raise argparse.ArgumentTypeError(f"--jobs must be >= 1, got {iv}")
+    return iv
+
+
 def _resolved_jobs(jobs: int | None) -> int:
     """Resolve a CLI/plan `jobs` value to a positive pool width (rf-scal-02)."""
     if jobs is not None and jobs > 0:
@@ -2044,7 +2058,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--strict-cross-device", action="store_true",
                    help="rf-sec-03: refuse to proceed when source and dest "
                         "share a filesystem (default: warn and continue)")
-    p.add_argument("--jobs", "-j", type=int, default=None,
+    p.add_argument("--jobs", "-j", type=_positive_jobs, default=None,
                    help="rf-scal-02: pool width for ownership + verify "
                         "(default: min(32, cpu_count+4))")
     p.add_argument("--no-space-check", action="store_true",

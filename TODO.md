@@ -186,7 +186,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-cli-01 | open | low | relocate_folder.py:1866 — --jobs/-j accepts 0 and negatives; _resolved_jobs silently maps jobs <= 0 to the default, so `-j 0`/`-j -4` run with the default pool while the user believes concurrency was constrained. Reject non-positive --jobs with a clear parser error. | silent fallback misleads
 
 ## dependency
 
