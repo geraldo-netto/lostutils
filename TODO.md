@@ -63,7 +63,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-dist-01 | open | med | link_queue.py:1267 — _immediate_consumer pulls item via _immediate_q.get() but calls task_done() on a re-read of self._immediate_q; if _resize_immediate_queue_locked swaps the queue in between, task_done() hits the NEW queue (no matching get) → ValueError: task_done() called too many times, killing the consumer. Capture the queue object at get() time and call task_done() on that same object. | shared-resource swap race
 
 ## dependability
 

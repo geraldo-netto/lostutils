@@ -1263,8 +1263,14 @@ class Dispatcher:
         while True:
             if stop_self.is_set():
                 return
+            # lq-dist-01: capture the queue object we get() from and call
+            # task_done() on that SAME object. _resize_immediate_queue_locked can
+            # swap self._immediate_q between the get and the task_done; calling
+            # task_done on the re-read (new) queue raises "task_done() called too
+            # many times" and kills the consumer.
+            work_q = self._immediate_q
             try:
-                item = self._immediate_q.get(timeout=0.25)
+                item = work_q.get(timeout=0.25)
             except queue.Empty:
                 if self.stop_event.is_set():
                     return
@@ -1282,7 +1288,7 @@ class Dispatcher:
             finally:
                 with self._immediate_lock:
                     self._immediate_current[cid] = None
-                self._immediate_q.task_done()
+                work_q.task_done()
 
     def _ensure_immediate_pool(self) -> None:
         """Align the live consumer pool to `_immediate_pool_size` (conc-02 /

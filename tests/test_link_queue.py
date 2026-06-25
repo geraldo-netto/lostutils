@@ -3786,3 +3786,28 @@ def test_immediate_consumer_survives_item_exception(headless_dispatcher):
     disp._dispatch_immediate(q("ok"))
     assert done.wait(3), "consumer died after an item raised; 'ok' never ran"
     assert "boom" in seen and "ok" in seen
+
+
+def test_immediate_consumer_task_done_survives_queue_swap(headless_dispatcher):
+    """lq-dist-01: a queue swap (resize) between get() and task_done() must not
+    crash the consumer with 'task_done() called too many times'."""
+    disp = headless_dispatcher
+    disp.config["immediate_queue_maxsize"] = 5
+    swapped = threading.Event()
+
+    def runner(item):
+        # Simulate a concurrent _resize_immediate_queue_locked swapping the queue
+        # while this item is in flight.
+        with disp._immediate_lock:
+            disp.config["immediate_queue_maxsize"] = 9
+            disp._resize_immediate_queue_locked()
+        swapped.set()
+
+    disp._run_immediate_item = runner
+    disp._dispatch_immediate(q("x"))
+    assert swapped.wait(3)
+    # Consumer must still be alive: a second item still runs.
+    ev2 = threading.Event()
+    disp._run_immediate_item = lambda it: ev2.set()
+    disp._dispatch_immediate(q("y"))
+    assert ev2.wait(3), "consumer died after queue swap (task_done on wrong queue)"
