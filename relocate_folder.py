@@ -221,6 +221,36 @@ def validate_source(source: Path) -> None:
         raise NotADirectoryError(f"source is not a directory: {source}")
 
 
+def _source_identity_fd(source: Path) -> tuple[int, tuple[int, int]]:
+    """Open ``source`` as a directory WITHOUT following a final symlink
+    (rf-sec-01), returning ``(fd, (st_dev, st_ino))``.
+
+    ``O_NOFOLLOW`` makes the open fail (ELOOP) if ``source`` was swapped for a
+    symlink, and ``O_DIRECTORY`` fails (ENOTDIR) if it is no longer a directory —
+    closing the swap-for-symlink TOCTOU at open time. The caller holds the fd
+    open across the migration (pinning the inode) and re-checks the path's
+    identity against this fstat right before copying via
+    :func:`_assert_source_identity`."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(source, flags)
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd, (st.st_dev, st.st_ino)
+
+
+def _assert_source_identity(source: Path, expected: tuple[int, int]) -> None:
+    """Raise when ``source``'s current lstat identity differs from ``expected``
+    (rf-sec-01) — i.e. the path was swapped since it was opened."""
+    st = os.lstat(source)
+    if (st.st_dev, st.st_ino) != expected:
+        raise RuntimeError(
+            f"source {source} was replaced during the migration "
+            f"(inode/device changed); aborting to avoid acting on a swapped path")
+
+
 def ensure_dest_root(dest_root: Path, source: Path) -> list[Path]:
     """Create dest_root if missing; new dirs get source's uid/gid and mode 0o755.
 
@@ -1710,21 +1740,34 @@ def execute(plan: Plan) -> str:
         if plan.dry_run:
             _advance(MigrationState.DRY_RUN)
             return f"dry-run: would migrate {plan.source} -> {plan.target}"
-        created_dirs = ensure_dest_root(plan.target.parent, plan.source)
+        # rf-sec-01: open the source (O_NOFOLLOW|O_DIRECTORY) and hold the fd
+        # across the copy so the inode can't be swapped for a symlink/other dir;
+        # identity is re-checked just before copying. Opened AFTER the open-files
+        # check (our own held fd would otherwise trip it) and after the dry-run
+        # return (dry-run reads nothing).
+        src_fd, src_id = _source_identity_fd(plan.source)
         try:
-            # rf-ddd-02: _copy_and_verify advances to COPIED between copy and
-            # verify so a verify-failed run logs an honest intermediate state.
-            _copy_and_verify(plan, on_state=_advance)
-            _advance(MigrationState.VERIFIED)
-            atomic_swap(plan.source, plan.target)
-            _advance(MigrationState.SWAPPED)
-            return f"ok: {plan.source} -> {plan.target}"
-        except BaseException:
-            # rf-state-01: every post-ensure_dest_root failure path (verify or
-            # swap failure) must unwind the dest dirs we created — _copy_and_verify
-            # only cleans the leaf target, not the ancestors mkdir'd here.
-            _cleanup_created_dirs(created_dirs)
-            raise
+            created_dirs = ensure_dest_root(plan.target.parent, plan.source)
+            try:
+                # rf-sec-01: confirm the source path still names the inode we
+                # opened before reading from it by path.
+                _assert_source_identity(plan.source, src_id)
+                # rf-ddd-02: _copy_and_verify advances to COPIED between copy and
+                # verify so a verify-failed run logs an honest intermediate state.
+                _copy_and_verify(plan, on_state=_advance)
+                _advance(MigrationState.VERIFIED)
+                atomic_swap(plan.source, plan.target)
+                _advance(MigrationState.SWAPPED)
+                return f"ok: {plan.source} -> {plan.target}"
+            except BaseException:
+                # rf-state-01: every post-ensure_dest_root failure path (verify
+                # or swap failure) must unwind the dest dirs we created —
+                # _copy_and_verify only cleans the leaf target, not the
+                # ancestors mkdir'd here.
+                _cleanup_created_dirs(created_dirs)
+                raise
+        finally:
+            os.close(src_fd)
     finally:
         # rf-obs-04: promote the terminal state to INFO so operators
         # running at the default verbosity see the canonical lifecycle

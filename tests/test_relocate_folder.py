@@ -3678,3 +3678,35 @@ def test_recover_refuses_when_source_reappears(tmp_path, monkeypatch):
     with pytest.raises(FileExistsError):
         rf.recover(source, force=True)
     assert backup.exists(), "backup lost despite refused recovery"
+
+
+def test_source_identity_fd_rejects_symlink(tmp_path):
+    """rf-sec-01: opening a symlinked source with O_NOFOLLOW must fail."""
+    real = tmp_path / "real"; real.mkdir()
+    link = tmp_path / "link"; link.symlink_to(real)
+    with pytest.raises(OSError):
+        rf._source_identity_fd(link)
+
+
+def test_assert_source_identity_detects_swap(tmp_path):
+    """rf-sec-01: a changed inode at the source path is detected."""
+    src = tmp_path / "src"; src.mkdir()
+    st = os.lstat(src)
+    rf._assert_source_identity(src, (st.st_dev, st.st_ino))  # matches -> ok
+    with pytest.raises(RuntimeError):
+        rf._assert_source_identity(src, (st.st_dev, st.st_ino + 1))
+
+
+def test_execute_aborts_when_source_swapped_before_copy(tmp_path, monkeypatch):
+    """rf-sec-01: a source swapped between validation and copy aborts the run
+    before any data is read by path."""
+    src = tmp_path / "src"; _make_tree(src)
+    plan = rf.Plan(source=src, target=tmp_path / "dst")
+
+    def swap(*_a, **_k):
+        raise RuntimeError("source was replaced during the migration")
+
+    monkeypatch.setattr(rf, "_assert_source_identity", swap)
+    with pytest.raises(RuntimeError, match="replaced during the migration"):
+        rf.execute(plan)
+    assert not (tmp_path / "dst").exists()
