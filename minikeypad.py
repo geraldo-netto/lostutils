@@ -987,11 +987,15 @@ class App(tk.Tk):
     def _render_layout(self):
         for widget in self._keys_body.winfo_children():
             widget.destroy()
+        # Centre the keycaps in the (full-width) scroll body instead of letting
+        # them hug the left edge with blank space to the right.
+        holder = ttk.Frame(self._keys_body)
+        holder.pack(anchor="n", pady=4)
         entries = dict(self._layouts).get(self.layout_var.get())
         if entries is None:
-            self._render_basic(self._keys_body)
+            self._render_basic(holder)
         else:
-            self._render_script(self._keys_body, entries)
+            self._render_script(holder, entries)
 
     def _render_basic(self, body):
         for row in BASIC_ROWS:
