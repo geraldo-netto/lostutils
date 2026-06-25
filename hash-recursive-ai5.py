@@ -1147,6 +1147,22 @@ def _retry_head_alias(key, tried, aliases, config):
     return None
 
 
+def _retry_tail_alias(key, tried, size, aliases, config):
+    """hr-rel-30: re-hash the stage-2 tail of the next readable alias of `key`
+    after its representative produced a None tail, mirroring
+    :func:`_retry_head_alias`. A multi-alias (hardlinked) inode whose stage-2
+    representative vanished or lost read access between stages — while a sibling
+    alias stays readable — was silently dropped from its confirmed group. Returns
+    the first non-None tail digest, or None when no sibling is readable."""
+    for alias in aliases.get(key, ()):
+        if alias == tried:
+            continue
+        tail = hash_tail_and_samples(alias, size, config=config)
+        if tail is not None:
+            return tail
+    return None
+
+
 def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
                  aliases=None, on_hashed=None, on_progress=None):
     """Run Stage 1 (head hash) and bucket candidates by ``(size, head)``
@@ -1193,7 +1209,7 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
 
 
 def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
-                 on_progress=None):
+                 on_progress=None, aliases=None):
     """Run Stage 2 (tail + center + middle samples) and regroup by
     ``(head, tail)`` (hr-cx-05).
 
@@ -1226,6 +1242,11 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     for item in stage2_items:
         _s, _path, head, key = item
         tail = tail_by_item.get(item)
+        # hr-rel-30: retry the tail on a readable sibling alias before dropping a
+        # multi-alias inode whose representative lost read access between stages
+        # (mirrors the stage-1 head retry).
+        if tail is None and aliases is not None and len(aliases.get(key, ())) > 1:
+            tail = _retry_tail_alias(key, _path, _s, aliases, config)
         if tail is None:
             continue   # failed/unhashed tail — already in stage2_errors
         regrouped.setdefault((head, tail), []).append(key)
@@ -1385,7 +1406,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     # ---- Stage 2: tail + center + middle samples for size+head collisions ----
     regrouped, stage2_info = _stage2_hash(
         stage2_items, jobs, config, cancel_event,
-        on_progress=_progress("stage2"))
+        on_progress=_progress("stage2"), aliases=aliases)
     for combined, keys in regrouped.items():
         if len(keys) >= 2:
             _accept_group(combined, keys)

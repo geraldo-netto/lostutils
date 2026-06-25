@@ -2914,3 +2914,29 @@ def test_retry_head_alias_property(n_aliases, live_choice):
         result = hr._retry_head_alias(("d", 0), "/p0", aliases, None)
     assert "/p0" not in probed
     assert result == ("HD" if readable is not None else None)
+
+
+def test_retry_tail_alias_skips_tried_and_returns_sibling(monkeypatch):
+    # hr-rel-30: the representative (tried) has no readable tail; the next alias
+    # hashes fine.
+    aliases = {("d", 0): ["/dead", "/live"]}
+    calls = []
+
+    def fake_tail(path, size, config=None):
+        calls.append(path)
+        return None if path == "/dead" else "GOODTAIL"
+
+    monkeypatch.setattr(hr, "hash_tail_and_samples", fake_tail)
+    tail = hr._retry_tail_alias(("d", 0), "/dead", 1234, aliases, None)
+    assert tail == "GOODTAIL"
+    assert "/dead" not in calls   # already-tried rep skipped
+
+
+def test_retry_tail_alias_returns_none_when_no_sibling_readable(monkeypatch):
+    aliases = {("d", 0): ["/dead", "/alsodead"]}
+    monkeypatch.setattr(hr, "hash_tail_and_samples", lambda p, s, config=None: None)
+    assert hr._retry_tail_alias(("d", 0), "/dead", 1, aliases, None) is None
+
+
+def test_retry_tail_alias_unknown_key_returns_none():
+    assert hr._retry_tail_alias(("d", 9), "/x", 1, {}, None) is None
