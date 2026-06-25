@@ -464,6 +464,10 @@ def test_ensure_pyusb_returns_false_when_install_fails(monkeypatch):
 
 def test_ensure_pyusb_success_reimports(monkeypatch):
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    # _ensure_pyusb rebinds the module global `usb`; record it so monkeypatch
+    # restores the real module and background poll threads stay happy.
+    monkeypatch.setattr(minikeypad, "usb", getattr(minikeypad, "usb", None),
+                        raising=False)
     monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: True)
     monkeypatch.setitem(sys.modules, "usb", types.ModuleType("usb"))
     monkeypatch.setitem(sys.modules, "usb.core", types.ModuleType("usb.core"))
@@ -913,7 +917,13 @@ def app(monkeypatch):
     # whether IBus is installed on the test host.
     monkeypatch.setattr(minikeypad, "_unicode_available", lambda: True)
     a = minikeypad.App()
-    _drain(a)                       # flush the startup connect attempt
+    # Fully settle the startup connect probe so its _connect_done can't land
+    # mid-test and race a later worker's completion.
+    end = time.time() + 2.0
+    while time.time() < end and a._io_busy:
+        _drain(a)
+        time.sleep(0.005)
+    _drain(a)
     try:
         yield a
     finally:
@@ -1245,6 +1255,145 @@ def test_destroy_is_idempotent(app):
     app.destroy()
     app.destroy()                           # second call must not raise TclError
     assert app._destroyed is True
+
+
+# ===========================================================================
+#  session map: record on write, key colouring, save/load, write-all
+# ===========================================================================
+def test_successful_write_records_assignment(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=True)
+    app._select_key(1)
+    app.kp.basic_key(4, "A")
+    app._download()
+    _wait_drain(app)
+    assert app._assignments[(1, 1)]["desc"] == "A"
+
+
+def test_failed_write_does_not_record(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=False)
+    app._select_key(1)
+    app.kp.basic_key(4, "A")
+    app._download()
+    _wait_drain(app)
+    assert app._assignments == {}
+
+
+def test_refresh_key_map_marks_mapped_and_idle(app):
+    app._assignments[(1, 2)] = {"data": bytes(65), "desc": "Xtra-long"}
+    app._selected_id = None
+    app._refresh_key_map()
+    mapped = app._phys_buttons[2]
+    assert mapped.cget("bg") == minikeypad.COL_KEY_MAPPED
+    assert "Xtra-lon" in mapped.cget("text")          # desc truncated to 8
+    assert app._phys_buttons[3].cget("bg") == minikeypad.COL_KEY_IDLE
+
+
+def test_key_name_mapping():
+    assert minikeypad.App._key_name(1) == "KEY1"
+    assert minikeypad.App._key_name(14) == "Knob1-Press"
+    assert minikeypad.App._key_name(176) == "LED"
+    assert minikeypad.App._key_name(999) == "id999"
+
+
+def test_save_and_load_profile_round_trip(app, tmp_path):
+    app._assignments = {(1, 1): {"data": bytes(range(65)), "desc": "A"},
+                        (2, 5): {"data": bytes(65), "desc": "Vol +"}}
+    path = str(tmp_path / "p.json")
+    app._save_profile(path)
+    app._assignments = {}
+    assert app._load_profile(path) == 2
+    assert app._assignments[(1, 1)]["desc"] == "A"
+    assert app._assignments[(1, 1)]["data"] == bytes(range(65))
+
+
+def test_load_profile_rejects_bad_buffer_length(app, tmp_path):
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"version":1,"assignments":'
+                   '[{"layer":1,"key_id":1,"desc":"x","data":"00ff"}]}')
+    with pytest.raises(ValueError):
+        app._load_profile(str(bad))
+
+
+def test_reports_for_rebuilds_saved_key(app):
+    app._select_key(1)
+    app.kp.basic_key(4, "A")
+    built = app._reports_for(1, bytes(app.kp.data))
+    assert built is not None
+    reports, flash, _ = built
+    assert flash == "kbd" and reports[0][0] == 1
+
+
+def test_write_all_not_connected(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=False)
+    app._assignments = {(1, 1): {"data": bytes(65), "desc": "A"}}
+    app._write_all()
+    assert "failed" in app.dl_status.cget("text").lower()
+
+
+def test_write_all_busy(app):
+    app._io_busy = True
+    app._write_all()
+    assert "busy" in app.dl_status.cget("text").lower()
+
+
+def test_write_all_empty(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True)
+    app._assignments = {}
+    app._write_all()
+    assert "nothing saved" in app.dl_status.cget("text").lower()
+
+
+def _one_key_assignment(app, key_id=1, code=4, label="A"):
+    app._select_key(key_id)
+    app.kp.basic_key(code, label)
+    return bytes(app.kp.data)
+
+
+def test_write_all_success(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=True)
+    data = _one_key_assignment(app)
+    app._assignments = {(1, 1): {"data": data, "desc": "A"}}
+    app._write_all()
+    _wait_drain(app)
+    assert "1/1" in app.log_box.get("1.0", "end")
+    assert "success" in app.dl_status.cget("text").lower()
+
+
+def test_write_all_partial_failure(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=False)
+    data = _one_key_assignment(app)
+    app._assignments = {(1, 1): {"data": data, "desc": "A"}}
+    app._write_all()
+    _wait_drain(app)
+    assert "0/1" in app.log_box.get("1.0", "end")
+    assert "failed" in app.dl_status.cget("text").lower()
+
+
+def test_write_all_skips_unbuildable(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=True)
+    app._assignments = {(1, 7): {"data": bytes(65), "desc": ""}}  # key id 0 -> None
+    app._write_all()
+    _wait_drain(app)
+    assert "nothing to send" in app.log_box.get("1.0", "end").lower()
+
+
+def test_write_all_worker_crash_logged(app):
+    app._io_busy = False
+    app.dev = CrashDev(connected=True)              # write_device raises
+    data = _one_key_assignment(app)
+    app._assignments = {(1, 1): {"data": data, "desc": "A"}}
+    app._write_all()
+    _wait_drain(app)
+    log = app.log_box.get("1.0", "end").lower()
+    assert "error" in log and "0/1" in log
+    assert app._io_busy is False
 
 
 def test_connect_done_clears_busy(app):

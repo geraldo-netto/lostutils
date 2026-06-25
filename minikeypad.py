@@ -43,6 +43,7 @@ Linux note:
 # pyright: reportMissingImports=false, reportPossiblyUnboundVariable=false
 
 import argparse
+import json
 import logging
 import os
 import queue
@@ -54,6 +55,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import ttk
+from tkinter import filedialog
 from tkinter import scrolledtext
 from typing import Any
 
@@ -118,6 +120,8 @@ WRITE_RETRY_BACKOFF_S = 0.05
 # Colours mirroring the original WinForms app.
 COL_KEY_IDLE = "#98fb98"   # 152,251,152  pale green
 COL_KEY_SEL = "#ff3030"    # 255,48,48    selected red
+COL_KEY_MAPPED = "#add8e6"  # light blue: written this session on the cur. layer
+PROFILE_VERSION = 1
 COL_MENU = "#c8c8a9"
 COL_CONNECTED = "#188a18"
 COL_DISCONNECTED = "#c83232"
@@ -796,8 +800,14 @@ class App(tk.Tk):
         self.kp = KeyParam()
         self.dev = KeypadDevice(log=self.log)
         self._phys_buttons = {}     # key_id -> Button
+        self._phys_base = {}        # key_id -> base button label
         self._selected_id = None
         self._destroyed = False
+        # Session map of what has been written (the device is write-only and
+        # cannot be read back): (layer, key_id) -> {"data": bytes, "desc": str}.
+        self._assignments = {}
+        self._pending = None        # candidate assignment awaiting write ACK
+        self._action_buttons = []   # disabled while a write is in flight
         # Only offer the extended scripts when the OS Unicode-entry method is
         # present; otherwise fall back to the default US keyboard only.
         self._uni_available = _unicode_available()
@@ -862,6 +872,7 @@ class App(tk.Tk):
                           command=lambda k=kid: self._select_key(k))
             b.grid(row=r, column=c, padx=3, pady=3)
             self._phys_buttons[kid] = b
+            self._phys_base[kid] = label
 
         for name, knob in (("Knob 1", KNOB1), ("Knob 2", KNOB2)):
             nf = ttk.LabelFrame(left, text=name + "  (rotate / press)")
@@ -873,6 +884,7 @@ class App(tk.Tk):
                               command=lambda k=kid: self._select_key(k))
                 b.pack(side="left", padx=3)
                 self._phys_buttons[kid] = b
+                self._phys_base[kid] = label
 
         # current assignment display
         disp = ttk.LabelFrame(left, text="Current key assignment")
@@ -887,6 +899,17 @@ class App(tk.Tk):
         ttk.Button(btns, text="Clear", command=self._clear).pack(side="left", expand=True, fill="x", padx=2)
         self.dl_btn = ttk.Button(btns, text="Write ▶", command=self._download)
         self.dl_btn.pack(side="left", expand=True, fill="x", padx=2)
+
+        # Profile row: persist the session map (the device cannot be read back)
+        # and replay every saved key in one pass.
+        pbtns = ttk.Frame(left)
+        pbtns.pack(fill="x", pady=(4, 0))
+        self.wa_btn = ttk.Button(pbtns, text="Write all", command=self._write_all)
+        save_btn = ttk.Button(pbtns, text="Save…", command=self._save_dialog)
+        load_btn = ttk.Button(pbtns, text="Load…", command=self._load_dialog)
+        for b in (save_btn, load_btn, self.wa_btn):
+            b.pack(side="left", expand=True, fill="x", padx=2)
+        self._action_buttons = [self.dl_btn, self.wa_btn, save_btn, load_btn]
 
         self.dl_status = tk.Label(left, text="", anchor="center")
         self.dl_status.pack(fill="x", pady=(4, 0))
@@ -1099,16 +1122,24 @@ class App(tk.Tk):
         self.after(120, self._drain_ui)
 
     # ---- physical-key colour handling ------------------------------------
-    def _colour_init(self):
-        for b in self._phys_buttons.values():
-            b.configure(bg=COL_KEY_IDLE)
+    def _refresh_key_map(self):
+        """Repaint/label physical keys: mapped-this-layer, selected, or idle."""
+        layer = self.kp.KEY_Cur_Layer
+        for kid, btn in self._phys_buttons.items():
+            base = self._phys_base[kid]
+            rec = self._assignments.get((layer, kid))
+            if rec:
+                btn.configure(text="%s\n%s" % (base, rec["desc"][:8]), bg=COL_KEY_MAPPED)
+            else:
+                btn.configure(text=base, bg=COL_KEY_IDLE)
+        if self._selected_id is not None:
+            self._phys_buttons[self._selected_id].configure(bg=COL_KEY_SEL)
 
     def _select_key(self, key_id):
         if not self.kp.select_physical_key(key_id):
             return  # LED page: selection disabled
         self._selected_id = key_id
-        self._colour_init()
-        self._phys_buttons[key_id].configure(bg=COL_KEY_SEL)
+        self._refresh_key_map()
         self._refresh_display()
         self.log("Selected key id %d (layer %d)" % (key_id, self.kp.KEY_Cur_Layer))
 
@@ -1209,7 +1240,7 @@ class App(tk.Tk):
     def _clear(self):
         self.kp.key_cleared()
         self._selected_id = None
-        self._colour_init()
+        self._refresh_key_map()
         self._refresh_display()
 
     def _refresh_display(self):
@@ -1302,6 +1333,10 @@ class App(tk.Tk):
         if truncated:
             self.log("Macro longer than %d groups; sending first %d."
                      % (MAX_KBD_GROUPS, MAX_KBD_GROUPS))
+        desc = (self.kp.key_text() + " " + self.kp.fun_text()).strip() or "raw"
+        self._pending = (self.kp.KEY_Cur_Layer,
+                         self.kp.data[KeyParam.KeySet_KeyNum],
+                         bytes(self.kp.data), desc)
         self._run_download(reports, flash)
 
     def _send_reports(self, reports, flash_buf, rid):
@@ -1327,10 +1362,14 @@ class App(tk.Tk):
         self.log("Write: %d reports + flash committed and acknowledged" % total)
         return "ok"
 
+    def _set_actions(self, state):
+        for b in self._action_buttons:
+            b.configure(state=state)
+
     def _run_download(self, reports, flash):
         """Send all reports on a worker thread; the UI stays responsive."""
         self._io_busy = True
-        self.dl_btn.configure(state="disabled")
+        self._set_actions("disabled")
         rid = self.kp.ReportID
         flash_buf = self._flash_buf(flash)
 
@@ -1347,14 +1386,134 @@ class App(tk.Tk):
 
     def _download_done(self, outcome):
         self._io_busy = False
-        self.dl_btn.configure(state="normal")
-        if outcome == "reports":
+        self._set_actions("normal")
+        if outcome == "ok" and self._pending:
+            layer, kid, data, desc = self._pending
+            self._assignments[(layer, kid)] = {"data": data, "desc": desc}
+            self._refresh_key_map()
+        elif outcome == "reports":
             # Failure before the (last) flash commit: nothing was persisted.
             self.log("Not committed -- previous mapping intact. Press Write to retry.")
         elif outcome in ("flash", "error"):
             # Commit step ambiguous: re-writing resends the whole sequence.
             self.log("Commit may be partial -- write again to be safe.")
+        self._pending = None
         self._dl_result(outcome == "ok")
+
+    # ---- session profile: save / load / replay ---------------------------
+    @staticmethod
+    def _key_name(kid):
+        special = {13: "Knob1-L", 14: "Knob1-Press", 15: "Knob1-R",
+                   16: "Knob2-L", 17: "Knob2-Press", 18: "Knob2-R", 176: "LED"}
+        if 1 <= kid <= 12:
+            return "KEY%d" % kid
+        return special.get(kid, "id%d" % kid)
+
+    def _save_profile(self, path):
+        """Write the session map to `path` as JSON (atomic temp+rename)."""
+        payload = {"version": PROFILE_VERSION, "assignments": [
+            {"layer": layer, "key_id": kid, "desc": rec["desc"],
+             "data": rec["data"].hex()}
+            for (layer, kid), rec in self._assignments.items()]}
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+
+    def _load_profile(self, path):
+        """Replace the session map from a JSON profile. Returns the count."""
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        size = len(KeyParam().data)
+        loaded = {}
+        for item in payload.get("assignments", []):
+            data = bytes.fromhex(item["data"])
+            if len(data) != size:
+                raise ValueError("bad assignment buffer length")
+            loaded[(int(item["layer"]), int(item["key_id"]))] = {
+                "data": data, "desc": str(item.get("desc", ""))}
+        self._assignments = loaded
+        self._refresh_key_map()
+        return len(loaded)
+
+    def _save_dialog(self):
+        path = filedialog.asksaveasfilename(  # pragma: no cover - dialog glue
+            title="Save profile", defaultextension=".json",
+            filetypes=[("JSON profile", "*.json")])
+        if not path:  # pragma: no cover - dialog glue
+            return
+        try:  # pragma: no cover - dialog glue
+            self._save_profile(path)
+            self.log("Saved %d key(s) to %s" % (len(self._assignments), path))
+        except OSError as e:  # pragma: no cover - dialog glue
+            self.log("Save failed: %s" % e)
+
+    def _load_dialog(self):
+        path = filedialog.askopenfilename(  # pragma: no cover - dialog glue
+            title="Load profile", filetypes=[("JSON profile", "*.json")])
+        if not path:  # pragma: no cover - dialog glue
+            return
+        try:  # pragma: no cover - dialog glue
+            self.log("Loaded %d key(s) from %s" % (self._load_profile(path), path))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as e:  # pragma: no cover
+            self.log("Load failed: %s" % e)
+
+    def _reports_for(self, layer, data):
+        """Rebuild the report sequence for a saved key on the current device."""
+        kp = KeyParam()
+        kp.data = bytearray(data)
+        kp.KEY_Cur_Layer = layer
+        kp.ReportID = self.kp.ReportID
+        return kp.build_download_reports()
+
+    def _write_all(self):
+        if self._io_busy:
+            self._dl_note("Busy, try again")
+            return
+        if not self.dev.connected:
+            self.log("Write-all ignored: device not connected.")
+            self._dl_result(False)
+            return
+        if not self._assignments:
+            self._dl_note("Nothing saved to write.")
+            return
+        jobs = []
+        for (layer, kid), rec in self._assignments.items():
+            built = self._reports_for(layer, rec["data"])
+            if built is None:
+                self.log("Write-all: %s has nothing to send" % self._key_name(kid))
+                continue
+            reports, flash, _ = built
+            jobs.append((kid, reports, self._flash_buf(flash)))
+        self._run_write_all(jobs)
+
+    def _run_write_all(self, jobs):
+        self._io_busy = True
+        self._set_actions("disabled")
+        rid = self.kp.ReportID
+
+        def worker():
+            ok = 0
+            for kid, reports, flash_buf in jobs:
+                try:
+                    outcome = self._send_reports(reports, flash_buf, rid)
+                except Exception as e:
+                    LOG.exception("write-all worker crashed")
+                    self.log("Write-all: %s error: %s" % (self._key_name(kid), e))
+                    outcome = "error"
+                if outcome == "ok":
+                    ok += 1
+                else:
+                    self.log("Write-all: %s failed (%s)" % (self._key_name(kid), outcome))
+            self._ui_q.put(lambda: self._write_all_done(ok, len(jobs)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _write_all_done(self, ok, total):
+        self._io_busy = False
+        self._set_actions("normal")
+        self.log("Write-all: %d/%d key(s) written" % (ok, total))
+        self._dl_result(ok == total and total > 0)
 
     def destroy(self):
         # Idempotent: closing the window already calls destroy(), and main()'s
