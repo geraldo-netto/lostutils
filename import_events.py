@@ -2588,6 +2588,14 @@ def _llm_heartbeat(label: str, interval: float = LLM_HEARTBEAT_SECONDS,
 
 def _create_chat_completion(client: Any, messages: List[Any], config: ModelConfig,
                             label: str = "LLM request") -> Any:
+    # ie-conc-10: _LLM_REQUEST_LOCK serializes EVERY LLM call because the
+    # llama.cpp client is a single, non-thread-safe model instance — only one
+    # inference can run at a time. Consequence for the stall-replacement
+    # mechanism (ie-robust-02): a worker wedged in this uncancellable native
+    # call holds the lock for the rest of the process, so a replacement worker
+    # can only make progress on LLM-FREE files; the moment it needs the LLM it
+    # blocks here behind the wedged call. Replacements cannot parallelize past
+    # an LLM stall — the run gives up on the wedged work via ie-rel-10 instead.
     with _LLM_REQUEST_LOCK:
         with _llm_heartbeat(label):
             return client.create_chat_completion(
@@ -3105,9 +3113,14 @@ def _run_file_workers(
                     "LLM stall in %s but live-worker cap (%d) reached; "
                     "not spawning another.", label, workers + max_replacements)
                 return
+        # ie-conc-10: the replacement can only drain LLM-free files — it will
+        # block on _LLM_REQUEST_LOCK (held by the wedged worker) the moment it
+        # needs the model. It does not rescue the stalled extraction; ie-rel-10
+        # bounds the wait and returns partials if no progress follows.
         start_worker(
             f"LLM stall in {label} ({elapsed:.0f}s >= {int(deadline)}s); "
-            "the stalled extraction remains running unbounded"
+            "the stalled extraction remains running unbounded — replacement "
+            "can only progress LLM-free files"
         )
 
     for _index in range(workers):

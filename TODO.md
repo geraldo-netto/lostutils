@@ -52,7 +52,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-conc-10 | open | high | import_events.py:2585 — `_create_chat_completion` holds the process-wide `_LLM_REQUEST_LOCK` for the entire native LLM call, so a stalled worker keeps the lock; the replacement worker `on_llm_stall` spawns (ie-robust-02) then blocks indefinitely on `_LLM_REQUEST_LOCK` the moment it issues its own LLM call — making the replacement mechanism ineffective for the exact LLM-stall case it exists for. Document that replacements only help OCR work, or scope/release the lock so a wedged call can't starve replacements. | replacement worker starves on global LLM lock
 lq-conc-10 | open | med | link_queue.py:935 — `_save_state` snapshots `inflight` (under `_immediate_lock`) and the immediate `backlog` (under `_immediate_q.mutex`) in two separate lock sections; a consumer that `work_q.get()`s then publishes to `_immediate_current` in the gap leaves an in-flight immediate item in neither snapshot, losing it. Snapshot both under a single `_immediate_lock` hold (consumer also takes `_immediate_lock` around get+publish). | torn multi-lock snapshot, narrow data-loss window
 
 ## multithreading
