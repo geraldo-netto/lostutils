@@ -1889,26 +1889,31 @@ def organize(
         ctx=ctx,
     )
 
-    if not files and (preview or verbose):
-        logger.info(f"No files to organize under {root} (already bucketed or empty).")
-        return
-
-    manager = bucket_manager if bucket_manager is not None else BucketManager(root=root)
-    plan = plan_moves(root, sorted(files), manager, ctx=ctx, preview=preview)
-    stats = _run_moves(
-        plan,
-        worker=make_worker(preview),
-        num_threads=num_threads,
-        preview=preview,
-        total_files=len(files),
-        head_cache=head_cache,
-    )
-    if verbose or preview or stats.processed > 0 or stats.skipped > 0:
-        logger.info(
-            f"Finished. Processed {stats.processed} file(s), "
-            f"skipped {stats.skipped} file(s)."
+    # oze-rel-12: when there are no files to move, skip the move stage but
+    # still fall through to the prune stage below — an already-organized tree
+    # (every file already bucketed) is the common case where the user runs
+    # --prune-empty-dirs to clean up leftover empty dirs. Returning here
+    # silently dropped the prune request whenever --verbose/--preview was set.
+    if not files:
+        if preview or verbose:
+            logger.info(f"No files to organize under {root} (already bucketed or empty).")
+    else:
+        manager = bucket_manager if bucket_manager is not None else BucketManager(root=root)
+        plan = plan_moves(root, sorted(files), manager, ctx=ctx, preview=preview)
+        stats = _run_moves(
+            plan,
+            worker=make_worker(preview),
+            num_threads=num_threads,
+            preview=preview,
+            total_files=len(files),
+            head_cache=head_cache,
         )
-    _log_run_stats(head_cache, manager)
+        if verbose or preview or stats.processed > 0 or stats.skipped > 0:
+            logger.info(
+                f"Finished. Processed {stats.processed} file(s), "
+                f"skipped {stats.skipped} file(s)."
+            )
+        _log_run_stats(head_cache, manager)
 
     if prune_empty:
         if preview:
