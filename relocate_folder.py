@@ -328,7 +328,16 @@ def already_migrated(source: Path, target: Path) -> bool:
         # that as "migrated" would skip the copy and silently strand the source
         # data. Only declare migration done when the target exists and holds
         # content.
-        return _target_has_content(target)
+        has_content = _target_has_content(target)
+        if has_content:
+            # rf-rel-03: the skip is decided on content PRESENCE, not a
+            # source-vs-target comparison — a partial/divergent prior target
+            # still counts as migrated. Log the decision so an operator can
+            # audit a skip that may have stranded or diverged data.
+            _log().info(
+                "already migrated: %s -> %s (target non-empty; copy skipped on "
+                "content presence, not a content comparison)", source, target)
+        return has_content
     except PermissionError as exc:
         # rf-rel-10: silently returning False on EACCES would let a
         # misconfigured (chmod 0o000) target look like "not migrated"

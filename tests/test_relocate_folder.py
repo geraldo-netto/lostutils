@@ -3525,3 +3525,16 @@ def test_warn_if_not_traversable_swallows_stat_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(rf.Path, "stat", boom_stat)
     # Must return quietly, not raise.
     rf._warn_if_not_traversable(tmp_path, source)
+
+
+def test_already_migrated_logs_content_presence_skip(tmp_path, caplog):
+    """rf-rel-03: a content-presence skip is logged so the operator can audit
+    a migration declared done without comparing target to source."""
+    import logging as _logging
+    target = tmp_path / "tgt"; target.mkdir()
+    (target / "file").write_text("data", encoding="utf-8")
+    src = tmp_path / "src"
+    src.symlink_to(target)
+    with caplog.at_level(_logging.INFO):
+        assert rf.already_migrated(src, target) is True
+    assert any("already migrated" in r.message for r in caplog.records)
