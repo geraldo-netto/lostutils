@@ -219,7 +219,7 @@ class _WalkState(NamedTuple):
     box guarded by ``lock``."""
 
     pending: queue.SimpleQueue
-    out_q: queue.SimpleQueue
+    out_q: queue.Queue
     lock: threading.Lock
     inflight: list
     per_worker_stats: list
@@ -1371,8 +1371,9 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         if on_stage_progress is None:
             return None
 
+        cb_fn = on_stage_progress
         def _cb(done, total):
-            on_stage_progress(stage, done, total)
+            cb_fn(stage, done, total)
         return _cb
 
     by_head, stage1_info = _stage1_hash(
@@ -1548,7 +1549,7 @@ def _log_line(msg, quiet) -> None:
 def _configure_stdio_encoding() -> None:
     """Keep path output writable for Unicode and surrogate-escaped names."""
     for stream in (sys.stdout, sys.stderr):
-        if not isinstance(stream, io.TextIOBase):
+        if not isinstance(stream, io.TextIOWrapper):
             continue
         try:
             stream.reconfigure(encoding="utf-8", errors="surrogateescape")

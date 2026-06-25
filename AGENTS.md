@@ -184,6 +184,13 @@ framework/law in the finding's `notes`.
 - **test / fuzz coverage** — property/fuzz/adversarial coverage exists for parsers and
   command builders (file parsing, shell/SQL argument construction, network inputs),
   concurrency, and interface contracts; counts toward the same coverage gate.
+- **ruff (lint)** — every root `.py` file passes `ruff check` clean. Run `ruff check *.py`
+  on each scan; each remaining diagnostic (rule code + `file:line`) is a finding. Style,
+  unused imports/vars, and bug-prone patterns ruff flags all count.
+- **pylance / pyright (type check)** — every root `.py` file passes static type checking
+  clean. Run `pyright *.py` on each scan; each error/warning (rule like
+  `reportPossiblyUnbound` + `file:line`) is a finding. Prefer a real guard/cast/narrowing
+  fix over `# type: ignore`.
 
 ## File Editing
 

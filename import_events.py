@@ -28,7 +28,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from dataclasses import dataclass
 from datetime import datetime, date
-from typing import List, Dict, Any, Optional, Callable, Tuple, MutableMapping, Iterable
+from typing import List, Dict, Any, Optional, Callable, Tuple, MutableMapping, Iterable, cast
 from pathlib import Path
 
 # Default paths to the local GGUF models.
@@ -2479,7 +2479,9 @@ def _ocr_image_bytes(
 
 def _current_llm_stall_callback() -> Optional[Callable[[str, float, float], None]]:
     callback = getattr(_LLM_STALL_CONTEXT, "callback", None)
-    return callback if callable(callback) else None
+    if callable(callback):
+        return cast(Callable[[str, float, float], None], callback)
+    return None
 
 
 def _run_llm_stall_callback(
@@ -2955,6 +2957,7 @@ def _file_worker(
 ) -> None:
     while True:
         item = work_queue.get()
+        index = None
         try:
             if item is None:
                 return
