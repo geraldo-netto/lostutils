@@ -1619,11 +1619,14 @@ def execute(plan: Plan) -> str:
         validate_source(plan.source)
         if not plan.force:
             _check_no_open_files(plan.source)
-        ensure_dest_root(plan.target.parent, plan.source)
+        # rf-rel-21: _check_cross_device is read-only (warn/raise), so keep it
+        # for dry-run, but return BEFORE ensure_dest_root — which mkdirs/chowns
+        # the destination — so --dry-run never mutates the filesystem.
         _check_cross_device(plan)
         if plan.dry_run:
             _advance(MigrationState.DRY_RUN)
             return f"dry-run: would migrate {plan.source} -> {plan.target}"
+        ensure_dest_root(plan.target.parent, plan.source)
         # rf-ddd-02: _copy_and_verify advances to COPIED between copy and
         # verify so a verify-failed run logs an honest intermediate state.
         _copy_and_verify(plan, on_state=_advance)

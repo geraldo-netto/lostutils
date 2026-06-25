@@ -3538,3 +3538,13 @@ def test_already_migrated_logs_content_presence_skip(tmp_path, caplog):
     with caplog.at_level(_logging.INFO):
         assert rf.already_migrated(src, target) is True
     assert any("already migrated" in r.message for r in caplog.records)
+
+
+def test_execute_dry_run_creates_no_dest_dirs(tmp_path):
+    """rf-rel-21: --dry-run must not mkdir/chown the destination tree."""
+    src = tmp_path / "src"; _make_tree(src)
+    dest_parent = tmp_path / "newdest"
+    plan = rf.Plan(source=src, target=dest_parent / "src", dry_run=True)
+    result = rf.execute(plan)
+    assert result.startswith("dry-run:")
+    assert not dest_parent.exists(), "dry-run created destination directories"
