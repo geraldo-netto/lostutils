@@ -2351,15 +2351,14 @@ def test_iter_verify_tasks_with_ownership_appends_extra(tmp_path):
 
 
 def test_iter_verify_tasks_skips_non_file_dir_symlink(tmp_path):
-    # A FIFO entry: is_symlink False, is_file False, is_dir False — none of
-    # the three branches fire; ownership-only task can still be appended.
+    # rf-rel-02: a FIFO is a special file copy_tree skips — it has no kind
+    # branch AND (now) no ownership task, since there is no dst counterpart to
+    # verify. It must produce NO task at all, even with verify_ownership=True.
     src = tmp_path / "s"; src.mkdir()
     fifo = src / "f"; os.mkfifo(fifo)
     dst = tmp_path / "t"; dst.mkdir()
-    os.mkfifo(dst / "f")
     tasks = list(rf._iter_verify_tasks(src, dst, checksum=False, verify_ownership=True))
-    # Only ownership tasks for the FIFO + no kind-specific task.
-    assert tasks   # at least one task produced
+    assert tasks == []   # skipped special yields nothing to verify
 
 
 def test_nearest_existing_dir_returns_none_when_root_not_dir(tmp_path, monkeypatch):
@@ -3623,3 +3622,16 @@ def test_copy_and_verify_cleans_target_on_keyboardinterrupt(tmp_path, monkeypatc
     with pytest.raises(KeyboardInterrupt):
         rf._copy_and_verify(plan)
     assert not plan.target.exists(), "partial target not cleaned on Ctrl+C in verify"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo (POSIX)")
+def test_verify_ownership_skips_special_files(tmp_path):
+    """rf-rel-02: a tree with a skipped special file (FIFO) must not fail
+    --verify-ownership — copy_tree never created a dst counterpart for it."""
+    src = tmp_path / "src"; src.mkdir()
+    (src / "real.txt").write_bytes(b"data")
+    os.mkfifo(src / "pipe")             # special file copy_tree will skip
+    dst = tmp_path / "dst"
+    rf.copy_tree(src, dst, check_space=False)
+    # Must not raise on the skipped FIFO that has no dst counterpart.
+    rf.verify_copy(src, dst, False, verify_ownership=True)

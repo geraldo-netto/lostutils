@@ -1062,14 +1062,22 @@ def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
             # deleted. Yield a task that raises so verify_copy fails loudly.
             yield partial(_verify_unreadable_src, full, rel, exc)
             st = None
+        is_copied_kind = False
         if st is not None and stat.S_ISLNK(st.st_mode):
             yield partial(_verify_symlink, full, counterpart, rel)
+            is_copied_kind = True
         elif st is not None and stat.S_ISREG(st.st_mode):
             yield partial(_verify_file, full, counterpart, rel, checksum,
                           src_size=st.st_size)
+            is_copied_kind = True
         elif st is not None and stat.S_ISDIR(st.st_mode):
             yield partial(_verify_dir, full, counterpart, rel)
-        if verify_ownership:
+            is_copied_kind = True
+        # rf-rel-02: only verify ownership for entries copy_tree actually copied
+        # (symlink/regular/dir). A skipped special file (socket/FIFO/device) has
+        # no dst counterpart, so its ownership check would lstat a missing path
+        # and fail the whole --verify-ownership migration.
+        if verify_ownership and is_copied_kind:
             yield partial(_verify_ownership, full, counterpart, rel)
 
 
