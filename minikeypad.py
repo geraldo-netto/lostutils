@@ -16,7 +16,7 @@ without the device attached; it just reports "Not connected".
 
 Programming a key sends several reports followed by a flash-commit; this is
 NOT atomic.  If a write fails mid-sequence the key may be left partially
-programmed -- just press Download again to re-send the full sequence.
+programmed -- just press Write again to re-send the full sequence.
 
 Dependencies:
     pip install pyusb        # and a libusb backend (libusb-1.0)
@@ -886,7 +886,7 @@ class App(tk.Tk):
         btns = ttk.Frame(left)
         btns.pack(fill="x")
         ttk.Button(btns, text="Clear", command=self._clear).pack(side="left", expand=True, fill="x", padx=2)
-        self.dl_btn = ttk.Button(btns, text="Download ▶", command=self._download)
+        self.dl_btn = ttk.Button(btns, text="Write ▶", command=self._download)
         self.dl_btn.pack(side="left", expand=True, fill="x", padx=2)
 
         self.dl_status = tk.Label(left, text="", anchor="center")
@@ -1258,11 +1258,11 @@ class App(tk.Tk):
 
     def _dl_result(self, ok):
         if ok:
-            self.dl_status.configure(text="Download success", fg="white", bg=COL_CONNECTED)
-            self.log("Download success")
+            self.dl_status.configure(text="Write success", fg="white", bg=COL_CONNECTED)
+            self.log("Write success")
         else:
-            self.dl_status.configure(text="Download failed", fg="white", bg=COL_DISCONNECTED)
-            self.log("Download failed")
+            self.dl_status.configure(text="Write failed", fg="white", bg=COL_DISCONNECTED)
+            self.log("Write failed")
         self.after(2500, lambda: self.dl_status.configure(text="", bg=self.cget("bg")))
 
     def _dl_note(self, msg):
@@ -1276,12 +1276,12 @@ class App(tk.Tk):
             self._dl_note("Busy, try again")
             return
         if not self.dev.connected:
-            self.log("Download ignored: device not connected.")
+            self.log("Write ignored: device not connected.")
             self._dl_result(False)
             return
         result = self.kp.build_download_reports()
         if result is None:
-            self._dl_note("Nothing to download (no key / function assigned).")
+            self._dl_note("Nothing to write (no key / function assigned).")
             return
         reports, flash, truncated = result
         if truncated:
@@ -1303,13 +1303,13 @@ class App(tk.Tk):
         total = len(reports)
         for i, buf in enumerate(reports, 1):
             if not self.dev.write_device(rid, buf):
-                self.log("Download: report %d/%d not acknowledged" % (i, total))
+                self.log("Write: report %d/%d not acknowledged" % (i, total))
                 return "reports"
             LOG.debug("report %d/%d acked", i, total)
         if not self.dev.write_device(rid, flash_buf):
-            self.log("Download: flash commit not acknowledged")
+            self.log("Write: flash commit not acknowledged")
             return "flash"
-        self.log("Download: %d reports + flash committed and acknowledged" % total)
+        self.log("Write: %d reports + flash committed and acknowledged" % total)
         return "ok"
 
     def _run_download(self, reports, flash):
@@ -1323,8 +1323,8 @@ class App(tk.Tk):
             try:
                 outcome = self._send_reports(reports, flash_buf, rid)
             except Exception as e:             # never strand the disabled button
-                LOG.exception("download worker crashed")
-                self.log("Download error: %s" % e)
+                LOG.exception("write worker crashed")
+                self.log("Write error: %s" % e)
                 outcome = "error"
             self._ui_q.put(lambda: self._download_done(outcome))
 
@@ -1335,10 +1335,10 @@ class App(tk.Tk):
         self.dl_btn.configure(state="normal")
         if outcome == "reports":
             # Failure before the (last) flash commit: nothing was persisted.
-            self.log("Not committed -- previous mapping intact. Press Download to retry.")
+            self.log("Not committed -- previous mapping intact. Press Write to retry.")
         elif outcome in ("flash", "error"):
-            # Commit step ambiguous: re-downloading resends the whole sequence.
-            self.log("Commit may be partial -- re-download to be safe.")
+            # Commit step ambiguous: re-writing resends the whole sequence.
+            self.log("Commit may be partial -- write again to be safe.")
         self._dl_result(outcome == "ok")
 
     def destroy(self):
