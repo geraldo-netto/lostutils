@@ -220,18 +220,33 @@ def validate_source(source: Path) -> None:
         raise NotADirectoryError(f"source is not a directory: {source}")
 
 
-def ensure_dest_root(dest_root: Path, source: Path) -> None:
+def ensure_dest_root(dest_root: Path, source: Path) -> list[Path]:
     """Create dest_root if missing; new dirs get source's uid/gid and mode 0o755.
 
     Existing path components are NEVER modified. If any existing ancestor would
-    block the source's owner from traversing it, a warning is logged.
+    block the source's owner from traversing it, a warning is logged. Returns
+    the list of directories actually created (outermost-first) so a failed
+    migration can unwind them (rf-state-01).
     """
     if dest_root.exists() and not dest_root.is_dir():
         raise NotADirectoryError(
             f"dest root exists but is not a directory: {dest_root}"
         )
-    _create_missing_dirs(dest_root, source)
+    created = _create_missing_dirs(dest_root, source)
     _warn_if_not_traversable(dest_root, source)
+    return created
+
+
+def _cleanup_created_dirs(created: list[Path]) -> None:
+    """rf-state-01: remove the destination ancestor dirs created by
+    ensure_dest_root when a migration fails after they were made, so a failed
+    run doesn't leave empty dirs stranded on the dest volume. Innermost-first;
+    stop at the first dir that won't rmdir (non-empty or already gone)."""
+    for path in reversed(created):
+        try:
+            os.rmdir(path)
+        except OSError:
+            break
 
 
 def _create_missing_dirs(dest_root: Path, source: Path) -> list[Path]:
@@ -1626,14 +1641,21 @@ def execute(plan: Plan) -> str:
         if plan.dry_run:
             _advance(MigrationState.DRY_RUN)
             return f"dry-run: would migrate {plan.source} -> {plan.target}"
-        ensure_dest_root(plan.target.parent, plan.source)
-        # rf-ddd-02: _copy_and_verify advances to COPIED between copy and
-        # verify so a verify-failed run logs an honest intermediate state.
-        _copy_and_verify(plan, on_state=_advance)
-        _advance(MigrationState.VERIFIED)
-        atomic_swap(plan.source, plan.target)
-        _advance(MigrationState.SWAPPED)
-        return f"ok: {plan.source} -> {plan.target}"
+        created_dirs = ensure_dest_root(plan.target.parent, plan.source)
+        try:
+            # rf-ddd-02: _copy_and_verify advances to COPIED between copy and
+            # verify so a verify-failed run logs an honest intermediate state.
+            _copy_and_verify(plan, on_state=_advance)
+            _advance(MigrationState.VERIFIED)
+            atomic_swap(plan.source, plan.target)
+            _advance(MigrationState.SWAPPED)
+            return f"ok: {plan.source} -> {plan.target}"
+        except BaseException:
+            # rf-state-01: every post-ensure_dest_root failure path (verify or
+            # swap failure) must unwind the dest dirs we created — _copy_and_verify
+            # only cleans the leaf target, not the ancestors mkdir'd here.
+            _cleanup_created_dirs(created_dirs)
+            raise
     finally:
         # rf-obs-04: promote the terminal state to INFO so operators
         # running at the default verbosity see the canonical lifecycle

@@ -118,7 +118,6 @@ rf-robust-03 | open | med | relocate_folder.py:1300 — _backup_target only roll
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-state-01 | open | med | relocate_folder.py:1588 — on any failure after ensure_dest_root (verify failure, swap failure, --strict-cross-device raising at 1592), the dest ancestor dirs created by _create_missing_dirs are never cleaned up; only copy_tree/_copy_and_verify clean plan.target itself, not the parent dirs they mkdir'd, leaving empty .relocate dirs on the dest volume. Capture _create_missing_dirs' returned list and unwind it on the failure paths. | every post-ensure_dest_root error path leaks dirs
 
 ## testing
 

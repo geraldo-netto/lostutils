@@ -3548,3 +3548,19 @@ def test_execute_dry_run_creates_no_dest_dirs(tmp_path):
     result = rf.execute(plan)
     assert result.startswith("dry-run:")
     assert not dest_parent.exists(), "dry-run created destination directories"
+
+
+def test_execute_unwinds_created_dest_dirs_on_failure(tmp_path, monkeypatch):
+    """rf-state-01: a failure after ensure_dest_root must remove the empty dest
+    ancestor dirs it created, not strand them on the dest volume."""
+    src = tmp_path / "src"; _make_tree(src)
+    dest_parent = tmp_path / "a" / "b" / "c"   # none exist yet
+    plan = rf.Plan(source=src, target=dest_parent / "src")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("copy failed")
+
+    monkeypatch.setattr(rf, "_copy_and_verify", boom)
+    with pytest.raises(RuntimeError):
+        rf.execute(plan)
+    assert not (tmp_path / "a").exists(), "created dest dirs not unwound on failure"
