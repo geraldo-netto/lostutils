@@ -3926,3 +3926,14 @@ def test_immediate_item_crash_records_failure_metric(headless_dispatcher):
     while time.time() < end and disp.metrics.get("failures", 0) == before:
         time.sleep(0.02)
     assert disp.metrics.get("failures", 0) == before + 1
+
+
+def test_resize_immediate_pool_resets_depth_warned_on_grow(headless_dispatcher):
+    """lq-obs-01: growing the pool clears the stale depth-warned latch so a
+    backlog under the new size stops being flagged."""
+    disp = headless_dispatcher
+    disp._immediate_pool_size = 1
+    disp._immediate_depth_warned = True            # previously warned at size 1
+    disp.config["immediate_worker_count"] = 4      # grow the pool
+    disp._resize_immediate_pool()
+    assert disp._immediate_depth_warned is False

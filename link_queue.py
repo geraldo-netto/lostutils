@@ -1357,7 +1357,14 @@ class Dispatcher:
         changes; takes `_immediate_lock` itself."""
         dropped = 0
         with self._immediate_lock:
+            old_size = self._immediate_pool_size
             self._immediate_pool_size = self._immediate_concurrency()
+            # lq-obs-01: a grown pool makes the "already warned" latch stale — a
+            # backlog over the OLD size but under the NEW should no longer be
+            # flagged. Reset so the next _note_immediate_depth re-evaluates
+            # against the new pool size.
+            if self._immediate_pool_size > old_size:
+                self._immediate_depth_warned = False
             self._ensure_immediate_pool()
             dropped = self._resize_immediate_queue_locked()
         if dropped:
