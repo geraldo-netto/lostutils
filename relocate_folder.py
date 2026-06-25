@@ -669,7 +669,10 @@ def copy_tree(src: Path, dst: Path, *,
             copy_function=copy_function,
             ignore=_make_ignore_specials(skipped, cache),
         )
-    except Exception:
+    except BaseException:
+        # rf-robust-02: catch BaseException (not just Exception) so a
+        # KeyboardInterrupt mid-copy also cleans the half-written `dst` instead
+        # of leaving a partial target that blocks the O_EXCL/_path_taken retry.
         # rf-rel-11: log cleanup failures so an operator knows when a
         # half-written `dst` survived a failed copy (read-only mount,
         # permission-denied target). The original exception is still
@@ -1808,7 +1811,9 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
         else:
             _log().warning("verification disabled (--no-verify): the source %s "
                            "will be deleted without checking the copy", plan.source)
-    except Exception:
+    except BaseException:
+        # rf-robust-02: BaseException (not just Exception) so a Ctrl+C during
+        # verify also removes the partial target rather than blocking retry.
         # rf-rel-03 / rf-conc-01: rmtree(plan.target) is reached only AFTER
         # `verify_copy` has returned or raised. The rmtree-vs-read join
         # guarantee is specific to the CHECKSUM branch: there `verify_copy`

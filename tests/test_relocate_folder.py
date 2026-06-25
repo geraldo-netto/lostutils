@@ -3590,3 +3590,36 @@ def test_check_disk_space_uses_allocated_not_apparent(tmp_path, monkeypatch):
     monkeypatch.setattr(rf.shutil, "disk_usage", lambda _p: _Usage())
     # Apparent-size accounting would raise; allocated accounting passes.
     rf._check_disk_space(src, tmp_path / "dst")
+
+
+def test_copy_tree_cleans_partial_target_on_keyboardinterrupt(tmp_path, monkeypatch):
+    """rf-robust-02: a Ctrl+C mid-copy must remove the half-written target so a
+    retry isn't blocked by a leftover partial dst."""
+    src = tmp_path / "src"; _make_tree(src)
+    dst = tmp_path / "dst"
+    from pathlib import Path as _P
+
+    def boom_copytree(s, d, **kw):
+        _P(d).mkdir()
+        (_P(d) / "partial").write_text("x")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rf.shutil, "copytree", boom_copytree)
+    with pytest.raises(KeyboardInterrupt):
+        rf.copy_tree(src, dst, check_space=False)
+    assert not dst.exists(), "partial target not cleaned on KeyboardInterrupt"
+
+
+def test_copy_and_verify_cleans_target_on_keyboardinterrupt(tmp_path, monkeypatch):
+    """rf-robust-02: a Ctrl+C during verification also removes the partial
+    target (the cleanup catches BaseException)."""
+    src = tmp_path / "src"; _make_tree(src)
+    plan = rf.Plan(source=src, target=tmp_path / "dst")
+
+    def boom_verify(*_a, **_k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rf, "verify_copy", boom_verify)
+    with pytest.raises(KeyboardInterrupt):
+        rf._copy_and_verify(plan)
+    assert not plan.target.exists(), "partial target not cleaned on Ctrl+C in verify"
