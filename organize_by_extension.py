@@ -417,6 +417,17 @@ def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
     family = _family_for(detected, ctx.extra_zip_family)
     if family is not None and declared_canon in family:
         return declared
+    # oze-pdf-01: a declared `.pdf` whose header is NOT a PDF may be a carrier
+    # (e.g. a Wrapster MP3 wrapper) with the real PDF embedded past the header.
+    # Do a 3rd check ONLY for `.pdf`: scan the payload for the %PDF- marker and,
+    # if present, route to pdf/. Otherwise fall through to the detected content
+    # type so a genuinely-mislabelled file still lands by its real bytes.
+    if declared_canon == "pdf" and _file_contains_pdf(path):
+        logger.info(
+            "embedded PDF found in %s (header is %s) — bucketing under pdf/",
+            path, detected,
+        )
+        return "pdf"
     # oze-perf-06: real mismatch — header authoritative. Warn so the user
     # notices misnamed / mistyped files.
     logger.warning(
@@ -424,6 +435,33 @@ def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
         path, declared, detected, detected,
     )
     return detected
+
+
+_PDF_MAGIC = b"%PDF-"
+_PDF_SCAN_CHUNK = 1 << 20   # 1 MiB read window for the embedded-PDF scan
+
+
+def _file_contains_pdf(path: Path) -> bool:
+    """True when the ``%PDF-`` marker appears ANYWHERE in ``path`` (oze-pdf-01).
+
+    Used only for declared-``.pdf`` files whose header isn't a PDF, to route a
+    carrier (Wrapster-style MP3 wrapper, etc.) holding an embedded PDF into
+    pdf/. Streams the whole file in chunks with a small overlap so the marker is
+    never split across a boundary; any read error answers False (treat as
+    not-a-PDF)."""
+    overlap = len(_PDF_MAGIC) - 1
+    try:
+        with open(path, "rb") as fh:
+            prev = b""
+            while True:
+                chunk = fh.read(_PDF_SCAN_CHUNK)
+                if not chunk:
+                    return False
+                if _PDF_MAGIC in prev + chunk:
+                    return True
+                prev = chunk[-overlap:]
+    except OSError:
+        return False
 
 
 def normalize_prefix(name: str) -> str:

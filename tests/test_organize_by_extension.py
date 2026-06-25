@@ -3845,3 +3845,53 @@ def test_cross_device_reclaim_logs_warning(tmp_path, caplog):
     with caplog.at_level(_logging.WARNING):
         oze._move_cross_device(src, dst)
     assert any("overwriting 0-byte target" in r.message for r in caplog.records)
+
+
+def test_pdf_carrier_with_embedded_pdf_routes_to_pdf(tmp_path):
+    """oze-pdf-01: a declared .pdf whose header is MP3 (Wrapster-style carrier)
+    but which contains %PDF- later is routed to pdf/, not mp3/."""
+    f = tmp_path / "Rex Sikes - NLP (WIP).pdf"
+    # MP3 frame sync header, wrapster-ish filler, then the embedded PDF.
+    f.write_bytes(b"\xff\xfb\x18\x0c" + b"wrapster\x002.0\x00" + b"x" * 64
+                  + b"%PDF-1.4\n...pdf body...\n%%EOF\n")
+    assert _oze.resolve_real_extension(f) == "pdf"
+
+
+def test_pdf_mislabel_without_payload_uses_detected(tmp_path):
+    """oze-pdf-01: a declared .pdf that is really an MP3 (no %PDF- anywhere)
+    still falls through to the detected content type."""
+    f = tmp_path / "song.pdf"
+    f.write_bytes(b"\xff\xfb\x18\x0c" + b"\x00" * 256)  # pure MP3, no PDF marker
+    assert _oze.resolve_real_extension(f) == "mp3"
+
+
+def test_real_pdf_unaffected(tmp_path):
+    """A genuine PDF declared .pdf still resolves to pdf with no scan needed."""
+    f = tmp_path / "real.pdf"
+    f.write_bytes(b"%PDF-1.7\n...\n%%EOF\n")
+    assert _oze.resolve_real_extension(f) == "pdf"
+
+
+def test_pdf_scan_only_runs_for_pdf_extension(tmp_path, monkeypatch):
+    """oze-pdf-01: the embedded-PDF scan must NOT run for non-.pdf mismatches."""
+    calls = []
+    monkeypatch.setattr(_oze, "_file_contains_pdf",
+                        lambda p: calls.append(p) or True)
+    f = tmp_path / "song.mp4"          # declared mp4, header mp3 -> mismatch
+    f.write_bytes(b"\xff\xfb\x18\x0c" + b"\x00" * 64)
+    _oze.resolve_real_extension(f)
+    assert calls == []                 # scan never invoked for non-pdf
+
+
+def test_file_contains_pdf_marker_split_across_chunk(tmp_path, monkeypatch):
+    """oze-pdf-01: the %PDF- marker straddling a read-chunk boundary is found."""
+    monkeypatch.setattr(_oze, "_PDF_SCAN_CHUNK", 8)
+    f = tmp_path / "c.bin"
+    f.write_bytes(b"AAAAAA%P" + b"DF-rest")   # %PDF- split across the 8-byte window
+    assert _oze._file_contains_pdf(f) is True
+
+
+def test_file_contains_pdf_absent(tmp_path):
+    f = tmp_path / "n.bin"
+    f.write_bytes(b"no marker here at all")
+    assert _oze._file_contains_pdf(f) is False
