@@ -1185,7 +1185,8 @@ def test_failure_cooldown(app):
     item = q("http://host/x")
     app._trigger_failure_cooldown(1, item, 7)
     domain = app._domain_of(item)
-    assert app._cooldown_until[domain] > time.time()
+    # lq-time-03: cooldown deadlines are monotonic values.
+    assert app._cooldown_until[domain] > time.monotonic()
     # Per-domain cooldown no longer blocks ALL workers — only a global pause
     # does. The failed domain is skipped inside _pick_next_item instead.
     assert app._is_blocked()[0] is False

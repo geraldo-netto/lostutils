@@ -2281,7 +2281,9 @@ class Dispatcher:
         if fail_s <= 0:
             return
         domain = self._domain_of(item)
-        new_until = time.time() + fail_s
+        # lq-time-03: monotonic deadline so a wall-clock step can't keep a
+        # domain cooling past its window (backward) or expire it early (forward).
+        new_until = time.monotonic() + fail_s
         with self._cooldown_lock:
             if new_until > self._cooldown_until.get(domain, 0.0):
                 self._cooldown_until[domain] = new_until
@@ -2395,9 +2397,12 @@ class Dispatcher:
         """Per-domain failure cooldowns still in effect: {domain: until_ts}.
         Prunes expired entries so the dict can't grow unbounded over a
         long-running session that fails on many distinct hosts. Caller need
-        not hold any lock."""
+        not hold any lock.
+
+        lq-time-03: ``until`` timestamps are ``time.monotonic()`` values, so
+        ``now`` defaults to (and callers must pass) the monotonic clock."""
         if now is None:
-            now = time.time()
+            now = time.monotonic()
         with self._cooldown_lock:
             expired = [d for d, until in self._cooldown_until.items()
                        if until <= now]
@@ -3641,7 +3646,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             running = sum(1 for v in self.current_items.values() if v is not None)
             pending = len(self.queue_items)
         target = int(self.config.get("worker_count", 1))
-        now = time.time()
+        now = time.monotonic()  # lq-time-03: match the monotonic cooldown clock
         cooling = self._active_cooldowns(now)
         cd_remaining = max((u - now for u in cooling.values()), default=0.0)
 

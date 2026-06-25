@@ -150,7 +150,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-time-03 | open | low | link_queue.py:2229/2348 — failure cooldowns are armed as `time.time() + fail_s` and expired against `time.time()`; a backward clock step keeps domains cooling past the window, a forward step expires them early. Key cooldown timestamps off `time.monotonic()`. | wall-clock deadline for cooldown TTL
 lq-time-02 | open | low | link_queue.py:4567/4619 — `_shutdown` sets `deadline = time.time() + timeout` and `_join_threads` computes `remaining = deadline - time.time()` on the wall clock; a forward clock jump between them zeroes `remaining`, abandoning worker threads unjoined (the Tcl_AsyncDelete hazard the join prevents). Use `time.monotonic()` for the deadline pair. | non-monotonic elapsed-time math (distinct site from lq-time-01)
 
 ## platform
