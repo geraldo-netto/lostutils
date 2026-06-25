@@ -129,6 +129,8 @@ def test_cleanup_drops_all_standalone_tokens(words):
 def _parse_rows(out):
     rows = []
     for ln in out.splitlines():
+        if not ln or ln.startswith("#"):  # skip blank + `# source lines:` comments
+            continue
         a, b, d = ln.split(";")
         rows.append((a, b, int(d)))
     return rows
@@ -319,3 +321,15 @@ def test_distinct_undecodable_bytes_not_collapsed(tmp_path):
     # Under errors="replace" both lines collapse and emit a ";0" self-collision.
     # Under surrogateescape they stay distinct -> no distance-0 line.
     assert b";0\n" not in out
+
+
+def test_self_collision_reports_source_line_numbers(monkeypatch, tmp_path, capsys):
+    """A cleaned form produced by multiple input lines emits a `# source
+    lines:` comment naming those 1-based line numbers (dnv3-rel-02)."""
+    f = tmp_path / "names.txt"
+    f.write_text("alpha\nbeta\nalpha\n", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["deduplicate-by-namev3.py", str(f)])
+    dn.main()
+    out = capsys.readouterr().out
+    assert "# source lines: 1,3" in out
+    assert "alpha;alpha;0" in out

@@ -94,12 +94,17 @@ def main():
         except ValueError:
             pass
 
+    # dnv3-rel-02: keep the 1-based source line numbers behind each cleaned
+    # key so a self-collision report can point back at the input lines that
+    # produced it (the counts dict alone lost that mapping).
     counts = {}
-    for raw in raw_lines:
+    line_nums = {}
+    for lineno, raw in enumerate(raw_lines, 1):
         cleaned = cleanup(raw)
         if not cleaned:
             continue
         counts[cleaned] = counts.get(cleaned, 0) + 1
+        line_nums.setdefault(cleaned, []).append(lineno)
 
     items = list(counts.items())
     n = len(items)
@@ -117,6 +122,8 @@ def main():
     # i==i reports never overlap with the cross-pair reports.
     for i in range(n):
         if cnts[i] > 1:
+            src = ",".join(str(x) for x in line_nums[cleaned_strs[i]])
+            write(f"# source lines: {src}\n")
             write(f"{cleaned_strs[i]};{cleaned_strs[i]};0\n")
 
     emit_pairs(cleaned_strs, threshold, args.workers, write)
