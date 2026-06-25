@@ -356,3 +356,10 @@ def test_emit_pairs_threshold_zero_short_circuits(monkeypatch):
     dn.emit_pairs(["abc", "abd", "xyz"], 0, 1, out.append)
     assert out == []
     assert called == []   # no matrix computed
+
+
+def test_cleanup_strips_semicolon_delimiter():
+    """dnv3-cli-03: ';' is removed so a cleaned value can't break the ;-delimited
+    output format."""
+    assert ";" not in dn.cleanup("foo;bar")
+    assert dn.cleanup("a;b") == "ab"

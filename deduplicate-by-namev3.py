@@ -35,7 +35,9 @@ DEFAULT_THRESHOLD = 7
 MAX_THRESHOLD = 254  # uint8 distance matrix caps at 255; stay below to avoid wrap
 BLOCK_THRESHOLD = 4000  # N above which the matrix is computed in row blocks
 BLOCK_ROWS = 2000  # rows per block when row-blocking (peak BLOCK_ROWS×N bytes)
-REPLACEMENTS = (",", "[", "]")
+REPLACEMENTS = (",", "[", "]", ";")  # dnv3-cli-03: ";" is the output field
+# delimiter (`{a};{b};{dist}`); strip it from cleaned strings so a value
+# containing ";" can't produce rows a downstream ;-split parser mis-reads.
 WORD_TOKENS = ("xxx", "monography")
 _WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, WORD_TOKENS)))
 
