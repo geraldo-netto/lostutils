@@ -316,8 +316,10 @@ def test_layout_tables_scancodes_are_valid_hid():
     scripts = [(n, e) for n, e in minikeypad.LAYOUTS if e is not None]
     assert minikeypad.LAYOUTS[0][1] is None          # "US (basic)" sentinel
     names = [n for n, _ in minikeypad.LAYOUTS]
-    for expected in ("Greek", "Russian", "Hebrew", "German", "Latin (accents)"):
+    for expected in ("Greek", "Russian", "Hebrew", "German / Nordic", "Latin (accents)"):
         assert expected in names
+    nordic = {g for g, _ in dict(minikeypad.LAYOUTS)["German / Nordic"]}
+    assert {"ä", "ö", "ü", "ß", "å", "æ", "ø"} <= nordic
     for _title, entries in scripts:
         assert entries, "layout table must not be empty"
         for glyph, scancode in entries:

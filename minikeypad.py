@@ -705,8 +705,13 @@ HEBREW_KEYS = [
     ("ס", 27), ("ע", 10), ("פ", 19), ("צ", 16), ("ק", 8), ("ר", 21), ("ש", 4),
     ("ת", 54), ("ך", 15), ("ם", 18), ("ן", 12), ("ף", 51), ("ץ", 55),
 ]
-# Germanic / Latin-ext: the QWERTZ glyphs the basic US page lacks.
-GERMAN_KEYS = [("ä", 52), ("ö", 51), ("ü", 47), ("ß", 45)]
+# Germanic + Nordic: glyphs the basic US page lacks.  Scancodes are the single
+# key that yields the glyph on the respective national layout (German QWERTZ /
+# the Nordic layouts); Swedish ä/ö coincide with German.
+GERMANIC_KEYS = [
+    ("ä", 52), ("ö", 51), ("ü", 47), ("ß", 45),    # German
+    ("å", 47), ("æ", 51), ("ø", 52),               # Danish / Norwegian / Swedish
+]
 
 # Accented Latin merged across Portuguese / French / Spanish / Italian.  Most
 # come from dead-key sequences that vary per layout and cannot be one scancode,
@@ -727,7 +732,7 @@ LAYOUTS = [
     ("Greek", GREEK_KEYS),
     ("Russian", RUSSIAN_KEYS),
     ("Hebrew", HEBREW_KEYS),
-    ("German", GERMAN_KEYS),
+    ("German / Nordic", GERMANIC_KEYS),
     ("Latin (accents)", LATIN_KEYS),
 ]
 
