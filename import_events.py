@@ -769,6 +769,12 @@ _FAULT_TRACEBACKS_ENABLED = False
 _OUTPUT_REDIRECT_LOCK = threading.RLock()
 _OCR_WARNING_LOCK = threading.Lock()
 _PADDLE_OCR_LOCK = threading.Lock()
+# ie-scal-01: INTENTIONAL process-wide serialization. PaddleOCR's predictor is
+# not reliably thread-safe, so every Paddle run holds this single lock. The
+# consequence is deliberate: the --workers pool gives NO Paddle-OCR
+# parallelism (one image is OCR'd at a time process-wide); workers still
+# parallelize file I/O, Tesseract, and LLM stages. Do not scope this per engine
+# unless the backend is confirmed thread-safe.
 _PADDLE_RUN_LOCK = threading.Lock()
 _TESSERACT_PATH_LOCK = threading.Lock()
 _EXTRACTION_FAILURE_LOCK = threading.Lock()
@@ -2303,6 +2309,9 @@ def _ocr_with_paddle(
     language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
     config: Optional[ModelConfig] = None,
 ) -> str:
+    """Run PaddleOCR on ``image_path``. Serialized process-wide via
+    ``_PADDLE_RUN_LOCK`` (ie-scal-01): Paddle runs one image at a time across
+    all workers because the predictor is not reliably thread-safe."""
     engine = _get_paddle_ocr(language, config)
     if engine is None:
         return ""

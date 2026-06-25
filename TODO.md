@@ -44,7 +44,6 @@ rf-perf-06 | open | med | relocate_folder.py:689/672 — `_src_total_bytes` sums
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-scal-01 | open | low | import_events.py:2305 — `_ocr_with_paddle` serializes every Paddle OCR call across all worker threads on the module-global `_PADDLE_RUN_LOCK`, so `--workers N` gives no Paddle-OCR parallelism (one image OCR'd at a time process-wide). Document as an intentional invariant or scope the lock per engine if the backend is thread-safe. | global run-lock nullifies worker parallelism
 lq-scal-04 | open | low | link_queue.py:1219 — `_immediate_concurrency` returns `max(1, int(raw))` with no upper clamp (unlike the queue pool's `MAX_WORKERS=32`); config `immediate_worker_count: 100000` spawns 100k consumer threads via `_ensure_immediate_pool`. Clamp to `WorkerPool.MAX_WORKERS`. | missing upper bound on thread-pool size
 
 ## N+1 / call efficiency
