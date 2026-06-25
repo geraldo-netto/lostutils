@@ -3564,3 +3564,29 @@ def test_execute_unwinds_created_dest_dirs_on_failure(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         rf.execute(plan)
     assert not (tmp_path / "a").exists(), "created dest dirs not unwound on failure"
+
+
+def test_src_size_totals_sparse_alloc_under_apparent(tmp_path):
+    """rf-perf-06: a sparse file's allocated total is below its apparent size,
+    so the disk-space precheck doesn't over-count it."""
+    f = tmp_path / "sparse.bin"
+    with open(f, "wb") as fh:
+        fh.truncate(10 * 1024 * 1024)  # 10 MiB hole, ~0 blocks allocated
+    apparent, allocated = rf._src_size_totals(tmp_path)
+    assert apparent >= 10 * 1024 * 1024
+    assert allocated < apparent  # holes not counted at full logical size
+
+
+def test_check_disk_space_uses_allocated_not_apparent(tmp_path, monkeypatch):
+    """rf-perf-06: a mostly-sparse tree that fits in actual blocks must not be
+    refused on apparent size alone."""
+    src = tmp_path / "src"; src.mkdir()
+    with open(src / "sparse.bin", "wb") as fh:
+        fh.truncate(1 << 40)  # 1 TiB apparent, ~0 allocated
+
+    class _Usage:
+        free = 64 * 1024 * 1024  # 64 MiB free — far below 1 TiB apparent
+
+    monkeypatch.setattr(rf.shutil, "disk_usage", lambda _p: _Usage())
+    # Apparent-size accounting would raise; allocated accounting passes.
+    rf._check_disk_space(src, tmp_path / "dst")

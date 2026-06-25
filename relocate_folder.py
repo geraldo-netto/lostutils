@@ -628,16 +628,18 @@ def copy_tree(src: Path, dst: Path, *,
     # precheck and (when present) the progress callback. The walk runs only
     # when something needs the total: the disk-space precheck (unless
     # disabled) or a progress callback. Otherwise it's skipped outright.
-    src_total = 0
+    apparent_total = 0
+    alloc_total = 0
     if check_space or progress_cb is not None:
-        src_total = _src_total_bytes(src)
+        apparent_total, alloc_total = _src_size_totals(src)
     if check_space:
-        _check_disk_space(src, dst, total_bytes=src_total)
+        # rf-perf-06: size the precheck by allocated bytes, not apparent size.
+        _check_disk_space(src, dst, total_bytes=alloc_total)
     skipped: list[Path] = []
     cache = mode_cache if mode_cache is not None else {}
     copy_function = shutil.copy2
     if progress_cb is not None:
-        total = src_total
+        total = apparent_total
         done = [0]
 
         def tracking_copy2(s, d, *, follow_symlinks=True):
@@ -714,10 +716,12 @@ def _check_disk_space(src: Path, dst: Path, *, total_bytes: int | None = None) -
 
     rf-rel-14: the check is BEST-EFFORT. The tree can grow between this
     call and `shutil.copytree`'s own walk; an ENOSPC mid-stream is still
-    possible. Callers that already computed `_src_total_bytes` (e.g.
-    `copy_tree` for its progress callback) pass `total_bytes=` to skip
-    the second walk."""
-    needed = total_bytes if total_bytes is not None else _src_total_bytes(src)
+    possible. Callers that already computed the allocated total (e.g.
+    `copy_tree`) pass `total_bytes=` to skip the second walk.
+
+    rf-perf-06: ``total_bytes`` is the ALLOCATED size (``st_blocks * 512``),
+    not the apparent ``st_size``, so sparse files aren't over-counted."""
+    needed = total_bytes if total_bytes is not None else _src_size_totals(src)[1]
     probe = dst
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -734,11 +738,15 @@ def _check_disk_space(src: Path, dst: Path, *, total_bytes: int | None = None) -
         )
 
 
-def _src_total_bytes(src: Path) -> int:
-    """Sum of regular-file sizes under `src` (rf-rel-07). Non-regular files
-    (sockets, FIFOs, devices) are zero-cost in the copy, so they're excluded.
-    Symlinks are not followed."""
-    total = 0
+def _src_size_totals(src: Path) -> tuple[int, int]:
+    """One walk returning ``(apparent_bytes, allocated_bytes)`` for regular
+    files under ``src`` (rf-perf-06). ``apparent`` (``st_size``) drives the
+    progress bar; ``allocated`` (``st_blocks * 512``) drives the disk-space
+    precheck, so a sparse file whose holes the copy preserves isn't counted at
+    its full logical size and falsely refused for "insufficient space".
+    Non-regular files are zero-cost in the copy; symlinks are not followed."""
+    apparent = 0
+    allocated = 0
     for path, _dir_names, names in os.walk(src, followlinks=False):
         base = Path(path)
         for name in names:
@@ -747,8 +755,16 @@ def _src_total_bytes(src: Path) -> int:
             except OSError:
                 continue
             if stat.S_ISREG(st.st_mode):
-                total += st.st_size
-    return total
+                apparent += st.st_size
+                allocated += st.st_blocks * 512
+    return apparent, allocated
+
+
+def _src_total_bytes(src: Path) -> int:
+    """Apparent sum of regular-file sizes under `src` (rf-rel-07). Non-regular
+    files (sockets, FIFOs, devices) are zero-cost in the copy, so they're
+    excluded. Symlinks are not followed."""
+    return _src_size_totals(src)[0]
 
 
 def _make_ignore_specials(skipped: list[Path], mode_cache: dict[Path, int]):
