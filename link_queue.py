@@ -1381,14 +1381,24 @@ class Dispatcher:
         lq-scal-01: the work queue is bounded, so once it is full the item is
         dropped with a warning rather than pinning unbounded RAM. Spawn the pool
         FIRST so consumers can be draining while we attempt the put."""
+        # lq-di-01: put_nowait while STILL holding _immediate_lock. Releasing it
+        # before the put let a concurrent _resize_immediate_queue_locked swap the
+        # queue in the gap, landing the item in the orphaned old queue that no
+        # consumer reads — a silently lost item. The _log/_note callbacks run
+        # outside the lock (_note re-acquires it).
+        full = False
+        maxsize = 0
         with self._immediate_lock:
             self._ensure_immediate_pool()
-        try:
-            self._immediate_q.put_nowait(item)
-        except queue.Full:
+            try:
+                self._immediate_q.put_nowait(item)
+            except queue.Full:
+                full = True
+                maxsize = self._immediate_q.maxsize
+        if full:
             self._log(
                 f"[immediate dropped] {item.protocol}: {item.url} "
-                f"(immediate queue full, maxsize={self._immediate_q.maxsize})"
+                f"(immediate queue full, maxsize={maxsize})"
             )
             return
         self._log(f"[immediate] {item.protocol}: {item.url}")

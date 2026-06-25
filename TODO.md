@@ -29,7 +29,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-di-01 | open | med | link_queue.py:1360 — _dispatch_immediate releases _immediate_lock after _ensure_immediate_pool() then does _immediate_q.put_nowait(item) OUTSIDE the lock; a concurrent _resize_immediate_queue_locked (drains, clears, and swaps the queue under the lock) can run in the gap so the item lands in the orphaned old queue no consumer reads — silently lost. put_nowait while holding the lock, or re-read _immediate_q under it. | lost-write under queue swap
 
 ## performance
 

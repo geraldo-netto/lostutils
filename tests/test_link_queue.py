@@ -3811,3 +3811,12 @@ def test_immediate_consumer_task_done_survives_queue_swap(headless_dispatcher):
     disp._run_immediate_item = lambda it: ev2.set()
     disp._dispatch_immediate(q("y"))
     assert ev2.wait(3), "consumer died after queue swap (task_done on wrong queue)"
+
+
+def test_dispatch_immediate_item_lands_in_live_queue(headless_dispatcher):
+    """lq-di-01: the item is enqueued on the current queue under the lock, not
+    lost to a concurrent queue swap."""
+    disp = headless_dispatcher
+    disp._immediate_pool_size = 0   # no consumers spawned -> nothing drains
+    disp._dispatch_immediate(q("magnet:?x", protocol="magnet"))
+    assert disp._immediate_q.qsize() == 1
