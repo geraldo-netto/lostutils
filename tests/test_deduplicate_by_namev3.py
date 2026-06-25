@@ -345,3 +345,14 @@ def test_valid_threshold_rejects_negative_and_garbage(bad):
     import argparse
     with pytest.raises(argparse.ArgumentTypeError):
         dn.valid_threshold(bad)
+
+
+def test_emit_pairs_threshold_zero_short_circuits(monkeypatch):
+    """dnv3-cli-02: threshold 0 emits no cross pairs and does not walk the
+    matrix (cdist must not be called)."""
+    called = []
+    monkeypatch.setattr(dn, "cdist", lambda *a, **k: called.append(1))
+    out = []
+    dn.emit_pairs(["abc", "abd", "xyz"], 0, 1, out.append)
+    assert out == []
+    assert called == []   # no matrix computed

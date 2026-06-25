@@ -151,6 +151,11 @@ def emit_pairs(cleaned_strs, threshold, workers, write):
     BLOCK_ROWS×N instead of N²; the emitted pairs are identical to the
     single-call path.
     """
+    # dnv3-cli-02: with threshold 0 the only matches would be distance-0 cells,
+    # but cleaned_strs are distinct dict keys so no off-diagonal cell is 0 — the
+    # full N×N walk finds nothing. Skip it (exact self-collisions already emitted).
+    if threshold <= 0:
+        return
     n = len(cleaned_strs)
     step = n if n <= BLOCK_THRESHOLD else BLOCK_ROWS
     for start in range(0, n, step):
