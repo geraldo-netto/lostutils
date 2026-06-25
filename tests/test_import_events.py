@@ -4355,3 +4355,9 @@ def test_process_folder_caps_replacement_workers_on_repeated_stall(tmp_path, mon
         model_config=import_events.ModelConfig(workers=1, deterministic_order=True))
     assert [e["source"] for e in events] == ["event-0.txt", "event-1.txt"]
     assert len(seen_threads) <= 2  # initial worker + at most one replacement
+
+
+def test_worker_final_join_is_bounded():
+    """End-of-run join must be bounded so a wedged native worker can't hang
+    shutdown (ie-conc-01)."""
+    assert 0 < import_events.WORKER_FINAL_JOIN_SECONDS < 3600

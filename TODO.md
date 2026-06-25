@@ -57,7 +57,6 @@ lq-nplus1-01 | open | low | link_queue.py:1084 — _restore_queue_from_state cal
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-conc-01 | open | med | import_events.py:3107 — `_run_file_workers` clean-shutdown `for thread in running_threads: thread.join()` has no timeout, so a worker wedged in the uncancellable native `create_chat_completion` (the exact stall `on_llm_stall` is designed around) hangs the whole process at end-of-run even after all results arrived. Bound the final join with a timeout (threads are daemon). | join-without-timeout on a documented-unbounded native call
 lq-conc-01 | open | low | link_queue.py:1380 — _note_immediate_depth samples depth = _immediate_q.qsize() BEFORE taking _immediate_lock, then makes the edge-trigger warn decision under the lock using that pre-lock sample; two dispatchers can sample different depths and interleave so the latched over/under transition disagrees with the true depth. Sample qsize inside the locked region. | edge-trigger sample/decision race
 
 ## multithreading

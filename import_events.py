@@ -63,6 +63,11 @@ LLM_HEARTBEAT_SECONDS = 60
 # certainly wedged. We still can't cancel a native llama_cpp call, but the
 # louder log tells the operator to abort.
 LLM_STALL_DEADLINE_SECONDS = 600
+# ie-conc-01: ceiling on the end-of-run worker join. All expected results are
+# already collected by then, so a worker still running is wedged in an
+# uncancellable native call; bound the join so it can't hang the process
+# (workers are daemon threads — the interpreter reclaims a leftover one).
+WORKER_FINAL_JOIN_SECONDS = 30.0
 LLM_RESPONSE_LOG_EXCERPT_CHARS = 160
 DEFAULT_LANGUAGE = "auto"
 DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
@@ -3135,7 +3140,13 @@ def _run_file_workers(
     for _index in range(extra_workers):
         work_queue.put(None)
     for thread in running_threads:
-        thread.join()
+        # ie-conc-01: bounded join — a worker wedged in a native LLM call must
+        # not hang shutdown; its result is already collected and it is a daemon.
+        thread.join(timeout=WORKER_FINAL_JOIN_SECONDS)
+        if thread.is_alive():
+            logger.warning(
+                "Worker %s still running at shutdown (likely wedged in a native "
+                "call); abandoning it as a daemon thread.", thread.name)
     return [event for index in sorted(results) for event in results[index]]
 
 
