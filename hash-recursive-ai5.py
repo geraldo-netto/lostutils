@@ -604,8 +604,9 @@ class SamplingStrategy:
 
     Subclasses override `windows(size)` to return the list of
     `FileWindow`s to hash. The default (`ThirdsStrategy`) picks the
-    tail-CAP plus two SAMPLE-byte windows at `size // 3` and
-    `2 * size // 3`. Splitting this out from `hash_tail_and_samples` lets
+    tail-CAP, a center CAP-wide block at the file midpoint, plus two
+    SAMPLE-byte windows at `size // 3` and `2 * size // 3` (see
+    `ThirdsStrategy` for the exact layout). Splitting this out from `hash_tail_and_samples` lets
     tests plug a deterministic strategy (e.g. fixed offsets) and lets a
     future caller experiment with denser sampling for very large files
     without touching the dedup pipeline."""

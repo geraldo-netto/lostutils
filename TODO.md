@@ -239,7 +239,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-doc-01 | open | low | hash-recursive-ai5.py:607 — the SamplingStrategy base-class docstring still describes the default ThirdsStrategy as "tail-CAP plus two SAMPLE-byte windows at size//3 and 2*size//3", with no mention of the center 4 MiB block ThirdsStrategy now also hashes; the base docstring and the concrete strategy disagree. Update it. | docs-vs-behavior drift
 
 ## UI / UX
 
