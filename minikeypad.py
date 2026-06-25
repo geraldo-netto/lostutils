@@ -707,11 +707,33 @@ HEBREW_KEYS = [
 # Germanic / Latin-ext: the QWERTZ glyphs the basic US page lacks.
 GERMAN_KEYS = [("ä", 52), ("ö", 51), ("ü", 47), ("ß", 45)]
 
-SCRIPT_TABS = [
+# Accented Latin (Portuguese / French / Spanish).  Most of these come from
+# dead-key sequences that vary per layout and cannot be one scancode, so the
+# scancode here is the BASE letter (typed in scancode mode); Unicode mode types
+# the real accented glyph on any layout.
+PORTUGUESE_KEYS = [
+    ("á", 4), ("à", 4), ("â", 4), ("ã", 4), ("é", 8), ("ê", 8), ("í", 12),
+    ("ó", 18), ("ô", 18), ("õ", 18), ("ú", 24), ("ç", 6),
+]
+FRENCH_KEYS = [
+    ("à", 4), ("â", 4), ("ç", 6), ("é", 8), ("è", 8), ("ê", 8), ("ë", 8),
+    ("î", 12), ("ï", 12), ("ô", 18), ("œ", 18), ("ù", 24), ("û", 24), ("ü", 24),
+]
+SPANISH_KEYS = [
+    ("ñ", 17), ("á", 4), ("é", 8), ("í", 12), ("ó", 18), ("ú", 24), ("ü", 24),
+    ("¿", 56), ("¡", 30),
+]
+
+# Layouts offered by the Keys-tab combobox; None == the US basic keyboard page.
+LAYOUTS = [
+    ("US (basic)", None),
     ("Greek", GREEK_KEYS),
     ("Russian", RUSSIAN_KEYS),
     ("Hebrew", HEBREW_KEYS),
-    ("Latin-ext", GERMAN_KEYS),
+    ("German", GERMAN_KEYS),
+    ("Portuguese", PORTUGUESE_KEYS),
+    ("French", FRENCH_KEYS),
+    ("Spanish", SPANISH_KEYS),
 ]
 
 # HID usage codes for the hex digits used by Unicode-entry macros.
@@ -737,7 +759,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("MINI-KeyBoard configurator")
-        self.geometry("1040x680")
+        self.geometry("1240x680")
         self.minsize(900, 600)
 
         # Cross-thread UI marshalling: background device threads enqueue
@@ -841,12 +863,15 @@ class App(tk.Tk):
         nb.bind("<<NotebookTabChanged>>", self._on_page)
         self.nb = nb
 
-        self.tab_key = self._build_key_tab(nb)
+        # The KEY page and all extended scripts share one "Keys" tab; the
+        # layout is picked by a combobox (US basic + Greek/Cyrillic/Hebrew/
+        # accented-Latin), so they all map to firmware page 1.
+        self.tab_keys = self._build_keys_tab(nb)
         self.tab_fun = self._build_fun_tab(nb)
         self.tab_mul = self._build_mul_tab(nb)
         self.tab_led = self._build_led_tab(nb)
         self.tab_mouse = self._build_mouse_tab(nb)
-        nb.add(self.tab_key, text="KEY")
+        nb.add(self.tab_keys, text="Keys")
         nb.add(self.tab_fun, text="Ctrl Shift Alt")
         nb.add(self.tab_mul, text="Multimedia")
         nb.add(self.tab_led, text="LED")
@@ -854,23 +879,14 @@ class App(tk.Tk):
         # page index -> KEY_Cur_Page value used by the firmware
         self._page_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
 
-        # Extended-script tabs behave like the KEY page (keyboard scancodes /
-        # Unicode macros), so they fall through to the default page value 1.
-        for title, entries in SCRIPT_TABS:
-            nb.add(self._build_script_tab(nb, entries), text=title)
-
         if not _USB_OK:
             self.log("pyusb not available: %s" % _USB_ERR)
             self.log("Install with:  pip install pyusb   (needs a libusb backend)")
 
-    def _scroll_tab(self, nb):
-        """A notebook tab whose body scrolls vertically so no keycap is clipped.
-
-        Returns (outer, body): add `outer` to the notebook, fill `body`.
-        """
-        outer = ttk.Frame(nb)
-        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
-        vbar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    def _scroll_area(self, parent):
+        """Pack a vertical-scroll canvas into `parent`; return the inner body."""
+        canvas = tk.Canvas(parent, highlightthickness=0, borderwidth=0)
+        vbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         body = ttk.Frame(canvas)
         body.bind("<Configure>",
                   lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -880,7 +896,15 @@ class App(tk.Tk):
         canvas.pack(side="left", fill="both", expand=True)
         vbar.pack(side="right", fill="y")
         self._bind_wheel(canvas)
-        return outer, body
+        return body
+
+    def _scroll_tab(self, nb):
+        """A notebook tab whose whole body scrolls vertically.
+
+        Returns (outer, body): add `outer` to the notebook, fill `body`.
+        """
+        outer = ttk.Frame(nb)
+        return outer, self._scroll_area(outer)
 
     def _bind_wheel(self, canvas):
         """Route the mouse wheel to `canvas` while the pointer is over it."""
@@ -907,9 +931,31 @@ class App(tk.Tk):
             b.grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
         return frame
 
-    def _build_key_tab(self, nb):
-        tab, body = self._scroll_tab(nb)
-        # letters/numbers/specials
+    def _build_keys_tab(self, nb):
+        """Single Keys tab: a layout combobox over a scrollable keycap area."""
+        tab = ttk.Frame(nb)
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", padx=6, pady=(6, 2))
+        ttk.Label(bar, text="Layout:").pack(side="left")
+        self.layout_var = tk.StringVar(value=LAYOUTS[0][0])
+        cb = ttk.Combobox(bar, textvariable=self.layout_var, state="readonly",
+                          width=18, values=[name for name, _ in LAYOUTS])
+        cb.pack(side="left", padx=4)
+        cb.bind("<<ComboboxSelected>>", lambda _e: self._render_layout())
+        self._keys_body = self._scroll_area(tab)
+        self._render_layout()
+        return tab
+
+    def _render_layout(self):
+        for widget in self._keys_body.winfo_children():
+            widget.destroy()
+        entries = dict(LAYOUTS)[self.layout_var.get()]
+        if entries is None:
+            self._render_basic(self._keys_body)
+        else:
+            self._render_script(self._keys_body, entries)
+
+    def _render_basic(self, body):
         for row in BASIC_ROWS:
             rf = ttk.Frame(body)
             rf.pack(anchor="w", padx=6, pady=1)
@@ -923,7 +969,21 @@ class App(tk.Tk):
             tk.Button(mf, text=name, width=8, height=2,
                       command=lambda b=bit, n=name: self._basic_mod(b, n)
                       ).pack(side="left", padx=2, pady=2)
-        return tab
+
+    def _render_script(self, body, entries):
+        note = ttk.Label(
+            body, wraplength=620, foreground="#555",
+            text="Scancode mode sends the national-layout key (needs that OS "
+                 "layout active; accented Latin sends the base letter).  Turn on "
+                 "Unicode mode to type the glyph itself on any layout.")
+        note.pack(anchor="w", padx=6, pady=(6, 2))
+        grid = ttk.Frame(body)
+        grid.pack(anchor="w", padx=6, pady=4)
+        for i, (glyph, scancode) in enumerate(entries):
+            r, c = divmod(i, 11)
+            tk.Button(grid, text=glyph, width=4, height=2,
+                      command=lambda g=glyph, s=scancode: self._script_key(g, s)
+                      ).grid(row=r, column=c, padx=2, pady=2)
 
     def _build_fun_tab(self, nb):
         tab, body = self._scroll_tab(nb)
@@ -959,22 +1019,6 @@ class App(tk.Tk):
         tab, body = self._scroll_tab(nb)
         self._grid_buttons(body, LED_MODES,
                            lambda it: self._led(it), per_row=1, width=20)
-        return tab
-
-    def _build_script_tab(self, nb, entries):
-        tab, body = self._scroll_tab(nb)
-        note = ttk.Label(
-            body, wraplength=520, foreground="#555",
-            text="Sends the national-layout scancode (needs that OS layout "
-                 "active).  Turn on Unicode mode to type the glyph on any layout.")
-        note.pack(anchor="w", padx=6, pady=(6, 2))
-        grid = ttk.Frame(body)
-        grid.pack(anchor="w", padx=6, pady=4)
-        for i, (glyph, scancode) in enumerate(entries):
-            r, c = divmod(i, 11)
-            tk.Button(grid, text=glyph, width=4, height=2,
-                      command=lambda g=glyph, s=scancode: self._script_key(g, s)
-                      ).grid(row=r, column=c, padx=2, pady=2)
         return tab
 
     # ---- cross-thread UI plumbing ----------------------------------------

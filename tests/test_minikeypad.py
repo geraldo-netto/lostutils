@@ -312,12 +312,24 @@ def test_unicode_platform_detection(monkeypatch):
     assert minikeypad._unicode_platform() is None
 
 
-def test_script_tables_scancodes_are_valid_hid():
-    for _title, entries in minikeypad.SCRIPT_TABS:
-        assert entries, "script table must not be empty"
+def test_layout_tables_scancodes_are_valid_hid():
+    scripts = [(n, e) for n, e in minikeypad.LAYOUTS if e is not None]
+    assert minikeypad.LAYOUTS[0][1] is None          # "US (basic)" sentinel
+    names = [n for n, _ in minikeypad.LAYOUTS]
+    for expected in ("Greek", "Russian", "Hebrew", "Portuguese", "French", "Spanish"):
+        assert expected in names
+    for _title, entries in scripts:
+        assert entries, "layout table must not be empty"
         for glyph, scancode in entries:
             assert len(glyph) == 1
             assert 0 < scancode < 256
+
+
+def test_accented_latin_present_for_pt_fr_es():
+    by_name = dict(minikeypad.LAYOUTS)
+    assert any(g == "é" for g, _ in by_name["Portuguese"])
+    assert any(g == "ç" for g, _ in by_name["French"])
+    assert any(g == "ñ" for g, _ in by_name["Spanish"])
 
 
 # ===========================================================================
@@ -1111,7 +1123,25 @@ def test_update_state_disconnected(app):
     assert app.state_lbl.cget("text") == "Not connected"
 
 
+def test_keys_tab_defaults_to_us_basic(app):
+    assert app.layout_var.get() == "US (basic)"
+    # US basic renders letter buttons, not the script note
+    assert app._keys_body.winfo_children()
+
+
+def test_switching_layout_rerenders_body(app):
+    app.layout_var.set("Greek")
+    app._render_layout()
+    app.layout_var.set("Spanish")
+    app._render_layout()
+    # script view present -> a child Label (the note) exists
+    kinds = {w.winfo_class() for w in app._keys_body.winfo_children()}
+    assert "TLabel" in kinds
+
+
 def test_script_key_scancode_mode(app):
+    app.layout_var.set("Greek")
+    app._render_layout()
     app._select_key(1)
     app.unicode_var.set(False)
     app._script_key("α", 4)
