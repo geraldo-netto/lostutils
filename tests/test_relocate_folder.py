@@ -3512,3 +3512,16 @@ def test_run_streamed_drains_running_futures_after_abort():
     assert "slow" in completed
     assert "fail" in completed
     assert len(seen) == 2
+
+
+def test_warn_if_not_traversable_swallows_stat_errors(tmp_path, monkeypatch):
+    """rf-robust-05: an advisory traversability check must not abort the
+    migration when a stat fails (ancestor vanished / permission revoked)."""
+    source = tmp_path / "src"; source.mkdir()
+
+    def boom_stat(self):
+        raise OSError("vanished")
+
+    monkeypatch.setattr(rf.Path, "stat", boom_stat)
+    # Must return quietly, not raise.
+    rf._warn_if_not_traversable(tmp_path, source)

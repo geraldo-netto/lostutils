@@ -266,11 +266,24 @@ def _create_missing_dirs(dest_root: Path, source: Path) -> list[Path]:
 
 
 def _warn_if_not_traversable(dest_root: Path, source: Path) -> None:
-    st = source.stat()
+    # rf-robust-05: this is an advisory check; a stat that fails (source/ancestor
+    # removed or permission revoked mid-walk) must never abort the migration, so
+    # every syscall here is guarded and any failure just ends the advisory walk.
+    try:
+        st = source.stat()
+    except OSError:
+        return
     cur = dest_root
     while cur != cur.parent:
-        if not _can_traverse(cur, st.st_uid, st.st_gid):
-            cur_st = cur.stat()
+        try:
+            traversable = _can_traverse(cur, st.st_uid, st.st_gid)
+        except OSError:
+            return
+        if not traversable:
+            try:
+                cur_st = cur.stat()
+            except OSError:
+                return
             _log().warning(
                 "path %s may not be traversable by uid=%d "
                 "(mode=%s, owner_uid=%d)",
