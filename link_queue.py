@@ -2053,6 +2053,15 @@ class Dispatcher:
                     item = self._try_claim_item(idx)
                     if item is not None:
                         return item
+                    # lq-perf-03: nothing claimable because every pending domain
+                    # is in failure cooldown — sleep until the soonest expiry
+                    # instead of re-polling at the 0.25s cadence for the whole
+                    # (up to 300s) cooldown. A cv notify (new item, config
+                    # change, cooldown trigger) still wakes us early.
+                    cool_wait = self._cooldown_wait_hint()
+                    if cool_wait is not None and cool_wait > 0:
+                        self._dispatch_cv.wait(timeout=cool_wait)
+                        continue
                 remaining = self._dispatch_wait_remaining(
                     deadline, blocked, sleep_for)
                 if remaining <= 0:
@@ -2382,6 +2391,24 @@ class Dispatcher:
         h, m = divmod(m, 60)
         return f"{h}h{m:02d}m"
 
+
+    def _cooldown_wait_hint(self) -> "float | None":
+        """lq-perf-03: seconds until the soonest failure-cooldown expiry WHEN
+        the queue is non-empty and every pending domain is cooling (so nothing
+        can be claimed until a cooldown lifts). Returns None when at least one
+        pending domain is claimable now, or the queue is empty — those cases use
+        the normal short poll. Caller holds `self._dispatch_cv`."""
+        by_domain = getattr(self.queue_items, "by_domain", None)
+        if not by_domain:
+            return None
+        pending_domains = [d for d, bucket in by_domain.items() if bucket]
+        if not pending_domains:
+            return None
+        cooling = self._active_cooldowns()
+        if any(d not in cooling for d in pending_domains):
+            return None  # something is claimable now — don't oversleep
+        soonest = min(cooling[d] for d in pending_domains)
+        return max(0.0, soonest - time.monotonic())
 
     def _is_blocked(self) -> tuple[bool, float]:
         """Whether queue workers should hold off on grabbing ANY new work.

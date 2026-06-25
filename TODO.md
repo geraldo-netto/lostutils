@@ -34,7 +34,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
-lq-perf-03 | open | low | link_queue.py:2004 — when every pending domain is in failure cooldown, `_is_blocked` reports not-blocked so `_dispatch_wait_remaining` grants the full `wait_seconds`; each worker re-arms a fresh 0.25s deadline and re-polls `_pick_next_item` at ~4 Hz for the whole (up to 300s) cooldown. Cap the cv wait by the nearest cooldown `until` when all claimable domains are cooling. | busy-poll while all domains cool down
 
 ## scalability
 

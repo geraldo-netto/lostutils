@@ -3887,3 +3887,20 @@ def test_join_threads_honors_monotonic_deadline():
     link_queue.LinkQueueApp._join_threads([stuck], _time.monotonic() - 1.0)
     assert _time.monotonic() - start < 0.5
     ev.set(); stuck.join()
+
+
+def test_cooldown_wait_hint_sleeps_until_expiry(headless_dispatcher):
+    """lq-perf-03: when every pending domain is cooling, the hint is the time
+    until the soonest expiry; otherwise None (normal short poll)."""
+    import time as _time
+    disp = headless_dispatcher
+    assert disp._cooldown_wait_hint() is None          # empty queue
+    item = q("http://host/x")
+    with disp._dispatch_cv:
+        disp.queue_items.append(item)
+    assert disp._cooldown_wait_hint() is None          # claimable -> None
+    domain = disp._domain_of(item)
+    with disp._cooldown_lock:
+        disp._cooldown_until[domain] = _time.monotonic() + 50.0
+    hint = disp._cooldown_wait_hint()
+    assert hint is not None and 40.0 < hint <= 50.0     # sleep until expiry
