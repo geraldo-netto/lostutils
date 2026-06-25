@@ -3728,3 +3728,26 @@ def test_positive_jobs_validator():
     for bad in ("0", "-4", "x"):
         with pytest.raises(_ap.ArgumentTypeError):
             rf._positive_jobs(bad)
+
+
+def test_iter_verify_tasks_logs_unstatable_entry(tmp_path, monkeypatch, caplog):
+    """rf-obs-01: a source entry that can't be stat'd logs a breadcrumb (and
+    still yields a raising task)."""
+    import logging as _logging
+    src = tmp_path / "src"; src.mkdir()
+    (src / "f").write_text("x", encoding="utf-8")
+    real_lstat = rf.os.lstat
+
+    def boom_lstat(p, *a, **k):
+        if str(p).endswith("/f"):
+            raise OSError(13, "EACCES")
+        return real_lstat(p, *a, **k)
+
+    monkeypatch.setattr(rf.os, "lstat", boom_lstat)
+    with caplog.at_level(_logging.WARNING):
+        tasks = list(rf._iter_verify_tasks(src, tmp_path / "dst", False, False))
+    assert any("cannot stat source entry" in r.message for r in caplog.records)
+    # the raising task is still yielded
+    with pytest.raises(Exception):
+        for t in tasks:
+            t()

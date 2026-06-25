@@ -1110,6 +1110,9 @@ def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
             # rf-rel-01: a src entry that became unreadable mid-run must NOT be
             # silently skipped — the copy would be accepted and the source then
             # deleted. Yield a task that raises so verify_copy fails loudly.
+            # rf-obs-01: also log a breadcrumb so the operator sees WHY an entry
+            # couldn't be classified, not just the eventual verify failure.
+            _log().warning("verify: cannot stat source entry %s: %s", full, exc)
             yield partial(_verify_unreadable_src, full, rel, exc)
             st = None
         is_copied_kind = False
