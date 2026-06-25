@@ -1627,3 +1627,17 @@ def test_load_dialog_handles_malformed_profile_typeerror(app, tmp_path, monkeypa
     monkeypatch.setattr(app, "log", logs.append)
     app._load_dialog()   # must not raise
     assert any("Load failed" in m for m in logs)
+
+
+def test_save_profile_cleans_tmp_on_write_failure(app, tmp_path, monkeypatch):
+    """mkp-robust-20: a json.dump failure must not orphan the <path>.tmp file."""
+    app._assignments = {(1, 1): {"data": bytes(range(65)), "desc": "A"}}
+    path = str(tmp_path / "p.json")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(minikeypad.json, "dump", boom)
+    with pytest.raises(RuntimeError):
+        app._save_profile(path)
+    assert not (tmp_path / "p.json.tmp").exists(), "orphaned .tmp left behind"

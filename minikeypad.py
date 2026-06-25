@@ -1437,9 +1437,18 @@ class App(tk.Tk):
              "data": rec["data"].hex()}
             for (layer, kid), rec in self._assignments.items()]}
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, path)
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, ensure_ascii=False)
+            os.replace(tmp, path)
+        except BaseException:
+            # mkp-robust-20: a failed/interrupted write must not leave an
+            # orphaned <path>.tmp behind.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def _load_profile(self, path):
         """Replace the session map from a JSON profile. Returns the count."""
