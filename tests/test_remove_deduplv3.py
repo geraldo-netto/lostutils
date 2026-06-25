@@ -47,3 +47,14 @@ def test_identical_path_collapsed_not_removed(monkeypatch, tmp_path):
     out = _run(monkeypatch, tmp_path, "h /a\nh /a\n")
     # Only one unique file in the group -> nothing to remove.
     assert "rm -f" not in out
+
+
+def test_no_duplicate_path_in_rm_line(monkeypatch, tmp_path):
+    """rdv3-rel-02: a path repeated under one hash must not produce
+    `rm -f /a /a`; the per-group dedup (rdv3-rel-01) prevents it."""
+    out = _run(monkeypatch, tmp_path, "h /a\nh /a\nh /b\n")
+    rm_lines = [ln for ln in out.splitlines() if ln.startswith("rm -f")]
+    assert rm_lines
+    for ln in rm_lines:
+        targets = ln[len("rm -f "):].split()
+        assert len(targets) == len(set(targets)), f"duplicate path in: {ln}"
