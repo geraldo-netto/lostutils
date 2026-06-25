@@ -3820,3 +3820,20 @@ def test_dispatch_immediate_item_lands_in_live_queue(headless_dispatcher):
     disp._immediate_pool_size = 0   # no consumers spawned -> nothing drains
     disp._dispatch_immediate(q("magnet:?x", protocol="magnet"))
     assert disp._immediate_q.qsize() == 1
+
+
+def test_normalize_config_coerces_garbage_numeric_scalars():
+    """lq-val-01: a non-numeric worker_count must degrade to its default, not
+    crash startup."""
+    cfg = {"protocols": {}, "worker_count": "abc", "immediate_worker_count": "x",
+           "immediate_queue_maxsize": "nope"}
+    link_queue.ConfigStore._normalize_config_schema(cfg)
+    assert cfg["worker_count"] == 1
+    assert cfg["immediate_worker_count"] == 0
+    assert cfg["immediate_queue_maxsize"] == 0
+
+
+def test_normalize_config_keeps_valid_numeric_strings():
+    cfg = {"protocols": {}, "worker_count": "4"}
+    link_queue.ConfigStore._normalize_config_schema(cfg)
+    assert cfg["worker_count"] == 4

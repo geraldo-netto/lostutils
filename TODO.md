@@ -18,7 +18,6 @@ rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-val-01 | open | med | link_queue.py:2877 — startup `_ensure_worker_count(int(self.config.get("worker_count", 1)))` (and `int()` at 1963) coerce a config scalar `_normalize_config_schema` never type-checks; a hand-edited `worker_count: "abc"` raises ValueError and aborts `LinkQueueApp.__init__`. Coerce/validate numeric scalars in `_normalize_config_schema`. | STRIDE-DoS; unvalidated config scalar crashes startup
 
 ## data governance
 

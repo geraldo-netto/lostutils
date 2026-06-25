@@ -538,6 +538,23 @@ class ConfigStore(dict):
             pc["shell"] = bool(pc["shell"])
         cfg.setdefault("default_shell", False)
         cfg["default_shell"] = bool(cfg.get("default_shell", False))
+        # lq-val-01: coerce numeric scalars so a hand-edited non-numeric value
+        # (e.g. worker_count: "abc") degrades to its default instead of crashing
+        # the startup int(self.config.get("worker_count")) and aborting __init__.
+        for key, default in (("worker_count", 1),
+                             ("immediate_worker_count", 0),
+                             ("immediate_queue_maxsize", 0)):
+            if key not in cfg:
+                continue
+            try:
+                cfg[key] = int(cfg[key])
+            except (TypeError, ValueError):
+                print(
+                    f"[warn] config: {key}={cfg[key]!r} is not an integer; "
+                    f"using {default}",
+                    file=sys.stderr,
+                )
+                cfg[key] = default
         # token_mappings: keep only str-prefix -> str-flag entries.
         tm = cfg.get("token_mappings")
         if not isinstance(tm, dict):
