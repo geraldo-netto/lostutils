@@ -333,6 +333,47 @@ def test_accented_latin_present_for_pt_fr_es():
 
 
 # ===========================================================================
+#  Unicode-method availability gating
+# ===========================================================================
+def test_ibus_available_via_path(monkeypatch):
+    monkeypatch.setattr(minikeypad.shutil, "which", lambda _x: "/usr/bin/ibus")
+    assert minikeypad._ibus_available() is True
+
+
+def test_ibus_available_via_im_env(monkeypatch):
+    monkeypatch.setattr(minikeypad.shutil, "which", lambda _x: None)
+    monkeypatch.setenv("GTK_IM_MODULE", "ibus")
+    assert minikeypad._ibus_available() is True
+
+
+def test_ibus_absent(monkeypatch):
+    monkeypatch.setattr(minikeypad.shutil, "which", lambda _x: None)
+    for v in ("GTK_IM_MODULE", "QT_IM_MODULE", "XMODIFIERS"):
+        monkeypatch.delenv(v, raising=False)
+    assert minikeypad._ibus_available() is False
+
+
+def test_unicode_available_per_platform(monkeypatch):
+    monkeypatch.setattr(minikeypad.sys, "platform", "linux")
+    monkeypatch.setattr(minikeypad, "_ibus_available", lambda: True)
+    assert minikeypad._unicode_available() is True
+    monkeypatch.setattr(minikeypad, "_ibus_available", lambda: False)
+    assert minikeypad._unicode_available() is False
+    monkeypatch.setattr(minikeypad.sys, "platform", "darwin")
+    assert minikeypad._unicode_available() is True
+    monkeypatch.setattr(minikeypad.sys, "platform", "win32")
+    assert minikeypad._unicode_available() is False
+
+
+def test_available_layouts_gates_on_unicode(monkeypatch):
+    monkeypatch.setattr(minikeypad, "_unicode_available", lambda: True)
+    assert len(minikeypad._available_layouts()) == len(minikeypad.LAYOUTS)
+    monkeypatch.setattr(minikeypad, "_unicode_available", lambda: False)
+    only = minikeypad._available_layouts()
+    assert len(only) == 1 and only[0][1] is None     # US basic only
+
+
+# ===========================================================================
 #  fuzz — random op streams must never raise or emit out-of-range bytes
 # ===========================================================================
 def test_fuzz_keyparam_operations_stay_in_bounds():
@@ -860,9 +901,12 @@ def _wait_drain(app, timeout=2.0):
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch):
     if not _has_display():
         pytest.skip("no Tk display")
+    # Force Unicode availability so the extended layouts load regardless of
+    # whether IBus is installed on the test host.
+    monkeypatch.setattr(minikeypad, "_unicode_available", lambda: True)
     a = minikeypad.App()
     _drain(a)                       # flush the startup connect attempt
     try:
@@ -1127,6 +1171,20 @@ def test_keys_tab_defaults_to_us_basic(app):
     assert app.layout_var.get() == "US (basic)"
     # US basic renders letter buttons, not the script note
     assert app._keys_body.winfo_children()
+
+
+def test_app_without_unicode_method_loads_us_only(monkeypatch):
+    if not _has_display():
+        pytest.skip("no Tk display")
+    monkeypatch.setattr(minikeypad, "_unicode_available", lambda: False)
+    a = minikeypad.App()
+    try:
+        _drain(a)
+        assert a._layouts == minikeypad.LAYOUTS[:1]
+        assert a.layout_var.get() == "US (basic)"
+        assert "extended-script layouts disabled" in a.log_box.get("1.0", "end")
+    finally:
+        a.destroy()
 
 
 def test_switching_layout_rerenders_body(app):

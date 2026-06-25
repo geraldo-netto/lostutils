@@ -46,6 +46,7 @@ import argparse
 import logging
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import sys
@@ -752,6 +753,32 @@ def _unicode_platform():
     return None             # Windows hex-alt is unreliable for these scripts
 
 
+def _ibus_available():
+    """True if IBus looks installed/active (binary on PATH or selected IM)."""
+    if shutil.which("ibus"):
+        return True
+    im = " ".join(os.environ.get(v, "")
+                  for v in ("GTK_IM_MODULE", "QT_IM_MODULE", "XMODIFIERS"))
+    return "ibus" in im.lower()
+
+
+def _unicode_available():
+    """Whether the OS Unicode-entry method this app uses is actually present."""
+    plat = _unicode_platform()
+    if plat == "linux":
+        return _ibus_available()
+    return plat == "darwin"   # macOS ships Unicode Hex Input; Windows: no
+
+
+def _available_layouts():
+    """Full layout list when Unicode entry is available, else US basic only.
+
+    The extended scripts are only reliably usable through the Unicode-entry
+    method, so when it is missing we offer just the default US keyboard.
+    """
+    return LAYOUTS if _unicode_available() else LAYOUTS[:1]
+
+
 # --------------------------------------------------------------------------- #
 #  Application
 # --------------------------------------------------------------------------- #
@@ -772,10 +799,17 @@ class App(tk.Tk):
         self._phys_buttons = {}     # key_id -> Button
         self._selected_id = None
         self._destroyed = False
+        # Only offer the extended scripts when the OS Unicode-entry method is
+        # present; otherwise fall back to the default US keyboard only.
+        self._uni_available = _unicode_available()
+        self._layouts = _available_layouts()
 
         self._build_ui()
         self._drain_ui()
         self._poll_connection()
+        if not self._uni_available:
+            self.log("No OS Unicode input method (IBus / macOS Hex Input) "
+                     "detected; extended-script layouts disabled (US only).")
 
     # ---- UI construction --------------------------------------------------
     def _build_ui(self):
@@ -810,9 +844,13 @@ class App(tk.Tk):
         uf = ttk.LabelFrame(left, text="Unicode mode")
         uf.pack(fill="x", pady=(0, 6))
         self.unicode_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(uf, variable=self.unicode_var,
-                        text="Type glyph via OS (%s)"
-                        % (_unicode_platform() or "unsupported")
+        if self._uni_available:
+            label = "Type glyph via OS (%s)" % _unicode_platform()
+            state = "normal"
+        else:
+            label = "Unavailable (no IBus / Hex Input)"
+            state = "disabled"
+        ttk.Checkbutton(uf, variable=self.unicode_var, text=label, state=state
                         ).pack(anchor="w", padx=4, pady=2)
 
         kf = ttk.LabelFrame(left, text="Keys")
@@ -937,9 +975,9 @@ class App(tk.Tk):
         bar = ttk.Frame(tab)
         bar.pack(fill="x", padx=6, pady=(6, 2))
         ttk.Label(bar, text="Layout:").pack(side="left")
-        self.layout_var = tk.StringVar(value=LAYOUTS[0][0])
+        self.layout_var = tk.StringVar(value=self._layouts[0][0])
         cb = ttk.Combobox(bar, textvariable=self.layout_var, state="readonly",
-                          width=18, values=[name for name, _ in LAYOUTS])
+                          width=18, values=[name for name, _ in self._layouts])
         cb.pack(side="left", padx=4)
         cb.bind("<<ComboboxSelected>>", lambda _e: self._render_layout())
         self._keys_body = self._scroll_area(tab)
@@ -949,7 +987,7 @@ class App(tk.Tk):
     def _render_layout(self):
         for widget in self._keys_body.winfo_children():
             widget.destroy()
-        entries = dict(LAYOUTS)[self.layout_var.get()]
+        entries = dict(self._layouts).get(self.layout_var.get())
         if entries is None:
             self._render_basic(self._keys_body)
         else:
