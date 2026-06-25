@@ -37,6 +37,11 @@ PROGRESS_EVERY = 10_000   # oze-obs-02: emit a progress line every N done items
 # ``num_threads * SUBMIT_BACKLOG_MULT``. 4× keeps every worker fed at full
 # rate (each can pre-fetch ~3 jobs) without growing memory linearly with N.
 SUBMIT_BACKLOG_MULT = 4
+# oze-robust-11: hard ceiling on the worker pool. `--threads <huge>` would
+# otherwise build a ThreadPoolExecutor with that many threads and exhaust
+# memory/FDs before any move runs. 32× the CPU count is generous for the
+# I/O-bound move stage while staying bounded.
+MAX_NUM_THREADS = max(8, 32 * (os.cpu_count() or 1))
 # Bucket directory width: 5 zero-padded digits (oze-rel-08). The previous
 # 4-digit format topped out at 9999 buckets per (ext, prefix) pair — for a
 # tree with >5M files in one extension that ceiling was reachable. 5 digits
@@ -1895,6 +1900,13 @@ def organize(
     """
     if not isinstance(num_threads, int) or isinstance(num_threads, bool) or num_threads < 1:
         raise ValueError(f"num_threads must be a positive integer (>=1), got {num_threads!r}")
+    if num_threads > MAX_NUM_THREADS:
+        # oze-robust-11: clamp a runaway thread count instead of spawning a
+        # ThreadPoolExecutor that exhausts memory/FDs before the first move.
+        logger.warning(
+            "num_threads %d exceeds the ceiling %d; clamping.",
+            num_threads, MAX_NUM_THREADS)
+        num_threads = MAX_NUM_THREADS
     root = resolve_root(root)
     if verbose:
         logger.info(f"Organizing files in: {root}")

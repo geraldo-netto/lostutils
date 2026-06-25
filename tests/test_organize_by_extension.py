@@ -3779,3 +3779,23 @@ def test_cross_device_empty_source_zero_target_is_recovery(tmp_path):
     dst = tmp_path / "dst.bin"; dst.write_bytes(b"")
     oze._move_cross_device(src, dst)
     assert dst.exists() and not src.exists()
+
+
+def test_organize_clamps_runaway_thread_count(tmp_path, caplog):
+    """oze-robust-11: an absurd --threads is clamped to MAX_NUM_THREADS with a
+    warning rather than spawning a runaway pool."""
+    import logging as _logging
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    captured = {}
+    real_pool = oze.ThreadPoolExecutor
+
+    def spy_pool(max_workers=None, **kw):
+        captured["max_workers"] = max_workers
+        return real_pool(max_workers=max_workers, **kw)
+
+    import unittest.mock as _mock
+    with _mock.patch.object(oze, "ThreadPoolExecutor", spy_pool), \
+            caplog.at_level(_logging.WARNING):
+        oze.organize(str(tmp_path), num_threads=1_000_000)
+    assert captured["max_workers"] == oze.MAX_NUM_THREADS
+    assert any("clamping" in r.message for r in caplog.records)
