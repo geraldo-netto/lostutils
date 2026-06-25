@@ -141,8 +141,12 @@ def emit_pairs(cleaned_strs, threshold, workers, write):
     n = len(cleaned_strs)
     step = n if n <= BLOCK_THRESHOLD else BLOCK_ROWS
     for start in range(0, n, step):
+        # dnv3-perf-01: only columns >= start can yield an upper-triangle pair
+        # (j > i >= start), so compute against cleaned_strs[start:] instead of
+        # all n columns — halves the cdist work and peak block width, identical
+        # output. Block column c maps to global index j = start + c.
         block = cdist(
-            cleaned_strs[start:start + step], cleaned_strs,
+            cleaned_strs[start:start + step], cleaned_strs[start:],
             scorer=Levenshtein.distance,
             score_cutoff=threshold,
             workers=workers,
@@ -150,11 +154,12 @@ def emit_pairs(cleaned_strs, threshold, workers, write):
         )
         mask = block <= threshold
         for r in range(block.shape[0]):
-            mask[r, :start + r + 1] = False  # keep only j > global row index
+            mask[r, :r + 1] = False  # local: keep only c > r  (j = start+c > i = start+r)
         rows, cols = np.where(mask)
-        for r, j in zip(rows.tolist(), cols.tolist()):
+        for r, c in zip(rows.tolist(), cols.tolist()):
             i = start + r
-            write(f"{cleaned_strs[i]};{cleaned_strs[j]};{int(block[r, j])}\n")
+            j = start + c
+            write(f"{cleaned_strs[i]};{cleaned_strs[j]};{int(block[r, c])}\n")
 
 
 if __name__ == "__main__":
