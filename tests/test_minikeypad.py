@@ -1555,3 +1555,35 @@ def test_load_profile_rejects_missing_version(app, tmp_path):
     bad.write_text('{"assignments":[]}')
     with pytest.raises(ValueError):
         app._load_profile(str(bad))
+
+
+def test_load_profile_rejects_out_of_range_layer(app, tmp_path):
+    """layer outside {1,2,3} is rejected, not stored invisibly (mkp-input-01)."""
+    import json as _json
+    data_hex = bytes(len(minikeypad.KeyParam().data)).hex()
+    bad = tmp_path / "badlayer.json"
+    bad.write_text(_json.dumps({"version": 1, "assignments": [
+        {"layer": 9, "key_id": 1, "desc": "x", "data": data_hex}]}))
+    with pytest.raises(ValueError):
+        app._load_profile(str(bad))
+
+
+def test_load_profile_rejects_out_of_range_key_id(app, tmp_path):
+    import json as _json
+    data_hex = bytes(len(minikeypad.KeyParam().data)).hex()
+    bad = tmp_path / "badkid.json"
+    bad.write_text(_json.dumps({"version": 1, "assignments": [
+        {"layer": 1, "key_id": 999, "desc": "x", "data": data_hex}]}))
+    with pytest.raises(ValueError):
+        app._load_profile(str(bad))
+
+
+def test_load_profile_accepts_led_and_knob_ids(app, tmp_path):
+    """In-range ids (LED 176, knob 18) still load (mkp-input-01 no false-reject)."""
+    import json as _json
+    data_hex = bytes(len(minikeypad.KeyParam().data)).hex()
+    good = tmp_path / "good.json"
+    good.write_text(_json.dumps({"version": 1, "assignments": [
+        {"layer": 3, "key_id": 176, "desc": "led", "data": data_hex},
+        {"layer": 2, "key_id": 18, "desc": "knob", "data": data_hex}]}))
+    assert app._load_profile(str(good)) == 2

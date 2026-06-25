@@ -122,6 +122,10 @@ COL_KEY_IDLE = "#98fb98"   # 152,251,152  pale green
 COL_KEY_SEL = "#ff3030"    # 255,48,48    selected red
 COL_KEY_MAPPED = "#add8e6"  # light blue: written this session on the cur. layer
 PROFILE_VERSION = 1
+# mkp-input-01: the device model has 3 layers, key ids 1..18 (12 keys + 2
+# knobs × 3), and 176 for the LED. A profile entry outside these is invalid.
+VALID_LAYERS = frozenset((1, 2, 3))
+VALID_KEY_IDS = frozenset(range(1, 19)) | {176}
 COL_MENU = "#c8c8a9"
 COL_CONNECTED = "#188a18"
 COL_DISCONNECTED = "#c83232"
@@ -1438,7 +1442,14 @@ class App(tk.Tk):
             data = bytes.fromhex(item["data"])
             if len(data) != size:
                 raise ValueError("bad assignment buffer length")
-            loaded[(int(item["layer"]), int(item["key_id"]))] = {
+            layer, kid = int(item["layer"]), int(item["key_id"])
+            # mkp-input-01: reject out-of-range entries instead of storing an
+            # assignment the UI can never display yet _write_all still replays
+            # to the device.
+            if layer not in VALID_LAYERS or kid not in VALID_KEY_IDS:
+                raise ValueError(
+                    "assignment out of range: layer=%r key_id=%r" % (layer, kid))
+            loaded[(layer, kid)] = {
                 "data": data, "desc": str(item.get("desc", ""))}
         self._assignments = loaded
         self._refresh_key_map()
