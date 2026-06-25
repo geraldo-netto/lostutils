@@ -65,6 +65,19 @@ def valid_workers(value):
     return iv
 
 
+def valid_threshold(value):
+    """argparse `type=` validator (dnv3-cli-01): a negative --threshold becomes
+    a negative score_cutoff that makes rapidfuzz crash with OverflowError; reject
+    it with a clean CLI error instead. Upper bound is handled by clamp_threshold."""
+    try:
+        iv = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"threshold must be an integer, got {value!r}")
+    if iv < 0:
+        raise argparse.ArgumentTypeError(f"threshold must be >= 0, got {iv}")
+    return iv
+
+
 def cleanup(entry):
     s = entry.strip().lower()
     for tok in REPLACEMENTS:
@@ -76,7 +89,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Find near-duplicate strings via batched Levenshtein.")
     ap.add_argument("file", help="text file, one string per line")
-    ap.add_argument("-t", "--threshold", type=int, default=DEFAULT_THRESHOLD,
+    ap.add_argument("-t", "--threshold", type=valid_threshold, default=DEFAULT_THRESHOLD,
                     help=f"max distance to report (default {DEFAULT_THRESHOLD})")
     ap.add_argument("-w", "--workers", type=valid_workers, default=-1,
                     help="cdist worker threads (-1 = all cores)")

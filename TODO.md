@@ -200,7 +200,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnv3-cli-02 | open | low | deduplicate-by-namev3.py:34 — MAX_THRESHOLD/clamp only caps the upper bound; a threshold <= 0 is silently accepted and emit_pairs then walks the full N×N matrix even though exact-collision pairs were already printed. Short-circuit emit_pairs when threshold <= 0. | wasted full-matrix walk
-dnv3-cli-01 | open | low | deduplicate-by-namev3.py:64 — --threshold accepts negative values; non-empty inputs then pass a negative score_cutoff into rapidfuzz and crash with OverflowError instead of a CLI validation error. Reject values below 0 before running cdist and cover the edge case. | option validation
 dnv3-cli-03 | open | low | deduplicate-by-namev3.py:96 — `cleanup()` strips `,[]` but not `;`, while output uses `;` as the field delimiter (`{a};{b};{dist}`); a cleaned string containing `;` yields rows a downstream `;`-split parser cannot disambiguate. Strip `;` in REPLACEMENTS or quote/escape fields. | output delimiter collision
 rf-cli-01 | open | low | relocate_folder.py:1866 — --jobs/-j accepts 0 and negatives; _resolved_jobs silently maps jobs <= 0 to the default, so `-j 0`/`-j -4` run with the default pool while the user believes concurrency was constrained. Reject non-positive --jobs with a clear parser error. | silent fallback misleads
 

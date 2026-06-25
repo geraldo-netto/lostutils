@@ -333,3 +333,15 @@ def test_self_collision_reports_source_line_numbers(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     assert "# source lines: 1,3" in out
     assert "alpha;alpha;0" in out
+
+
+def test_valid_threshold_accepts_zero_and_positive():
+    assert dn.valid_threshold("0") == 0
+    assert dn.valid_threshold("7") == 7
+
+
+@pytest.mark.parametrize("bad", ["-1", "-5", "x", "1.5"])
+def test_valid_threshold_rejects_negative_and_garbage(bad):
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError):
+        dn.valid_threshold(bad)
