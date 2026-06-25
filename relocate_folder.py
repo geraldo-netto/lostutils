@@ -1636,6 +1636,12 @@ def _rename_noreplace(src: Path, dst: Path) -> None:
     except (OSError, AttributeError):
         os.rename(src, dst)  # no renameat2: single-operator assumption applies
         return
+    # rf-sec-10: pin the prototype so ctypes marshals the args at the right
+    # widths (two int fds, two char* paths, one unsigned-int flag) instead of
+    # relying on default int marshalling, which can mis-pass pointers/flags.
+    renameat2.restype = ctypes.c_int
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                          ctypes.c_char_p, ctypes.c_uint]
     AT_FDCWD = -100
     res = renameat2(AT_FDCWD, os.fsencode(str(src)),
                     AT_FDCWD, os.fsencode(str(dst)), _RENAME_NOREPLACE)
