@@ -265,10 +265,11 @@ def test_stream_summary_logs_first_line_and_milestones(headless_dispatcher):
 
 
 def test_dispatch_wait_remaining():
-    assert LinkQueueApp._dispatch_wait_remaining(time.time() - 1, False, 0) == 0.0
-    r = LinkQueueApp._dispatch_wait_remaining(time.time() + 10, True, 0.25)
+    # lq-time-01: deadlines are monotonic values.
+    assert LinkQueueApp._dispatch_wait_remaining(time.monotonic() - 1, False, 0) == 0.0
+    r = LinkQueueApp._dispatch_wait_remaining(time.monotonic() + 10, True, 0.25)
     assert 0 < r <= 0.25
-    r2 = LinkQueueApp._dispatch_wait_remaining(time.time() + 10, False, 0)
+    r2 = LinkQueueApp._dispatch_wait_remaining(time.monotonic() + 10, False, 0)
     assert r2 > 1
 
 
@@ -3856,3 +3857,15 @@ def test_remove_selected_uses_debounced_save(app, monkeypatch):
     app._on_remove_selected()
     assert calls["debounced"] == 1
     assert calls["sync"] == 0
+
+
+def test_dispatch_wait_remaining_uses_monotonic_clock():
+    """lq-time-01: remaining is computed against the monotonic clock, so a
+    monotonic deadline yields the expected budget."""
+    import time as _time
+    deadline = _time.monotonic() + 10.0
+    rem = link_queue.Dispatcher._dispatch_wait_remaining(deadline, False, 0.0)
+    assert 9.0 < rem <= 10.0
+    # Block caps remaining by sleep_for.
+    rem2 = link_queue.Dispatcher._dispatch_wait_remaining(deadline, True, 2.0)
+    assert rem2 == 2.0

@@ -2041,7 +2041,9 @@ class Dispatcher:
         if available, and we wait on the cv (with bounded timeout) until
         the block clears.
         """
-        deadline = time.time() + wait_seconds
+        # lq-time-01: monotonic deadline so a wall-clock jump can't make the
+        # claim wait expire early or stall. Pairs with _dispatch_wait_remaining.
+        deadline = time.monotonic() + wait_seconds
         with self._dispatch_cv:
             while True:
                 if self.stop_event.is_set() or stop_self.is_set():
@@ -2080,8 +2082,11 @@ class Dispatcher:
         deadline: float, blocked: bool, sleep_for: float
     ) -> float:
         """How long to wait on the cv before re-evaluating. Caps the
-        caller's wait budget by the block-imposed sleep when blocked."""
-        remaining = deadline - time.time()
+        caller's wait budget by the block-imposed sleep when blocked.
+
+        lq-time-01: ``deadline`` is a ``time.monotonic()`` value, so compare
+        against the same clock (never wall time)."""
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             return 0.0
         if blocked and sleep_for > 0:
