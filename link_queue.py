@@ -1401,12 +1401,15 @@ class Dispatcher:
         once when depth first crosses above the pool, reset when it drains back
         at/under it, so a steady backlog doesn't spam the log. Also nudges the
         status bar so the depth shows there too."""
-        depth = self._immediate_q.qsize()
         # lq-conc-02: latch the edge-trigger flag under _immediate_lock so two
         # dispatchers can't interleave the compare/assign and produce a missed
         # or duplicate backlog notice. The flag's transition decides who logs;
         # the _log/_update_status callbacks run outside the lock.
+        # lq-conc-01: sample qsize INSIDE the lock too, so the depth that feeds
+        # the edge-trigger decision is consistent with the latched flag — a
+        # pre-lock sample let two dispatchers decide on different depths.
         with self._immediate_lock:
+            depth = self._immediate_q.qsize()
             over = depth > self._immediate_pool_size
             if over and not self._immediate_depth_warned:
                 self._immediate_depth_warned = True
