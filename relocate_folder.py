@@ -1372,7 +1372,11 @@ def _backup_target(target: Path) -> Iterator[Path]:
     backup_id = (backup_st.st_dev, backup_st.st_ino)
     try:
         yield backup
-    except Exception:
+    except BaseException:
+        # rf-robust-03: BaseException (not just Exception) so a KeyboardInterrupt
+        # /SystemExit between the rename-aside and the symlink restores the
+        # source instead of leaving it missing with only <name>.relocate-backup.
+        # Abrupt death (SIGKILL/power-loss) still falls to --recover.
         if not _backup_identity_ok(backup, backup_id):
             _log().error(
                 "atomic_swap failed AND the backup at %s was substituted "

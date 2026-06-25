@@ -3635,3 +3635,17 @@ def test_verify_ownership_skips_special_files(tmp_path):
     rf.copy_tree(src, dst, check_space=False)
     # Must not raise on the skipped FIFO that has no dst counterpart.
     rf.verify_copy(src, dst, False, verify_ownership=True)
+
+
+def test_backup_target_restores_source_on_keyboardinterrupt(tmp_path):
+    """rf-robust-03: a Ctrl+C inside the backup window must restore the source
+    (move the backup back), not leave only <name>.relocate-backup."""
+    target = tmp_path / "real"; target.mkdir()
+    (target / "f").write_text("x", encoding="utf-8")
+    backup = target.with_name(target.name + rf.BACKUP_SUFFIX)
+    with pytest.raises(KeyboardInterrupt):
+        with rf._backup_target(target) as b:
+            assert b == backup and backup.exists()
+            raise KeyboardInterrupt
+    assert target.exists(), "source not restored after Ctrl+C"
+    assert not backup.exists(), "backup left behind after restore"
