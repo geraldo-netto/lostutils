@@ -3765,3 +3765,24 @@ def test_immediate_concurrency_clamps_runaway_upper_bound(headless_dispatcher):
     disp = headless_dispatcher
     disp.config["immediate_worker_count"] = 100000
     assert disp._immediate_concurrency() == link_queue.WorkerPool.MAX_WORKERS
+
+
+def test_immediate_consumer_survives_item_exception(headless_dispatcher):
+    """lq-mt-01: an exception in one immediate item must not kill the consumer;
+    the next item still runs."""
+    disp = headless_dispatcher
+    seen = []
+    done = threading.Event()
+
+    def runner(item):
+        seen.append(item.url)
+        if item.url == "boom":
+            raise RuntimeError("intentional")
+        if item.url == "ok":
+            done.set()
+
+    disp._run_immediate_item = runner
+    disp._dispatch_immediate(q("boom"))
+    disp._dispatch_immediate(q("ok"))
+    assert done.wait(3), "consumer died after an item raised; 'ok' never ran"
+    assert "boom" in seen and "ok" in seen

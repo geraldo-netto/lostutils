@@ -1273,6 +1273,12 @@ class Dispatcher:
                 self._immediate_current[cid] = item
             try:
                 self._run_immediate_item(item)
+            except Exception as e:
+                # lq-mt-01: an exception escaping _run_immediate_item would
+                # otherwise kill this consumer thread permanently, silently
+                # shrinking the pool. Log and keep draining, like the queue
+                # worker loop.
+                self._log(f"[immediate error] {item.protocol}: {item.url}: {e}")
             finally:
                 with self._immediate_lock:
                     self._immediate_current[cid] = None
