@@ -1322,6 +1322,17 @@ def _same_file_content(a: Path, b: Path) -> bool:
         return False
 
 
+def _is_stranded_reservation(source: Path, target: Path) -> bool:
+    """True when ``target`` is an empty ``O_EXCL`` reservation left behind by a
+    move killed before ``os.replace``, while ``source`` has real content
+    (oze-robust-10). Any stat failure answers False so a genuine collision
+    still raises instead of being silently reclaimed."""
+    try:
+        return target.stat().st_size == 0 and source.stat().st_size != 0
+    except OSError:
+        return False
+
+
 def _move_cross_device(source: Path, target: Path) -> None:
     """Move a file across filesystems, kill-safe and idempotent (oze-di-01).
 
@@ -1343,7 +1354,15 @@ def _move_cross_device(source: Path, target: Path) -> None:
         if _same_file_content(source, target):
             os.unlink(source)
             return
-        raise
+        # oze-robust-10: a 0-byte target with a non-empty source is a stranded
+        # O_EXCL reservation from a move killed before os.replace. Reclaim the
+        # name and re-reserve it so the move self-heals on re-run instead of
+        # raising a phantom collision forever.
+        if _is_stranded_reservation(source, target):
+            os.unlink(target)
+            _reserve_target(target)  # genuine race here re-raises FileExistsError
+        else:
+            raise
     # oze-sec-01: replace the PID-based suffix with cryptographically
     # random bytes. The previous `.{name}.{pid}.tmp` pattern was
     # predictable: an attacker with write access to the bucket dir

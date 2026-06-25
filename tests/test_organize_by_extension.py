@@ -3759,3 +3759,23 @@ def test_main_logs_interrupted_message(tmp_path, monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="organize_by_extension"):
         oze.main()  # must not raise
     assert any("Interrupted." in r.getMessage() for r in caplog.records)
+
+
+def test_cross_device_reclaims_stranded_zero_byte_reservation(tmp_path):
+    """oze-robust-10: a 0-byte target (an O_EXCL reservation stranded by a move
+    killed before os.replace) with a non-empty source is reclaimed and the move
+    completes, instead of raising a phantom collision on every re-run."""
+    src = tmp_path / "src.bin"; src.write_bytes(b"payload")
+    dst = tmp_path / "dst.bin"; dst.write_bytes(b"")  # stranded reservation
+    oze._move_cross_device(src, dst)
+    assert dst.read_bytes() == b"payload"
+    assert not src.exists()
+
+
+def test_cross_device_empty_source_zero_target_is_recovery(tmp_path):
+    """An empty source onto an empty target is a completed move (same content),
+    so the source is removed — not misread as a stranded collision."""
+    src = tmp_path / "src.bin"; src.write_bytes(b"")
+    dst = tmp_path / "dst.bin"; dst.write_bytes(b"")
+    oze._move_cross_device(src, dst)
+    assert dst.exists() and not src.exists()
