@@ -128,7 +128,6 @@ _clean — `pyright *.py` reports 0 errors / 0 warnings across all root files (r
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnv3-obs-01 | open | low | deduplicate-by-namev3.py:76 — lines whose cleaned form is empty (blank, or only REPLACEMENTS/WORD_TOKENS chars) are dropped with no count or notice, so the user can't tell input was discarded. Track and report a dropped count to stderr. | silent data loss
-lq-obs-10 | open | low | link_queue.py:4644 — `_shutdown` calls the pre-stop state save BEFORE `stop_event.set()`, so a save failure there routes through `self._log` → `_safe_after` → the Tk job queue (not stderr); with the poller about to be cancelled, that warning is never drained and the failure is invisible. `_save_state`'s stderr fallback only triggers once `stop_event` is set. Set `stop_event` before the pre-stop save, or force the stderr path there. | silent-failure audit: dropped shutdown-save warning
 
 ## watchdog
 

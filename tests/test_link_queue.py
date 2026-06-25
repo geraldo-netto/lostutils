@@ -3958,3 +3958,18 @@ def test_restore_immediate_logs_accepted_not_total_on_full(headless_dispatcher, 
     assert any("1 immediate item(s) from previous session" in m for m in logs)
     assert any("1 immediate item(s) dropped on restore" in m for m in logs)
     assert not any("2 immediate item(s) from previous session" in m for m in logs)
+
+
+def test_shutdown_sets_stop_event_before_presave(app, monkeypatch):
+    """lq-obs-10: stop_event must be set before the pre-stop save so a save
+    failure routes to stderr, not the about-to-be-cancelled UI queue."""
+    observed = {}
+    orig = app._safe_save_state_on_shutdown
+
+    def spy():
+        observed.setdefault("first_stop_set", app.stop_event.is_set())
+        return orig()
+
+    monkeypatch.setattr(app, "_safe_save_state_on_shutdown", spy)
+    app._shutdown(timeout=0.1)
+    assert observed.get("first_stop_set") is True

@@ -4676,12 +4676,16 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         still has pending after() callbacks. Joining every thread we spawned
         (queue workers AND immediate-mode runners) first avoids that.
         """
-        # Snapshot pending work to disk BEFORE we set stop_event — workers
-        # may still be running and shrinking queue_items right up until we
-        # signal them to stop, so this is the closest-to-truth view we get.
+        # lq-obs-10: set stop_event BEFORE the pre-stop snapshot. _save_state
+        # routes a failure to self._log (the Tk UI-jobs queue) unless stop_event
+        # is set; on shutdown that poller is about to be cancelled, so such a
+        # warning would vanish. With stop_event set first, _save_state falls back
+        # to stderr. Setting it first also stops workers claiming new items, so
+        # the snapshot still captures every pending/in-flight item (it never
+        # clears queue_items), and the authoritative post-join save follows.
+        self.stop_event.set()
         self._safe_save_state_on_shutdown()
 
-        self.stop_event.set()
         self.pause_event.clear()
         # lq-conc-02: latch the shutting-down flag and cancel any pending
         # debounced save atomically. Past this point no timer can run
