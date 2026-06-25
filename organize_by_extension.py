@@ -216,7 +216,11 @@ CONTAINER_FAMILIES: tuple[ContainerFamily, ...] = (
     ContainerFamily("zip", frozenset({
         "zip", "docx", "xlsx", "pptx", "odt", "ods", "odp",
         "epub", "jar", "apk", "ipa", "war", "ear", "kmz", "xpi",
+        "cbz",   # comic book ZIP — keep its own cbz/ bucket, not zip/
     })),
+    # rar/cbr share the RAR header; cbr is a comic book RAR and gets its own
+    # cbr/ bucket instead of being lumped under rar/.
+    ContainerFamily("rar", frozenset({"rar", "cbr"})),
     ContainerFamily("ole2", frozenset({
         "ole2", "doc", "xls", "ppt", "msi", "msg", "vsd",
     })),
