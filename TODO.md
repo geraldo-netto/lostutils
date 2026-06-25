@@ -18,6 +18,8 @@ rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+mkp-rel-01 | open | low | minikeypad.py:1462 — _load_profile does `int(item["layer"])`/`int(item["key_id"])`; a profile with a JSON null (or list) value raises TypeError, which _load_dialog (catches OSError/ValueError/KeyError/JSONDecodeError, NOT TypeError) lets escape and crash the handler. Add TypeError to the caught set or coerce defensively. | uncaught TypeError on malformed profile
+rf-sec-10 | open | low | relocate_folder.py:1632 — `_rename_noreplace` calls `libc.renameat2` without setting `restype`/`argtypes`; the 5 args (two int fds, two char*, one unsigned-int flag) rely on ctypes default int marshalling, which can mis-pass pointers/flags on some ABIs. Set `renameat2.restype = ctypes.c_int` and `argtypes = [c_int, c_char_p, c_int, c_char_p, c_uint]`. | ctypes-no-argtypes
 
 ## data governance
 
@@ -28,6 +30,7 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+oze-di-20 | open | med | organize_by_extension.py:1379-1381 — _move_cross_device treats ANY 0-byte target with a non-empty source as a stranded O_EXCL reservation and unlinks it; a user's intentional empty file at that name is silently deleted and overwritten by the move. Restrict reclaim to temp/reservation files this process owns, or skip reclaim when the 0-byte target was not created in this run. | 0-byte file is not proof of a stranded reservation
 
 ## performance
 
@@ -49,11 +52,14 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ie-conc-10 | open | high | import_events.py:2585 — `_create_chat_completion` holds the process-wide `_LLM_REQUEST_LOCK` for the entire native LLM call, so a stalled worker keeps the lock; the replacement worker `on_llm_stall` spawns (ie-robust-02) then blocks indefinitely on `_LLM_REQUEST_LOCK` the moment it issues its own LLM call — making the replacement mechanism ineffective for the exact LLM-stall case it exists for. Document that replacements only help OCR work, or scope/release the lock so a wedged call can't starve replacements. | replacement worker starves on global LLM lock
+lq-conc-10 | open | med | link_queue.py:935 — `_save_state` snapshots `inflight` (under `_immediate_lock`) and the immediate `backlog` (under `_immediate_q.mutex`) in two separate lock sections; a consumer that `work_q.get()`s then publishes to `_immediate_current` in the gap leaves an in-flight immediate item in neither snapshot, losing it. Snapshot both under a single `_immediate_lock` hold (consumer also takes `_immediate_lock` around get+publish). | torn multi-lock snapshot, narrow data-loss window
 
 ## multithreading
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+lq-mt-10 | open | low | link_queue.py:1297 — when `_run_immediate_item` raises, the consumer's `except` (lq-mt-01) logs but records NO metric, so an immediate item that crashes counts as neither failure nor completion (the queue-worker path records a failure on exception). Call `self._record_metric("failures")` in the except so immediate crashes stay visible. | silent metric gap on immediate crash
 
 ## distributed systems
 
@@ -89,6 +95,8 @@ dnp-rel-02 | open | med | dedupl_numpy.py:13 — PATH_OFFSET=26 is hardcoded ("p
 dnp-rel-03 | open | med | dedupl_numpy.py:21-24 — mmap is used as the np.frombuffer source after the file handle closes at with-exit and is never closed (leak); an empty file also makes mmap raise. Keep the file open (or copy), close mm, and guard zero-length files. | resource
 dnp-rel-04 | open | low | dedupl_numpy.py:25 — a file whose last line lacks a trailing newline drops that final record (no 0x0A, so line_starts/n_lines never include it); confirmed 0/1 on a 2-duplicate file. Append a virtual line start at EOF when data[-1] != 0x0A. | opposite of the line-36 overrun case
 dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None] + arange(32) assumes every line is ≥32+PATH_OFFSET bytes with the hash exactly 32 chars at offset 0; a short/blank/final line reads across the newline or past buffer end, corrupting grouping. Validate line length / derive hash width. | array-bounds
+ie-rel-10 | open | high | import_events.py:3109 — the result-collection loop `while expected is None or completed < expected: done_queue.get()` blocks with no timeout, but a worker permanently wedged in the uncancellable native `create_chat_completion` has already taken its file off `work_queue` and never puts a result, so `completed` can never reach `expected` and the main thread hangs forever — never reaching the WORKER_FINAL_JOIN_SECONDS bounded join. Bound the collection loop (done_queue.get(timeout=…) with an overall deadline, or track in-flight indices and abandon wedged ones). | wedged worker hangs consumer; bounded join (ie-conc-01) never reached
+rf-rel-30 | open | low | relocate_folder.py:191 — `Plan.from_args` derives `target = dst_root / src.name`; when `source` has an empty basename (`/` or trailing-slash root) `src.name == ''`, so `target == dst_root`, the `src == target` guard doesn't fire, and the run proceeds on a root-shaped path. Reject empty `src.name` in `from_args` with a typed ValueError. | empty-basename
 rdv3-rel-01 | open | low | remove-deduplv3.py:107 — the max tiebreaker keeps a stable survivor, but if two byte-identical path strings appear in a group (duplicate line) both compare equal and one is emitted for removal though it's the same file. Dedup identical path strings within a group first. | duplicate-path edge
 rdv3-rel-02 | open | low | remove-deduplv3.py:109 — when the same path appears twice under one hash, to_remove keeps both copies and emits `rm -f /a /a`; confirmed on a 3-line input. Dedup paths per group (build to_remove from a set) before quoting. | distinct from line-107 keep-vs-keep tie
 
@@ -97,6 +105,10 @@ rdv3-rel-02 | open | low | remove-deduplv3.py:109 — when the same path appears
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-rel-30 | open | med | hash-recursive-ai5.py:1276 — _split_stage1_buckets builds stage-2 items with `rep[key]` and _stage2_hash hashes only that path with no readable-alias retry, unlike stage-1's _retry_head_alias; if the representative of a multi-alias (hardlinked) inode vanishes or loses read access between stages while a sibling alias stays readable, the tail hash returns None and the inode is silently dropped from its duplicate group. Add the same sibling-alias retry on a None stage-2 tail. | asymmetric recovery / partial-state
+ie-robust-10 | open | med | import_events.py:3084 — `replacements_started` is incremented under `threads_lock` and never decremented, but a replacement worker that finishes cleanly (processes real files and exits) permanently consumes one of the `max_replacements=workers` slots; after `workers` transient stalls the cap is exhausted for the rest of the run even though no daemon threads are still leaked. Decrement on replacement exit, or count currently-wedged workers rather than cumulative spawns. | cap counts cumulative spawns, never frees slots
+lq-rel-10 | open | low | link_queue.py:1111 — `_restore_queue_from_state` re-dispatches persisted immediate items via `_dispatch_immediate` (which silently drops on `queue.Full`) but logs `len(immediate)` as "restored", overstating the count when the restored backlog exceeds `immediate_queue_maxsize`. Have `_dispatch_immediate` return accepted/dropped and log only the accepted count plus a "[warn] N immediate dropped on restore (queue full)" line. | silent drop + miscount on restore
+mkp-robust-20 | open | low | minikeypad.py:1439-1442 — _save_profile writes `path + ".tmp"` then os.replace, but on a json.dump/write failure the .tmp file is orphaned (no try/finally cleanup). Wrap write+replace so a failed save unlinks the temp. | orphaned temp on write failure
+oze-robust-20 | open | low | organize_by_extension.py:1380-1381 — stranded-reservation reclaim has a TOCTOU between _is_stranded_reservation's stat and os.unlink(target): another process can write real content into the 0-byte target in the window, and the unlink then destroys it (the re-reserve guard only protects the slot, not the unlink). Re-check or open the target with O_EXCL-style semantics atomically before removing. | TOCTOU on reclaim unlink
 
 ## state machine integrity
 
@@ -135,6 +147,7 @@ hr-obs-02 | open | low | hash-recursive-ai5.py:1716 — the hashes.txt dump writ
 hr-obs-10 | open | low | hash-recursive-ai5.py:1722 — _on_hashed dumps `aliases.get(key, ())`, but when --alias-cap is active index_inodes caps each inode's alias list at ingest (977), so the dump silently omits every hardlink past the cap with NO `+N more` marker (the emit path adds one). The "dump every hashed file" contract is silently violated for hardlink-heavy inodes. Dump from overflow-aware data or append a truncation marker. | silent-failure audit / incomplete dump under alias cap
 lq-obs-01 | open | low | link_queue.py:1269 — _resize_immediate_pool recomputes _immediate_pool_size but does not reset _immediate_depth_warned; after an upward resize the next _note_immediate_depth compares the live depth against the larger pool with a stale "already warned" latch, so a backlog over the old size but under the new never clears its warning until it fully drains. Reset _immediate_depth_warned on grow. | edge-trigger desync
 lq-obs-02 | open | low | link_queue.py:3595 — _update_status reads _immediate_q.qsize() and compares to _immediate_pool_size without _immediate_lock, racing a concurrent _resize_immediate_queue_locked swap; under the swap the qsize can be read off the orphaned old queue, so "N immediate waiting" can show a stale/zero depth while the new queue has a backlog. Read depth under the lock. | status reads unsynchronized state
+lq-obs-10 | open | low | link_queue.py:4644 — `_shutdown` calls the pre-stop state save BEFORE `stop_event.set()`, so a save failure there routes through `self._log` → `_safe_after` → the Tk job queue (not stderr); with the poller about to be cancelled, that warning is never drained and the failure is invisible. `_save_state`'s stderr fallback only triggers once `stop_event` is set. Set `stop_event` before the pre-stop save, or force the stderr path there. | silent-failure audit: dropped shutdown-save warning
 oze-obs-10 | open | low | organize_by_extension.py:1783 — the `progress:` line denominator `total_files` is the scan-stage `len(files)`, but the plan drops files (bucket-selection failure, 1602) and adds `.collision` renames, so `processed X/total` can never converge to the final processed+skipped tally and misleads on long runs. Label it approximate or recompute from the plan tally. | three-pillars / metrics accuracy
 rf-obs-01 | open | low | relocate_folder.py:992 — the except OSError in _iter_verify_tasks swallows the stat error with no log line, so even if rf-rel-01 is fixed to raise, the operator gets no breadcrumb why an entry couldn't be classified. Log a warning with the path and errno. |
 rf-obs-02 | open | low | relocate_folder.py:1757 — _copy_and_verify cleans a failed target with shutil.rmtree(..., ignore_errors=True); unlike the copy_tree cleanup path (which records+logs rmtree failures), a failed cleanup here is silently dropped, so a surviving partial target after a verify failure leaves no audit trail despite the log line at 1752 claiming it "has been deleted". Use an onerror recorder and warn on residual entries. | log claims deletion even when rmtree silently failed
@@ -154,7 +167,10 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+dnv3-plat-01 | open | low | deduplicate-by-namev3.py:93 — `sys.stdout.reconfigure(errors="surrogateescape")` sets errors only, leaving stdout's encoding at the locale default; under a non-UTF-8 locale (LC_ALL=C/ascii) a legitimately-decoded non-ASCII cleaned string raises UnicodeEncodeError on write. Reconfigure with `encoding="utf-8", errors="surrogateescape"`. | stdout encoding not forced
 hr-plat-04 | open | low | hash-recursive-ai5.py:563 — `_hash_file_windows` references `os.O_NOFOLLOW | os.O_CLOEXEC` unconditionally; both attributes are absent on Windows (AttributeError at hash time) and there is no platform guard or documented POSIX-only contract. Guard with `getattr(os, "O_NOFOLLOW", 0)` / `getattr(os, "O_CLOEXEC", 0)` or document the POSIX-only requirement. | cross-OS portability / POSIX-only primitive
+lq-plat-10 | open | med | link_queue.py:2603 — `LogSink._open_locked` passes `os.O_NOFOLLOW`, which is Unix-only; on Windows accessing `os.O_NOFOLLOW` raises AttributeError, caught by the broad `except Exception`, so the log file silently never opens despite the module advertising Windows support. Guard with `getattr(os, "O_NOFOLLOW", 0)`. | POSIX-only primitive on a cross-OS surface
+rdv3-plat-01 | open | low | remove-deduplv3.py:81 — `sys.stdout.reconfigure(errors=err_mode)` sets errors only; under a non-UTF-8 locale a legitimately-decoded non-ASCII path crashes with UnicodeEncodeError when the rm line is written. Also force `encoding="utf-8"` on the reconfigure. | stdout encoding not forced
 
 ## caching strategy
 
@@ -220,6 +236,9 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+rf-unused-10 | open | low | relocate_folder.py:797 — `_src_total_bytes` has no live caller (grep-proven; only docstring + test references); `_src_size_totals` superseded it and callers use its `[0]`/`[1]` directly. Delete `_src_total_bytes` (and update the test that pins it). | dead helper — delete
+rf-unused-12 | open | low | relocate_folder.py:865 — `_OWNERSHIP_INFLIGHT` is assigned but never read by live code (only the dead `_VERIFY_INFLIGHT` alias + a docstring); the live inflight bound comes from `_inflight_cap(workers)`. Delete it. | dead const — delete
+rf-unused-11 | open | low | relocate_folder.py:1030 — `_VERIFY_WORKERS` and `_VERIFY_INFLIGHT` are assigned but never read by live code (verify pool uses `_resolved_jobs`/`_inflight_cap`); only docstring references remain. Delete both. | dead const — delete
 
 ## Audit picks deliberately rejected
 
