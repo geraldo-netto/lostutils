@@ -3038,6 +3038,12 @@ def _run_file_workers(
     threads: List[threading.Thread] = []
     threads_lock = threading.Lock()
     next_worker_id = 0
+    # ie-robust-02: bound how many replacement workers stalls can spawn. Each
+    # stalled (uncancellable) native LLM call leaks a daemon thread, so without
+    # a ceiling repeated stalls fan out unbounded threads. Allow at most one
+    # pool's worth of replacements.
+    max_replacements = workers
+    replacements_started = 0
 
     def start_worker(reason: str = "") -> None:
         nonlocal next_worker_id
@@ -3061,6 +3067,14 @@ def _run_file_workers(
             logger.warning("Started replacement file worker %s after %s.", name, reason)
 
     def on_llm_stall(label: str, elapsed: float, deadline: float) -> None:
+        nonlocal replacements_started
+        with threads_lock:
+            if replacements_started >= max_replacements:
+                logger.warning(
+                    "LLM stall in %s but replacement-worker cap (%d) reached; "
+                    "not spawning another.", label, max_replacements)
+                return
+            replacements_started += 1
         start_worker(
             f"LLM stall in {label} ({elapsed:.0f}s >= {int(deadline)}s); "
             "the stalled extraction remains running unbounded"

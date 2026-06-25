@@ -4323,3 +4323,35 @@ def test_feed_file_queue_count_excludes_unqueued_on_early_stop():
     while not wq.empty():
         drained.append(wq.get())
     assert all(x is None for x in drained)
+
+
+def test_process_folder_caps_replacement_workers_on_repeated_stall(tmp_path, monkeypatch):
+    """Repeated stall callbacks must not fan out unbounded workers; with
+    workers=1 the replacement cap is 1, so at most 2 threads ever run even if
+    the stall callback fires many times (ie-robust-02)."""
+    for index in range(2):
+        (tmp_path / f"event-{index}.txt").write_text("Launch", encoding="utf-8")
+    second_started = threading.Event()
+    seen_threads = set()
+    lock = threading.Lock()
+
+    def fake_extract(file, llm_client=None, default_tz=None, model_config=None):
+        with lock:
+            seen_threads.add(threading.current_thread().name)
+        if file.name == "event-0.txt":
+            callback = import_events._current_llm_stall_callback()
+            assert callback is not None
+            for _ in range(5):              # hammer the stall callback
+                callback(file.name, 600.0, 600.0)
+            assert second_started.wait(2)
+        else:
+            second_started.set()
+        return [{"title": file.name, "start": "2026-06-06", "end": "",
+                 "location": "", "source": file.name, "type": "Text/LLM"}]
+
+    monkeypatch.setattr(import_events, "extract_from_file", fake_extract)
+    events = import_events.process_folder(
+        str(tmp_path),
+        model_config=import_events.ModelConfig(workers=1, deterministic_order=True))
+    assert [e["source"] for e in events] == ["event-0.txt", "event-1.txt"]
+    assert len(seen_threads) <= 2  # initial worker + at most one replacement
