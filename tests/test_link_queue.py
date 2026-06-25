@@ -3904,3 +3904,25 @@ def test_cooldown_wait_hint_sleeps_until_expiry(headless_dispatcher):
         disp._cooldown_until[domain] = _time.monotonic() + 50.0
     hint = disp._cooldown_wait_hint()
     assert hint is not None and 40.0 < hint <= 50.0     # sleep until expiry
+
+
+def test_immediate_item_crash_records_failure_metric(headless_dispatcher):
+    """lq-mt-10: an immediate item that raises is counted as a failure."""
+    disp = headless_dispatcher
+    before = disp.metrics.get("failures", 0)
+    done = threading.Event()
+
+    def runner(item):
+        try:
+            raise RuntimeError("boom")
+        finally:
+            done.set()
+
+    disp._run_immediate_item = runner
+    disp._dispatch_immediate(q("boom"))
+    assert done.wait(3)
+    # allow the finally/metric to settle
+    end = time.time() + 2
+    while time.time() < end and disp.metrics.get("failures", 0) == before:
+        time.sleep(0.02)
+    assert disp.metrics.get("failures", 0) == before + 1

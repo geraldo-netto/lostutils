@@ -1301,6 +1301,10 @@ class Dispatcher:
                 # otherwise kill this consumer thread permanently, silently
                 # shrinking the pool. Log and keep draining, like the queue
                 # worker loop.
+                # lq-mt-10: count it as a failure so a crashing immediate item
+                # stays visible in the metrics summary (it is otherwise neither a
+                # completion nor a failure).
+                self._record_metric("failures")
                 self._log(f"[immediate error] {item.protocol}: {item.url}: {e}")
             finally:
                 with self._immediate_lock:

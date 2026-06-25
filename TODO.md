@@ -55,7 +55,6 @@ lq-conc-10 | open | med | link_queue.py:935 — `_save_state` snapshots `infligh
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-mt-10 | open | low | link_queue.py:1297 — when `_run_immediate_item` raises, the consumer's `except` (lq-mt-01) logs but records NO metric, so an immediate item that crashes counts as neither failure nor completion (the queue-worker path records a failure on exception). Call `self._record_metric("failures")` in the except so immediate crashes stay visible. | silent metric gap on immediate crash
 
 ## distributed systems
 
