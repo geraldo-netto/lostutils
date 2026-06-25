@@ -303,3 +303,19 @@ def test_valid_workers_rejects_out_of_range(bad):
     import argparse
     with pytest.raises(argparse.ArgumentTypeError):
         dn.valid_workers(bad)
+
+
+def test_distinct_undecodable_bytes_not_collapsed(tmp_path):
+    """Two lines with DIFFERENT undecodable bytes must stay distinct, not
+    collapse to one U+FFFD key reported as a distance-0 self-collision
+    (dnv3-di-01). Run as a subprocess so stdout surrogateescape round-trips."""
+    import subprocess
+    import sys as _sys
+    p = tmp_path / "names.txt"
+    p.write_bytes(b"cafe\xe9\ncafe\xe8\n")  # two distinct invalid trailing bytes
+    script = str(Path(__file__).resolve().parent.parent / "deduplicate-by-namev3.py")
+    out = subprocess.run([_sys.executable, script, str(p)],
+                         capture_output=True).stdout
+    # Under errors="replace" both lines collapse and emit a ";0" self-collision.
+    # Under surrogateescape they stay distinct -> no distance-0 line.
+    assert b";0\n" not in out

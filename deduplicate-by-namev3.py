@@ -23,6 +23,7 @@ Tradeoff:
 from __future__ import annotations
 
 import argparse
+import io
 import re
 import sys
 
@@ -81,8 +82,17 @@ def main():
                     help="cdist worker threads (-1 = all cores)")
     args = ap.parse_args()
 
-    with open(args.file, "r", encoding="utf-8", errors="replace") as f:
+    # dnv3-di-01: surrogateescape (not "replace") so distinct undecodable byte
+    # sequences stay distinguishable instead of all collapsing to U+FFFD and
+    # being reported as the same cleaned string. Round-trips losslessly to
+    # stdout below once it is reconfigured to match.
+    with open(args.file, "r", encoding="utf-8", errors="surrogateescape") as f:
         raw_lines = f.readlines()
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        try:
+            sys.stdout.reconfigure(errors="surrogateescape")
+        except ValueError:
+            pass
 
     counts = {}
     for raw in raw_lines:
