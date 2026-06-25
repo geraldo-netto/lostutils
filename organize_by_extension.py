@@ -1381,6 +1381,14 @@ def _move_cross_device(source: Path, target: Path) -> None:
         # overwrites the 0-byte reservation in a single rename with no window.
         if not _is_stranded_reservation(source, target):
             raise
+        # oze-di-20: a 0-byte target is indistinguishable from a user's
+        # intentional empty file, so don't reclaim it silently — warn that it is
+        # being overwritten (as a presumed stranded reservation) before the
+        # atomic os.replace below replaces it.
+        logger.warning(
+            "overwriting 0-byte target %s with %s — treating it as a stranded "
+            "reservation from an interrupted move; an intentional empty file at "
+            "this path would be replaced", target, source)
     # oze-sec-01: replace the PID-based suffix with cryptographically
     # random bytes. The previous `.{name}.{pid}.tmp` pattern was
     # predictable: an attacker with write access to the bucket dir

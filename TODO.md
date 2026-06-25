@@ -29,7 +29,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-di-20 | open | med | organize_by_extension.py:1379-1381 — _move_cross_device treats ANY 0-byte target with a non-empty source as a stranded O_EXCL reservation and unlinks it; a user's intentional empty file at that name is silently deleted and overwritten by the move. Restrict reclaim to temp/reservation files this process owns, or skip reclaim when the 0-byte target was not created in this run. | 0-byte file is not proof of a stranded reservation
 
 ## performance
 

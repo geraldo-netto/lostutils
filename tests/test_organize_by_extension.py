@@ -3833,3 +3833,13 @@ def test_cross_device_reclaim_overwrites_without_unlinking_target(tmp_path, monk
     oze._move_cross_device(src, dst)
     assert dst.read_bytes() == b"payload"
     assert str(dst) not in unlinked   # target overwritten atomically, not unlinked
+
+
+def test_cross_device_reclaim_logs_warning(tmp_path, caplog):
+    """oze-di-20: overwriting a 0-byte target must be warned, not silent."""
+    import logging as _logging
+    src = tmp_path / "src.bin"; src.write_bytes(b"payload")
+    dst = tmp_path / "dst.bin"; dst.write_bytes(b"")
+    with caplog.at_level(_logging.WARNING):
+        oze._move_cross_device(src, dst)
+    assert any("overwriting 0-byte target" in r.message for r in caplog.records)
