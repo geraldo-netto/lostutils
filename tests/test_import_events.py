@@ -4361,3 +4361,33 @@ def test_worker_final_join_is_bounded():
     """End-of-run join must be bounded so a wedged native worker can't hang
     shutdown (ie-conc-01)."""
     assert 0 < import_events.WORKER_FINAL_JOIN_SECONDS < 3600
+
+
+def test_run_file_workers_returns_partials_on_unrecoverable_stall(tmp_path, monkeypatch):
+    """ie-rel-10: a worker wedged in the native LLM call must not hang the run;
+    once the stall is flagged and no further completion arrives, return the
+    partial results gathered so far."""
+    monkeypatch.setattr(import_events, "WORKER_STALL_GIVEUP_SECONDS", 0.3)
+    monkeypatch.setattr(import_events, "WORKER_FINAL_JOIN_SECONDS", 0.2)
+    for i in range(2):
+        (tmp_path / f"event-{i}.txt").write_text("Launch", encoding="utf-8")
+    wedge = threading.Event()
+
+    def fake_extract(file, llm_client=None, default_tz=None, model_config=None):
+        if file.name == "event-0.txt":
+            cb = import_events._current_llm_stall_callback()
+            assert cb is not None
+            cb(file.name, 600.0, 600.0)   # flag the stall
+            wedge.wait(5)                 # simulate the uncancellable wedge
+            return []
+        return [{"title": file.name, "start": "2026-06-06", "end": "",
+                 "location": "", "source": file.name, "type": "Text/LLM"}]
+
+    monkeypatch.setattr(import_events, "extract_from_file", fake_extract)
+    try:
+        events = import_events.process_folder(
+            str(tmp_path),
+            model_config=import_events.ModelConfig(workers=2, deterministic_order=True))
+    finally:
+        wedge.set()
+    assert [e["source"] for e in events] == ["event-1.txt"]  # event-0 abandoned

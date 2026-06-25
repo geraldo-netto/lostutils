@@ -68,6 +68,12 @@ LLM_STALL_DEADLINE_SECONDS = 600
 # uncancellable native call; bound the join so it can't hang the process
 # (workers are daemon threads — the interpreter reclaims a leftover one).
 WORKER_FINAL_JOIN_SECONDS = 30.0
+# ie-rel-10: once an LLM stall is detected, allow this long with NO further
+# completion before concluding the remaining work is wedged behind the
+# uncancellable native call (which holds _LLM_REQUEST_LOCK) and returning the
+# partial results instead of hanging the consumer forever. Live workers keep
+# resetting this window while they still complete LLM-free files.
+WORKER_STALL_GIVEUP_SECONDS = 60.0
 LLM_RESPONSE_LOG_EXCERPT_CHARS = 160
 DEFAULT_LANGUAGE = "auto"
 DEFAULT_OCR_FALLBACK_LANGUAGE = "en"
@@ -3058,6 +3064,10 @@ def _run_file_workers(
     # pool's worth of replacements.
     max_replacements = workers
     replacements_started = 0
+    # ie-rel-10: set when a worker stalls in the native LLM call so the result
+    # loop can give up (return partials) instead of waiting forever on a result
+    # that will never arrive.
+    stall_event = threading.Event()
 
     def start_worker(reason: str = "") -> None:
         nonlocal next_worker_id
@@ -3082,6 +3092,7 @@ def _run_file_workers(
 
     def on_llm_stall(label: str, elapsed: float, deadline: float) -> None:
         nonlocal replacements_started
+        stall_event.set()
         with threads_lock:
             if replacements_started >= max_replacements:
                 logger.warning(
@@ -3105,9 +3116,28 @@ def _run_file_workers(
     feeder.start()
     expected: Optional[int] = None
     completed = 0
+    last_progress = time.monotonic()
     try:
         while expected is None or completed < expected:
-            index, events, exc = done_queue.get()
+            try:
+                index, events, exc = done_queue.get(timeout=1.0)
+            except queue.Empty:
+                # ie-rel-10: a worker wedged in the uncancellable native LLM call
+                # never produces a result, so without this bound the loop waits
+                # forever. Once a stall is flagged and NO completion has arrived
+                # for the give-up window (live workers still draining LLM-free
+                # files keep resetting it), abandon the wedged work and return
+                # what we have.
+                if (stall_event.is_set() and
+                        time.monotonic() - last_progress > WORKER_STALL_GIVEUP_SECONDS):
+                    logger.error(
+                        "LLM stall unrecoverable: %d/%s file(s) done before the "
+                        "remaining worker(s) wedged in an uncancellable native "
+                        "call; returning partial results.", completed, expected)
+                    stop_event.set()
+                    break
+                continue
+            last_progress = time.monotonic()
             if index is None:
                 expected = events
                 if exc is not None:
