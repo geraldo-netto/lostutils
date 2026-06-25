@@ -786,7 +786,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("MINI-KeyBoard configurator")
-        self.geometry("1240x680")
+        self.geometry("1440x880")
         self.minsize(900, 600)
 
         # Cross-thread UI marshalling: background device threads enqueue
