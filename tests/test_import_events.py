@@ -4278,3 +4278,23 @@ def test_read_text_truncates_to_max_chars(tmp_path):
     f = tmp_path / "a.txt"
     f.write_text("a" * 100, encoding="utf-8")
     assert import_events._read_text(f, max_chars=10) == "a" * 10
+
+
+def test_ocr_image_bytes_closes_fd_on_fdopen_failure(monkeypatch):
+    """If os.fdopen raises, the raw descriptor must be closed, not leaked
+    (ie-robust-03)."""
+    closed = []
+    real_close = os.close
+
+    def fake_fdopen(*_a, **_k):
+        raise OSError("fdopen boom")
+
+    def tracking_close(fd):
+        closed.append(fd)
+        return real_close(fd)
+
+    monkeypatch.setattr(import_events.os, "fdopen", fake_fdopen)
+    monkeypatch.setattr(import_events.os, "close", tracking_close)
+    with pytest.raises(OSError):
+        import_events._ocr_image_bytes(b"\x89PNG")
+    assert closed, "descriptor was not explicitly closed on fdopen failure"

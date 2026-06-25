@@ -2465,7 +2465,15 @@ def _ocr_image_bytes(
 ) -> str:
     fd, tmp_name = tempfile.mkstemp(suffix=".png")
     try:
-        with os.fdopen(fd, "wb") as tmp:
+        # ie-robust-03: if os.fdopen itself raises, the raw fd is never wrapped
+        # (so the `with` can't close it) and only the path is unlinked below —
+        # close the descriptor explicitly on that failure to avoid an fd leak.
+        try:
+            tmp = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with tmp:
             tmp.write(image_data)
         if language_chain is None and stage == "OCR":
             return _ocr_image_path(Path(tmp_name), config, language)
