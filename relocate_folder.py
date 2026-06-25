@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import enum
+import errno
 import hashlib
 import logging
 import os
@@ -1588,6 +1589,39 @@ def _warn_orphaned_backup(backup: Path, source: Path) -> None:
     )
 
 
+_RENAME_NOREPLACE = 1  # linux/fs.h: fail with EEXIST if the new path exists
+
+
+def _rename_noreplace(src: Path, dst: Path) -> None:
+    """Rename ``src`` -> ``dst`` failing with ``FileExistsError`` if ``dst``
+    exists (rf-dist-01). Uses ``renameat2(RENAME_NOREPLACE)`` on Linux to close
+    the gate→rename TOCTOU where a concurrently recreated ``dst`` would be
+    silently clobbered by plain ``os.rename``. Falls back to ``os.rename`` (with
+    the documented single-operator assumption) where the syscall/flag is
+    unavailable."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = libc.renameat2
+    except (OSError, AttributeError):
+        os.rename(src, dst)  # no renameat2: single-operator assumption applies
+        return
+    AT_FDCWD = -100
+    res = renameat2(AT_FDCWD, os.fsencode(str(src)),
+                    AT_FDCWD, os.fsencode(str(dst)), _RENAME_NOREPLACE)
+    if res == 0:
+        return
+    err = ctypes.get_errno()
+    if err == errno.EEXIST:
+        raise FileExistsError(
+            f"refusing to recover: {dst} reappeared during recovery; "
+            f"resolve it manually before restoring {src}")
+    if err in (errno.ENOSYS, errno.EINVAL):
+        os.rename(src, dst)  # kernel/fs without RENAME_NOREPLACE: fall back
+        return
+    raise OSError(err, os.strerror(err))
+
+
 def recover(source: Path, *, force: bool = False) -> str:
     """Restore an orphaned `<source>.relocate-backup` to `source` (rf-rel-01).
 
@@ -1628,7 +1662,9 @@ def recover(source: Path, *, force: bool = False) -> str:
         )
     if not force:
         _check_no_open_files(backup)
-    os.rename(backup, source)
+    # rf-dist-01: no-replace rename so a source recreated between the
+    # _path_taken gate above and here is never silently clobbered.
+    _rename_noreplace(backup, source)
     return f"recovered: {backup} -> {source}"
 
 

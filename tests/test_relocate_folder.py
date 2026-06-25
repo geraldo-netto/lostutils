@@ -3649,3 +3649,32 @@ def test_backup_target_restores_source_on_keyboardinterrupt(tmp_path):
             raise KeyboardInterrupt
     assert target.exists(), "source not restored after Ctrl+C"
     assert not backup.exists(), "backup left behind after restore"
+
+
+def test_recover_restores_orphaned_backup(tmp_path):
+    """rf-dist-01: normal recover renames the orphaned backup back to source."""
+    source = tmp_path / "data"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.mkdir(); (backup / "f").write_text("x", encoding="utf-8")
+    result = rf.recover(source, force=True)
+    assert result.startswith("recovered:")
+    assert source.is_dir() and not backup.exists()
+
+
+def test_recover_refuses_when_source_reappears(tmp_path, monkeypatch):
+    """rf-dist-01: a source recreated between the gate and the rename must not
+    be clobbered — _rename_noreplace fails with FileExistsError."""
+    source = tmp_path / "data"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.mkdir(); (backup / "f").write_text("x", encoding="utf-8")
+
+    real_noreplace = rf._rename_noreplace
+
+    def racing(src, dst):
+        dst.mkdir()  # simulate concurrent recreation just before the rename
+        return real_noreplace(src, dst)
+
+    monkeypatch.setattr(rf, "_rename_noreplace", racing)
+    with pytest.raises(FileExistsError):
+        rf.recover(source, force=True)
+    assert backup.exists(), "backup lost despite refused recovery"

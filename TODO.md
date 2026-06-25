@@ -68,7 +68,6 @@ lq-mt-01 | open | med | link_queue.py:1262 — _immediate_consumer's run loop wr
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-dist-01 | open | med | link_queue.py:1267 — _immediate_consumer pulls item via _immediate_q.get() but calls task_done() on a re-read of self._immediate_q; if _resize_immediate_queue_locked swaps the queue in between, task_done() hits the NEW queue (no matching get) → ValueError: task_done() called too many times, killing the consumer. Capture the queue object at get() time and call task_done() on that same object. | shared-resource swap race
-rf-dist-01 | open | med | relocate_folder.py:1525 — recover gates on _path_taken(source) then os.rename(backup, source); a concurrent recreation of source as an empty dir between the gate and the rename is silently replaced (Linux rename onto an empty dir succeeds), clobbering it. Document the single-operator assumption or use renameat2(RENAME_NOREPLACE) where available. | TOCTOU gate→rename
 
 ## dependability
 
