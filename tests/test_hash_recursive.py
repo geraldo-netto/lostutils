@@ -1711,24 +1711,21 @@ def test_main_hashes_file_exists_on_cancel_during_walk(tmp_path, monkeypatch):
 
 def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
         tmp_path, monkeypatch):
-    # hr-log-03: a Ctrl-C (KeyboardInterrupt) mid-pipeline must leave the
-    # dump flushed and closed. Line buffering means each line is on disk as
-    # written; main's finally closes the handle even though the interrupt
-    # propagates out.
+    # hr-log-03 + hr-obs-02: a Ctrl-C (KeyboardInterrupt) mid-pipeline must
+    # leave the dump flushed and closed. The dump is now written in main's
+    # finally (the composite digest can only be known after stage 2), so a
+    # digest recorded via on_hashed before the interrupt still survives.
     (tmp_path / "a.bin").write_bytes(b"x")
     out = tmp_path / "hashes.txt"
     digest = "ab" * 32                          # 64-char hex
-    seen = {}
 
     def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
-             cancel_event=None, on_hashed=None, on_stage_progress=None):
+             cancel_event=None, on_hashed=None, on_stage_progress=None,
+             on_composite=None):
         list(files)                             # drain walk so threads finish
         if on_walk_done is not None:
             on_walk_done()
         on_hashed(1, 1, digest, (1, 1), {(1, 1): [str(tmp_path / "a.bin")]})
-        # Read from a separate handle: with line buffering the line is
-        # already on disk before main closes the writer.
-        seen["mid"] = out.read_text()
         raise KeyboardInterrupt
 
     monkeypatch.setattr(hr, "find_duplicate_groups", stub)
@@ -1736,7 +1733,6 @@ def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
         hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
     with pytest.raises(KeyboardInterrupt):
         hr.main()
-    assert digest in seen["mid"]                # flushed mid-run
     assert digest in out.read_text()            # survived the finally close
 
 
@@ -2940,3 +2936,26 @@ def test_retry_tail_alias_returns_none_when_no_sibling_readable(monkeypatch):
 
 def test_retry_tail_alias_unknown_key_returns_none():
     assert hr._retry_tail_alias(("d", 9), "/x", 1, {}, None) is None
+
+
+def test_main_dump_writes_composite_for_stage2_files(tmp_path, monkeypatch):
+    """hr-obs-02: two files sharing a head but differing past it get DISTINCT
+    composite head:tail digests in the dump (not identical head-only digests).
+    Use a tiny --block-size so small files reach stage 2."""
+    head = b"H" * 64
+    (tmp_path / "a.bin").write_bytes(head + b"AAAA")   # same size + head
+    (tmp_path / "b.bin").write_bytes(head + b"BBBB")   # differ in the tail
+    out = tmp_path / "hashes.txt"
+    monkeypatch.setattr(hr.sys, "argv", [
+        "hr", "--hashes-file", str(out), "--block-size", "16",
+        "--sample-size", "4", str(tmp_path)])
+    hr.main()
+    lines = [ln for ln in out.read_text().splitlines() if ln and "hashes.txt" not in ln]
+    digests = {ln.split(" ", 1)[1].rsplit("/", 1)[-1]: ln.split(" ", 1)[0]
+               for ln in lines}
+    assert "a.bin" in digests and "b.bin" in digests
+    # composite form head:tail
+    assert ":" in digests["a.bin"] and ":" in digests["b.bin"]
+    # distinct identities despite shared head
+    assert digests["a.bin"] != digests["b.bin"]
+    assert digests["a.bin"].split(":")[0] == digests["b.bin"].split(":")[0]  # same head

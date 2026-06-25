@@ -1301,7 +1301,8 @@ def _split_stage1_buckets(by_head, rep, accept_group):
 
 def find_duplicate_groups(files, jobs, on_group=None, config=None,
                           on_walk_done=None, cancel_event=None,
-                          on_hashed=None, on_stage_progress=None):
+                          on_hashed=None, on_stage_progress=None,
+                          on_composite=None):
     """Run the dedup pipeline on walk results (hr-arch-01).
 
     `files` may be a list OR an iterator (hr-scal-05). When called with
@@ -1408,6 +1409,13 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         stage2_items, jobs, config, cancel_event,
         on_progress=_progress("stage2"), aliases=aliases)
     for combined, keys in regrouped.items():
+        # hr-obs-02: report the composite head:tail digest per stage-2 key so
+        # the hashes dump can record the true dup-grouping identity (two files
+        # sharing a head but differing past it get DISTINCT dump digests).
+        if on_composite is not None:
+            head, tail = combined
+            for key in keys:
+                on_composite(key, f"{head}:{tail}")
         if len(keys) >= 2:
             _accept_group(combined, keys)
 
@@ -1698,6 +1706,11 @@ def main():
     previous_sigint = _install_sigint_cancel(cancel_event)
 
     hashes_state: dict = {"fh": None}
+    # hr-obs-02: per-key (digest, paths) accumulated during hashing so a stage-2
+    # file's digest can be upgraded to the composite head:tail before the dump
+    # is written. Declared before the try so the finally can flush it on a
+    # Ctrl-C (with whatever digests resolved so far). Bounded by candidate count.
+    dump_pending: dict = {}
 
     try:
         # hr-log-04: open the hashes dump BEFORE the walk so it always
@@ -1737,12 +1750,17 @@ def main():
         progress_state: dict = {}
 
         def _on_hashed(done, total, head, key, aliases):
-            # hr-log-02: dump every hashed file. Live progress is emitted
-            # by `_on_stage_progress` as each hash batch completes.
-            dump = hashes_state["fh"]
-            if head is not None and dump is not None:
-                dump.write("".join(
-                    f"{head} {p}\n" for p in aliases.get(key, ())))
+            # hr-log-02: record every hashed file for the dump. Live progress is
+            # emitted by `_on_stage_progress` as each hash batch completes.
+            if head is not None and hashes_state["fh"] is not None:
+                dump_pending[key] = (head, list(aliases.get(key, ())))
+
+        def _on_composite(key, composite):
+            # hr-obs-02: upgrade the stage-1 head digest to the composite
+            # head:tail once stage 2 has resolved the tail for this key.
+            entry = dump_pending.get(key)
+            if entry is not None:
+                dump_pending[key] = (composite, entry[1])
 
         def _on_stage_progress(stage, done, total):
             state = progress_state.setdefault(
@@ -1765,7 +1783,7 @@ def main():
             _progress_walk(walk_iter, args.quiet), args.jobs,
             on_group=on_group, config=config, on_walk_done=_mark_walk_done,
             cancel_event=cancel_event, on_hashed=_on_hashed,
-            on_stage_progress=_on_stage_progress,
+            on_stage_progress=_on_stage_progress, on_composite=_on_composite,
         )
         t_end = time.perf_counter()
         walk_stats = walk_iter.stats
@@ -1856,6 +1874,12 @@ def main():
         # error can't skip the SIGINT-handler restore below.
         if hashes_state["fh"] is not None:
             try:
+                # hr-obs-02: write the accumulated dump (composite head:tail for
+                # resolved stage-2 keys, head for the rest) here so it is flushed
+                # on a normal return AND on a Ctrl-C, then close.
+                _fh = hashes_state["fh"]
+                for _digest, _paths in dump_pending.values():
+                    _fh.write("".join(f"{_digest} {p}\n" for p in _paths))
                 hashes_state["fh"].close()
             except OSError as exc:
                 _log_line(f"WARNING: closing {args.hashes_file} failed: {exc}",
