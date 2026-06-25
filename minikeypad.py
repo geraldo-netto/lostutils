@@ -970,7 +970,7 @@ class App(tk.Tk):
         return frame
 
     def _build_keys_tab(self, nb):
-        """Single Keys tab: a layout combobox over a scrollable keycap area."""
+        """Single Keys tab: a layout combobox over a fill-to-panel keycap grid."""
         tab = ttk.Frame(nb)
         bar = ttk.Frame(tab)
         bar.pack(fill="x", padx=6, pady=(6, 2))
@@ -980,52 +980,59 @@ class App(tk.Tk):
                           width=18, values=[name for name, _ in self._layouts])
         cb.pack(side="left", padx=4)
         cb.bind("<<ComboboxSelected>>", lambda _e: self._render_layout())
-        self._keys_body = self._scroll_area(tab)
+        self._keys_body = ttk.Frame(tab)
+        self._keys_body.pack(fill="both", expand=True, padx=4, pady=4)
         self._render_layout()
         return tab
 
     def _render_layout(self):
         for widget in self._keys_body.winfo_children():
             widget.destroy()
-        # Centre the keycaps in the (full-width) scroll body instead of letting
-        # them hug the left edge with blank space to the right.
-        holder = ttk.Frame(self._keys_body)
-        holder.pack(anchor="n", pady=4)
         entries = dict(self._layouts).get(self.layout_var.get())
         if entries is None:
-            self._render_basic(holder)
+            self._render_basic(self._keys_body)
         else:
-            self._render_script(holder, entries)
+            self._render_script(self._keys_body, entries)
+
+    @staticmethod
+    def _fill_grid(parent, rows):
+        """Lay buttons out on a weighted grid so every cell stretches to fill."""
+        widest = max(len(r) for r in rows)
+        for c in range(widest):
+            parent.columnconfigure(c, weight=1, uniform="keys")
+        for r, row in enumerate(rows):
+            parent.rowconfigure(r, weight=1)
+            for c, button in enumerate(row):
+                button.grid(row=r, column=c, sticky="nsew", padx=1, pady=1)
 
     def _render_basic(self, body):
+        grid = ttk.Frame(body)
+        grid.pack(fill="both", expand=True)
+        rows = []
         for row in BASIC_ROWS:
-            rf = ttk.Frame(body)
-            rf.pack(anchor="w", padx=6, pady=1)
-            for label, code in row:
-                tk.Button(rf, text=label, width=6, height=2,
-                          command=lambda lbl=label, c=code: self._basic_key(c, lbl)
-                          ).pack(side="left", padx=1, pady=1)
-        mf = ttk.LabelFrame(body, text="Modifiers (combine with a key)")
-        mf.pack(anchor="w", padx=6, pady=6)
-        for bit, name in BASIC_MODS:
-            tk.Button(mf, text=name, width=8, height=2,
-                      command=lambda b=bit, n=name: self._basic_mod(b, n)
-                      ).pack(side="left", padx=2, pady=2)
+            rows.append([tk.Button(grid, text=label,
+                                   command=lambda lbl=label, c=code: self._basic_key(c, lbl))
+                         for label, code in row])
+        rows.append([tk.Button(grid, text=name,
+                               command=lambda b=bit, n=name: self._basic_mod(b, n))
+                     for bit, name in BASIC_MODS])
+        self._fill_grid(grid, rows)
 
     def _render_script(self, body, entries):
         note = ttk.Label(
-            body, wraplength=620, foreground="#555",
+            body, foreground="#555", wraplength=900,
             text="Scancode mode sends the national-layout key (needs that OS "
                  "layout active; accented Latin sends the base letter).  Turn on "
                  "Unicode mode to type the glyph itself on any layout.")
-        note.pack(anchor="w", padx=6, pady=(6, 2))
+        note.pack(anchor="w", fill="x", padx=6, pady=(2, 4))
         grid = ttk.Frame(body)
-        grid.pack(anchor="w", padx=6, pady=4)
-        for i, (glyph, scancode) in enumerate(entries):
-            r, c = divmod(i, 11)
-            tk.Button(grid, text=glyph, width=4, height=2,
-                      command=lambda g=glyph, s=scancode: self._script_key(g, s)
-                      ).grid(row=r, column=c, padx=2, pady=2)
+        grid.pack(fill="both", expand=True)
+        per_row = 11
+        buttons = [tk.Button(grid, text=glyph,
+                             command=lambda g=glyph, s=scancode: self._script_key(g, s))
+                   for glyph, scancode in entries]
+        rows = [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
+        self._fill_grid(grid, rows)
 
     def _build_fun_tab(self, nb):
         tab, body = self._scroll_tab(nb)

@@ -1192,9 +1192,8 @@ def test_switching_layout_rerenders_body(app):
     app._render_layout()
     app.layout_var.set("Spanish")
     app._render_layout()
-    # one centred holder under the body; the script note (Label) lives in it
-    holder = app._keys_body.winfo_children()[0]
-    kinds = {w.winfo_class() for w in holder.winfo_children()}
+    # script view present -> the note Label sits directly under the body
+    kinds = {w.winfo_class() for w in app._keys_body.winfo_children()}
     assert "TLabel" in kinds
 
 
