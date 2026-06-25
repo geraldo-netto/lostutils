@@ -536,6 +536,10 @@ def list_files(
         # a Ctrl+C isn't mistaken for a freeze. Logs at INFO (visible under -v),
         # matching the move-stage progress cadence.
         scanned += 1
+        # oze-obs-06: -vv emits one line per file so a long silent scan on a
+        # smaller-but-slow tree (header sniff opens each file) shows live
+        # progress before the 10k-file INFO heartbeat would ever fire.
+        logger.debug("scan: %s", path)
         if scanned % PROGRESS_EVERY == 0:
             logger.info(
                 "scanning: %d files seen (%d to move, %d already bucketed)",
@@ -1997,8 +2001,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--verbose',
         '-v',
-        action='store_true',
-        help='Enable verbose output.',
+        action='count',
+        default=0,
+        help='Enable verbose output. Repeat (-vv) for per-file DEBUG scan logging.',
     )
     parser.add_argument(
         '--threads',
@@ -2096,6 +2101,10 @@ def main() -> None:
     # regardless of `--verbose`. One call, computed level, no surprise.
     if args.root is None:
         log_level = logging.INFO
+    elif args.verbose >= 2:
+        # -vv: per-file scan trace (oze-obs-06) for a long silent scan where
+        # the 10k-file heartbeat never fires on a smaller-but-slow tree.
+        log_level = logging.DEBUG
     elif args.verbose or args.preview:
         # --preview is a dry run whose whole point is to show planned
         # moves, so it always logs at INFO even without --verbose.
@@ -2114,7 +2123,7 @@ def main() -> None:
         organize(
             root,
             preview=args.preview,
-            verbose=args.verbose,
+            verbose=bool(args.verbose),
             num_threads=args.threads,
             sniff=args.sniff,
             extra_zip_family=_parse_extra_zip_family(args.extra_zip_family),
