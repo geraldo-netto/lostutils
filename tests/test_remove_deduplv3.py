@@ -58,3 +58,16 @@ def test_no_duplicate_path_in_rm_line(monkeypatch, tmp_path):
     for ln in rm_lines:
         targets = ln[len("rm -f "):].split()
         assert len(targets) == len(set(targets)), f"duplicate path in: {ln}"
+
+
+def test_emits_stderr_summary(monkeypatch, tmp_path, capsys):
+    """rdv3-obs-01: a stderr summary reports group + removal counts."""
+    f = tmp_path / "hashes.txt"
+    f.write_text("h1 /a\nh1 /bb\nh2 /c\n", encoding="utf-8")  # h1 dup, h2 single
+    monkeypatch.setattr("sys.argv", ["remove-deduplv3.py", str(f)])
+    rd.main()
+    err = capsys.readouterr().err
+    assert "summary:" in err
+    assert "2 hash group(s)" in err
+    assert "1 with duplicates" in err
+    assert "1 file(s) queued for removal" in err

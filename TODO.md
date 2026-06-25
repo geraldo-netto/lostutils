@@ -146,7 +146,6 @@ lq-obs-10 | open | low | link_queue.py:4644 — `_shutdown` calls the pre-stop s
 oze-obs-10 | open | low | organize_by_extension.py:1783 — the `progress:` line denominator `total_files` is the scan-stage `len(files)`, but the plan drops files (bucket-selection failure, 1602) and adds `.collision` renames, so `processed X/total` can never converge to the final processed+skipped tally and misleads on long runs. Label it approximate or recompute from the plan tally. | three-pillars / metrics accuracy
 rf-obs-01 | open | low | relocate_folder.py:992 — the except OSError in _iter_verify_tasks swallows the stat error with no log line, so even if rf-rel-01 is fixed to raise, the operator gets no breadcrumb why an entry couldn't be classified. Log a warning with the path and errno. |
 rf-obs-02 | open | low | relocate_folder.py:1757 — _copy_and_verify cleans a failed target with shutil.rmtree(..., ignore_errors=True); unlike the copy_tree cleanup path (which records+logs rmtree failures), a failed cleanup here is silently dropped, so a surviving partial target after a verify failure leaves no audit trail despite the log line at 1752 claiming it "has been deleted". Use an onerror recorder and warn on residual entries. | log claims deletion even when rmtree silently failed
-rdv3-obs-01 | open | low | remove-deduplv3.py:101-112 — groups with all-identical paths or a single survivor are silently skipped; no stderr summary of #groups/#files-to-remove. Emit a stderr summary before the rm block for auditability. | audit
 
 ## watchdog
 

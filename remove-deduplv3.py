@@ -106,6 +106,8 @@ def main():
         sys.exit(3)
 
     out = sys.stdout.write
+    groups_with_dups = 0
+    files_to_remove = 0
     for h, paths in groups.items():
         # rdv3-rel-01: collapse byte-identical path strings within a group (a
         # duplicate input line) so the same file can't be picked as survivor AND
@@ -120,8 +122,17 @@ def main():
         to_remove = [p for p in paths if p != keep]
         if not to_remove:
             continue
+        groups_with_dups += 1
+        files_to_remove += len(to_remove)
         quoted = " ".join(shlex.quote(p) for p in to_remove)
         out(f"# duplicates: {h}\n# saving: {keep}\nrm -f {quoted}\n\n")
+    # rdv3-obs-01: audit summary to stderr (groups with all-identical paths or a
+    # single survivor are otherwise silently skipped with no trace).
+    print(
+        f"summary: {len(groups)} hash group(s), {groups_with_dups} with "
+        f"duplicates, {files_to_remove} file(s) queued for removal",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":
