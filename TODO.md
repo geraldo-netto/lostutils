@@ -100,7 +100,6 @@ rf-rel-30 | open | low | relocate_folder.py:191 — `Plan.from_args` derives `ta
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-rel-10 | open | low | link_queue.py:1111 — `_restore_queue_from_state` re-dispatches persisted immediate items via `_dispatch_immediate` (which silently drops on `queue.Full`) but logs `len(immediate)` as "restored", overstating the count when the restored backlog exceeds `immediate_queue_maxsize`. Have `_dispatch_immediate` return accepted/dropped and log only the accepted count plus a "[warn] N immediate dropped on restore (queue full)" line. | silent drop + miscount on restore
-oze-robust-20 | open | low | organize_by_extension.py:1380-1381 — stranded-reservation reclaim has a TOCTOU between _is_stranded_reservation's stat and os.unlink(target): another process can write real content into the 0-byte target in the window, and the unlink then destroys it (the re-reserve guard only protects the slot, not the unlink). Re-check or open the target with O_EXCL-style semantics atomically before removing. | TOCTOU on reclaim unlink
 
 ## state machine integrity
 

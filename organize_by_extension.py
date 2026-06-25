@@ -1373,13 +1373,13 @@ def _move_cross_device(source: Path, target: Path) -> None:
             os.unlink(source)
             return
         # oze-robust-10: a 0-byte target with a non-empty source is a stranded
-        # O_EXCL reservation from a move killed before os.replace. Reclaim the
-        # name and re-reserve it so the move self-heals on re-run instead of
-        # raising a phantom collision forever.
-        if _is_stranded_reservation(source, target):
-            os.unlink(target)
-            _reserve_target(target)  # genuine race here re-raises FileExistsError
-        else:
+        # O_EXCL reservation from a move killed before os.replace; the move must
+        # self-heal on re-run instead of raising a phantom collision forever.
+        # oze-robust-20: do NOT unlink+re-reserve (that opened a TOCTOU window
+        # where another process could write real content into the gap, then have
+        # it destroyed). Fall through to the atomic os.replace below, which
+        # overwrites the 0-byte reservation in a single rename with no window.
+        if not _is_stranded_reservation(source, target):
             raise
     # oze-sec-01: replace the PID-based suffix with cryptographically
     # random bytes. The previous `.{name}.{pid}.tmp` pattern was

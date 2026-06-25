@@ -3819,3 +3819,17 @@ def test_collision_slot_rolls_back_candidate_on_interrupt(tmp_path, monkeypatch)
         oze._atomic_rename_to_free_slot(src)
     assert src.exists()
     assert not (tmp_path / "f.bin.collision1").exists()
+
+
+def test_cross_device_reclaim_overwrites_without_unlinking_target(tmp_path, monkeypatch):
+    """oze-robust-20: reclaiming a stranded 0-byte target must overwrite it
+    atomically via os.replace, never unlink it first (no TOCTOU window)."""
+    src = tmp_path / "src.bin"; src.write_bytes(b"payload")
+    dst = tmp_path / "dst.bin"; dst.write_bytes(b"")   # stranded reservation
+    unlinked = []
+    real_unlink = oze.os.unlink
+    monkeypatch.setattr(oze.os, "unlink",
+                        lambda p: unlinked.append(str(p)) or real_unlink(p))
+    oze._move_cross_device(src, dst)
+    assert dst.read_bytes() == b"payload"
+    assert str(dst) not in unlinked   # target overwritten atomically, not unlinked
