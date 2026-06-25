@@ -1540,3 +1540,18 @@ def test_install_signal_handlers_swallows_failure(monkeypatch):
 
     monkeypatch.setattr(minikeypad.signal, "signal", boom)
     minikeypad._install_signal_handlers(object())   # must not raise
+
+
+def test_load_profile_rejects_unknown_version(app, tmp_path):
+    """A profile whose version != PROFILE_VERSION must fail closed (mkp-rob-01)."""
+    bad = tmp_path / "futurever.json"
+    bad.write_text('{"version":999,"assignments":[]}')
+    with pytest.raises(ValueError):
+        app._load_profile(str(bad))
+
+
+def test_load_profile_rejects_missing_version(app, tmp_path):
+    bad = tmp_path / "nover.json"
+    bad.write_text('{"assignments":[]}')
+    with pytest.raises(ValueError):
+        app._load_profile(str(bad))

@@ -1424,6 +1424,14 @@ class App(tk.Tk):
         """Replace the session map from a JSON profile. Returns the count."""
         with open(path, encoding="utf-8") as fh:
             payload = json.load(fh)
+        # mkp-rob-01: fail closed on an unknown/future format instead of
+        # silently loading mismatched fields and pushing wrong bytes to the
+        # device. _load_dialog surfaces the ValueError as "Load failed".
+        version = payload.get("version")
+        if version != PROFILE_VERSION:
+            raise ValueError(
+                "unsupported profile version %r (expected %d)"
+                % (version, PROFILE_VERSION))
         size = len(KeyParam().data)
         loaded = {}
         for item in payload.get("assignments", []):
