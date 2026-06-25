@@ -65,7 +65,6 @@ lq-conc-01 | open | low | link_queue.py:1380 — _note_immediate_depth samples d
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-mt-01 | open | med | link_queue.py:1262 — _immediate_consumer's run loop wraps _run_immediate_item only in try/finally with no except (unlike _worker_loop which catches and continues); any exception escaping _run_immediate_item kills the consumer thread permanently, silently shrinking the immediate pool until the next _ensure_immediate_pool. Wrap the body in try/except Exception with a log, like the queue worker. | swallowed-future / thread lifecycle
-mkp-thread-01 | open | med | minikeypad.py:1256 — `_poll_connection` calls `self.dev.still_connected()` directly on the Tk main thread every 1s, and that method runs `usb.core.find(...)` (full USB-bus enumeration, line 212) under `_lock`; on a slow/contended bus this freezes the UI, contradicting the explicit off-thread design used for `connect()`. Run the liveness probe on the worker-thread pattern, not the Tk thread. | background-task-off-ui-thread
 
 ## distributed systems
 

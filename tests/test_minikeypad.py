@@ -1587,3 +1587,28 @@ def test_load_profile_accepts_led_and_knob_ids(app, tmp_path):
         {"layer": 3, "key_id": 176, "desc": "led", "data": data_hex},
         {"layer": 2, "key_id": 18, "desc": "knob", "data": data_hex}]}))
     assert app._load_profile(str(good)) == 2
+
+
+def test_probe_done_clears_busy(app):
+    """_probe_done resets the io mutex so the next poll can run (mkp-thread-01)."""
+    app._io_busy = True
+    app._probe_done(True)
+    assert app._io_busy is False
+
+
+def test_probe_alive_offthread_reports_disconnect(app):
+    """_probe_alive posts _probe_done back via the UI queue; a vanished device
+    clears busy and is reported, all without blocking the Tk thread."""
+    app.dev = FlakyDev()       # connected, but still_connected() -> False
+    app._io_busy = True
+    app._probe_alive()
+    _wait_drain(app)
+    assert app._io_busy is False
+
+
+def test_probe_alive_offthread_reports_alive(app):
+    app.dev = FakeDev(connected=True)
+    app._io_busy = True
+    app._probe_alive()
+    _wait_drain(app)
+    assert app._io_busy is False

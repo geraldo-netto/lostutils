@@ -1257,13 +1257,30 @@ class App(tk.Tk):
     def _poll_connection(self):
         if not self._io_busy:
             if self.dev.connected:
-                if not self.dev.still_connected():
-                    self.log("Device disconnected")
+                # mkp-thread-01: still_connected() runs usb.core.find (full bus
+                # enumeration) under the device lock; run it off the Tk thread
+                # like the connect probe so a slow bus never freezes the UI.
+                self._io_busy = True
+                threading.Thread(target=self._probe_alive, daemon=True).start()
             else:
                 self._io_busy = True
                 threading.Thread(target=self._try_connect, daemon=True).start()
         self._update_state()
         self.after(1000, self._poll_connection)
+
+    def _probe_alive(self):
+        """Off-thread liveness check (mkp-thread-01)."""
+        try:
+            alive = self.dev.still_connected()
+        except Exception:
+            alive = False
+        self._ui_q.put(lambda: self._probe_done(alive))
+
+    def _probe_done(self, alive):
+        self._io_busy = False
+        if not alive:
+            self.log("Device disconnected")
+        self._update_state()
 
     def _try_connect(self):
         """Runs off the Tk thread so the connect/version probe never freezes UI."""
