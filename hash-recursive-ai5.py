@@ -1711,6 +1711,10 @@ def main():
     # is written. Declared before the try so the finally can flush it on a
     # Ctrl-C (with whatever digests resolved so far). Bounded by candidate count.
     dump_pending: dict = {}
+    # hr-obs-10: per-inode count of aliases elided AT INGEST by the alias cap, so
+    # the dump can append a `+N more` marker instead of silently omitting
+    # hardlinks past the cap.
+    dump_overflow: dict = {}
 
     try:
         # hr-log-04: open the hashes dump BEFORE the walk so it always
@@ -1785,6 +1789,8 @@ def main():
             cancel_event=cancel_event, on_hashed=_on_hashed,
             on_stage_progress=_on_stage_progress, on_composite=_on_composite,
         )
+        if result.overflow:
+            dump_overflow.update(result.overflow)
         t_end = time.perf_counter()
         walk_stats = walk_iter.stats
         info = result.info
@@ -1878,8 +1884,13 @@ def main():
                 # resolved stage-2 keys, head for the rest) here so it is flushed
                 # on a normal return AND on a Ctrl-C, then close.
                 _fh = hashes_state["fh"]
-                for _digest, _paths in dump_pending.values():
+                for _key, (_digest, _paths) in dump_pending.items():
                     _fh.write("".join(f"{_digest} {p}\n" for p in _paths))
+                    # hr-obs-10: surface hardlinks elided at ingest by the alias
+                    # cap instead of silently omitting them from the dump.
+                    _elided = dump_overflow.get(_key, 0)
+                    if _elided > 0:
+                        _fh.write(f"{_digest} +{_elided} more (alias-cap)\n")
                 hashes_state["fh"].close()
             except OSError as exc:
                 _log_line(f"WARNING: closing {args.hashes_file} failed: {exc}",

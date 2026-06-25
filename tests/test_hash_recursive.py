@@ -2959,3 +2959,21 @@ def test_main_dump_writes_composite_for_stage2_files(tmp_path, monkeypatch):
     # distinct identities despite shared head
     assert digests["a.bin"] != digests["b.bin"]
     assert digests["a.bin"].split(":")[0] == digests["b.bin"].split(":")[0]  # same head
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hardlinks via os.link (POSIX)")
+def test_main_dump_marks_aliases_elided_by_cap(tmp_path, monkeypatch):
+    """hr-obs-10: hardlinks elided at ingest by --alias-cap must be surfaced in
+    the dump with a `+N more (alias-cap)` marker, not silently omitted."""
+    payload = b"shared-content-payload"
+    a = tmp_path / "a1.bin"; a.write_bytes(payload)
+    os.link(a, tmp_path / "a2.bin")     # 3 hardlinks to inode A
+    os.link(a, tmp_path / "a3.bin")
+    (tmp_path / "b.bin").write_bytes(payload)   # 2nd inode, same size -> candidate
+    out = tmp_path / "hashes.txt"
+    monkeypatch.setattr(hr.sys, "argv", [
+        "hr", "--hashes-file", str(out), "--alias-cap", "1", str(tmp_path)])
+    hr.main()
+    text = out.read_text()
+    assert "more (alias-cap)" in text
+    assert "+2 more (alias-cap)" in text   # inode A had 3 aliases, 1 shown
