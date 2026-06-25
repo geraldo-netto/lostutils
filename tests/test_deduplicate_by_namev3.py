@@ -291,3 +291,15 @@ def test_emit_pairs_blocking_invariant(lines, t, block_rows):
         dn.BLOCK_THRESHOLD, dn.BLOCK_ROWS = orig_bt, orig_br
     assert single == blocked
     assert len(blocked) == len(set(blocked))
+
+
+def test_valid_workers_accepts_all_cores_and_positive():
+    assert dn.valid_workers("-1") == -1
+    assert dn.valid_workers("4") == 4
+
+
+@pytest.mark.parametrize("bad", ["-5", "0", "-2", "x", "1.5"])
+def test_valid_workers_rejects_out_of_range(bad):
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError):
+        dn.valid_workers(bad)

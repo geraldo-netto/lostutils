@@ -50,6 +50,20 @@ def clamp_threshold(threshold):
     return threshold
 
 
+def valid_workers(value):
+    """argparse `type=` validator (dnv3-val-01): rapidfuzz cdist accepts only
+    -1 (all cores) or a positive thread count; reject everything else (e.g.
+    -5, 0) with a CLI error instead of passing it straight into cdist."""
+    try:
+        iv = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"workers must be an integer, got {value!r}")
+    if iv != -1 and iv < 1:
+        raise argparse.ArgumentTypeError(
+            f"workers must be -1 (all cores) or a positive count, got {iv}")
+    return iv
+
+
 def cleanup(entry):
     s = entry.strip().lower()
     for tok in REPLACEMENTS:
@@ -63,7 +77,7 @@ def main():
     ap.add_argument("file", help="text file, one string per line")
     ap.add_argument("-t", "--threshold", type=int, default=DEFAULT_THRESHOLD,
                     help=f"max distance to report (default {DEFAULT_THRESHOLD})")
-    ap.add_argument("-w", "--workers", type=int, default=-1,
+    ap.add_argument("-w", "--workers", type=valid_workers, default=-1,
                     help="cdist worker threads (-1 = all cores)")
     args = ap.parse_args()
 

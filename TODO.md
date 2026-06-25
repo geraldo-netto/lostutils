@@ -19,7 +19,6 @@ rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-val-01 | open | low | deduplicate-by-namev3.py:66 — --workers accepts any int (e.g. -5, 0) with no validation; rapidfuzz only defines -1 (all cores) and positive counts, so out-of-range values pass straight into cdist. Reject workers < -1 with an argparse error. | option validation
 lq-val-01 | open | med | link_queue.py:2877 — startup `_ensure_worker_count(int(self.config.get("worker_count", 1)))` (and `int()` at 1963) coerce a config scalar `_normalize_config_schema` never type-checks; a hand-edited `worker_count: "abc"` raises ValueError and aborts `LinkQueueApp.__init__`. Coerce/validate numeric scalars in `_normalize_config_schema`. | STRIDE-DoS; unvalidated config scalar crashes startup
 mkp-input-01 | open | med | minikeypad.py:1433 — `_load_profile` stores `int(item["layer"])`/`int(item["key_id"])` from untrusted JSON with no range check; an entry with layer∉{1,2,3} or key_id out of range is kept in `_assignments`, never shown by `_refresh_key_map`, yet still replayed to the device by `_write_all`. Validate ranges and skip/reject out-of-range entries on load. | validate-before-use
 
