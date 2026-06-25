@@ -3852,8 +3852,11 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         self._refresh_queue_list()
         for it in removed:
             self._log(f"[queue] removed {it.url}")
-        if removed:  # pragma: no cover - withdrawn-root Tk early-exit
-            self._save_state()
+        if removed:
+            # lq-rel-01: use the debounced save (like _on_clear_queue) so a
+            # large queue isn't serialized + fsync-rename'd synchronously on the
+            # UI thread, stalling the GUI on every Delete.
+            self._request_save_state()
 
     def _remove_pending_urls(self, urls: "list[str]") -> "list[QueueItem]":
         """Remove pending items whose URL is in `urls`, atomically under the

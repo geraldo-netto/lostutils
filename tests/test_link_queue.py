@@ -3837,3 +3837,22 @@ def test_normalize_config_keeps_valid_numeric_strings():
     cfg = {"protocols": {}, "worker_count": "4"}
     link_queue.ConfigStore._normalize_config_schema(cfg)
     assert cfg["worker_count"] == 4
+
+
+def test_remove_selected_uses_debounced_save(app, monkeypatch):
+    """lq-rel-01: Delete uses the debounced save path, not a synchronous
+    _save_state on the UI thread."""
+    stop_bg_workers(app)
+    calls = {"sync": 0, "debounced": 0}
+    monkeypatch.setattr(app, "_save_state",
+                        lambda: calls.__setitem__("sync", calls["sync"] + 1))
+    monkeypatch.setattr(app, "_request_save_state",
+                        lambda: calls.__setitem__("debounced", calls["debounced"] + 1))
+    with app._dispatch_cv:
+        app.queue_items[:] = [q("http://a/1"), q("http://b/2")]
+    app._do_refresh_queue_list()
+    rows = app.queue_tree.get_children()
+    app.queue_tree.selection_set(rows[0])
+    app._on_remove_selected()
+    assert calls["debounced"] == 1
+    assert calls["sync"] == 0
