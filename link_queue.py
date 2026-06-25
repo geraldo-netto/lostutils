@@ -929,14 +929,17 @@ class Dispatcher:
             # now an unprocessed backlog (and, since this fix, an in-flight item
             # pulled off the queue but not yet finished) was silently lost on
             # shutdown. In-flight items are persisted FIRST so a restart retries
-            # them ahead of the still-queued backlog. Read the deque under the
-            # queue's own mutex so we don't consume items a consumer may still
-            # be about to run; read the in-flight slots under _immediate_lock.
+            # them ahead of the still-queued backlog.
+            # lq-conc-10: read the in-flight slots AND the queue backlog under a
+            # single _immediate_lock hold (nesting the queue's own mutex). The
+            # consumer reserves an item (get + publish) under the same lock, so
+            # an item pulled off the queue but not yet recorded in-flight can
+            # never fall into the gap between two separate snapshot sections.
             with self._immediate_lock:
                 inflight = [it for it in self._immediate_current.values()
                             if it is not None]
-            with self._immediate_q.mutex:
-                backlog = list(self._immediate_q.queue)
+                with self._immediate_q.mutex:
+                    backlog = list(self._immediate_q.queue)
             immediate = [self._serialize_item(it) for it in inflight + backlog]
             # Use a tempfile in the same directory as STATE_FILE so the
             # final os.replace() stays on the same filesystem and is atomic.
@@ -1293,15 +1296,25 @@ class Dispatcher:
             # swap self._immediate_q between the get and the task_done; calling
             # task_done on the re-read (new) queue raises "task_done() called too
             # many times" and kills the consumer.
+            # lq-conc-10: reserve the item — remove it from the queue AND publish
+            # it to _immediate_current — atomically under _immediate_lock, so
+            # _save_state's snapshot (which holds the same lock) never sees an
+            # item that is in neither the queue nor the in-flight slots. A
+            # non-blocking get_nowait keeps the lock hold short; an idle consumer
+            # waits outside the lock.
             work_q = self._immediate_q
-            try:
-                item = work_q.get(timeout=0.25)
-            except queue.Empty:
+            with self._immediate_lock:
+                try:
+                    item = work_q.get_nowait()
+                except queue.Empty:
+                    item = None
+                else:
+                    self._immediate_current[cid] = item
+            if item is None:
                 if self.stop_event.is_set():
                     return
+                time.sleep(0.05)
                 continue
-            with self._immediate_lock:
-                self._immediate_current[cid] = item
             try:
                 self._run_immediate_item(item)
             except Exception as e:

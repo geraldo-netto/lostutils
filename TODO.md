@@ -49,7 +49,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-conc-10 | open | med | link_queue.py:935 — `_save_state` snapshots `inflight` (under `_immediate_lock`) and the immediate `backlog` (under `_immediate_q.mutex`) in two separate lock sections; a consumer that `work_q.get()`s then publishes to `_immediate_current` in the gap leaves an in-flight immediate item in neither snapshot, losing it. Snapshot both under a single `_immediate_lock` hold (consumer also takes `_immediate_lock` around get+publish). | torn multi-lock snapshot, narrow data-loss window
 
 ## multithreading
 
