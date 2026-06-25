@@ -1109,13 +1109,21 @@ class Dispatcher:
         # of being silently lost. Done first so consumers can start draining
         # while the pending queue is restored.
         immediate = self._load_immediate_items(state)
-        for it in immediate:
-            self._dispatch_immediate(it)
+        # lq-rel-10: count items actually accepted — _dispatch_immediate silently
+        # drops on a full bounded queue, so logging len(immediate) overstated the
+        # restore. Report the accepted count and warn on any drops.
+        restored_immediate = sum(1 for it in immediate if self._dispatch_immediate(it))
+        dropped_immediate = len(immediate) - restored_immediate
+        if dropped_immediate:
+            self._log(
+                f"[warn] {dropped_immediate} immediate item(s) dropped on "
+                f"restore (immediate queue full)"
+            )
         items = in_flight + pending  # in-flight retries go FIRST
         if not items:
-            if immediate:
+            if restored_immediate:
                 self._log(
-                    f"[restored] {len(immediate)} immediate item(s) from "
+                    f"[restored] {restored_immediate} immediate item(s) from "
                     f"previous session"
                 )
             return
@@ -1125,10 +1133,10 @@ class Dispatcher:
             self._dispatch_cv.notify_all()
         self._refresh_queue_list()
         self._update_status()
-        if immediate:
+        if restored_immediate:
             self._log(
-                f"[restored] {len(immediate)} immediate item(s) from previous "
-                f"session"
+                f"[restored] {restored_immediate} immediate item(s) from "
+                f"previous session"
             )
         if in_flight and pending:
             self._log(
@@ -1399,7 +1407,7 @@ class Dispatcher:
         self._immediate_q = new_q
         return dropped
 
-    def _dispatch_immediate(self, item: QueueItem) -> None:
+    def _dispatch_immediate(self, item: QueueItem) -> bool:
         """Hand an immediate-mode item to the bounded pool (conc-02). Immediate
         items are fire-and-forget and intentionally not deduplicated — a user
         who wanted exactly one fire would have used a queue protocol. The number
@@ -1428,9 +1436,10 @@ class Dispatcher:
                 f"[immediate dropped] {item.protocol}: {item.url} "
                 f"(immediate queue full, maxsize={maxsize})"
             )
-            return
+            return False  # lq-rel-10: report the drop so callers can count it
         self._log(f"[immediate] {item.protocol}: {item.url}")
         self._note_immediate_depth()
+        return True
 
     def _note_immediate_depth(self) -> None:
         """lq-obs-02: surface immediate-queue backlog when it exceeds the pool

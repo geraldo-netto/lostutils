@@ -95,7 +95,6 @@ dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None]
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-rel-10 | open | low | link_queue.py:1111 — `_restore_queue_from_state` re-dispatches persisted immediate items via `_dispatch_immediate` (which silently drops on `queue.Full`) but logs `len(immediate)` as "restored", overstating the count when the restored backlog exceeds `immediate_queue_maxsize`. Have `_dispatch_immediate` return accepted/dropped and log only the accepted count plus a "[warn] N immediate dropped on restore (queue full)" line. | silent drop + miscount on restore
 
 ## state machine integrity
 

@@ -3937,3 +3937,24 @@ def test_resize_immediate_pool_resets_depth_warned_on_grow(headless_dispatcher):
     disp.config["immediate_worker_count"] = 4      # grow the pool
     disp._resize_immediate_pool()
     assert disp._immediate_depth_warned is False
+
+
+def test_restore_immediate_logs_accepted_not_total_on_full(headless_dispatcher, monkeypatch):
+    """lq-rel-10: when the immediate queue is full, restore logs the ACCEPTED
+    count and warns on drops, not the full backlog size."""
+    disp = headless_dispatcher
+    state = {"immediate": [disp._serialize_item(q("magnet:?a")),
+                           disp._serialize_item(q("magnet:?b"))]}
+    with open(link_queue.STATE_FILE, "w", encoding="utf-8") as fh:
+        link_queue._yaml_dump(state, fh, allow_unicode=True)
+    # First dispatch accepted, second dropped.
+    results = iter([True, False])
+    monkeypatch.setattr(disp, "_dispatch_immediate", lambda it: next(results))
+    logs = []
+    monkeypatch.setattr(disp, "_log", logs.append)
+    monkeypatch.setattr(disp, "_refresh_queue_list", lambda: None)
+    monkeypatch.setattr(disp, "_update_status", lambda: None)
+    disp._restore_queue_from_state()
+    assert any("1 immediate item(s) from previous session" in m for m in logs)
+    assert any("1 immediate item(s) dropped on restore" in m for m in logs)
+    assert not any("2 immediate item(s) from previous session" in m for m in logs)
