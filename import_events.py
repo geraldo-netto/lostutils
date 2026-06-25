@@ -3063,7 +3063,6 @@ def _run_file_workers(
     # a ceiling repeated stalls fan out unbounded threads. Allow at most one
     # pool's worth of replacements.
     max_replacements = workers
-    replacements_started = 0
     # ie-rel-10: set when a worker stalls in the native LLM call so the result
     # loop can give up (return partials) instead of waiting forever on a result
     # that will never arrive.
@@ -3086,20 +3085,26 @@ def _run_file_workers(
                 daemon=True,
             )
             threads.append(thread)
-        thread.start()
+            # ie-robust-10: start inside the lock so a concurrent on_llm_stall
+            # counting live workers sees this one as alive (no append-vs-start
+            # race that could overshoot the cap).
+            thread.start()
         if reason:
             logger.warning("Started replacement file worker %s after %s.", name, reason)
 
     def on_llm_stall(label: str, elapsed: float, deadline: float) -> None:
-        nonlocal replacements_started
         stall_event.set()
+        # ie-robust-10: cap on CONCURRENT live workers, not cumulative spawns —
+        # a replacement that finishes (draining LLM-free files) frees its slot,
+        # so transient stalls don't permanently exhaust the budget. A worker
+        # wedged in the native call still counts as alive, bounding the fan-out.
         with threads_lock:
-            if replacements_started >= max_replacements:
+            live = sum(1 for t in threads if t.is_alive())
+            if live >= workers + max_replacements:
                 logger.warning(
-                    "LLM stall in %s but replacement-worker cap (%d) reached; "
-                    "not spawning another.", label, max_replacements)
+                    "LLM stall in %s but live-worker cap (%d) reached; "
+                    "not spawning another.", label, workers + max_replacements)
                 return
-            replacements_started += 1
         start_worker(
             f"LLM stall in {label} ({elapsed:.0f}s >= {int(deadline)}s); "
             "the stalled extraction remains running unbounded"

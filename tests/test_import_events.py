@@ -4391,3 +4391,4 @@ def test_run_file_workers_returns_partials_on_unrecoverable_stall(tmp_path, monk
     finally:
         wedge.set()
     assert [e["source"] for e in events] == ["event-1.txt"]  # event-0 abandoned
+
