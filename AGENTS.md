@@ -30,6 +30,8 @@ This file defines the expected behavior and usage model for AI agents working in
 - Document assumptions, constraints, and design intent in comments or commit notes when they matter.
 - Do not add comments that restate what the code plainly says. Comment only the non-obvious: why a choice was made, a constraint, or a subtle edge case. Delete redundant comments rather than write them.
 - Prefer explicit, maintainable solutions over clever shortcuts.
+- Never cap or wrap lines in Markdown (`.md`) files. Let prose run on a single line per
+  paragraph; do not hard-wrap to a column width.
 - Propose business/design patterns and DDD only when they improve clarity or structure.
 - ALWAYS record review findings in `TODO.md` — never report them only in chat. Any time you
   scan, review, audit, or "look for issues" (not just major changes), add each finding to the
