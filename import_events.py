@@ -3425,7 +3425,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--mlock", "--llm-mlock", dest="llm_mlock", action="store_true",
                         default=defaults.llm_mlock,
                         help=("Ask llama.cpp to lock model memory only when the estimated "
-                              "GGUF footprint is at most 70% of environment memory."))
+                              "GGUF footprint is at most 70%% of environment memory."))
     parser.add_argument("--max-content-chars", type=int, default=None,
                         help=("Max text characters sent to the LLM per file "
                               "(default: computed from --llm-context)."))
