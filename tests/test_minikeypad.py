@@ -1560,6 +1560,15 @@ def test_load_profile_rejects_missing_version(app, tmp_path):
         app._load_profile(str(bad))
 
 
+def test_load_profile_rejects_non_object(app, tmp_path):
+    """A top-level JSON array/scalar must fail closed, not crash (mkp-rel-02)."""
+    for payload in ("[]", "42", '"str"', "null"):
+        bad = tmp_path / "nonobj.json"
+        bad.write_text(payload)
+        with pytest.raises(ValueError):
+            app._load_profile(str(bad))
+
+
 def test_load_profile_rejects_out_of_range_layer(app, tmp_path):
     """layer outside {1,2,3} is rejected, not stored invisibly (mkp-input-01)."""
     import json as _json

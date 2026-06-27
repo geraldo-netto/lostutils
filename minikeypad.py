@@ -1460,6 +1460,12 @@ class App(tk.Tk):
         """Replace the session map from a JSON profile. Returns the count."""
         with open(path, encoding="utf-8") as fh:
             payload = json.load(fh)
+        # mkp-rel-02: a top-level JSON array/scalar has no .get(), which would
+        # raise AttributeError — not in _load_dialog's caught set — and crash
+        # the handler. Reject a non-object payload as a ValueError so it
+        # surfaces as "Load failed" like every other malformed profile.
+        if not isinstance(payload, dict):
+            raise ValueError("profile must be a JSON object")
         # mkp-rob-01: fail closed on an unknown/future format instead of
         # silently loading mismatched fields and pushing wrong bytes to the
         # device. _load_dialog surfaces the ValueError as "Load failed".
