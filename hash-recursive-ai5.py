@@ -1899,10 +1899,20 @@ def main():
                     _elided = dump_overflow.get(_key, 0)
                     if _elided > 0:
                         _fh.write(f"{_digest} +{_elided} more (alias-cap)\n")
-                hashes_state["fh"].close()
             except OSError as exc:
-                _log_line(f"WARNING: closing {args.hashes_file} failed: {exc}",
+                _log_line(f"WARNING: writing {args.hashes_file} failed: {exc}",
                           False)
+            finally:
+                # hr-rob-01: a second Ctrl-C landing inside the write loop above
+                # raises KeyboardInterrupt (not OSError); without this finally
+                # the close would be skipped and the fd leaked. Close here so
+                # the fd is released on every exit path.
+                try:
+                    hashes_state["fh"].close()
+                except OSError as exc:
+                    _log_line(
+                        f"WARNING: closing {args.hashes_file} failed: {exc}",
+                        False)
         # hr-rel-20: always restore the previous SIGINT handler so a
         # second run (or a host that imports and calls main()) gets a
         # clean signal stack. `signal.getsignal` returns None when the

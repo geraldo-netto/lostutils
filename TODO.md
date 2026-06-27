@@ -96,7 +96,6 @@ dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None]
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-rob-01 | open | low | hash-recursive-ai5.py:1882 — the final hashes-dump flush+close sits in a finally's inner `try/except OSError`; a second Ctrl-C landing inside `_fh.write()` raises KeyboardInterrupt, skips `close()` at line 1894, leaking the fd during teardown. Wrap `close()` in its own finally or widen the except. | teardown-only; OS reclaims fd, low impact but file tracks this class meticulously
 
 ## state machine integrity
 

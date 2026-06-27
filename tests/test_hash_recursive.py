@@ -1788,6 +1788,52 @@ def test_main_hashes_close_failure_warns(tmp_path, monkeypatch, capsys):
     assert "closing" in err and "failed" in err
 
 
+def test_main_hashes_closed_when_dump_write_interrupted(tmp_path, monkeypatch):
+    # hr-rob-01: a second Ctrl-C landing inside the dump write loop raises
+    # KeyboardInterrupt (not OSError); the fd must still be closed by the
+    # finally rather than leaked.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    out = tmp_path / "hashes.txt"
+    digest = "ab" * 32
+    closed = {"n": 0}
+    real_open = open
+
+    class _FH:
+        def __init__(self, f):
+            self._f = f
+
+        def fileno(self):
+            return self._f.fileno()
+
+        def write(self, s):
+            raise KeyboardInterrupt             # 2nd Ctrl-C mid-write
+
+        def close(self):
+            closed["n"] += 1
+            self._f.close()
+
+    def fake_open(path, *a, **kw):
+        if str(path) == str(out):
+            return _FH(real_open(path, *a, **kw))
+        return real_open(path, *a, **kw)
+
+    def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
+             cancel_event=None, on_hashed=None, on_stage_progress=None,
+             on_composite=None):
+        list(files)
+        if on_walk_done is not None:
+            on_walk_done()
+        on_hashed(1, 1, digest, (1, 1), {(1, 1): [str(tmp_path / "a.bin")]})
+
+    monkeypatch.setattr(hr, "find_duplicate_groups", stub)
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    with pytest.raises(KeyboardInterrupt):
+        hr.main()
+    assert closed["n"] == 1                      # fd closed despite KI mid-write
+
+
 def test_main_hashes_file_open_failure_warns(tmp_path, monkeypatch, capsys):
     # hr-log-02: an unwritable dump path warns once and does not abort.
     (tmp_path / "a.bin").write_bytes(b"x")
