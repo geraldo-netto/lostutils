@@ -1768,48 +1768,89 @@ def _calendar_hierarchy_lines(text: str) -> List[str]:
     return [line for line in out if line]
 
 
+class _TableState:
+    """Mutable scan state for `_calendar_table_lines` (ie-cx-01)."""
+
+    def __init__(self) -> None:
+        self.active_order: Tuple[str, ...] = ()
+        self.pending_order: Tuple[str, ...] = ()
+        self.pending_start = ""
+        self.out: List[str] = []
+
+
+def _table_handle_header(line: str, st: _TableState, year: Optional[int]) -> bool:
+    header_order = _table_header_order(line)
+    if not header_order:
+        return False
+    st.active_order, st.pending_order, st.pending_start = header_order, (), ""
+    for dated, title in _table_rows_from_line(
+            _table_data_after_header(line), st.active_order, year):
+        if title:
+            st.out.append(dated)
+    return True
+
+
+def _table_handle_pending_date(line: str, st: _TableState, year: Optional[int]) -> bool:
+    date_order = _table_date_order(line)
+    if not date_order:
+        return False
+    parses_as_row = _split_table_date(line, st.active_order or date_order, year)
+    if _is_table_activity_header(line) or parses_as_row is not None:
+        return False
+    st.pending_order = date_order
+    return True
+
+
+def _table_handle_promote(line: str, st: _TableState, year: Optional[int]) -> bool:
+    if not (st.pending_order and _is_table_activity_header(line)):
+        return False
+    st.active_order, st.pending_order, st.pending_start = st.pending_order, (), ""
+    return True
+
+
+def _table_handle_pending_start(line: str, st: _TableState, year: Optional[int]) -> bool:
+    if not st.pending_start:
+        return False
+    st.out.append(f"{st.pending_start} - {line}")
+    st.pending_start = ""
+    return True
+
+
+def _table_handle_rows(line: str, st: _TableState, year: Optional[int]) -> bool:
+    # Terminal handler: consumes the line whether or not it yields rows.
+    if not st.active_order:
+        return True
+    rows = _table_rows_from_line(line, st.active_order, year)
+    if not rows:
+        return True
+    if len(rows) == 1 and not rows[0][1]:
+        dated, _title = rows[0]
+        st.pending_start = dated.split(" - ", 1)[0]
+        return True
+    st.out.extend(dated for dated, title in rows if title)
+    return True
+
+
+_TABLE_HANDLERS = (
+    _table_handle_header,
+    _table_handle_pending_date,
+    _table_handle_promote,
+    _table_handle_pending_start,
+    _table_handle_rows,
+)
+
+
 def _calendar_table_lines(text: str) -> List[str]:
     year = _calendar_document_year(text)
-    active_order: Tuple[str, ...] = ()
-    pending_order: Tuple[str, ...] = ()
-    pending_start = ""
-    out: List[str] = []
+    st = _TableState()
     for raw in text.splitlines():
         line = " ".join(raw.split())
         if not line:
             continue
-        header_order = _table_header_order(line)
-        if header_order:
-            active_order, pending_order, pending_start = header_order, (), ""
-            for dated, title in _table_rows_from_line(
-                    _table_data_after_header(line), active_order, year):
-                if title:
-                    out.append(dated)
-            continue
-        date_order = _table_date_order(line)
-        parses_as_row = (_split_table_date(line, active_order or date_order, year)
-                         if date_order else None)
-        if date_order and not _is_table_activity_header(line) and parses_as_row is None:
-            pending_order = date_order
-            continue
-        if pending_order and _is_table_activity_header(line):
-            active_order, pending_order, pending_start = pending_order, (), ""
-            continue
-        if pending_start:
-            out.append(f"{pending_start} - {line}")
-            pending_start = ""
-            continue
-        if not active_order:
-            continue
-        rows = _table_rows_from_line(line, active_order, year)
-        if not rows:
-            continue
-        if len(rows) == 1 and not rows[0][1]:
-            dated, _title = rows[0]
-            pending_start = dated.split(" - ", 1)[0]
-            continue
-        out.extend(dated for dated, title in rows if title)
-    return out
+        for handler in _TABLE_HANDLERS:
+            if handler(line, st, year):
+                break
+    return st.out
 
 
 def _dedupe_lines(lines: List[str]) -> List[str]:
