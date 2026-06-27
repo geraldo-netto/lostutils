@@ -188,7 +188,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-doc-01 | open | low | link_queue.py:19 — module docstring says config is persisted to `~/.link_queue_config.json`, but the current runtime uses `link_queue_config.yaml` under `$XDG_CONFIG_HOME/link_queue` or `~/.config/link_queue`, with script-dir reuse for pre-existing files and legacy JSON migration. | README now documents the current runtime path; update the in-code docstring separately.
 
 ## UI / UX
 

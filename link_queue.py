@@ -16,7 +16,9 @@ Command templates support the following placeholders:
     {url_quoted}   the URL, shell-quoted (recommended when shell=True)
     {protocol}     the URL scheme (http, https, ftp, magnet, ...)
 
-Config is persisted to ~/.link_queue_config.json.
+Config is persisted as YAML to $XDG_CONFIG_HOME/link_queue/link_queue_config.yaml
+(or ~/.config/link_queue/link_queue_config.yaml). A legacy
+~/.link_queue_config.json is migrated to YAML once on first run.
 """
 
 from __future__ import annotations
