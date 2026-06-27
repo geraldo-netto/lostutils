@@ -70,6 +70,8 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ie-cx-01 | open | med | import_events.py:1771 — `_calendar_table_lines` cyclomatic complexity 20 (radon C), exceeds the ≤10 limit; extract the column-sizing / row-formatting branches into helpers. | radon cc=20
+ie-cx-02 | open | med | import_events.py:3055 — `_run_file_workers` cyclomatic complexity 23 (radon D), exceeds the ≤10 limit; split thread setup, result collection, and the four except handlers into helpers. | radon cc=23
 
 ## code duplication
 
@@ -89,11 +91,14 @@ dnp-rel-02 | open | med | dedupl_numpy.py:13 — PATH_OFFSET=26 is hardcoded ("p
 dnp-rel-03 | open | med | dedupl_numpy.py:21-24 — mmap is used as the np.frombuffer source after the file handle closes at with-exit and is never closed (leak); an empty file also makes mmap raise. Keep the file open (or copy), close mm, and guard zero-length files. | resource
 dnp-rel-04 | open | low | dedupl_numpy.py:25 — a file whose last line lacks a trailing newline drops that final record (no 0x0A, so line_starts/n_lines never include it); confirmed 0/1 on a 2-duplicate file. Append a virtual line start at EOF when data[-1] != 0x0A. | opposite of the line-36 overrun case
 dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None] + arange(32) assumes every line is ≥32+PATH_OFFSET bytes with the hash exactly 32 chars at offset 0; a short/blank/final line reads across the newline or past buffer end, corrupting grouping. Validate line length / derive hash width. | array-bounds
+mkp-rel-02 | open | low | minikeypad.py:1460 — `_load_profile` calls `payload.get("version")` right after `json.load`; a profile whose top level is a JSON array/scalar (not an object) raises AttributeError, which the `_load_dialog` handler at line 1503 does NOT catch (it lists OSError/ValueError/TypeError/KeyError/JSONDecodeError), so a malformed profile crashes the handler instead of reporting "Load failed". Guard with `isinstance(payload, dict)` or add AttributeError to the except. | malformed-profile crash
 
 ## robustness / recovery
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+hr-rob-01 | open | low | hash-recursive-ai5.py:1882 — the final hashes-dump flush+close sits in a finally's inner `try/except OSError`; a second Ctrl-C landing inside `_fh.write()` raises KeyboardInterrupt, skips `close()` at line 1894, leaking the fd during teardown. Wrap `close()` in its own finally or widen the except. | teardown-only; OS reclaims fd, low impact but file tracks this class meticulously
+hr-rob-02 | open | low | hash-recursive-ai5.py:563 — `os.open` succeeds then `os.fdopen` wraps the fd; if fdopen raises (e.g. MemoryError) the `except OSError` at line 580 does not close the raw fd, leaking one fd per failure across a long multi-file run. Close the fd in the except, or use try/finally around fdopen. | fd leak on rare fdopen failure
 
 ## state machine integrity
 
@@ -115,13 +120,13 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-_clean — `ruff check *.py` reports no issues across all root files (rescan 2026-06-25)._
+_clean — `ruff check *.py` reports no issues across all root files (rescan 2026-06-27)._
 
 ## pylance / pyright (type check)
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-_clean — `pyright *.py` reports 0 errors / 0 warnings across all root files (rescan 2026-06-25)._
+_clean — `pyright *.py` reports 0 errors / 0 warnings across all root files (rescan 2026-06-27)._
 
 ## observability
 

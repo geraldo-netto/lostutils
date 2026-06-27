@@ -592,14 +592,17 @@ def test_connect_success_with_endpoint(monkeypatch):
     assert any("Connected" in m for m in logs)
 
 
-def test_connect_interface_fallback(monkeypatch):
+def test_connect_interface_fallback(monkeypatch, caplog):
     dev = FakeUsbDev(cfg={(0, 0): FakeIntf(0)})        # no (1,0) -> fallback
     usb, _ = make_usb(find_dev=dev, ep=FakeEP())
     _install_usb(monkeypatch, usb)
     d = minikeypad.KeypadDevice()
-    assert d.connect() is True
+    with caplog.at_level("WARNING", logger="minikeypad"):
+        assert d.connect() is True
     assert d.intf is not None
     assert d.intf.bInterfaceNumber == 0
+    # mkp-obs-01: the fallback to interface 0 must be surfaced, not silent.
+    assert any("falling back to interface 0" in r.message for r in caplog.records)
 
 
 def test_connect_control_path_when_no_endpoint(monkeypatch):

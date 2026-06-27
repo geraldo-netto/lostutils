@@ -205,7 +205,13 @@ class KeypadDevice:
         try:
             return cfg[(HID_INTERFACE, 0)]
         except (KeyError, IndexError):
-            return cfg[(0, 0)]  # fall back to first interface
+            # mkp-obs-01: surface the fallback so a device whose HID interface
+            # number differs from HID_INTERFACE is diagnosable instead of
+            # silently claiming interface 0.
+            LOG.warning(
+                "HID interface %d not found; falling back to interface 0",
+                HID_INTERFACE)
+            return cfg[(0, 0)]
 
     def still_connected(self):
         """Cheap liveness check; drops state if the device vanished."""
