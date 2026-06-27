@@ -561,7 +561,15 @@ def _hash_file_windows(path, windows, config=None):
                for w in windows]
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        with os.fdopen(fd, "rb", buffering=0) as f:
+        try:
+            f = os.fdopen(fd, "rb", buffering=0)
+        except BaseException:
+            # hr-rob-02: fdopen never took ownership of the raw fd, so the
+            # `with` below never runs to close it; close it here so a fdopen
+            # failure can't leak one fd per file across a long run.
+            os.close(fd)
+            raise
+        with f:
             h = blake3.blake3()
             for window in windows:
                 f.seek(window.offset, window.whence)

@@ -594,6 +594,23 @@ def test_hash_file_windows_other_oserror_warns(monkeypatch, capsys):
     assert "hash failed" in err and "EACCES" in err
 
 
+def test_hash_file_windows_fdopen_failure_closes_fd(monkeypatch):
+    # hr-rob-02: os.open succeeds but os.fdopen fails; the raw fd must be
+    # closed by us, since the `with` that would close it never runs.
+    closed = []
+    monkeypatch.setattr(hr.os, "open", lambda *a, **k: 4242, raising=False)
+
+    def boom(*a, **k):
+        raise OSError("fdopen boom")
+
+    monkeypatch.setattr(hr.os, "fdopen", boom, raising=False)
+    monkeypatch.setattr(hr.os, "close", lambda fd: closed.append(fd),
+                        raising=False)
+    out = hr._hash_file_windows("/whatever", [(0, 10, hr.os.SEEK_SET)])
+    assert out is None
+    assert closed == [4242]
+
+
 # --- hr-conc-02: ENOENT/ESTALE mid-read counts as vanished, not error ------
 
 def test_tick_vanished_increments_counter():
