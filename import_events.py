@@ -3093,6 +3093,83 @@ def _feed_file_queue(
                         break
 
 
+def _join_workers(
+    threads: List[threading.Thread],
+    threads_lock: threading.Lock,
+    timeout: float,
+) -> None:
+    with threads_lock:
+        running = list(threads)
+    for thread in running:
+        thread.join(timeout=timeout)
+
+
+def _shutdown_workers(
+    threads: List[threading.Thread],
+    threads_lock: threading.Lock,
+    work_queue: queue.Queue,
+    workers: int,
+) -> None:
+    """Drain replacement workers and bounded-join the pool (ie-cx-02)."""
+    with threads_lock:
+        extra_workers = max(0, len(threads) - workers)
+        running_threads = list(threads)
+    for _index in range(extra_workers):
+        work_queue.put(None)
+    for thread in running_threads:
+        # ie-conc-01: bounded join — a worker wedged in a native LLM call must
+        # not hang shutdown; its result is already collected and it is a daemon.
+        thread.join(timeout=WORKER_FINAL_JOIN_SECONDS)
+        if thread.is_alive():
+            logger.warning(
+                "Worker %s still running at shutdown (likely wedged in a native "
+                "call); abandoning it as a daemon thread.", thread.name)
+
+
+def _collect_file_results(
+    done_queue: queue.Queue,
+    stall_event: threading.Event,
+    stop_event: threading.Event,
+    results: Dict[int, List[Dict[str, Any]]],
+) -> None:
+    """Drain `done_queue` into `results` (ie-cx-02).
+
+    Mutates `results` in place so the caller keeps the partials gathered so
+    far if a worker re-raises. Raises the first worker exception it sees."""
+    expected: Optional[int] = None
+    completed = 0
+    last_progress = time.monotonic()
+    while expected is None or completed < expected:
+        try:
+            index, events, exc = done_queue.get(timeout=1.0)
+        except queue.Empty:
+            # ie-rel-10: a worker wedged in the uncancellable native LLM call
+            # never produces a result, so without this bound the loop waits
+            # forever. Once a stall is flagged and NO completion has arrived
+            # for the give-up window (live workers still draining LLM-free
+            # files keep resetting it), abandon the wedged work and return
+            # what we have.
+            if (stall_event.is_set() and
+                    time.monotonic() - last_progress > WORKER_STALL_GIVEUP_SECONDS):
+                logger.error(
+                    "LLM stall unrecoverable: %d/%s file(s) done before the "
+                    "remaining worker(s) wedged in an uncancellable native "
+                    "call; returning partial results.", completed, expected)
+                stop_event.set()
+                return
+            continue
+        last_progress = time.monotonic()
+        if index is None:
+            expected = events
+            if exc is not None:
+                raise exc
+            continue
+        completed += 1
+        if exc is not None:
+            raise exc
+        results[index] = events
+
+
 def _run_file_workers(
     files: Iterable[Path],
     runtime_config: ModelConfig,
@@ -3173,78 +3250,24 @@ def _run_file_workers(
         daemon=True,
     )
     feeder.start()
-    expected: Optional[int] = None
-    completed = 0
-    last_progress = time.monotonic()
     try:
-        while expected is None or completed < expected:
-            try:
-                index, events, exc = done_queue.get(timeout=1.0)
-            except queue.Empty:
-                # ie-rel-10: a worker wedged in the uncancellable native LLM call
-                # never produces a result, so without this bound the loop waits
-                # forever. Once a stall is flagged and NO completion has arrived
-                # for the give-up window (live workers still draining LLM-free
-                # files keep resetting it), abandon the wedged work and return
-                # what we have.
-                if (stall_event.is_set() and
-                        time.monotonic() - last_progress > WORKER_STALL_GIVEUP_SECONDS):
-                    logger.error(
-                        "LLM stall unrecoverable: %d/%s file(s) done before the "
-                        "remaining worker(s) wedged in an uncancellable native "
-                        "call; returning partial results.", completed, expected)
-                    stop_event.set()
-                    break
-                continue
-            last_progress = time.monotonic()
-            if index is None:
-                expected = events
-                if exc is not None:
-                    raise exc
-                continue
-            completed += 1
-            if exc is not None:
-                raise exc
-            results[index] = events
+        _collect_file_results(done_queue, stall_event, stop_event, results)
     except ModelUnavailableError as model_exc:
         # ie-robust-01: preserve the events gathered before the model failed so
         # the caller can emit a partial result before aborting.
         stop_event.set()
-        with threads_lock:
-            running_threads = list(threads)
-        for thread in running_threads:
-            thread.join(timeout=0.2)
+        _join_workers(threads, threads_lock, 0.2)
         model_exc.partial_events = [
             event for index in sorted(results) for event in results[index]]
         raise
-    except KeyboardInterrupt:
-        stop_event.set()
-        with threads_lock:
-            running_threads = list(threads)
-        for thread in running_threads:
-            thread.join(timeout=0.2)
-        raise
     except BaseException:
+        # Covers KeyboardInterrupt and every other worker re-raise identically:
+        # stop the pool, briefly join, and propagate.
         stop_event.set()
-        with threads_lock:
-            running_threads = list(threads)
-        for thread in running_threads:
-            thread.join(timeout=0.2)
+        _join_workers(threads, threads_lock, 0.2)
         raise
     feeder.join()
-    with threads_lock:
-        extra_workers = max(0, len(threads) - workers)
-        running_threads = list(threads)
-    for _index in range(extra_workers):
-        work_queue.put(None)
-    for thread in running_threads:
-        # ie-conc-01: bounded join — a worker wedged in a native LLM call must
-        # not hang shutdown; its result is already collected and it is a daemon.
-        thread.join(timeout=WORKER_FINAL_JOIN_SECONDS)
-        if thread.is_alive():
-            logger.warning(
-                "Worker %s still running at shutdown (likely wedged in a native "
-                "call); abandoning it as a daemon thread.", thread.name)
+    _shutdown_workers(threads, threads_lock, work_queue, workers)
     return [event for index in sorted(results) for event in results[index]]
 
 

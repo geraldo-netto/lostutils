@@ -70,7 +70,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cx-02 | open | med | import_events.py:3055 — `_run_file_workers` cyclomatic complexity 23 (radon D), exceeds the ≤10 limit; split thread setup, result collection, and the four except handlers into helpers. | radon cc=23
 
 ## code duplication
 
