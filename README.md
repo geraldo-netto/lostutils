@@ -8,6 +8,7 @@ There is no repository-wide requirements file. Install only the third-party pack
 
 | Script | Purpose | Non-stdlib dependencies |
 | --- | --- | --- |
+| `bookmark-tidy.py` | Merge Chrome, Edge, Firefox, and Netscape bookmark exports, dedupe URLs, preserve immutable folders, and recategorize mutable links with a local llama.cpp model. | Optional `llama-cpp-python` for categorization |
 | `deduplicate-by-namev3.py` | Find near-duplicate text lines with batched Levenshtein distance. | `numpy`, `rapidfuzz` |
 | `dedupl_numpy.py` | Fast duplicate-path extraction from a legacy fixed-width hash file. | `numpy` |
 | `hash-recursive-ai5.py` | Recursively find duplicate files with staged BLAKE3 hashing. | `blake3` |
@@ -89,6 +90,19 @@ python3 relocate_folder.py ~/.cache /mnt/large-disk/apps
 ```
 
 By default verification checks file and directory presence, sizes, symlinks, and per-file SHA-256 before deleting the moved-aside original. `--no-checksum` uses size-only verification, and `--no-verify` skips post-copy verification entirely. Use `python3 relocate_folder.py <source> --recover` to restore an orphaned `<source>.relocate-backup` left by an interrupted swap. Stop applications that hold files open under the source before running, or pass `--force` to skip the open-file precheck.
+
+## Bookmark organization
+
+### `bookmark-tidy.py`
+
+Reads one or more bookmark files or folders, deduplicates normalized URLs, preserves immutable folder/category roots, asks a local llama.cpp model to categorize the remaining bookmarks, and writes a new bookmark file:
+
+```bash
+python3 bookmark-tidy.py ~/bookmarks --model /path/to/model.gguf -o tidy-bookmarks.json
+python3 bookmark-tidy.py chrome-bookmarks.json firefox-places.sqlite --output-format netscape --immutable-root Work -o tidy-bookmarks.html
+```
+
+The default output format is Chrome bookmark JSON. `--output-format firefox` writes a Firefox backup-style JSON file, and `--output-format netscape` writes browser-importable Netscape HTML. If no input paths are supplied, the script looks for local Chrome, Edge, Chromium, and Firefox profile bookmarks. URL normalization strips fragments, default ports, tracking query parameters, `www.`, trailing slashes, and collapses `http`/`https` duplicates by default; each behavior has a matching `--keep-*` override. `llama-cpp-python` is loaded only when mutable bookmarks need categorization; pass `--auto-install-llama` to let the script install it with pip if it is missing.
 
 ## GUI tools
 
