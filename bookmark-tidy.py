@@ -665,12 +665,24 @@ def _normalized_key_url(display_url: str, options: NormalizeOptions) -> str:
 
 def _normalized_netloc(parsed: Any, options: NormalizeOptions) -> str:
     host = parsed.hostname or ""
+    if not options.lowercase_host:
+        host = _raw_host_part(parsed) or host
     host = host.casefold() if options.lowercase_host else host
     host = host[4:] if options.strip_www and host.startswith("www.") else host
     host_part = f"[{host}]" if ":" in host and not host.startswith("[") else host
     port = _normalized_port(parsed, options)
     auth = _url_auth_part(parsed)
     return f"{auth}{host_part}{port}"
+
+
+def _raw_host_part(parsed: Any) -> str:
+    host_port = parsed.netloc.rsplit("@", 1)[-1]
+    if host_port.startswith("["):
+        end = host_port.find("]")
+        return host_port[1:end] if end != -1 else host_port
+    if host_port.count(":") == 1:
+        return host_port.rsplit(":", 1)[0]
+    return host_port
 
 
 def _normalized_port(parsed: Any, options: NormalizeOptions) -> str:
