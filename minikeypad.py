@@ -19,11 +19,11 @@ NOT atomic.  If a write fails mid-sequence the key may be left partially
 programmed -- just press Write again to re-send the full sequence.
 
 Dependencies:
-    pip install pyusb        # and a libusb backend (libusb-1.0)
-    If pyusb is missing the app offers to install it for you on first run
-    (pip install pyusb).  Disable with --no-auto-install or
-    MINIKEYPAD_NO_AUTO_INSTALL=1.  The native libusb-1.0 backend still has to
-    come from your OS package manager.
+    pip install pyusb==1.3.1        # and a libusb backend (libusb-1.0)
+    If pyusb is missing the app starts without device access by default.
+    To opt into installing the pinned dependency at startup, pass
+    --auto-install-pyusb or set MINIKEYPAD_AUTO_INSTALL=1.  The native
+    libusb-1.0 backend still has to come from your OS package manager.
 Linux note:
     Accessing the device needs permission.  The recommended way is a udev rule
     (avoid running the whole GUI as root) -- e.g.

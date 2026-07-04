@@ -238,7 +238,6 @@ hr-dep-01 | open | low | hash-recursive-ai5.py:44 — top-level `import blake3` 
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-doc-01 | open | low | minikeypad.py:23 — the module docstring says the app "offers to install it for you on first run," implying a prompt, but `_ensure_pyusb` installs silently with no confirmation; reword to state it auto-installs (or add the prompt to match the docs). | docs-vs-behavior drift
 oze-doc-01 | open | low | organize_by_extension.py:374 — docstrings reference `:data:`ZIP_FAMILY`` (also line 250) as a runtime-extendable symbol, but no `ZIP_FAMILY` exists; it was replaced by `CONTAINER_FAMILIES` + `extra_zip_family`. Update the docstrings to the current names to remove stale cross-references. | docs-vs-code drift
 rf-doc-02 | open | low | relocate_folder.py:7 — module docstring usage example invokes `sudo python relocate.py …`, but the script is `relocate_folder.py`; the documented command as written won't run. Update the example to the real filename. | docs-vs-behavior drift
 
