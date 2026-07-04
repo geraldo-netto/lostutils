@@ -234,7 +234,6 @@ id | status | effort | description | notes
 dnp-cli-01 | open | low | dedupl_numpy.py:18 — usage text is printed to stdout (should be stderr) on the error path, and the script hand-rolls arg handling with no `--help`; migrate to argparse for a consistent CLI surface. | error output on wrong stream
 hr-cli-01 | open | low | hash-recursive-ai5.py:1683 — `args.jobs = max(1, args.jobs)` only lower-clamps; `-j 100000` spawns that many walk threads and a `ThreadPoolExecutor(max_workers=100000)`, exhausting threads/FDs. Add a sane upper clamp (e.g. multiple of cpu_count). | resource exhaustion / DoS
 ie-cli-01 | open | med | import_events.py:2450 — `--ocr-engine auto` and `both` take the identical code path (always run Paddle+Tesseract and merge); auto's documented "Paddle first, falls back to Tesseract when weak" (help at line 3523) never happens. Implement the fallback or fix the help text so the two modes differ. | docs-vs-behavior drift
-rf-cli-02 | open | med | relocate_folder.py:2122 — `--recover` dispatches to `_run_recover` before any `--dry-run` handling, so `relocate_folder.py --recover --dry-run <src>` still executes the real `rename(backup -> source)` mutation; recovery ignores `--dry-run` entirely. Guard `_run_recover` on `ns.dry_run` and print a would-recover line instead. | flag-ignored / mutation-under-dry-run
 
 ## dependency
 

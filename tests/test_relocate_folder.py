@@ -3251,6 +3251,17 @@ def test_main_recover_flag_restores(tmp_path):
     assert not rf._path_taken(backup)
 
 
+def test_main_recover_dry_run_does_not_restore(tmp_path, caplog):
+    source, backup = _make_orphan(tmp_path)
+    import logging
+    with caplog.at_level(logging.INFO):
+        rc = rf.main(["--recover", "--dry-run", str(source)])
+    assert rc == 0
+    assert backup.is_dir()
+    assert not rf._path_taken(source)
+    assert any("dry-run: would recover" in r.message for r in caplog.records)
+
+
 def test_main_recover_warns_when_dest_root_supplied(tmp_path, caplog):
     # rf-rel-03: dest_root is ignored under --recover; emit a warning.
     source, backup = _make_orphan(tmp_path)
