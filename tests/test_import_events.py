@@ -1841,6 +1841,36 @@ def test_stage_cache_key_memoizes_file_digest_until_file_changes(tmp_path, monke
     assert calls == [source, source]
 
 
+def test_stage_cache_prunes_to_configured_entry_cap(tmp_path):
+    source = tmp_path / "source.pdf"
+    source.write_text("input", encoding="utf-8")
+    cfg = import_events.ModelConfig(
+        stage_cache="on",
+        stage_cache_dir=str(tmp_path / "cache"),
+        stage_cache_max_entries=2,
+    )
+
+    for index in range(3):
+        import_events._write_stage_cache_text(
+            cfg, source, f"stage-{index}", {"index": index}, f"text {index}")
+
+    entries = list((tmp_path / "cache").glob("*.json"))
+    assert len(entries) == 2
+
+
+def test_reset_stage_cache_entries_deletes_json_only(tmp_path):
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    (cache_dir / "one.json").write_text("{}", encoding="utf-8")
+    (cache_dir / "notes.txt").write_text("keep", encoding="utf-8")
+    cfg = import_events.ModelConfig(stage_cache_dir=str(cache_dir))
+
+    assert import_events.reset_stage_cache_entries(cfg) == 1
+
+    assert not (cache_dir / "one.json").exists()
+    assert (cache_dir / "notes.txt").exists()
+
+
 def test_cached_text_stage_refresh_rewrites_cache(tmp_path):
     source = tmp_path / "source.pdf"
     source.write_text("input", encoding="utf-8")
@@ -2541,7 +2571,8 @@ def test_model_config_from_args_threads_values():
          "--paddle-ocr-device", "gpu:1", "--pdf-ocr-mode", "never", "--pdf-vision-pages", "3",
          "--tentative-events", "skip", "--no-activity-events", "keep",
          "--pdf-vision-dpi", "200", "--stage-cache", "refresh",
-         "--stage-cache-dir", "cache", "--benchmark", "--workers", "2",
+         "--stage-cache-dir", "cache", "--stage-cache-max-entries", "77",
+         "--reset-stage-cache", "--benchmark", "--workers", "2",
          "--deterministic-order"]
     )
 
@@ -2575,6 +2606,8 @@ def test_model_config_from_args_threads_values():
     assert cfg.pdf_vision_dpi == 200
     assert cfg.stage_cache == "refresh"
     assert cfg.stage_cache_dir == "cache"
+    assert cfg.stage_cache_max_entries == 77
+    assert cfg.reset_stage_cache is True
     assert cfg.benchmark is True
     assert cfg.workers == 2
     assert cfg.deterministic_order is True

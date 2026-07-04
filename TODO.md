@@ -188,7 +188,6 @@ rf-plat-01 | open | low | relocate_folder.py:239 — `os.O_DIRECTORY` is used un
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cache-01 | open | med | import_events.py:2179 — the stage cache writes one JSON per file+stage+options hash with no size cap, no eviction, and no reset hook; stale entries for prior file versions accumulate in the cache dir forever. Add a cap/LRU pruning and a documented reset. | caching-strategy invariant (cap+invalidation+reset)
 
 ## memory and cpu management
 

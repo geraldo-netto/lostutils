@@ -87,6 +87,7 @@ DEFAULT_PDF_OCR_MODE = "never"
 DEFAULT_TENTATIVE_EVENTS = "keep"
 DEFAULT_NO_ACTIVITY_EVENTS = "skip"
 DEFAULT_STAGE_CACHE = "off"
+DEFAULT_STAGE_CACHE_MAX_ENTRIES = 2048
 DEFAULT_WORKERS = 4
 DEFAULT_DETERMINISTIC_ORDER = False
 STAGE_CACHE_VERSION = 1
@@ -691,6 +692,8 @@ class ModelConfig:
     pdf_vision_dpi: int = PDF_VISION_DPI
     stage_cache: str = DEFAULT_STAGE_CACHE
     stage_cache_dir: Optional[str] = None
+    stage_cache_max_entries: int = DEFAULT_STAGE_CACHE_MAX_ENTRIES
+    reset_stage_cache: bool = False
     benchmark: bool = False
     workers: int = DEFAULT_WORKERS
     deterministic_order: bool = DEFAULT_DETERMINISTIC_ORDER
@@ -740,6 +743,8 @@ class ModelConfig:
             pdf_vision_dpi=max(36, args.pdf_vision_dpi),
             stage_cache=args.stage_cache,
             stage_cache_dir=(args.stage_cache_dir or str(cache_dir / "stage-cache")),
+            stage_cache_max_entries=max(1, args.stage_cache_max_entries),
+            reset_stage_cache=bool(args.reset_stage_cache),
             benchmark=args.benchmark,
             workers=max(1, args.workers),
             deterministic_order=args.deterministic_order,
@@ -2200,6 +2205,53 @@ def _stage_cache_path(config: ModelConfig, cache_key: str) -> Path:
     return _stage_cache_root(config) / f"{cache_key}.json"
 
 
+def _stage_cache_entries(root: Path) -> List[Path]:
+    try:
+        return [path for path in root.glob("*.json") if path.is_file()]
+    except OSError:
+        return []
+
+
+def _touch_stage_cache_entry(cache_path: Path) -> None:
+    try:
+        os.utime(cache_path, None)
+    except OSError:
+        pass
+
+
+def _stage_cache_lru_key(path: Path) -> tuple[int, str]:
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return mtime_ns, path.name
+
+
+def _prune_stage_cache(config: ModelConfig) -> None:
+    max_entries = max(1, config.stage_cache_max_entries)
+    entries = _stage_cache_entries(_stage_cache_root(config))
+    if len(entries) <= max_entries:
+        return
+    entries.sort(key=_stage_cache_lru_key, reverse=True)
+    for stale in entries[max_entries:]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
+def reset_stage_cache_entries(config: Optional[ModelConfig] = None) -> int:
+    runtime_config = config or ModelConfig()
+    removed = 0
+    for entry in _stage_cache_entries(_stage_cache_root(runtime_config)):
+        try:
+            entry.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
 def _read_stage_cache_text(config: ModelConfig, file_path: Path, stage: str,
                            options: Dict[str, Any]) -> Optional[str]:
     if config.stage_cache in {"off", "refresh"}:
@@ -2208,11 +2260,13 @@ def _read_stage_cache_text(config: ModelConfig, file_path: Path, stage: str,
     if cache_key is None:
         return None
     try:
-        data = json.loads(_stage_cache_path(config, cache_key).read_text(encoding="utf-8"))
+        cache_path = _stage_cache_path(config, cache_key)
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     text = data.get("text") if isinstance(data, dict) else None
     if isinstance(text, str):
+        _touch_stage_cache_entry(cache_path)
         logger.info("Stage cache hit for %s [%s]", file_path.name, stage)
         return text
     return None
@@ -2229,6 +2283,7 @@ def _write_stage_cache_text(config: ModelConfig, file_path: Path, stage: str,
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps({"text": text}, ensure_ascii=False, sort_keys=True).encode("utf-8")
     _atomic_write_bytes(cache_path, payload)
+    _prune_stage_cache(config)
 
 
 def _cached_text_stage(config: ModelConfig, file_path: Path, stage: str,
@@ -3628,6 +3683,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                               f"(default: {DEFAULT_STAGE_CACHE})."))
     parser.add_argument("--stage-cache-dir", default=None,
                         help="Directory for --stage-cache entries (default: model cache/stage-cache).")
+    parser.add_argument("--stage-cache-max-entries", type=int,
+                        default=defaults.stage_cache_max_entries,
+                        help=("Max JSON entries retained in the stage cache "
+                              f"(default: {DEFAULT_STAGE_CACHE_MAX_ENTRIES})."))
+    parser.add_argument("--reset-stage-cache", action="store_true",
+                        default=defaults.reset_stage_cache,
+                        help="Delete stage-cache JSON entries before processing.")
     parser.add_argument("--benchmark", action="store_true",
                         help="Log per-file stage timings for precision/speed tuning.")
     parser.add_argument("--workers", type=int, default=defaults.workers,
@@ -3656,6 +3718,10 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
     _log_llm_runtime_config(model_config)
     _enable_fault_tracebacks()
     reset_extraction_failures()
+    if model_config.reset_stage_cache:
+        removed = reset_stage_cache_entries(model_config)
+        logger.info("Reset stage cache: removed %d entr%s.",
+                    removed, "y" if removed == 1 else "ies")
 
     folder = Path(args.directory)
     if not folder.exists():
