@@ -194,6 +194,13 @@ framework/law in the finding's `notes`.
   `reportPossiblyUnbound` + `file:line`) is a finding. Prefer a real guard/cast/narrowing
   fix over `# type: ignore`.
 
+## Context Management
+
+- **Checkpoint compactly, on a schedule.** Summarize progress at roughly every 10% of context usage (~10%, ~20%, … ~90%, ~95%) — proactively, not only when compaction looms. Each checkpoint is a sparse resume note: what's done, what remains, key decisions, blockers, exact `file:line` anchors, and commands whose outcome matters — enough to survive a context reset. Omit anything cheap to rediscover from the repo, tests, or git history.
+- **Keep the working set lean.** Prefer targeted reads over whole-file dumps; delegate broad searches to subagents; compact aggressively and drop stale detail once it no longer serves the next concrete step.
+- **Omit mechanical history.** Routine mechanical task history stays out of checkpoints and handoff summaries unless it affects reproducibility, explains a failure, or leaves unfinished work. Durable context focuses on decisions, invariants, anchors, blockers, and remaining tasks.
+- **Persist durable facts.** Record decisions, anchors, and gotchas in `TODO.md`, the active plan file, or `docs/adr/README.md` — not only in chat.
+
 ## File Editing
 
 - Avoid overwriting existing files unless the user explicitly asks or the file is missing.
