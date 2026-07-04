@@ -2149,6 +2149,12 @@ def build_parser() -> argparse.ArgumentParser:
         help='Number of worker threads (positive int, default: 3).',
     )
     parser.add_argument(
+        '--bucket-size',
+        type=_positive_int,
+        default=BUCKET_SIZE,
+        help=f'Max files per bucket directory (positive int, default: {BUCKET_SIZE}).',
+    )
+    parser.add_argument(
         '--no-sniff',
         dest='sniff',
         action='store_false',
@@ -2227,6 +2233,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """Entry point for script execution."""
+    global BUCKET_SIZE
     parser = build_parser()
     args = parser.parse_args()
     # oze-dup-08: single basicConfig call. The previous code configured
@@ -2255,6 +2262,7 @@ def main() -> None:
         root = resolve_root(args.root)
     except (ValueError, TypeError, FileNotFoundError) as exc:
         raise SystemExit(str(exc)) from exc
+    BUCKET_SIZE = args.bucket_size
     try:
         organize(
             root,

@@ -208,7 +208,6 @@ rf-adapt-01 | open | low | relocate_folder.py:743 — `_DISK_SPACE_HEADROOM` (1.
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-cfg-01 | open | low | organize_by_extension.py:33 — `BUCKET_SIZE` (and `PROGRESS_EVERY`, `SUBMIT_BACKLOG_MULT`) are hardcoded module constants with no CLI flag or env override, yet `_log_run_stats`/comments (880-885) explicitly invite the user to "tune BUCKET_SIZE"; expose a `--bucket-size` flag or env knob with a typed default. | runtime knob w/o accessor
 
 ## API contract & compatibility
 
