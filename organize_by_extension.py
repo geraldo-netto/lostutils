@@ -1335,7 +1335,7 @@ def _link_with_transient_retry(src: Path, dst: Path) -> None:
         if base_delay > 0.0:
             time.sleep(base_delay * _RETRY_JITTER.uniform(0.5, 1.5))
         try:
-            os.link(src, dst)
+            _link_regular_no_follow(src, dst)
             return
         except OSError as exc:
             if exc.errno not in _TRANSIENT_LINK_ERRNOS:
@@ -1347,6 +1347,20 @@ def _link_with_transient_retry(src: Path, dst: Path) -> None:
     if last_exc is None:
         raise RuntimeError("link retry loop exhausted without capturing an exception")  # pragma: no cover - defensive: loop returns on success
     raise last_exc
+
+
+def _link_regular_no_follow(src: Path, dst: Path) -> None:
+    try:
+        os.link(src, dst, follow_symlinks=False)
+    except TypeError:
+        os.link(src, dst)
+    st = os.lstat(dst)
+    if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
+        try:
+            os.unlink(dst)
+        except OSError as exc:
+            logger.warning("could not remove non-regular link target %s after refusing %s: %s", dst, src, exc)
+        raise ValueError(f"refusing to move source that changed to non-regular during link: {src}")
 
 
 # oze-di-01: byte-compare chunk for recognising a target left behind by an

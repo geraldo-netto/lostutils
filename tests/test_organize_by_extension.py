@@ -3618,6 +3618,29 @@ def test_move_file_rejects_symlink_source(tmp_path):
     assert link.is_symlink(), "symlink source disturbed"
 
 
+def test_move_file_rejects_source_swapped_to_symlink_during_link(tmp_path, monkeypatch):
+    src = tmp_path / "file.bin"
+    src.write_bytes(b"data")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    dest = tmp_path / "bucket"
+    dest.mkdir()
+    real_link = oze.os.link
+
+    def swapped_link(source, target, *args, **kwargs):
+        src.unlink()
+        src.symlink_to(outside)
+        return real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(oze.os, "link", swapped_link)
+
+    with pytest.raises(ValueError):
+        oze.move_file(src, dest)
+
+    assert src.is_symlink()
+    assert not (dest / "file.bin").exists()
+
+
 def test_move_worker_reports_actual_dest_from_move_file(tmp_path, monkeypatch):
     """oze-obs-01: the worker reports the Path move_file returns, not the
     precomputed dest, which is wrong after a `.collision<n>` source rename."""
