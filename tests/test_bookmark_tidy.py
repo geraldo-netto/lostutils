@@ -538,6 +538,45 @@ def test_exports_and_write_output(tmp_path):
     assert json.loads(chrome_path.read_text(encoding="utf-8"))["root"] == "placesRoot"
 
 
+def test_atomic_write_fsyncs_parent_directory(tmp_path, monkeypatch):
+    output = tmp_path / "out.txt"
+    calls = []
+    real_open = bookmark_tidy.os.open
+    real_fsync = bookmark_tidy.os.fsync
+    real_close = bookmark_tidy.os.close
+
+    def tracking_open(path, flags, mode=0o777):
+        fd = real_open(path, flags, mode)
+        calls.append(("open", Path(path), flags, fd))
+        return fd
+
+    def tracking_fsync(fd):
+        calls.append(("fsync", fd))
+        return real_fsync(fd)
+
+    def tracking_close(fd):
+        calls.append(("close", fd))
+        return real_close(fd)
+
+    monkeypatch.setattr(bookmark_tidy.os, "open", tracking_open)
+    monkeypatch.setattr(bookmark_tidy.os, "fsync", tracking_fsync)
+    monkeypatch.setattr(bookmark_tidy.os, "close", tracking_close)
+
+    bookmark_tidy._atomic_write_text(output, "data")
+
+    opened_dir_fd = calls[-3][3]
+    assert output.read_text(encoding="utf-8") == "data"
+    assert calls[-3][0:2] == ("open", tmp_path)
+    assert calls[-2] == ("fsync", opened_dir_fd)
+    assert calls[-1] == ("close", opened_dir_fd)
+
+
+def test_fsync_parent_dir_ignores_unsupported_directory_fsync(tmp_path, monkeypatch):
+    monkeypatch.setattr(bookmark_tidy.os, "open", lambda path, flags: (_ for _ in ()).throw(OSError("no dir fsync")))
+
+    bookmark_tidy._fsync_parent_dir(tmp_path / "out.txt")
+
+
 def test_load_immutable_file_and_read_all_bookmarks(tmp_path, caplog):
     immutable = tmp_path / "immutable.txt"
     html = tmp_path / "bookmarks.html"

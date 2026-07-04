@@ -131,7 +131,6 @@ ie-rel-20 | open | low | import_events.py:3399 — `_end_precedes_start` does `e
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-robust-01 | open | low | bookmark-tidy.py:1232 — `_atomic_write_text` fsyncs the temp file then `os.replace`s it, but never fsyncs the parent directory, so a crash or power loss right after rename can lose the directory entry. Fsync the containing directory after replace. | atomic-write durability gap
 dnp-robust-02 | open | low | dedupl_numpy.py:21 — `open()` has no error handling, so a missing/unreadable hash-file exits with a raw `FileNotFoundError`/`OSError` traceback instead of the clean `error:` + nonzero exit that remove-deduplv3.py uses. | graceful failure contract
 dnp-robust-01 | open | low | dedupl_numpy.py:22 — `mmap.mmap(f.fileno(), 0, ...)` on a zero-byte input raises `ValueError: cannot mmap an empty file` (uncaught traceback); guard `os.fstat(f.fileno()).st_size == 0` and return cleanly. | interrupted/empty-input recovery
 ie-robust-20 | open | low | import_events.py:3347 — `_atomic_write_bytes` fsyncs the temp file then os.replace, but never fsyncs the parent directory, so a crash/power loss right after rename can lose the rename; fsync the containing dir after replace for true durability. | atomic-write durability gap
