@@ -2278,10 +2278,10 @@ def main() -> None:
         # here (the move stage prints its own summary and exits non-zero via
         # SystemExit, bypassing this handler). Surface a single line so an
         # interrupt during a long silent scan isn't mistaken for a clean no-op.
-        # Logged at WARNING so it shows even without --verbose. Return quietly
-        # (exit 0) per the established contract — no partial-write to recover
-        # from in those stages.
+        # Logged at WARNING so it shows even without --verbose, then exit
+        # non-zero like the move stage so callers can detect interruption.
         logger.warning("Interrupted.")
+        raise SystemExit(1) from None
 
 
 if __name__ == '__main__':  # pragma: no cover

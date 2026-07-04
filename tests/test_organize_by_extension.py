@@ -623,13 +623,15 @@ class OrganizeByExtensionTest(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 main()
 
-    def test_main_swallows_keyboard_interrupt(self):
-        """main() returns quietly if organize raises KeyboardInterrupt."""
+    def test_main_exits_nonzero_on_keyboard_interrupt(self):
+        """main() exits non-zero if organize raises KeyboardInterrupt."""
         with TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
             with patch.object(sys, 'argv', ['prog', str(root)]), \
                  patch('organize_by_extension.organize', side_effect=KeyboardInterrupt):
-                main()  # must not raise
+                with self.assertRaises(SystemExit) as cm:
+                    main()
+            self.assertEqual(cm.exception.code, 1)
 
     def test_choose_bucket_populates_cache_from_existing_bucket(self):
         """An existing on-disk bucket with room is reused, populating state_cache."""
@@ -3844,12 +3846,14 @@ def test_list_files_emits_scan_progress(tmp_path, monkeypatch, caplog):
 
 def test_main_logs_interrupted_message(tmp_path, monkeypatch, caplog):
     """oze-obs-05: a KeyboardInterrupt during scan/plan/prune reaches main and
-    is surfaced as a single 'Interrupted.' line (returns quietly, no raise)."""
+    is surfaced as a single 'Interrupted.' line with non-zero exit."""
     monkeypatch.setattr(sys, "argv", ["prog", str(tmp_path)])
     monkeypatch.setattr(oze, "organize",
                         lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt))
     with caplog.at_level(logging.WARNING, logger="organize_by_extension"):
-        oze.main()  # must not raise
+        with pytest.raises(SystemExit) as exc:
+            oze.main()
+    assert exc.value.code == 1
     assert any("Interrupted." in r.getMessage() for r in caplog.records)
 
 
