@@ -2174,6 +2174,38 @@ def test_atomic_write_removes_temp_on_keyboard_interrupt(tmp_path, monkeypatch):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_atomic_write_fsyncs_parent_directory(tmp_path, monkeypatch):
+    out = tmp_path / "events.json"
+    calls = []
+    real_open = import_events.os.open
+    real_close = import_events.os.close
+    dir_fd = 987654
+
+    def fake_open(path, flags, mode=0o777):
+        if Path(path) == tmp_path:
+            calls.append(("open", Path(path), flags))
+            return dir_fd
+        return real_open(path, flags, mode)
+
+    def fake_fsync(fd):
+        calls.append(("fsync", fd))
+
+    def fake_close(fd):
+        calls.append(("close", fd))
+        if fd != dir_fd:
+            real_close(fd)
+
+    monkeypatch.setattr(import_events.os, "open", fake_open)
+    monkeypatch.setattr(import_events.os, "fsync", fake_fsync)
+    monkeypatch.setattr(import_events.os, "close", fake_close)
+
+    import_events._atomic_write_bytes(out, b"new")
+
+    assert out.read_bytes() == b"new"
+    assert ("fsync", dir_fd) in calls
+    assert ("close", dir_fd) in calls
+
+
 ICS_TEMPLATE = (
     "BEGIN:VCALENDAR\r\n"
     "VERSION:2.0\r\n"

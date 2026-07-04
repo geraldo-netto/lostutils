@@ -3345,12 +3345,27 @@ def _atomic_write_bytes(output_path: Path, data: bytes) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, output_path)
+        _fsync_parent_dir(output_path)
     except BaseException:
         try:
             tmp.unlink()
         except OSError:
             pass
         raise
+
+
+def _fsync_parent_dir(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        dir_fd = os.open(path.parent, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
 
 
 def write_events_json(events: List[Dict[str, Any]], output_path: Path) -> None:
