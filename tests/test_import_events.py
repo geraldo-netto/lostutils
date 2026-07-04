@@ -1582,17 +1582,17 @@ def test_resolve_tesseract_path_caches_shutil_lookup(monkeypatch):
     assert calls == ["tesseract"]
 
 
-def test_ocr_image_path_auto_runs_paddle_and_tesseract_in_parallel(tmp_path, monkeypatch):
+def test_ocr_image_path_auto_uses_paddle_when_usable(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
-    tesseract_started = threading.Event()
+    calls = []
 
     def paddle(path, language="en", config=None):
-        assert tesseract_started.wait(1)
+        calls.append("paddle")
         return "Readable Paddle OCR text"
 
     def tesseract(path, language="en", config=None):
-        tesseract_started.set()
+        calls.append("tesseract")
         return "Tesseract text"
 
     monkeypatch.setattr(import_events, "_ocr_with_paddle", paddle)
@@ -1600,7 +1600,8 @@ def test_ocr_image_path_auto_runs_paddle_and_tesseract_in_parallel(tmp_path, mon
 
     text = import_events._ocr_image_path_once(img, import_events.ModelConfig(ocr_engine="auto"))
 
-    assert text == "Readable Paddle OCR text\nTesseract text"
+    assert text == "Readable Paddle OCR text"
+    assert calls == ["paddle"]
 
 
 def test_ocr_image_path_auto_falls_back_to_tesseract_when_paddle_is_weak(tmp_path, monkeypatch):

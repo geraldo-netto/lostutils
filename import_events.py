@@ -454,6 +454,14 @@ def _has_usable_extracted_text(text: str) -> bool:
     return alpha >= 30 and (alpha / max(1, len(compact))) >= 0.20
 
 
+def _has_usable_ocr_text(text: str) -> bool:
+    compact = "".join(ch for ch in text if not ch.isspace())
+    if len(compact) < 16:
+        return False
+    alpha = sum(1 for ch in compact if ch.isalpha())
+    return alpha >= 8 and (alpha / max(1, len(compact))) >= 0.20
+
+
 def _should_pdf_ocr(config: "ModelConfig", pdf_text: str) -> bool:
     if config.pdf_ocr_mode == "always":
         return True
@@ -2447,6 +2455,12 @@ def _ocr_image_path_once(
         return _ocr_with_paddle(image_path, language, runtime_config)[:runtime_config.text_budget_chars()]
     if engine == "tesseract":
         return _ocr_with_tesseract(image_path, language, runtime_config)[:runtime_config.text_budget_chars()]
+    if engine == "auto":
+        paddle_text = _ocr_with_paddle(image_path, language, runtime_config)
+        if _has_usable_ocr_text(paddle_text):
+            return paddle_text[:runtime_config.text_budget_chars()]
+        tesseract_text = _ocr_with_tesseract(image_path, language, runtime_config)
+        return _merge_text_blocks([paddle_text, tesseract_text], runtime_config.text_budget_chars())
     return _merge_text_blocks(
         _ocr_backend_texts(("paddle", "tesseract"), image_path, language, runtime_config),
         runtime_config.text_budget_chars(),
