@@ -1324,11 +1324,15 @@ class App(tk.Tk):
         zero = bytearray(8)
         for rid in (3, 0, 2):
             if self.dev.write_device(rid, zero):
-                self.kp.ReportID = rid
-                self.log("Keyboard reportID = %d" % rid)
+                self._ui_q.put(lambda found=rid: self._apply_report_id(
+                    found, "Keyboard reportID = %d" % found))
                 return
-        self.kp.ReportID = 0
-        self.log("Version check: no reportID accepted, defaulting to 0")
+        self._ui_q.put(lambda: self._apply_report_id(
+            0, "Version check: no reportID accepted, defaulting to 0"))
+
+    def _apply_report_id(self, report_id, message):
+        self.kp.ReportID = report_id
+        self.log(message)
 
     # ---- send routines (port of FormMain.Download_Click etc.) ------------
     @staticmethod

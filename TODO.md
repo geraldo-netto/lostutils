@@ -59,7 +59,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-mt-01 | open | med | minikeypad.py:1318 — `_version_check` runs on the connect worker thread and writes shared `self.kp.ReportID`, while the Tk main thread mutates the same `KeyParam` via page-button handlers; the shared object is touched from two threads with no lock or `_ui_q` marshalling. Route the `ReportID` assignment through `_ui_q`. | shared-state mutation off the UI thread
 
 ## distributed systems
 

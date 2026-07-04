@@ -999,6 +999,29 @@ def test_drain_ui_survives_callback_exception(caplog):
     assert "queued UI callback failed" in caplog.text
 
 
+def test_version_check_applies_report_id_on_ui_queue():
+    class ProbeDev:
+        def write_device(self, rid, _buf):
+            return rid == 2
+
+    logs = []
+    app = types.SimpleNamespace(
+        dev=ProbeDev(),
+        kp=KeyParam(),
+        _ui_q=minikeypad.queue.SimpleQueue(),
+        log=logs.append,
+    )
+    app.kp.ReportID = 99
+    app._apply_report_id = minikeypad.App._apply_report_id.__get__(app, type(app))
+
+    minikeypad.App._version_check(app)
+
+    assert app.kp.ReportID == 99
+    app._ui_q.get_nowait()()
+    assert app.kp.ReportID == 2
+    assert logs == ["Keyboard reportID = 2"]
+
+
 def test_select_disabled_on_led_page(app):
     app.kp.KEY_Cur_Page = 4
     app._select_key(2)
