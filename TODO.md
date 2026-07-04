@@ -128,7 +128,6 @@ dnp-robust-02 | open | low | dedupl_numpy.py:21 — `open()` has no error handli
 dnp-robust-01 | open | low | dedupl_numpy.py:22 — `mmap.mmap(f.fileno(), 0, ...)` on a zero-byte input raises `ValueError: cannot mmap an empty file` (uncaught traceback); guard `os.fstat(f.fileno()).st_size == 0` and return cleanly. | interrupted/empty-input recovery
 lq-rob-01 | open | low | link_queue.py:953 — `_save_state` (and `_write_config_file`, line 590) create uniquely-named `*.tmp` files via `mkstemp` then rename; a SIGKILL between create and rename orphans them, and nothing sweeps stale `<name>.*.tmp` on startup, so they accumulate in the config/state dir across crashes. Sweep leftover temp siblings on load. | orphaned-resource cleanup
 mkp-rob-10 | open | low | minikeypad.py:1117 — `_append_log` inserts into the `ScrolledText` log with no line cap, so a long-running session grows the widget (and its backing text) without bound; trim to the last N lines on insert. | unbounded buffer / memory growth
-mkp-rob-11 | open | low | minikeypad.py:1126 — `_drain_ui` calls each queued callable as `self._ui_q.get_nowait()()`; any exception other than `queue.Empty` propagates past the `self.after(120, self._drain_ui)` reschedule, permanently killing the cross-thread UI pump (logs, connect state, write results all freeze). Wrap each callable in try/except (or reschedule in a `finally`). | self-healing loop dies on one bad callback
 
 ## state machine integrity
 

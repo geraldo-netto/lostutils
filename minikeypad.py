@@ -1126,10 +1126,17 @@ class App(tk.Tk):
     def _drain_ui(self):
         try:
             while True:
-                self._ui_q.get_nowait()()
+                self._run_ui_callback(self._ui_q.get_nowait())
         except queue.Empty:
             pass
-        self.after(120, self._drain_ui)
+        finally:
+            self.after(120, self._drain_ui)
+
+    def _run_ui_callback(self, callback):
+        try:
+            callback()
+        except Exception:
+            LOG.exception("queued UI callback failed")
 
     # ---- physical-key colour handling ------------------------------------
     def _refresh_key_map(self):

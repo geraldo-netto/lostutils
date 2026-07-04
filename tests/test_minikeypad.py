@@ -957,6 +957,38 @@ def test_append_log_falls_back_to_print(app, capsys):
     assert "boom-line" in capsys.readouterr().out
 
 
+def test_drain_ui_survives_callback_exception(caplog):
+    class DummyApp:
+        def __init__(self):
+            self._ui_q = minikeypad.queue.SimpleQueue()
+            self.after_calls = []
+            self._drain_ui = minikeypad.App._drain_ui.__get__(self, type(self))
+            self._run_ui_callback = minikeypad.App._run_ui_callback.__get__(
+                self, type(self)
+            )
+
+        def after(self, delay, callback):
+            self.after_calls.append((delay, callback))
+
+    app = DummyApp()
+    ran = []
+
+    def bad():
+        ran.append("bad")
+        raise RuntimeError("boom")
+
+    app._ui_q.put(bad)
+    app._ui_q.put(lambda: ran.append("good"))
+
+    with caplog.at_level(logging.ERROR):
+        minikeypad.App._drain_ui(app)
+
+    assert ran == ["bad", "good"]
+    assert app.after_calls[0][0] == 120
+    assert app.after_calls[0][1].__func__ is minikeypad.App._drain_ui
+    assert "queued UI callback failed" in caplog.text
+
+
 def test_select_disabled_on_led_page(app):
     app.kp.KEY_Cur_Page = 4
     app._select_key(2)
