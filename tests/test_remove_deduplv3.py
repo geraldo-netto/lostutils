@@ -1,4 +1,5 @@
 """Tests for remove-deduplv3.py — clean error contract (rdv3-robust-01)."""
+import io
 import importlib.util
 from pathlib import Path
 
@@ -78,3 +79,14 @@ def test_emits_stderr_summary(monkeypatch, tmp_path, capsys):
     assert "2 hash group(s)" in err
     assert "1 with duplicates" in err
     assert "1 file(s) queued for removal" in err
+
+
+def test_configure_stdout_forces_utf8_and_error_mode(monkeypatch):
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
+    monkeypatch.setattr(rd.sys, "stdout", stream)
+
+    rd._configure_stdout_errors("surrogateescape")
+
+    assert stream.encoding.lower().replace("_", "-") == "utf-8"
+    assert stream.errors == "surrogateescape"
+    stream.detach()

@@ -75,7 +75,7 @@ def _configure_stdout_errors(err_mode):
     # (matches Linux kernel filename semantics).
     if isinstance(sys.stdout, io.TextIOWrapper):
         try:
-            sys.stdout.reconfigure(errors=err_mode)
+            sys.stdout.reconfigure(encoding="utf-8", errors=err_mode)
         except ValueError:
             pass  # already configured, or running under unusual stdout
 
