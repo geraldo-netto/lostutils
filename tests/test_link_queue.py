@@ -155,6 +155,7 @@ def headless_dispatcher(tmp_path, monkeypatch):
         # Wake any sleeping worker so it can exit promptly.
         with disp._dispatch_cv:
             disp._dispatch_cv.notify_all()
+        disp.close()
 
 
 @pytest.fixture
@@ -459,6 +460,25 @@ def test_headless_restore_queue_from_state_requeues_inflight_first(headless_disp
         "http://run/1",
         "http://wait/1",
     ]
+
+
+def test_dispatcher_state_lock_rejects_second_instance(tmp_path):
+    state_path = str(tmp_path / "state.yaml")
+    first = link_queue.Dispatcher.headless(
+        state_path=state_path, acquire_state_lock=True,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="already using"):
+            link_queue.Dispatcher.headless(
+                state_path=state_path, acquire_state_lock=True,
+            )
+    finally:
+        first.close()
+
+    second = link_queue.Dispatcher.headless(
+        state_path=state_path, acquire_state_lock=True,
+    )
+    second.close()
 
 
 def test_save_state_persists_immediate_backlog(tmp_path, monkeypatch):

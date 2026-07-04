@@ -66,7 +66,6 @@ mkp-mt-01 | open | med | minikeypad.py:1318 — `_version_check` runs on the con
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-dist-02 | open | med | link_queue.py:1096 — no single-instance / advisory file lock guards `STATE_FILE`; two concurrently-running app instances each `_restore_queue_from_state()` the same persisted queue (double-executing every idempotent-or-not command) and both `_save_state()` with last-write-wins, silently corrupting/losing each other's queue. Add an `fcntl.flock`/pidfile on the config or state dir and refuse/degrade on contention. | multi-process coordination; idempotent re-run
 
 ## dependability
 

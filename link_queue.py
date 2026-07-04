@@ -43,8 +43,13 @@ import tkinter as tk
 from collections import namedtuple
 from datetime import datetime
 from tkinter import messagebox, scrolledtext, ttk
-from typing import Callable, cast
+from typing import Callable, TextIO, cast
 from urllib.parse import urlparse
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
 
 try:
     import yaml  # PyYAML
@@ -180,6 +185,98 @@ def _resolve_state_path(name: str) -> str:
 CONFIG_FILE = _resolve_state_path(CONFIG_FILE_NAME)
 LEGACY_CONFIG_FILE = _resolve_state_path(LEGACY_CONFIG_FILE_NAME)
 STATE_FILE = _resolve_state_path(STATE_FILE_NAME)
+
+
+class StateFileLockError(RuntimeError):
+    """Raised when another process already owns the queue state lock."""
+
+
+class StateFileLock:
+    """Single-instance guard for one queue state file."""
+
+    def __init__(self, state_path: str) -> None:
+        self.state_path = state_path
+        self.lock_path = f"{state_path}.lock"
+        self._fh: TextIO | None = None
+        self._fd: int | None = None
+        self._owns_pidfile = False
+
+    def acquire(self) -> None:
+        if self._fh is not None or self._fd is not None:
+            return
+        os.makedirs(os.path.dirname(self.lock_path) or ".", exist_ok=True)
+        if fcntl is None:
+            self._acquire_pidfile()
+            return
+        self._acquire_flock()
+
+    def release(self) -> None:
+        self._release_flock()
+        self._release_pidfile()
+
+    def _acquire_flock(self) -> None:
+        assert fcntl is not None
+        fh = open(self.lock_path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            fh.close()
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise self._locked_error() from exc
+            raise
+        self._fh = fh
+        self._write_metadata(fh.fileno())
+
+    def _acquire_pidfile(self) -> None:
+        try:
+            fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as exc:
+            raise self._locked_error() from exc
+        self._fd = fd
+        self._owns_pidfile = True
+        self._write_metadata(fd)
+
+    def _release_flock(self) -> None:
+        if self._fh is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+            self._fh = None
+            self._unlink_lock_file()
+
+    def _release_pidfile(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            os.close(self._fd)
+        finally:
+            self._fd = None
+            if self._owns_pidfile:
+                self._owns_pidfile = False
+                self._unlink_lock_file()
+
+    def _write_metadata(self, fd: int) -> None:
+        payload = f"pid={os.getpid()}\nstate={self.state_path}\n".encode("utf-8")
+        os.ftruncate(fd, 0)
+        os.write(fd, payload)
+        os.fsync(fd)
+
+    def _unlink_lock_file(self) -> None:
+        try:
+            os.unlink(self.lock_path)
+        except OSError:
+            pass
+
+    def _locked_error(self) -> StateFileLockError:
+        return StateFileLockError(
+            f"Another link_queue instance is already using {self.state_path} "
+            f"(lock {self.lock_path}). Close it before starting another one, "
+            "or remove the lock file if it is stale."
+        )
+
 
 _PLACEHOLDER_RE = re.compile(r"\{(url_quoted|protocol|url)\}")
 
@@ -719,7 +816,9 @@ class Dispatcher:
     """
 
     @classmethod
-    def headless(cls, config=None) -> "Dispatcher":
+    def headless(
+        cls, config=None, *, state_path=None, acquire_state_lock: bool = False
+    ) -> "Dispatcher":
         """Construct a Dispatcher with no-op callbacks for headless tests
         (test-02). Bypasses Tk entirely so the queue / dispatch / worker /
         config-store logic can be exercised without a DISPLAY.
@@ -742,10 +841,13 @@ class Dispatcher:
             get_sleep=lambda: int(config.get("sleep_between_items", 5)),
             get_failure_sleep=lambda: int(config.get("failure_sleep_seconds", 300)),
             save_config=lambda: None,
+            state_path=state_path,
+            acquire_state_lock=acquire_state_lock,
         )
 
     def __init__(self, config, *, log, refresh, status, marshal,
-                 get_sleep, get_failure_sleep, save_config, state_path=None):
+                 get_sleep, get_failure_sleep, save_config, state_path=None,
+                 acquire_state_lock: bool = True):
         self.config = config
         self._log = log
         self._refresh_queue_list = refresh
@@ -759,6 +861,9 @@ class Dispatcher:
         # construction (not import) so a monkeypatched module STATE_FILE is
         # honoured; passing `state_path` overrides the module default.
         self.state_path = state_path if state_path is not None else STATE_FILE
+        self._state_lock = StateFileLock(self.state_path) if acquire_state_lock else None
+        if self._state_lock is not None:
+            self._state_lock.acquire()
 
         # ---- queue + dispatch state (relocated from LinkQueueApp) ----
         # _PendingQueue keeps the url-set + per-domain indexes the picker and
@@ -829,6 +934,12 @@ class Dispatcher:
         # lq-conc-02: set under _save_timer_lock by _begin_save_shutdown so a
         # debounced timer can't write behind the shutdown authoritative save.
         self._shutting_down = False
+
+    def close(self) -> None:
+        self._cancel_save_timer()
+        if self._state_lock is not None:
+            self._state_lock.release()
+            self._state_lock = None
 
     def _record_metric(self, name: str, amount: int = 1) -> None:
         with self._metrics_lock:
@@ -4716,6 +4827,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         # (obs-01/rel-05/cx-06). LogSink.stop() joins, so the file is flushed
         # before we return.
         self._log_sink.stop()
+        self.dispatcher.close()
 
         # Flush any after() callbacks scheduled before stop_event was set.
         try:
@@ -5001,7 +5113,15 @@ def main() -> None:
             style.theme_use("clam")
     except Exception:  # pragma: no cover - defensive against odd Tk themes
         pass
-    LinkQueueApp(root)
+    try:
+        LinkQueueApp(root)
+    except StateFileLockError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+        raise SystemExit(1) from exc
     root.mainloop()
 
 
