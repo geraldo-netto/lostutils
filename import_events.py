@@ -3394,8 +3394,19 @@ def _match_end_to_start(start: Any, end: Any) -> Any:
     return end
 
 
+def _is_aware_datetime(value: datetime) -> bool:
+    return value.tzinfo is not None and value.utcoffset() is not None
+
+
+def _datetimes_for_ordering(start: datetime, end: datetime) -> tuple[datetime, datetime]:
+    if _is_aware_datetime(start) == _is_aware_datetime(end):
+        return start, end
+    return start.replace(tzinfo=None), end.replace(tzinfo=None)
+
+
 def _end_precedes_start(start: Any, end: Any) -> bool:
     if isinstance(start, datetime) and isinstance(end, datetime):
+        start, end = _datetimes_for_ordering(start, end)
         return end < start
     if isinstance(start, datetime) and not isinstance(end, datetime) and isinstance(end, date):
         return end < start.date()

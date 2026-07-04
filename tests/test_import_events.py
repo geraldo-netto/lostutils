@@ -2331,6 +2331,30 @@ def test_build_ics_skips_end_before_start(caplog):
     assert "Skipping event end before start" in caplog.text
 
 
+def test_end_precedes_start_handles_mixed_timezone_awareness():
+    start = datetime(2026, 6, 22, 10, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 6, 22, 9, 30)
+
+    assert import_events._end_precedes_start(start, end) is True
+
+
+def test_build_ics_keeps_mixed_timezone_end_without_crashing():
+    pytest.importorskip("icalendar")
+    events = [{
+        "title": "Mixed",
+        "start": "2026-06-22T10:00:00+00:00",
+        "end": "2026-06-22T11:00:00",
+        "location": "",
+        "source": "s",
+        "type": "x",
+    }]
+
+    ics = import_events.build_ics(events).decode("utf-8")
+
+    assert "SUMMARY:Mixed" in ics
+    assert "DTEND" in ics
+
+
 def test_parse_iso_accepts_time_without_seconds():
     parsed = import_events._parse_iso("2026-06-22T14:00")
     assert parsed == datetime(2026, 6, 22, 14, 0)
@@ -4391,4 +4415,3 @@ def test_run_file_workers_returns_partials_on_unrecoverable_stall(tmp_path, monk
     finally:
         wedge.set()
     assert [e["source"] for e in events] == ["event-1.txt"]  # event-0 abandoned
-
