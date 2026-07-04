@@ -247,8 +247,8 @@ def _family_for(
 ) -> frozenset[str] | None:
     """Return the member set for ``detected_label`` or None when no family
     is registered. For the ``zip`` family, union in ``extra_zip_family``
-    (oze-rel-07) so a runtime-extended ZIP_FAMILY is honoured without mutating
-    the static registry.
+    (oze-rel-07) so runtime extensions are honoured without mutating
+    ``CONTAINER_FAMILIES``.
     """
     fam = _FAMILY_BY_DETECTED.get(detected_label)
     if fam is None:
@@ -371,9 +371,9 @@ class SniffContext:
     * ``head_cache`` — shared per-path head-bytes memo (oze-perf-04). Single dict
       threaded from the scan stage through the planner so each file is opened
       at most once. ``None`` disables caching.
-    * ``extra_zip_family`` — runtime extension of :data:`ZIP_FAMILY`
-      (oze-rel-07) so users can teach the script about new zip-based formats
-      without editing source.
+    * ``extra_zip_family`` — runtime extension of the zip entry in
+      ``CONTAINER_FAMILIES`` (oze-rel-07) so users can teach the script about
+      new zip-based formats without editing source.
 
     Passing one ``SniffContext`` parameter end-to-end replaces fifteen-plus
     verbatim argument-pass lines.
