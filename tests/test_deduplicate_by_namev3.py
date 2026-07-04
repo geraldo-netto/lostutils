@@ -1,5 +1,6 @@
 """Tests for deduplicate-by-namev3.py — dnv3-rel-* reliability fixes
 (threshold clamp against uint8 overflow, word-boundary cleanup)."""
+import io
 import importlib.util
 from pathlib import Path
 
@@ -127,6 +128,17 @@ def test_cleanup_strips_token_among_words():
 
 def test_cleanup_basic_replacements_and_case():
     assert dn.cleanup("  A,[B] ") == "ab"
+
+
+def test_configure_stdout_forces_utf8_and_surrogateescape(monkeypatch):
+    stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
+    monkeypatch.setattr(dn.sys, "stdout", stream)
+
+    dn.configure_stdout()
+
+    assert stream.encoding.lower().replace("_", "-") == "utf-8"
+    assert stream.errors == "surrogateescape"
+    stream.detach()
 
 
 @given(st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=12))

@@ -87,6 +87,14 @@ def cleanup(entry):
     return _WORD_RE.sub("", s)
 
 
+def configure_stdout():
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
+        except ValueError:
+            pass
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Find near-duplicate strings via batched Levenshtein.")
@@ -103,11 +111,7 @@ def main():
     # stdout below once it is reconfigured to match.
     with open(args.file, "r", encoding="utf-8", errors="surrogateescape") as f:
         raw_lines = f.readlines()
-    if isinstance(sys.stdout, io.TextIOWrapper):
-        try:
-            sys.stdout.reconfigure(errors="surrogateescape")
-        except ValueError:
-            pass
+    configure_stdout()
 
     # dnv3-rel-02: keep the 1-based source line numbers behind each cleaned
     # key so a self-collision report can point back at the input lines that
