@@ -967,6 +967,38 @@ def test_append_log_falls_back_to_print(app, capsys):
     assert "boom-line" in capsys.readouterr().out
 
 
+def test_append_log_trims_to_line_cap():
+    class FakeLogBox:
+        def __init__(self):
+            self.lines = []
+
+        def configure(self, **_kwargs):
+            pass
+
+        def insert(self, _where, text):
+            self.lines.extend(text.splitlines())
+
+        def index(self, _where):
+            return f"{len(self.lines)}.0"
+
+        def delete(self, _start, end):
+            stop = int(end.split(".", 1)[0]) - 1
+            del self.lines[:stop]
+
+        def see(self, _where):
+            pass
+
+    app = types.SimpleNamespace(log_box=FakeLogBox())
+    app._trim_log_lines = minikeypad.App._trim_log_lines.__get__(app, type(app))
+
+    for index in range(minikeypad.MAX_LOG_LINES + 7):
+        minikeypad.App._append_log(app, f"line-{index}")
+
+    assert len(app.log_box.lines) == minikeypad.MAX_LOG_LINES
+    assert app.log_box.lines[0] == "line-7"
+    assert app.log_box.lines[-1] == f"line-{minikeypad.MAX_LOG_LINES + 6}"
+
+
 def test_drain_ui_survives_callback_exception(caplog):
     class DummyApp:
         def __init__(self):

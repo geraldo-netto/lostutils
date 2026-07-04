@@ -109,6 +109,7 @@ def _ensure_pyusb():
 __version__ = "1.0"
 
 LOG = logging.getLogger("minikeypad")
+MAX_LOG_LINES = 1000
 
 VID = 0x1189
 PID = 0x8890
@@ -1120,10 +1121,20 @@ class App(tk.Tk):
         try:
             self.log_box.configure(state="normal")
             self.log_box.insert("end", msg + "\n")
+            self._trim_log_lines()
             self.log_box.see("end")
             self.log_box.configure(state="disabled")
         except Exception:
             print(msg)
+
+    def _trim_log_lines(self):
+        try:
+            line_count = int(str(self.log_box.index("end-1c")).split(".", 1)[0])
+        except (AttributeError, ValueError, IndexError):
+            return
+        excess = line_count - MAX_LOG_LINES
+        if excess > 0:
+            self.log_box.delete("1.0", f"{excess + 1}.0")
 
     def _drain_ui(self):
         try:
