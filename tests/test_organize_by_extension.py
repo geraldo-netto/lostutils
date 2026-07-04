@@ -982,6 +982,33 @@ class BucketManagerTests(unittest.TestCase):
             self.assertTrue(chosen.is_full())
             self.assertIs(mgr.state_cache[bucket_path], _BUCKET_FULL)
 
+    def test_release_removes_failed_reservation(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            mgr = BucketManager(root=root)
+            src = root / "a.txt"
+            src.write_bytes(b"x")
+            bucket = mgr.choose(src, root / "txt", "a")
+
+            mgr.release(src, bucket.path)
+
+            self.assertNotIn("a.txt", mgr.state_cache[bucket.path])
+
+    def test_release_rescans_full_bucket_before_releasing(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            bucket_path = root / "txt" / "a00000"
+            bucket_path.mkdir(parents=True)
+            (bucket_path / "old.txt").write_bytes(b"x")
+            mgr = BucketManager(root=root)
+            mgr.state_cache[bucket_path] = _BUCKET_FULL
+            src = root / "a.txt"
+            src.write_bytes(b"x")
+
+            mgr.release(src, bucket_path)
+
+            self.assertEqual(mgr.state_cache[bucket_path], {"old.txt"})
+
 
 class PlanMovesBucketExhaustionTests(unittest.TestCase):
     """oze-rel-02: a bucket-space exhaustion during planning skips one file
@@ -2914,6 +2941,25 @@ class SourceCollisionResolution(unittest.TestCase):
                                     head_cache=head_cache)
             self.assertEqual(stats.skipped, 1)
             self.assertEqual(stats.processed, 0)
+
+    def test_drain_futures_releases_failed_reservation(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            src = root / "f.txt"
+            src.write_text("x")
+            mgr = _oze.BucketManager(root=root)
+            bucket = mgr.choose(src, root / "txt", "f")
+            stats = _oze._RunStats()
+            head_cache: dict = {}
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(lambda: (src, bucket.path / src.name, OSError("boom")))
+                futures = {fut: src}
+                _oze._drain_futures(
+                    futures, stats, preview=False, head_cache=head_cache,
+                    manager=mgr,
+                )
+            self.assertNotIn(src.name, mgr.state_cache[bucket.path])
 
     def test_progress_line_fires_at_threshold(self, ):
         # oze-obs-02: progress line every PROGRESS_EVERY items. Patch the

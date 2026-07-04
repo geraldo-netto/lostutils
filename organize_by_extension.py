@@ -952,6 +952,19 @@ class BucketManager:
             )
         return bucket
 
+    def release(self, source: Path, bucket_dir: Path) -> None:
+        """Undo a planned reservation after a move is skipped."""
+        names = self.state_cache.get(bucket_dir)
+        if names is None:
+            return
+        if names is _BUCKET_FULL:
+            names = bucket_file_names(bucket_dir)
+            self.state_cache[bucket_dir] = names
+        if (bucket_dir / source.name).exists():
+            return
+        if isinstance(names, set):
+            names.discard(source.name)
+
 
 def ensure_directory(path: Path) -> None:
     """Create a directory path if it does not already exist."""
@@ -1845,6 +1858,7 @@ def _drain_futures(
     stats: _RunStats,
     preview: bool,
     head_cache: dict[Path, HeadBytes],
+    manager: BucketManager | None = None,
 ) -> None:
     """Block until at least one future completes, then log results and prune
     the head_cache for finished sources (oze-conc-03 / oze-scal-05)."""
@@ -1866,6 +1880,8 @@ def _drain_futures(
             continue
         if error:
             logger.warning(f"Skipped {source}: {error}")
+            if manager is not None:
+                manager.release(source, destination.parent)
             stats.skipped += 1
         else:
             action = "Preview:" if preview else "Moved"
@@ -1898,6 +1914,7 @@ def _run_moves(
     preview: bool,
     total_files: int,
     head_cache: dict[Path, HeadBytes],
+    manager: BucketManager,
 ) -> _RunStats:
     """Execute stage (oze-cmplx-01): own the thread pool, the bounded-backlog
     submission loop, drain, and progress logging. Returns the run tally.
@@ -1915,7 +1932,7 @@ def _run_moves(
     try:
         for source, bucket_dir in plan:
             while len(futures) >= max_outstanding:
-                _drain_futures(futures, stats, preview, head_cache)
+                _drain_futures(futures, stats, preview, head_cache, manager)
                 _maybe_log_progress(stats, total_files, progress)
             futures[executor.submit(worker, source, bucket_dir)] = source
             _maybe_log_progress(stats, total_files, progress)
@@ -1924,7 +1941,7 @@ def _run_moves(
         # is exhausted still emits progress instead of going silent until the
         # summary.
         while futures:
-            _drain_futures(futures, stats, preview, head_cache)
+            _drain_futures(futures, stats, preview, head_cache, manager)
             _maybe_log_progress(stats, total_files, progress)
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
@@ -2020,6 +2037,7 @@ def organize(
             preview=preview,
             total_files=len(files),
             head_cache=head_cache,
+            manager=manager,
         )
         if verbose or preview or stats.processed > 0 or stats.skipped > 0:
             logger.info(

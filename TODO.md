@@ -29,7 +29,6 @@ lq-gov-01 | open | low | link_queue.py:261 — `DEFAULT_CONFIG["output_folder"]`
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-di-01 | open | low | organize_by_extension.py:930 — `BucketManager.choose` adds `source.name` to the bucket name set before the move is submitted, but a failed/skipped move (worker returns error tuple in `_drain_futures`, 1853) never releases the reservation; the in-memory bucket then counts toward `BUCKET_SIZE`/`_BUCKET_FULL` while disk has room, wasting bucket slots and allocating extra dirs. Release the reserved name on move failure. | in-memory vs filesystem drift
 
 ## performance
 
