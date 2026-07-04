@@ -6,12 +6,13 @@ Proposed corrections / improvements. One table per review category. Format:
 
 Scan scope = root-directory `.py`/`.sh` files only (per AGENTS.md). Tables sorted by `description` (each starts with `file:line`). Scripts are standalone — dedup findings are within-file only, never cross-file module extraction.
 
-id prefixes: `dnp-` dedupl_numpy.py, `dnv3-` deduplicate-by-namev3.py, `hr-` hash-recursive-ai5.py, `ie-` import_events.py, `lq-` link_queue.py, `mkp-` minikeypad.py, `oze-` organize_by_extension.py, `rf-` relocate_folder.py, `rdv3-` remove-deduplv3.py.
+id prefixes: `bt-` bookmark-tidy.py, `dnp-` dedupl_numpy.py, `dnv3-` deduplicate-by-namev3.py, `hr-` hash-recursive-ai5.py, `ie-` import_events.py, `lq-` link_queue.py, `mkp-` minikeypad.py, `oze-` organize_by_extension.py, `rf-` relocate_folder.py, `rdv3-` remove-deduplv3.py.
 
 ## security
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-sec-01 | open | low | bookmark-tidy.py:924 — `--auto-install-llama` runs `pip install llama-cpp-python` from the network with no version or hash pin; the flag is explicit, but it still executes remote package/setup code without reproducibility. Pin the package/version and document or support a hash-constrained install. | STRIDE Tampering / EoP; supply-chain
 mkp-sec-01 | open | med | minikeypad.py:1623 — on startup, when pyusb is missing, the app runs `pip install pyusb` automatically (default-on; only opt-out via `--no-auto-install`/env), executing remote package/setup code with no consent prompt and no version/hash pinning. Make auto-install opt-in or prompt first, and pin the version. | STRIDE Tampering / EoP; supply-chain
 oze-sec-01 | open | low | organize_by_extension.py:1033 — `_require_regular_source` classifies via `os.lstat` then `move_file` (1068) hardlinks via `os.link` (default `follow_symlinks=True`); a hostile concurrent filesystem can swap the path for a symlink between the check and the link (TOCTOU). Scanner-fed paths are safe, but `move_file` is public API; harden with `os.link(..., follow_symlinks=False)` or an fd-based open+fstat. | STRIDE Tampering / TOCTOU
 rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands; shlex.quote is correct but the script emits destructive commands with no header warning/--dry-run note and no guard that the survivor still exists. Add a leading "review before piping to sh" banner and consider verifying paths. | destructive-output
@@ -31,6 +32,7 @@ lq-gov-01 | open | low | link_queue.py:261 — `DEFAULT_CONFIG["output_folder"]`
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-di-01 | open | med | bookmark-tidy.py:365 — Firefox import copies only `places.sqlite` before reading it; live Firefox profiles commonly keep recent bookmark writes in `places.sqlite-wal`, so the export can miss uncheckpointed bookmarks or read a stale snapshot. Use SQLite's backup API or copy/open the WAL-aware database safely. | sqlite WAL snapshot integrity
 oze-di-01 | open | low | organize_by_extension.py:930 — `BucketManager.choose` adds `source.name` to the bucket name set before the move is submitted, but a failed/skipped move (worker returns error tuple in `_drain_futures`, 1853) never releases the reservation; the in-memory bucket then counts toward `BUCKET_SIZE`/`_BUCKET_FULL` while disk has room, wasting bucket slots and allocating extra dirs. Release the reserved name on move failure. | in-memory vs filesystem drift
 
 ## performance
@@ -75,17 +77,35 @@ lq-dist-02 | open | med | link_queue.py:1096 — no single-instance / advisory f
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-depend-01 | open | low | bookmark-tidy.py:900 — `LlamaCategorizer.__call__` passes model output directly to `parse_category_response`; malformed or non-JSON LLM output raises `UserError` and aborts the whole run instead of falling back for that batch. Add a retry or assign `--fallback-category` with a warning. | provider failure graceful degradation
 dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no BrokenPipeError guard, so piping into `head` raises a BrokenPipeError traceback on close. Wrap the write/flush in a BrokenPipeError handler or restore SIGPIPE to default. | common CLI pipe pattern
 
 ## code complexity
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+dnv3-cx-01 | open | low | deduplicate-by-namev3.py:90 — `main()` cyclomatic complexity is 11 (>10 bar); extract stdout setup/input loading and duplicate-report emission into helpers. | radon CC=11
+hr-cmplx-03 | open | low | hash-recursive-ai5.py:1174 — `_stage1_hash` cyclomatic complexity is 11 (>10 bar); split progress callback construction and alias/head bucketing branches. | radon CC=11
+hr-cmplx-04 | open | med | hash-recursive-ai5.py:1310 — `find_duplicate_groups` spans 128 lines and orchestrates indexing, staged hashing, alias handling, callbacks, and final grouping in one function. Split stage orchestration from result assembly. | fat function / AGENTS complexity bar
 hr-cmplx-02 | open | med | hash-recursive-ai5.py:1637 — `main()` spans ~1637-1924 (~190 lines) with 5 nested closures and many try/if branches; cognitive complexity far above the ceiling. Extract stdio setup, dump flush, and the summary block into helpers. | AGENTS complexity<=10
+ie-cx-14 | open | low | import_events.py:690 — `ModelConfig.from_args` cyclomatic complexity is 12 (>10 bar); split path/default resolution, digest selection, and numeric option normalization. | radon CC=12
+ie-cx-15 | open | med | import_events.py:1044 — `_download_to_cache` cyclomatic complexity is 12 (>10 bar); split resume setup, request/read loop, and completion/verification handling. | radon CC=12
 ie-cx-10 | open | med | import_events.py:1435 — `_normalize_loose_time` cyclomatic complexity 15 (>10 bar); split the AM/PM vs 24h coercion into helpers. | radon CC=15
+ie-cx-16 | open | low | import_events.py:1637 — `_date_parts_from_values` cyclomatic complexity is 11 (>10 bar); extract year/month/day validation and two-digit-year expansion. | radon CC=11
 ie-cx-11 | open | med | import_events.py:1672 — `_split_table_time` cyclomatic complexity 25, by far the worst in the file; extract the has-time-columns token parse and the explicit-regex parse into named helpers. | radon CC=25
 ie-cx-12 | open | med | import_events.py:1739 — `_calendar_hierarchy_lines` complexity 13; the month/heading/weekday/day-number/day-title state branches should be table-dispatched like `_calendar_table_lines` was in ie-cx-01. | radon CC=13
 ie-cx-13 | open | med | import_events.py:2223 — `_paddle_texts` complexity 13 from deep dict/list/tuple recursion branches; split per container type. | radon CC=13
+lq-cx-01 | open | med | link_queue.py:520 — `ConfigStore._normalize_config_schema` cyclomatic complexity is 16 (>10 bar); split protocol normalization from scalar coercion. | radon CC=16
+lq-cx-02 | open | low | link_queue.py:901 — `Dispatcher._save_state` cyclomatic complexity is 14 (>10 bar); extract snapshot building and atomic YAML write handling. | radon CC=14
+lq-cx-03 | open | low | link_queue.py:1096 — `Dispatcher._restore_queue_from_state` cyclomatic complexity is 11 (>10 bar); split persisted item load, queue restore, and in-flight retry handling. | radon CC=11
+lq-cx-04 | open | low | link_queue.py:1337 — `Dispatcher._ensure_immediate_pool` cyclomatic complexity is 12 (>10 bar); extract consumer pruning and resize decisions. | radon CC=12
+lq-cx-05 | open | low | link_queue.py:1920 — `Dispatcher._run_item` cyclomatic complexity is 13 (>10 bar); split process spawn, streaming, timeout, and metric recording. | radon CC=13
+lq-cx-06 | open | med | link_queue.py:2140 — `Dispatcher._pick_next_item` cyclomatic complexity is 19 (>10 bar); isolate eligibility checks, domain-cap scoring, and claim mutation. | radon CC=19
+lq-cx-07 | open | low | link_queue.py:3704 — `LinkQueueApp._update_status` cyclomatic complexity is 12 (>10 bar); extract status counters and message formatting. | radon CC=12
+oze-cx-01 | open | low | organize_by_extension.py:534 — `list_files` cyclomatic complexity is 13 (>10 bar); split skip-path checks, bucket detection, and verbose logging. | radon CC=13
+oze-cx-02 | open | med | organize_by_extension.py:1938 — `organize` cyclomatic complexity is 21 (>10 bar); split scan, plan, execute, and prune phases into smaller helpers. | radon CC=21
+rf-cx-01 | open | low | relocate_folder.py:1091 — `_iter_verify_tasks` cyclomatic complexity is 11 (>10 bar); split file/dir/symlink task creation from ownership task creation. | radon CC=11
+rdv3-cx-01 | open | low | remove-deduplv3.py:55 — `main()` cyclomatic complexity is 17 (>10 bar); extract argument/encoding setup, hash grouping, and rm-command emission. | radon CC=17
 
 ## code duplication
 
@@ -112,6 +132,7 @@ ie-rel-20 | open | low | import_events.py:3399 — `_end_precedes_start` does `e
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-robust-01 | open | low | bookmark-tidy.py:1232 — `_atomic_write_text` fsyncs the temp file then `os.replace`s it, but never fsyncs the parent directory, so a crash or power loss right after rename can lose the directory entry. Fsync the containing directory after replace. | atomic-write durability gap
 dnp-robust-02 | open | low | dedupl_numpy.py:21 — `open()` has no error handling, so a missing/unreadable hash-file exits with a raw `FileNotFoundError`/`OSError` traceback instead of the clean `error:` + nonzero exit that remove-deduplv3.py uses. | graceful failure contract
 dnp-robust-01 | open | low | dedupl_numpy.py:22 — `mmap.mmap(f.fileno(), 0, ...)` on a zero-byte input raises `ValueError: cannot mmap an empty file` (uncaught traceback); guard `os.fstat(f.fileno()).st_size == 0` and return cleanly. | interrupted/empty-input recovery
 ie-robust-20 | open | low | import_events.py:3347 — `_atomic_write_bytes` fsyncs the temp file then os.replace, but never fsyncs the parent directory, so a crash/power loss right after rename can lose the rename; fsync the containing dir after replace for true durability. | atomic-write durability gap
@@ -139,13 +160,13 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-_clean — `ruff check *.py` reports no issues across all root files (rescan 2026-07-02)._
+_clean — `ruff check *.py` reports no issues across all root files (rescan 2026-07-04)._
 
 ## pylance / pyright (type check)
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-_clean — `pyright *.py` reports 0 errors / 0 warnings across all root files (rescan 2026-07-02)._
+_clean — `pyright *.py` reports 0 errors / 0 warnings across all root files (rescan 2026-07-04)._
 
 ## observability
 
@@ -217,6 +238,7 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-cli-01 | open | low | bookmark-tidy.py:733 — `--immutable-root` is documented as a root category selector, but `is_immutable_bookmark` matches the browser root display and every folder in the bookmark path; a nested folder named `Work` freezes that subtree too. Limit matching to the root/first category or rename the flag/help text to "any folder". | flag semantics drift
 dnp-cli-01 | open | low | dedupl_numpy.py:18 — usage text is printed to stdout (should be stderr) on the error path, and the script hand-rolls arg handling with no `--help`; migrate to argparse for a consistent CLI surface. | error output on wrong stream
 hr-cli-01 | open | low | hash-recursive-ai5.py:1683 — `args.jobs = max(1, args.jobs)` only lower-clamps; `-j 100000` spawns that many walk threads and a `ThreadPoolExecutor(max_workers=100000)`, exhausting threads/FDs. Add a sane upper clamp (e.g. multiple of cpu_count). | resource exhaustion / DoS
 ie-cli-01 | open | med | import_events.py:2450 — `--ocr-engine auto` and `both` take the identical code path (always run Paddle+Tesseract and merge); auto's documented "Paddle first, falls back to Tesseract when weak" (help at line 3523) never happens. Implement the fallback or fix the help text so the two modes differ. | docs-vs-behavior drift
