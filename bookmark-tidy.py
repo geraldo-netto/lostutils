@@ -27,6 +27,7 @@ DEFAULT_FALLBACK_CATEGORY = "Uncategorized"
 DEFAULT_LLM_BATCH_SIZE = 30
 DEFAULT_LLM_CONTEXT = 4096
 DEFAULT_LLM_MAX_TOKENS = 1024
+LLAMA_CPP_PYTHON_REQUIREMENT = "llama-cpp-python==0.3.32"
 MOZLZ4_MAGIC = b"mozLz40\x00"
 TRACKING_PARAM_NAMES = frozenset(
     {
@@ -1001,8 +1002,8 @@ def _import_llama(auto_install: bool) -> Any:
     except ImportError as exc:
         if not auto_install:
             raise UserError("llama-cpp-python is missing; install it or pass --auto-install-llama") from exc
-    LOGGER.warning("Installing llama-cpp-python with pip because --auto-install-llama was provided.")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "llama-cpp-python"])
+    LOGGER.warning("Installing %s with pip because --auto-install-llama was provided.", LLAMA_CPP_PYTHON_REQUIREMENT)
+    subprocess.check_call([sys.executable, "-m", "pip", "install", LLAMA_CPP_PYTHON_REQUIREMENT])
     from llama_cpp import Llama
     return Llama
 

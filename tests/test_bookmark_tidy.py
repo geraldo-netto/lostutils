@@ -575,7 +575,7 @@ def test_import_llama_missing_and_auto_install(monkeypatch):
     calls = []
     monkeypatch.setattr(bookmark_tidy.subprocess, "check_call", lambda cmd: calls.append(cmd))
     assert bookmark_tidy._import_llama(True) is FakeLlamaChat
-    assert calls[0][:4] == [sys.executable, "-m", "pip", "install"]
+    assert calls[0] == [sys.executable, "-m", "pip", "install", bookmark_tidy.LLAMA_CPP_PYTHON_REQUIREMENT]
 
 
 def test_exports_and_write_output(tmp_path):
