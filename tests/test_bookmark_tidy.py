@@ -161,6 +161,17 @@ def test_immutable_folder_is_copied_and_mutable_duplicate_is_removed(caplog):
     assert "Removed mutable duplicate of immutable bookmark" in caplog.text
 
 
+def test_immutable_root_matches_only_browser_root_or_top_level_folder():
+    top_level = bookmark_tidy.Bookmark("https://example.test/top", "Top", ("Work",))
+    nested = bookmark_tidy.Bookmark("https://example.test/nested", "Nested", ("Archive", "Work"))
+    browser_root = bookmark_tidy.Bookmark("https://example.test/root", "Root", (), root="other")
+    immutable = bookmark_tidy._immutable_names(["work", "Other Bookmarks"])
+
+    assert bookmark_tidy.is_immutable_bookmark(top_level, immutable)
+    assert not bookmark_tidy.is_immutable_bookmark(nested, immutable)
+    assert bookmark_tidy.is_immutable_bookmark(browser_root, immutable)
+
+
 def test_chrome_export_places_categorized_bookmarks_under_bookmark_bar():
     data = bookmark_tidy.export_chrome_bookmarks(
         [

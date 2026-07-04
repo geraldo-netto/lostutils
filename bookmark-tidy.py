@@ -730,7 +730,9 @@ def _immutable_names(values: Iterable[str]) -> set[str]:
 
 
 def is_immutable_bookmark(bookmark: Bookmark, immutable_roots: set[str]) -> bool:
-    names = [_root_display(bookmark.root), *bookmark.folder_path]
+    names = [_root_display(bookmark.root)]
+    if bookmark.folder_path:
+        names.append(bookmark.folder_path[0])
     return any(_folder_match_key(name) in immutable_roots for name in names)
 
 
@@ -1270,7 +1272,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--output-format", "--format", choices=("chrome", "firefox", "netscape"), default="chrome")
     parser.add_argument("--model", type=Path, help="Local GGUF model path loaded through llama-cpp-python.")
     parser.add_argument("--auto-install-llama", action="store_true", help="Install llama-cpp-python with pip if missing.")
-    parser.add_argument("--immutable-root", action="append", default=[], help="Root folder/category name to copy untouched.")
+    parser.add_argument("--immutable-root", action="append", default=[], help="Top-level folder/category name to copy untouched.")
     parser.add_argument("--immutable-file", help="Text file with one immutable folder/category name per line.")
     parser.add_argument("--discover-browsers", action="store_true", help="Add default Chrome, Edge, and Firefox profiles to inputs.")
     parser.add_argument("--no-recursive", dest="recursive", action="store_false", default=True, help="Do not scan input folders recursively.")
