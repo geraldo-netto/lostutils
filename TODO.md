@@ -208,7 +208,6 @@ rf-adapt-01 | open | low | relocate_folder.py:743 — `_DISK_SPACE_HEADROOM` (1.
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-config-01 | open | low | deduplicate-by-namev3.py:33-39 — DEFAULT_THRESHOLD, BLOCK_THRESHOLD, BLOCK_ROWS, REPLACEMENTS, and WORD_TOKENS are module constants with no env/CLI override; WORD_TOKENS ("xxx","monography") is a hardcoded domain assumption that needs a code edit to change. Expose the token/replacement lists via flags or document them as fixed invariants. | hardcoded domain assumption
 oze-cfg-01 | open | low | organize_by_extension.py:33 — `BUCKET_SIZE` (and `PROGRESS_EVERY`, `SUBMIT_BACKLOG_MULT`) are hardcoded module constants with no CLI flag or env override, yet `_log_run_stats`/comments (880-885) explicitly invite the user to "tune BUCKET_SIZE"; expose a `--bucket-size` flag or env knob with a typed default. | runtime knob w/o accessor
 
 ## API contract & compatibility

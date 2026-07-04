@@ -39,7 +39,17 @@ REPLACEMENTS = (",", "[", "]", ";")  # dnv3-cli-03: ";" is the output field
 # delimiter (`{a};{b};{dist}`); strip it from cleaned strings so a value
 # containing ";" can't produce rows a downstream ;-split parser mis-reads.
 WORD_TOKENS = ("xxx", "monography")
-_WORD_RE = re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, WORD_TOKENS)))
+DEFAULT_STRIP_CHARS = "".join(REPLACEMENTS)
+DEFAULT_WORD_TOKENS = ",".join(WORD_TOKENS)
+
+
+def compile_word_re(word_tokens):
+    if not word_tokens:
+        return None
+    return re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, word_tokens)))
+
+
+_WORD_RE = compile_word_re(WORD_TOKENS)
 
 
 def clamp_threshold(threshold):
@@ -80,11 +90,15 @@ def valid_threshold(value):
     return iv
 
 
-def cleanup(entry):
+def parse_word_tokens(value):
+    return tuple(token.strip().lower() for token in value.split(",") if token.strip())
+
+
+def cleanup(entry, replacements=REPLACEMENTS, word_re=_WORD_RE):
     s = entry.strip().lower()
-    for tok in REPLACEMENTS:
+    for tok in replacements:
         s = s.replace(tok, "")
-    return _WORD_RE.sub("", s)
+    return word_re.sub("", s) if word_re is not None else s
 
 
 def configure_stdout():
@@ -103,6 +117,11 @@ def main():
                     help=f"max distance to report (default {DEFAULT_THRESHOLD})")
     ap.add_argument("-w", "--workers", type=valid_workers, default=-1,
                     help="cdist worker threads (-1 = all cores)")
+    ap.add_argument("--strip-chars", default=DEFAULT_STRIP_CHARS,
+                    help=f"characters removed during cleanup (default {DEFAULT_STRIP_CHARS!r})")
+    ap.add_argument("--word-tokens", type=parse_word_tokens, default=WORD_TOKENS,
+                    help=("comma-separated whole-word tokens removed during cleanup "
+                          f"(default {DEFAULT_WORD_TOKENS!r}; empty disables)"))
     args = ap.parse_args()
 
     # dnv3-di-01: surrogateescape (not "replace") so distinct undecodable byte
@@ -119,8 +138,10 @@ def main():
     counts = {}
     line_nums = {}
     dropped_empty = 0
+    replacements = tuple(args.strip_chars)
+    word_re = compile_word_re(args.word_tokens)
     for lineno, raw in enumerate(raw_lines, 1):
-        cleaned = cleanup(raw)
+        cleaned = cleanup(raw, replacements, word_re)
         if not cleaned:
             dropped_empty += 1
             continue

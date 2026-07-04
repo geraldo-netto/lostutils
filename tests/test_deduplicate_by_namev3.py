@@ -130,6 +130,16 @@ def test_cleanup_basic_replacements_and_case():
     assert dn.cleanup("  A,[B] ") == "ab"
 
 
+def test_cleanup_accepts_custom_replacements_and_word_tokens():
+    word_re = dn.compile_word_re(("skip",))
+
+    assert dn.cleanup("Foo# skip", ("#",), word_re) == "foo "
+
+
+def test_parse_word_tokens_trims_and_drops_empty_items():
+    assert dn.parse_word_tokens(" alpha, ,Beta ") == ("alpha", "beta")
+
+
 def test_configure_stdout_forces_utf8_and_surrogateescape(monkeypatch):
     stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
     monkeypatch.setattr(dn.sys, "stdout", stream)
@@ -397,3 +407,18 @@ def test_cleanup_strips_semicolon_delimiter():
     output format."""
     assert ";" not in dn.cleanup("foo;bar")
     assert dn.cleanup("a;b") == "ab"
+
+
+def test_main_cleanup_flags_override_defaults(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "names.txt"
+    f.write_text("A# skip\nA\n", encoding="utf-8")
+    monkeypatch.setattr(
+        dn.sys,
+        "argv",
+        ["prog", str(f), "--strip-chars", "#", "--word-tokens", "skip", "-w", "1"],
+    )
+
+    dn.main()
+
+    out = capsys.readouterr().out
+    assert "a ;a;1" in out
