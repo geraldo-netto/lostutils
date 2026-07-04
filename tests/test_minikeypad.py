@@ -462,6 +462,16 @@ def test_ensure_pyusb_returns_false_when_install_fails(monkeypatch):
     assert minikeypad._ensure_pyusb() is False
 
 
+def test_ensure_pyusb_installs_pinned_requirement(monkeypatch):
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    monkeypatch.setattr(minikeypad, "_USB_ERR", "missing")
+    calls = []
+    monkeypatch.setattr(minikeypad, "_pip_install", lambda pkg: calls.append(pkg) or False)
+
+    assert minikeypad._ensure_pyusb() is False
+    assert calls == [minikeypad.PYUSB_REQUIREMENT]
+
+
 def test_ensure_pyusb_success_reimports(monkeypatch):
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
     # _ensure_pyusb rebinds the module global `usb`; record it so monkeypatch
@@ -1499,11 +1509,32 @@ def test_main_skips_install_with_flag(monkeypatch):
     assert called == []
 
 
-def test_main_auto_installs_when_missing(monkeypatch):
+def test_main_skips_install_by_default(monkeypatch):
     monkeypatch.setattr(minikeypad, "App", _FakeApp)
     monkeypatch.setattr(minikeypad, "_install_signal_handlers", lambda a: None)
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
-    monkeypatch.delenv("MINIKEYPAD_NO_AUTO_INSTALL", raising=False)
+    monkeypatch.delenv("MINIKEYPAD_AUTO_INSTALL", raising=False)
+    called = []
+    monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
+    minikeypad.main([])
+    assert called == []
+
+
+def test_main_auto_installs_with_opt_in_flag(monkeypatch):
+    monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_install_signal_handlers", lambda a: None)
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    called = []
+    monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
+    minikeypad.main(["--auto-install-pyusb"])
+    assert called == [True]
+
+
+def test_main_auto_installs_with_opt_in_env(monkeypatch):
+    monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_install_signal_handlers", lambda a: None)
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    monkeypatch.setenv("MINIKEYPAD_AUTO_INSTALL", "1")
     called = []
     monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
     minikeypad.main([])

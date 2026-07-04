@@ -68,6 +68,8 @@ except Exception as e:  # pragma: no cover - import guard
     _USB_OK = False
     _USB_ERR = repr(e)
 
+PYUSB_REQUIREMENT = "pyusb==1.3.1"
+
 
 def _pip_install(pkg):
     """Install pkg into the current interpreter. argv list, never a shell."""
@@ -88,9 +90,9 @@ def _ensure_pyusb():
     global _USB_OK, _USB_ERR, usb
     if _USB_OK:
         return True
-    print("pyusb not found; attempting automatic install (pip install pyusb)...")
-    if not _pip_install("pyusb"):
-        print("Automatic install failed. Install manually: pip install pyusb")
+    print(f"pyusb not found; installing pinned dependency ({PYUSB_REQUIREMENT})...")
+    if not _pip_install(PYUSB_REQUIREMENT):
+        print(f"Automatic install failed. Install manually: pip install {PYUSB_REQUIREMENT}")
         return False
     try:
         import usb.core
@@ -1619,14 +1621,18 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="MINI-KeyBoard configurator")
     parser.add_argument("--version", action="version",
                         version="minikeypad %s" % __version__)
+    parser.add_argument("--auto-install-pyusb", action="store_true",
+                        help=f"install missing pyusb with pip ({PYUSB_REQUIREMENT})")
     parser.add_argument("--no-auto-install", action="store_true",
-                        help="do not try to pip install pyusb when it is missing")
+                        help=argparse.SUPPRESS)
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="verbose (DEBUG) terminal logging")
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)
-    auto = (not args.no_auto_install
-            and os.environ.get("MINIKEYPAD_NO_AUTO_INSTALL") != "1")
+    auto = (
+        args.auto_install_pyusb
+        or os.environ.get("MINIKEYPAD_AUTO_INSTALL") == "1"
+    ) and not args.no_auto_install
     if not _USB_OK and auto:
         _ensure_pyusb()
     app = App()

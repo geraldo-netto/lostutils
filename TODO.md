@@ -12,7 +12,6 @@ id prefixes: `bt-` bookmark-tidy.py, `dnp-` dedupl_numpy.py, `dnv3-` deduplicate
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-sec-01 | open | med | minikeypad.py:1623 — on startup, when pyusb is missing, the app runs `pip install pyusb` automatically (default-on; only opt-out via `--no-auto-install`/env), executing remote package/setup code with no consent prompt and no version/hash pinning. Make auto-install opt-in or prompt first, and pin the version. | STRIDE Tampering / EoP; supply-chain
 
 ## input validation / command safety
 
