@@ -17,9 +17,11 @@ import import_events
 def _reset_paddle_runtime_state():
     import_events.reset_paddle_ocr_state()
     import_events._TESSERACT_PATH_CACHE.clear()
+    import_events.reset_stage_file_hash_cache()
     yield
     import_events.reset_paddle_ocr_state()
     import_events._TESSERACT_PATH_CACHE.clear()
+    import_events.reset_stage_file_hash_cache()
 
 
 SAMPLE_TABLE_CALENDAR_PDF = (
@@ -1815,6 +1817,28 @@ def test_cached_text_stage_reuses_file_hash_cache(tmp_path):
     assert import_events._cached_text_stage(cfg, source, "pdf_text", {"x": 1}, produce) == "cached text"
     assert import_events._cached_text_stage(cfg, source, "pdf_text", {"x": 1}, produce) == "cached text"
     assert calls == ["called"]
+
+
+def test_stage_cache_key_memoizes_file_digest_until_file_changes(tmp_path, monkeypatch):
+    source = tmp_path / "source.pdf"
+    source.write_text("input", encoding="utf-8")
+    calls = []
+    real_file_sha256 = import_events._file_sha256
+
+    def counted_file_sha256(path):
+        calls.append(path)
+        return real_file_sha256(path)
+
+    monkeypatch.setattr(import_events, "_file_sha256", counted_file_sha256)
+
+    first = import_events._stage_cache_key(source, "pdf_text", {"x": 1})
+    second = import_events._stage_cache_key(source, "pdf_ocr", {"x": 2})
+    source.write_text("changed content", encoding="utf-8")
+    third = import_events._stage_cache_key(source, "pdf_text", {"x": 1})
+
+    assert first != second
+    assert first != third
+    assert calls == [source, source]
 
 
 def test_cached_text_stage_refresh_rewrites_cache(tmp_path):

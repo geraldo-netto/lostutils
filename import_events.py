@@ -90,6 +90,7 @@ DEFAULT_STAGE_CACHE = "off"
 DEFAULT_WORKERS = 4
 DEFAULT_DETERMINISTIC_ORDER = False
 STAGE_CACHE_VERSION = 1
+FILE_SHA256_CACHE_MAX = 128
 PDF_VISION_MAX_PAGES = 0
 PDF_VISION_DPI = 150
 TEXT_CHARS_PER_TOKEN = 4
@@ -774,7 +775,9 @@ MAX_CONTENT_CHARS = _text_budget_from_context(DEFAULT_LLM_CONTEXT_SIZE,
 # enough for vision OCR without the memory blow-up of full-resolution pixmaps.
 
 _LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
+_FILE_SHA256_CACHE: "OrderedDict[tuple[str, int, int], Optional[str]]" = OrderedDict()
 _LLM_CACHE_LOCK = threading.RLock()
+_FILE_SHA256_CACHE_LOCK = threading.Lock()
 _LLM_REQUEST_LOCK = threading.Lock()
 _LLM_STALL_CONTEXT = threading.local()
 _APP_LOG_FILE: Optional[Any] = None
@@ -2142,6 +2145,37 @@ def _file_sha256(file_path: Path) -> Optional[str]:
     return digest.hexdigest()
 
 
+def reset_stage_file_hash_cache() -> None:
+    with _FILE_SHA256_CACHE_LOCK:
+        _FILE_SHA256_CACHE.clear()
+
+
+def _file_sha256_cache_key(file_path: Path) -> Optional[tuple[str, int, int]]:
+    try:
+        stat_result = file_path.stat()
+    except OSError:
+        return None
+    path_key = str(file_path.expanduser().resolve(strict=False))
+    return path_key, stat_result.st_mtime_ns, stat_result.st_size
+
+
+def _cached_file_sha256(file_path: Path) -> Optional[str]:
+    cache_key = _file_sha256_cache_key(file_path)
+    if cache_key is None:
+        return None
+    with _FILE_SHA256_CACHE_LOCK:
+        cached = _FILE_SHA256_CACHE.pop(cache_key, None)
+        if cached is not None:
+            _FILE_SHA256_CACHE[cache_key] = cached
+            return cached
+    digest = _file_sha256(file_path)
+    with _FILE_SHA256_CACHE_LOCK:
+        _FILE_SHA256_CACHE[cache_key] = digest
+        while len(_FILE_SHA256_CACHE) > FILE_SHA256_CACHE_MAX:
+            _FILE_SHA256_CACHE.popitem(last=False)
+    return digest
+
+
 def _stage_cache_root(config: ModelConfig) -> Path:
     if config.stage_cache_dir:
         return Path(config.stage_cache_dir).expanduser()
@@ -2149,7 +2183,7 @@ def _stage_cache_root(config: ModelConfig) -> Path:
 
 
 def _stage_cache_key(file_path: Path, stage: str, options: Dict[str, Any]) -> Optional[str]:
-    file_digest = _file_sha256(file_path)
+    file_digest = _cached_file_sha256(file_path)
     if file_digest is None:
         return None
     payload = {
