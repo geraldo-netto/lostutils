@@ -46,6 +46,18 @@ def _netscape_html():
 """
 
 
+def _mozlz4_literal(raw):
+    extra = len(raw) - 15
+    payload = bytearray([0xF0 if extra >= 0 else len(raw) << 4])
+    while extra >= 255:
+        payload.append(255)
+        extra -= 255
+    if extra >= 0:
+        payload.append(extra)
+    payload.extend(raw)
+    return bookmark_tidy.MOZLZ4_MAGIC + bytes(payload)
+
+
 class FakeLlamaChat:
     kwargs = {}
 
@@ -317,6 +329,32 @@ def test_read_firefox_sqlite_bookmarks(tmp_path):
     ]
 
 
+def test_read_firefox_sqlite_bookmarks_includes_wal_rows(tmp_path):
+    path = tmp_path / "places.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.executescript(
+        """
+        CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT);
+        CREATE TABLE moz_bookmarks (
+            id INTEGER PRIMARY KEY, type INTEGER, fk INTEGER, parent INTEGER,
+            position INTEGER, title TEXT, dateAdded INTEGER, lastModified INTEGER, guid TEXT
+        );
+        """
+    )
+    conn.execute("INSERT INTO moz_places VALUES (1, 'https://wal.example.test', 'WAL title')")
+    conn.execute("INSERT INTO moz_bookmarks VALUES (1, 2, NULL, NULL, 0, 'root', 0, 0, 'root________')")
+    conn.execute("INSERT INTO moz_bookmarks VALUES (2, 2, NULL, 1, 0, 'toolbar', 0, 0, 'toolbar_____')")
+    conn.execute("INSERT INTO moz_bookmarks VALUES (3, 1, 1, 2, 0, 'Bookmark', 3000000, 4000000, 'bookmark____')")
+    conn.commit()
+    try:
+        bookmarks = bookmark_tidy.read_firefox_sqlite_bookmarks(path)
+    finally:
+        conn.close()
+
+    assert bookmarks[0].url == "https://wal.example.test"
+
+
 def test_read_firefox_json_bookmarks(tmp_path):
     path = tmp_path / "firefox.json"
     path.write_text(
@@ -352,6 +390,35 @@ def test_read_firefox_json_bookmarks(tmp_path):
     assert bookmarks[0].folder_path == ("Research",)
     assert bookmarks[0].title == "https://example.test/a"
     assert bookmarks[0].add_date == 5
+
+
+def test_read_firefox_jsonlz4_bookmarks(tmp_path):
+    path = tmp_path / "bookmarks.jsonlz4"
+    payload = {
+        "root": "placesRoot",
+        "children": [
+            {
+                "root": "unfiledBookmarksFolder",
+                "children": [{"typeCode": 1, "uri": "https://lz4.example.test", "title": "LZ4"}],
+            }
+        ],
+    }
+    path.write_bytes(_mozlz4_literal(json.dumps(payload).encode("utf-8")))
+
+    bookmarks = bookmark_tidy.read_firefox_jsonlz4_bookmarks(path)
+
+    assert bookmarks == [
+        bookmark_tidy.Bookmark("https://lz4.example.test", "LZ4", (), root="other", source=str(path))
+    ]
+    assert bookmark_tidy.detect_bookmark_format(path) == "firefox-jsonlz4"
+    assert bookmark_tidy._supported_input_file(path)
+
+
+def test_read_firefox_jsonlz4_rejects_bad_container():
+    with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy._decode_mozlz4(b"not-lz4")
+    with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy._decode_lz4_block(bytes([0x10, 0x01, 0x00]))
 
 
 def test_detect_and_read_bookmark_formats(tmp_path):

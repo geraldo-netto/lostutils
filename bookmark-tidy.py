@@ -5,7 +5,6 @@ import argparse
 import json
 import logging
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -28,6 +27,7 @@ DEFAULT_FALLBACK_CATEGORY = "Uncategorized"
 DEFAULT_LLM_BATCH_SIZE = 30
 DEFAULT_LLM_CONTEXT = 4096
 DEFAULT_LLM_MAX_TOKENS = 1024
+MOZLZ4_MAGIC = b"mozLz40\x00"
 TRACKING_PARAM_NAMES = frozenset(
     {
         "dclid",
@@ -364,9 +364,21 @@ def _chromium_bookmark(
 
 def read_firefox_sqlite_bookmarks(path: Path) -> list[Bookmark]:
     with tempfile.TemporaryDirectory(prefix="bookmark-tidy-firefox-") as tmp_dir:
-        copied = Path(tmp_dir) / "places.sqlite"
-        shutil.copy2(path, copied)
-        return _read_firefox_sqlite_copy(copied, str(path))
+        snapshot = Path(tmp_dir) / "places.sqlite"
+        _backup_sqlite_database(path, snapshot)
+        return _read_firefox_sqlite_copy(snapshot, str(path))
+
+
+def _backup_sqlite_database(source: Path, target: Path) -> None:
+    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(target)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
 
 
 def _read_firefox_sqlite_copy(path: Path, source: str) -> list[Bookmark]:
@@ -455,9 +467,66 @@ def _firefox_bookmark(
 
 def read_firefox_json_bookmarks(path: Path) -> list[Bookmark]:
     data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    return firefox_json_data_to_bookmarks(data, str(path))
+
+
+def read_firefox_jsonlz4_bookmarks(path: Path) -> list[Bookmark]:
+    data = json.loads(_decode_mozlz4(path.read_bytes()).decode("utf-8"))
+    return firefox_json_data_to_bookmarks(data, str(path))
+
+
+def firefox_json_data_to_bookmarks(data: Any, source: str) -> list[Bookmark]:
+    if not isinstance(data, Mapping):
+        raise UserError(f"Firefox JSON bookmark backup must be an object: {source}")
     bookmarks: list[Bookmark] = []
-    _walk_firefox_json(data, "bookmark_bar", (), str(path), bookmarks)
+    _walk_firefox_json(data, "bookmark_bar", (), source, bookmarks)
     return bookmarks
+
+
+def _decode_mozlz4(data: bytes) -> bytes:
+    if not data.startswith(MOZLZ4_MAGIC):
+        raise UserError("Firefox jsonlz4 backup has an invalid mozLz4 header")
+    return _decode_lz4_block(data[len(MOZLZ4_MAGIC):])
+
+
+def _decode_lz4_block(data: bytes) -> bytes:
+    output = bytearray()
+    index = 0
+    while index < len(data):
+        token = data[index]
+        index += 1
+        literal_len, index = _lz4_length(data, index, token >> 4)
+        output.extend(data[index:index + literal_len])
+        index += literal_len
+        if index >= len(data):
+            break
+        if index + 2 > len(data):
+            raise UserError("truncated LZ4 match offset")
+        offset = data[index] | (data[index + 1] << 8)
+        index += 2
+        match_len, index = _lz4_length(data, index, token & 0x0F)
+        _copy_lz4_match(output, offset, match_len + 4)
+    return bytes(output)
+
+
+def _lz4_length(data: bytes, index: int, nibble: int) -> tuple[int, int]:
+    total = nibble
+    if total != 15:
+        return total, index
+    while index < len(data):
+        value = data[index]
+        index += 1
+        total += value
+        if value != 255:
+            return total, index
+    raise UserError("truncated LZ4 length")
+
+
+def _copy_lz4_match(output: bytearray, offset: int, length: int) -> None:
+    if offset <= 0 or offset > len(output):
+        raise UserError("invalid LZ4 match offset")
+    for _ in range(length):
+        output.append(output[-offset])
 
 
 def _walk_firefox_json(
@@ -514,6 +583,8 @@ def _firefox_json_bookmark(
 
 
 def detect_bookmark_format(path: Path) -> str:
+    if path.suffix.casefold() == ".jsonlz4":
+        return "firefox-jsonlz4"
     if path.name == "places.sqlite" or path.suffix.casefold() in {".sqlite", ".sqlite3"}:
         return "firefox-sqlite"
     sample = path.read_text(encoding="utf-8", errors="replace")[:4096]
@@ -545,6 +616,8 @@ def read_bookmark_file(path: Path) -> list[Bookmark]:
         return read_firefox_sqlite_bookmarks(path)
     if fmt == "firefox-json":
         return read_firefox_json_bookmarks(path)
+    if fmt == "firefox-jsonlz4":
+        return read_firefox_jsonlz4_bookmarks(path)
     return read_netscape_bookmarks(path)
 
 
@@ -554,6 +627,7 @@ def _supported_input_file(path: Path) -> bool:
         ".htm",
         ".html",
         ".json",
+        ".jsonlz4",
         ".sqlite",
         ".sqlite3",
     }

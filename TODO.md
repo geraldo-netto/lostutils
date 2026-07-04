@@ -32,7 +32,6 @@ lq-gov-01 | open | low | link_queue.py:261 — `DEFAULT_CONFIG["output_folder"]`
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-di-01 | open | med | bookmark-tidy.py:365 — Firefox import copies only `places.sqlite` before reading it; live Firefox profiles commonly keep recent bookmark writes in `places.sqlite-wal`, so the export can miss uncheckpointed bookmarks or read a stale snapshot. Use SQLite's backup API or copy/open the WAL-aware database safely. | sqlite WAL snapshot integrity
 oze-di-01 | open | low | organize_by_extension.py:930 — `BucketManager.choose` adds `source.name` to the bucket name set before the move is submitted, but a failed/skipped move (worker returns error tuple in `_drain_futures`, 1853) never releases the reservation; the in-memory bucket then counts toward `BUCKET_SIZE`/`_BUCKET_FULL` while disk has room, wasting bucket slots and allocating extra dirs. Release the reserved name on move failure. | in-memory vs filesystem drift
 
 ## performance
