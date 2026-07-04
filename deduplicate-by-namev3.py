@@ -114,12 +114,16 @@ def main():
     # produced it (the counts dict alone lost that mapping).
     counts = {}
     line_nums = {}
+    dropped_empty = 0
     for lineno, raw in enumerate(raw_lines, 1):
         cleaned = cleanup(raw)
         if not cleaned:
+            dropped_empty += 1
             continue
         counts[cleaned] = counts.get(cleaned, 0) + 1
         line_nums.setdefault(cleaned, []).append(lineno)
+    if dropped_empty:
+        print(f"dropped {dropped_empty} empty cleaned line(s)", file=sys.stderr)
 
     items = list(counts.items())
     n = len(items)

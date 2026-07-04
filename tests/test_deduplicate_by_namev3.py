@@ -87,6 +87,28 @@ def test_main_empty_file_noop(monkeypatch, tmp_path):
     assert out == ""
 
 
+def test_main_reports_cleaned_empty_lines(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "in.txt"
+    f.write_text("\nxxx\nalpha\n", encoding="utf-8")
+    monkeypatch.setattr(dn.sys, "argv", ["prog", str(f), "-w", "1"])
+
+    dn.main()
+
+    assert "dropped 2 empty cleaned line(s)" in capsys.readouterr().err
+
+
+def test_main_reports_all_cleaned_empty_before_noop(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "in.txt"
+    f.write_text("\nxxx\n", encoding="utf-8")
+    monkeypatch.setattr(dn.sys, "argv", ["prog", str(f), "-w", "1"])
+
+    dn.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "dropped 2 empty cleaned line(s)" in captured.err
+
+
 # --- dnv3-rel-02: cleanup strips only standalone "xxx"/"monography" ---------
 
 def test_cleanup_strips_standalone_tokens():
