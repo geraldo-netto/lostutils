@@ -14,7 +14,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 mkp-sec-01 | open | med | minikeypad.py:1623 — on startup, when pyusb is missing, the app runs `pip install pyusb` automatically (default-on; only opt-out via `--no-auto-install`/env), executing remote package/setup code with no consent prompt and no version/hash pinning. Make auto-install opt-in or prompt first, and pin the version. | STRIDE Tampering / EoP; supply-chain
 oze-sec-01 | open | low | organize_by_extension.py:1033 — `_require_regular_source` classifies via `os.lstat` then `move_file` (1068) hardlinks via `os.link` (default `follow_symlinks=True`); a hostile concurrent filesystem can swap the path for a symlink between the check and the link (TOCTOU). Scanner-fed paths are safe, but `move_file` is public API; harden with `os.link(..., follow_symlinks=False)` or an fd-based open+fstat. | STRIDE Tampering / TOCTOU
-rdv3-sec-01 | open | low | remove-deduplv3.py:112 — output is `rm -f` commands; shlex.quote is correct but the script emits destructive commands with no header warning/--dry-run note and no guard that the survivor still exists. Add a leading "review before piping to sh" banner and consider verifying paths. | destructive-output
 
 ## input validation / command safety
 

@@ -41,6 +41,10 @@ BOM_TABLE = (
     (b"\xff\xfe",         "utf-16"),
     (b"\xef\xbb\xbf",     "utf-8-sig"),
 )
+SAFETY_BANNER = (
+    "# WARNING: generated destructive rm -f commands.\n"
+    "# Review this file before piping it to sh; this script does not delete files by itself.\n\n"
+)
 
 
 def detect_encoding(path):
@@ -106,6 +110,7 @@ def main():
         sys.exit(3)
 
     out = sys.stdout.write
+    out(SAFETY_BANNER)
     groups_with_dups = 0
     files_to_remove = 0
     for h, paths in groups.items():

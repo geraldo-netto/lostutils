@@ -46,7 +46,7 @@ def test_identical_path_collapsed_not_removed(monkeypatch, tmp_path):
     emitted for removal."""
     out = _run(monkeypatch, tmp_path, "h /a\nh /a\n")
     # Only one unique file in the group -> nothing to remove.
-    assert "rm -f" not in out
+    assert not [ln for ln in out.splitlines() if ln.startswith("rm -f")]
 
 
 def test_no_duplicate_path_in_rm_line(monkeypatch, tmp_path):
@@ -58,6 +58,13 @@ def test_no_duplicate_path_in_rm_line(monkeypatch, tmp_path):
     for ln in rm_lines:
         targets = ln[len("rm -f "):].split()
         assert len(targets) == len(set(targets)), f"duplicate path in: {ln}"
+
+
+def test_output_starts_with_destructive_command_warning(monkeypatch, tmp_path):
+    out = _run(monkeypatch, tmp_path, "h /a\nh /bb\n")
+
+    assert out.startswith("# WARNING: generated destructive rm -f commands.\n")
+    assert "Review this file before piping it to sh" in out.splitlines()[1]
 
 
 def test_emits_stderr_summary(monkeypatch, tmp_path, capsys):
