@@ -3,9 +3,10 @@
 import importlib.util
 import json
 import string
+import types
 from pathlib import Path
 
-from hypothesis import given, settings, strategies as st
+from hypothesis import assume, given, settings, strategies as st
 
 
 REPO = Path(__file__).resolve().parent.parent.parent
@@ -139,3 +140,25 @@ def test_netscape_export_parse_preserves_urls(items):
     parser.feed(bookmark_tidy.export_netscape_bookmarks(bookmarks))
 
     assert sorted(bookmark.url for bookmark in parser.bookmarks) == sorted(url for url, _, _ in items)
+
+
+@given(seed=st.binary(min_size=1, max_size=24), offset=st.integers(min_value=1, max_value=24),
+       length=st.integers(min_value=0, max_value=48))
+@FUZZ
+def test_copy_lz4_match_grows_by_requested_length(seed, offset, length):
+    assume(offset <= len(seed))
+    output = bytearray(seed)
+
+    bookmark_tidy._copy_lz4_match(output, offset, length)
+
+    assert len(output) == len(seed) + length
+    assert bytes(output[:len(seed)]) == seed
+
+
+@given(host=st.text(alphabet=string.ascii_letters + string.digits + ":-.", min_size=1, max_size=40))
+@FUZZ
+def test_raw_host_part_preserves_multi_colon_hosts(host):
+    assume(host.count(":") != 1)
+    parsed = types.SimpleNamespace(netloc=host)
+
+    assert bookmark_tidy._raw_host_part(parsed) == host

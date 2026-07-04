@@ -421,6 +421,19 @@ def test_read_firefox_jsonlz4_rejects_bad_container():
         bookmark_tidy._decode_lz4_block(bytes([0x10, 0x01, 0x00]))
 
 
+def test_lz4_match_copy_decodes_repeated_sequence():
+    data = bytes([0x32]) + b"abc" + b"\x03\x00"
+
+    assert bookmark_tidy._decode_lz4_block(data) == b"abcabcabc"
+
+    output = bytearray(b"abc")
+    bookmark_tidy._copy_lz4_match(output, 3, 6)
+    assert bytes(output) == b"abcabcabc"
+
+    with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy._copy_lz4_match(bytearray(b"a"), 2, 1)
+
+
 def test_detect_and_read_bookmark_formats(tmp_path):
     chrome = tmp_path / "chrome.json"
     firefox = tmp_path / "firefox.json"
@@ -445,6 +458,26 @@ def test_detect_and_read_bookmark_formats(tmp_path):
         bookmark_tidy.detect_bookmark_format(unknown_json)
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy.detect_bookmark_format(unsupported)
+
+
+def test_read_bookmark_file_dispatches_every_format(monkeypatch, tmp_path):
+    path = tmp_path / "bookmarks.any"
+    path.write_text("", encoding="utf-8")
+    readers = {
+        "chromium": "chrome",
+        "firefox-sqlite": "sqlite",
+        "firefox-json": "json",
+        "firefox-jsonlz4": "jsonlz4",
+    }
+
+    for fmt, marker in readers.items():
+        monkeypatch.setattr(bookmark_tidy, "detect_bookmark_format", lambda _path, value=fmt: value)
+        monkeypatch.setattr(bookmark_tidy, "read_chromium_bookmarks", lambda _path: ["chrome"])
+        monkeypatch.setattr(bookmark_tidy, "read_firefox_sqlite_bookmarks", lambda _path: ["sqlite"])
+        monkeypatch.setattr(bookmark_tidy, "read_firefox_json_bookmarks", lambda _path: ["json"])
+        monkeypatch.setattr(bookmark_tidy, "read_firefox_jsonlz4_bookmarks", lambda _path: ["jsonlz4"])
+
+        assert bookmark_tidy.read_bookmark_file(path) == [marker]
 
 
 def test_expand_inputs_and_discovery_helpers(tmp_path, monkeypatch):
@@ -493,6 +526,12 @@ def test_normalize_url_option_edges():
     assert bookmark_tidy.normalize_url("https://[::1]:443/a", bookmark_tidy.NormalizeOptions())[1] == "https://[::1]/a"
 
 
+def test_raw_host_part_handles_brackets_auth_and_ipv6_text():
+    assert bookmark_tidy._raw_host_part(bookmark_tidy.urlsplit("https://user:pw@[::1]:443/a")) == "::1"
+    assert bookmark_tidy._raw_host_part(types.SimpleNamespace(netloc="[broken")) == "[broken"
+    assert bookmark_tidy._raw_host_part(bookmark_tidy.urlsplit("scheme://2001:db8::1/path")) == "2001:db8::1"
+
+
 def test_tidy_bookmarks_requires_categorizer_for_mutable_bookmarks():
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy.tidy_bookmarks(
@@ -535,7 +574,16 @@ def test_category_response_parsing_and_errors():
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy.parse_category_response("{bad", 1)
     with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy.parse_category_response("{bad}", 1)
+    with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy.parse_category_response("[1]", 1)
+
+
+def test_loads_json_object_rejects_non_mapping_response(monkeypatch):
+    monkeypatch.setattr(bookmark_tidy.json, "loads", lambda _text: [])
+
+    with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy._loads_json_object("{}")
 
 
 def test_llama_categorizer_chat_and_text_paths(monkeypatch, tmp_path):
@@ -603,6 +651,18 @@ def test_exports_and_write_output(tmp_path):
         bookmark_tidy.write_output(bookmarks, chrome_path, "firefox", force=False)
     bookmark_tidy.write_output(bookmarks, chrome_path, "firefox", force=True)
     assert json.loads(chrome_path.read_text(encoding="utf-8"))["root"] == "placesRoot"
+
+
+def test_firefox_folder_export_reuses_existing_folder_node():
+    ids = bookmark_tidy._IdFactory()
+    parent = {"children": [bookmark_tidy._firefox_folder_node(ids, "Existing")]}
+
+    first = bookmark_tidy._child_firefox_folder(parent, "Existing", ids)
+    second = bookmark_tidy._child_firefox_folder(parent, "New", ids)
+
+    assert first is parent["children"][0]
+    assert second["title"] == "New"
+    assert len(parent["children"]) == 2
 
 
 def test_atomic_write_fsyncs_parent_directory(tmp_path, monkeypatch):
