@@ -1167,6 +1167,7 @@ class App(tk.Tk):
 
     def _select_key(self, key_id):
         if not self.kp.select_physical_key(key_id):
+            self.log("Key selection disabled on LED page")
             return  # LED page: selection disabled
         self._selected_id = key_id
         self._refresh_key_map()

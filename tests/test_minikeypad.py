@@ -1054,6 +1054,19 @@ def test_version_check_applies_report_id_on_ui_queue():
     assert logs == ["Keyboard reportID = 2"]
 
 
+def test_select_key_logs_when_disabled_on_led_page():
+    class LedPageKeyParam:
+        def select_physical_key(self, _key_id):
+            return False
+
+    logs = []
+    app = types.SimpleNamespace(kp=LedPageKeyParam(), log=logs.append)
+
+    minikeypad.App._select_key(app, 2)
+
+    assert logs == ["Key selection disabled on LED page"]
+
+
 def test_select_disabled_on_led_page(app):
     app.kp.KEY_Cur_Page = 4
     app._select_key(2)

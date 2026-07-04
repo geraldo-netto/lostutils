@@ -247,7 +247,6 @@ rf-doc-02 | open | low | relocate_folder.py:7 — module docstring usage example
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-ux-01 | open | low | hash-recursive-ai5.py:78 — default `--hashes-file=hashes.txt` writes/appends a persistent dump into the current working directory on every run with no opt-in, silently polluting cwd. Make the dump opt-in or default off. | Laws of UX (least surprise)
-mkp-ux-01 | open | low | minikeypad.py:1150 — `_select_key` returns silently when `select_physical_key` refuses the click on the LED page (page 4); the user clicks a key, nothing happens, and no log/feedback is emitted. Add a hint (e.g. "Key selection disabled on LED page"). | Laws of UX: feedback / Doherty threshold
 
 ## i18n
 
