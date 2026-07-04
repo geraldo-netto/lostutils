@@ -848,7 +848,12 @@ def _assign_categories(
         return []
     result: list[Bookmark] = []
     for batch in _chunks(bookmarks, max(1, batch_size)):
-        categories = categorizer(batch) if categorizer is not None else {}
+        categories: Mapping[int, Sequence[str] | str] = {}
+        if categorizer is not None:
+            try:
+                categories = categorizer(batch)
+            except Exception as exc:
+                LOGGER.warning("LLM categorization failed for %d bookmark(s); using fallback category: %s", len(batch), exc)
         result.extend(_apply_category_batch(batch, categories, fallback))
     return result
 

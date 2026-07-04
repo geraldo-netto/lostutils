@@ -437,6 +437,24 @@ def test_tidy_bookmarks_requires_categorizer_for_mutable_bookmarks():
     assert bookmark_tidy.tidy_bookmarks([], [], bookmark_tidy.NormalizeOptions(), None) == []
 
 
+def test_tidy_bookmarks_falls_back_when_categorizer_fails(caplog):
+    def failing_categorizer(bookmarks):
+        raise bookmark_tidy.UserError("bad json")
+
+    caplog.set_level(logging.WARNING, logger="bookmark-tidy")
+
+    tidied = bookmark_tidy.tidy_bookmarks(
+        [_sample_bookmark()],
+        immutable_roots=[],
+        options=bookmark_tidy.NormalizeOptions(),
+        categorizer=failing_categorizer,
+        fallback_category="Fallback",
+    )
+
+    assert tidied[0].folder_path == ("Fallback",)
+    assert "LLM categorization failed" in caplog.text
+
+
 def test_category_response_parsing_and_errors():
     assert bookmark_tidy.parse_category_response(
         'prefix {"items":[{"id":0,"category":"Dev/Docs"},{"id":9,"category":"Nope"}]} suffix',

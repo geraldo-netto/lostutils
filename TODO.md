@@ -77,7 +77,6 @@ lq-dist-02 | open | med | link_queue.py:1096 — no single-instance / advisory f
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-depend-01 | open | low | bookmark-tidy.py:900 — `LlamaCategorizer.__call__` passes model output directly to `parse_category_response`; malformed or non-JSON LLM output raises `UserError` and aborts the whole run instead of falling back for that batch. Add a retry or assign `--fallback-category` with a warning. | provider failure graceful degradation
 dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no BrokenPipeError guard, so piping into `head` raises a BrokenPipeError traceback on close. Wrap the write/flush in a BrokenPipeError handler or restore SIGPIPE to default. | common CLI pipe pattern
 
 ## code complexity
