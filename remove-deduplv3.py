@@ -56,7 +56,7 @@ def detect_encoding(path):
     return "utf-8"
 
 
-def main():
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description="Emit `rm` commands to clear content-duplicates "
                     "while keeping the entry with the longest basename.")
@@ -67,17 +67,10 @@ def main():
     ap.add_argument("--strict", action="store_true",
                     help="Fail on undecodable bytes (default: "
                          "surrogateescape).")
-    args = ap.parse_args()
+    return ap.parse_args(argv)
 
-    try:
-        encoding = args.encoding or detect_encoding(args.file)
-    except OSError as e:
-        # Same clean contract as the read loop below: a missing/unreadable
-        # input gets `error:` + exit 2, not an uncaught traceback (rdv3-robust-01).
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(2)
-    err_mode = "strict" if args.strict else "surrogateescape"
 
+def _configure_stdout_errors(err_mode):
     # Reconfigure stdout to round-trip surrogateescape bytes losslessly
     # (matches Linux kernel filename semantics).
     if isinstance(sys.stdout, io.TextIOWrapper):
@@ -86,30 +79,32 @@ def main():
         except ValueError:
             pass  # already configured, or running under unusual stdout
 
-    groups = defaultdict(list)
-    try:
-        with open(args.file, "r", encoding=encoding, errors=err_mode) as f:
-            for raw in f:
-                line = raw.rstrip("\r\n")
-                if not line:
-                    continue
-                # split(None, 1) consumes any leading whitespace AND the
-                # whole gap between hash and path; the path keeps its
-                # interior whitespace (tabs, multiple spaces, etc.).
-                parts = line.split(None, 1)
-                if len(parts) < 2:
-                    continue
-                groups[parts[0]].append(parts[1])
-    except OSError as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(2)
-    except UnicodeDecodeError as e:
-        print(f"decode error in {args.file} (encoding={encoding}): {e}\n"
-              f"hint: try --encoding <name> or omit --strict",
-              file=sys.stderr)
-        sys.exit(3)
 
-    out = sys.stdout.write
+def _read_groups(path, encoding, err_mode):
+    groups = defaultdict(list)
+    with open(path, "r", encoding=encoding, errors=err_mode) as f:
+        for raw in f:
+            line = raw.rstrip("\r\n")
+            if not line:
+                continue
+            # split(None, 1) consumes any leading whitespace AND the
+            # whole gap between hash and path; the path keeps its
+            # interior whitespace (tabs, multiple spaces, etc.).
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            groups[parts[0]].append(parts[1])
+    return groups
+
+
+def _survivor(paths):
+    # max key: (basename_length, path). Computing basename length via
+    # rfind avoids building a basename string per call (str.rfind +
+    # arithmetic is ~5× faster than os.path.basename).
+    return max(paths, key=lambda p: (len(p) - p.rfind("/") - 1, p))
+
+
+def _emit_remove_commands(groups, out):
     out(SAFETY_BANNER)
     groups_with_dups = 0
     files_to_remove = 0
@@ -120,10 +115,7 @@ def main():
         paths = list(dict.fromkeys(paths))
         if len(paths) < 2:
             continue
-        # max key: (basename_length, path). Computing basename length via
-        # rfind avoids building a basename string per call (str.rfind +
-        # arithmetic is ~5× faster than os.path.basename).
-        keep = max(paths, key=lambda p: (len(p) - p.rfind("/") - 1, p))
+        keep = _survivor(paths)
         to_remove = [p for p in paths if p != keep]
         if not to_remove:
             continue
@@ -131,6 +123,33 @@ def main():
         files_to_remove += len(to_remove)
         quoted = " ".join(shlex.quote(p) for p in to_remove)
         out(f"# duplicates: {h}\n# saving: {keep}\nrm -f {quoted}\n\n")
+    return groups_with_dups, files_to_remove
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        encoding = args.encoding or detect_encoding(args.file)
+    except OSError as e:
+        # Same clean contract as the read loop below: a missing/unreadable
+        # input gets `error:` + exit 2, not an uncaught traceback (rdv3-robust-01).
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    err_mode = "strict" if args.strict else "surrogateescape"
+    _configure_stdout_errors(err_mode)
+
+    try:
+        groups = _read_groups(args.file, encoding, err_mode)
+    except OSError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(2)
+    except UnicodeDecodeError as e:
+        print(f"decode error in {args.file} (encoding={encoding}): {e}\n"
+              f"hint: try --encoding <name> or omit --strict",
+              file=sys.stderr)
+        sys.exit(3)
+
+    groups_with_dups, files_to_remove = _emit_remove_commands(groups, sys.stdout.write)
     # rdv3-obs-01: audit summary to stderr (groups with all-identical paths or a
     # single survivor are otherwise silently skipped with no trace).
     print(
