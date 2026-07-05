@@ -258,7 +258,6 @@ mkp-a11y-01 | open | low | minikeypad.py:1165 — the selected physical key is d
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-prod-01 | open | low | deduplicate-by-namev3.py:41 — `WORD_TOKENS = ("xxx", "monography")` ships a domain-specific whole-word removal default ("monography" looks like a leftover from one dataset), silently mutating every user's cleaned strings. Make the shipped default empty (opt-in) or document why universal. |
 
 ## i18n
 

@@ -41,7 +41,7 @@ BLOCK_ROWS = 2000  # rows per block when row-blocking (peak BLOCK_ROWS×N bytes)
 REPLACEMENTS = (",", "[", "]", ";")  # dnv3-cli-03: ";" is the output field
 # delimiter (`{a};{b};{dist}`); strip it from cleaned strings so a value
 # containing ";" can't produce rows a downstream ;-split parser mis-reads.
-WORD_TOKENS = ("xxx", "monography")
+WORD_TOKENS = ()
 DEFAULT_STRIP_CHARS = "".join(REPLACEMENTS)
 DEFAULT_WORD_TOKENS = ",".join(WORD_TOKENS)
 

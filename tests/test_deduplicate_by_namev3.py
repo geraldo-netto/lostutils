@@ -15,6 +15,8 @@ _spec = importlib.util.spec_from_file_location("deduplicate_by_namev3", _PATH)
 dn = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dn)
 
+TEST_WORD_TOKENS = ("xxx", "monography")
+
 
 # --- dnv3-rel-01: threshold clamped to <= MAX_THRESHOLD (uint8 safety) -------
 
@@ -67,6 +69,10 @@ def _cleanup_default(text):
     return dn.cleanup(text, dn.REPLACEMENTS, dn.compile_word_re(dn.WORD_TOKENS))
 
 
+def _cleanup_with_tokens(text, tokens=TEST_WORD_TOKENS):
+    return dn.cleanup(text, dn.REPLACEMENTS, dn.compile_word_re(tokens))
+
+
 def test_main_large_threshold_clamped_not_wrapped(monkeypatch, tmp_path):
     # Two far-apart strings; an unclamped uint8 wrap could falsely match them.
     lines = ["a", "z" * 50]
@@ -95,7 +101,11 @@ def test_main_empty_file_noop(monkeypatch, tmp_path):
 def test_main_reports_cleaned_empty_lines(monkeypatch, tmp_path, capsys):
     f = tmp_path / "in.txt"
     f.write_text("\nxxx\nalpha\n", encoding="utf-8")
-    monkeypatch.setattr(dn.sys, "argv", ["prog", str(f), "-w", "1"])
+    monkeypatch.setattr(
+        dn.sys,
+        "argv",
+        ["prog", str(f), "--word-tokens", "xxx", "-w", "1"],
+    )
 
     dn.main()
 
@@ -105,7 +115,11 @@ def test_main_reports_cleaned_empty_lines(monkeypatch, tmp_path, capsys):
 def test_main_reports_all_cleaned_empty_before_noop(monkeypatch, tmp_path, capsys):
     f = tmp_path / "in.txt"
     f.write_text("\nxxx\n", encoding="utf-8")
-    monkeypatch.setattr(dn.sys, "argv", ["prog", str(f), "-w", "1"])
+    monkeypatch.setattr(
+        dn.sys,
+        "argv",
+        ["prog", str(f), "--word-tokens", "xxx", "-w", "1"],
+    )
 
     dn.main()
 
@@ -130,17 +144,17 @@ def test_load_cleaned_lines_keeps_line_numbers_as_source_of_truth(tmp_path):
 # --- dnv3-rel-02: cleanup strips only standalone "xxx"/"monography" ---------
 
 def test_cleanup_strips_standalone_tokens():
-    assert _cleanup_default("xxx monography") == " "
+    assert _cleanup_with_tokens("xxx monography") == " "
 
 
 def test_cleanup_keeps_words_containing_tokens():
-    assert _cleanup_default("xxxl") == "xxxl"
-    assert _cleanup_default("monographymania") == "monographymania"
-    assert _cleanup_default("amonography") == "amonography"
+    assert _cleanup_with_tokens("xxxl") == "xxxl"
+    assert _cleanup_with_tokens("monographymania") == "monographymania"
+    assert _cleanup_with_tokens("amonography") == "amonography"
 
 
 def test_cleanup_strips_token_among_words():
-    assert _cleanup_default("my xxx file") == "my  file"
+    assert _cleanup_with_tokens("my xxx file") == "my  file"
 
 
 def test_cleanup_basic_replacements_and_case():
@@ -172,17 +186,24 @@ def test_configure_stdout_forces_utf8_and_surrogateescape(monkeypatch):
 def test_cleanup_never_strips_token_inside_longer_word(word):
     # A pure-alpha word longer than a token and containing it as a substring,
     # but not equal to it, must survive intact (no boundary).
-    for tok in dn.WORD_TOKENS:
+    for tok in TEST_WORD_TOKENS:
         if tok in word and word != tok:
-            assert _cleanup_default(word) == word
+            assert _cleanup_with_tokens(word) == word
 
 
 @given(st.lists(st.sampled_from(["xxx", "monography", "alpha", "beta"]),
                 min_size=1, max_size=6))
 def test_cleanup_drops_all_standalone_tokens(words):
-    result = _cleanup_default(" ".join(words))
-    for tok in dn.WORD_TOKENS:
+    result = _cleanup_with_tokens(" ".join(words))
+    for tok in TEST_WORD_TOKENS:
         assert tok not in result.split()
+
+
+def test_default_word_tokens_empty():
+    args = dn._build_parser().parse_args(["names.txt"])
+
+    assert args.word_tokens == ()
+    assert _cleanup_default("xxx monography") == "xxx monography"
 
 
 # --- dnv3-rel-01: matrix-mask vs self-collision semantics (no double-count) --
