@@ -3810,6 +3810,26 @@ def test_immediate_consumer_survives_item_exception(headless_dispatcher):
     assert "boom" in seen and "ok" in seen
 
 
+def test_immediate_consumer_waits_without_sleep(headless_dispatcher, monkeypatch):
+    """lq-perf-02: an idle immediate consumer blocks on the condition instead
+    of polling through time.sleep."""
+    disp = headless_dispatcher
+    ran = threading.Event()
+
+    def fail_sleep(_seconds):
+        raise AssertionError("idle immediate consumer used time.sleep")
+
+    monkeypatch.setattr(link_queue.time, "sleep", fail_sleep)
+    disp._run_immediate_item = lambda _item: ran.set()
+    with disp._immediate_lock:
+        disp._ensure_immediate_pool()
+    threading.Event().wait(0.05)
+
+    disp._dispatch_immediate(q("magnet:?wake"))
+
+    assert ran.wait(3), "condition notification did not wake the consumer"
+
+
 def test_immediate_consumer_task_done_survives_queue_swap(headless_dispatcher):
     """lq-dist-01: a queue swap (resize) between get() and task_done() must not
     crash the consumer with 'task_done() called too many times'."""

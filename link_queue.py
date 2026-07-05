@@ -909,6 +909,7 @@ class Dispatcher:
         self._immediate_current: dict[int, QueueItem | None] = {}
         self._immediate_consumer_seq = 0
         self._immediate_lock = threading.Lock()
+        self._immediate_cv = threading.Condition(self._immediate_lock)
         # lq-scal-01: bound the immediate work queue so a large paste can't pin
         # an unbounded number of QueueItems in RAM. Overflow is dropped-with-
         # warning in _dispatch_immediate (immediate items are fire-and-forget).
@@ -937,6 +938,8 @@ class Dispatcher:
 
     def close(self) -> None:
         self._cancel_save_timer()
+        with self._immediate_cv:
+            self._immediate_cv.notify_all()
         if self._state_lock is not None:
             self._state_lock.release()
             self._state_lock = None
@@ -1426,7 +1429,13 @@ class Dispatcher:
             if item is None:
                 if self.stop_event.is_set():
                     return
-                time.sleep(0.05)
+                with self._immediate_cv:
+                    self._immediate_cv.wait_for(
+                        lambda: stop_self.is_set()
+                        or self.stop_event.is_set()
+                        or not self._immediate_q.empty(),
+                        timeout=0.5,
+                    )
                 continue
             try:
                 self._run_immediate_item(item)
@@ -1474,6 +1483,7 @@ class Dispatcher:
         elif delta < 0:
             for c in live[delta:]:   # retire the surplus tail
                 c["stop"].set()
+            self._immediate_cv.notify_all()
 
     @property
     def immediate_threads(self) -> "list[threading.Thread]":
@@ -1531,6 +1541,7 @@ class Dispatcher:
             except queue.Full:
                 dropped += 1
         self._immediate_q = new_q
+        self._immediate_cv.notify_all()
         return dropped
 
     def _dispatch_immediate(self, item: QueueItem) -> bool:
@@ -1557,6 +1568,8 @@ class Dispatcher:
             except queue.Full:
                 full = True
                 maxsize = self._immediate_q.maxsize
+            else:
+                self._immediate_cv.notify()
         if full:
             self._log(
                 f"[immediate dropped] {item.protocol}: {item.url} "
@@ -4797,6 +4810,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         # the snapshot still captures every pending/in-flight item (it never
         # clears queue_items), and the authoritative post-join save follows.
         self.stop_event.set()
+        with self.dispatcher._immediate_cv:
+            self.dispatcher._immediate_cv.notify_all()
         self._safe_save_state_on_shutdown()
 
         self.pause_event.clear()
