@@ -2212,6 +2212,11 @@ USER_PROMPT = (
 )
 
 
+def _llm_text_prompt_digest() -> str:
+    payload = "\0".join((SYSTEM_PROMPT, USER_PROMPT))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _text_messages(
     content: str,
     language: str = DEFAULT_LANGUAGE,
@@ -3069,6 +3074,7 @@ def _run_text_llm(
         "llm_main_gpu": runtime_config.llm_main_gpu,
         "tentative_events": runtime_config.tentative_events,
         "no_activity_events": runtime_config.no_activity_events,
+        "prompt_sha256": _llm_text_prompt_digest(),
     }
     if llm_client is None:
         cached = _read_stage_cache_text(runtime_config, file_path, "llm_text", cache_options)

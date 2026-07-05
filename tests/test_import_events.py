@@ -2040,6 +2040,27 @@ def test_run_text_llm_uses_stage_cache_without_real_model(tmp_path, monkeypatch)
     assert len(calls) == 1
 
 
+def test_run_text_llm_stage_cache_key_includes_prompt_digest(tmp_path, monkeypatch):
+    source = tmp_path / "event.txt"
+    source.write_text("Launch", encoding="utf-8")
+    cfg = import_events.ModelConfig(
+        stage_cache="on", stage_cache_dir=str(tmp_path / "cache"))
+    captured = []
+
+    def fake_read(_config, _path, stage, options):
+        assert stage == "llm_text"
+        captured.append(options.copy())
+        return "[]"
+
+    monkeypatch.setattr(import_events, "_read_stage_cache_text", fake_read)
+
+    import_events._run_text_llm("Launch", "en", source, "Text/LLM", None, cfg)
+    monkeypatch.setattr(import_events, "USER_PROMPT", import_events.USER_PROMPT + "\nnew rule")
+    import_events._run_text_llm("Launch", "en", source, "Text/LLM", None, cfg)
+
+    assert captured[0]["prompt_sha256"] != captured[1]["prompt_sha256"]
+
+
 def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypatch):
     img = tmp_path / "poster.png"
     img.write_bytes(b"image")
