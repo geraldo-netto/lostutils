@@ -158,6 +158,45 @@ def test_emit_remove_commands_shell_quotes_paths():
     assert "rm -f " in text
 
 
+def test_emit_remove_commands_uses_translation_hook(monkeypatch):
+    def translate(message):
+        if message == rd.SAFETY_BANNER_TEMPLATE:
+            return "BANNER\n"
+        if message == "# duplicates: {hash}\n# saving: {path}\n":
+            return "DUP {hash}\nKEEP {path}\n"
+        return message
+
+    out = []
+    monkeypatch.setattr(rd, "_", translate)
+
+    rd._emit_remove_commands({"h": ["/tmp/remove", "/tmp/keep-longer-name"]}, out.append)
+
+    text = "".join(out)
+    assert text.startswith("BANNER\n")
+    assert "DUP h\nKEEP /tmp/keep-longer-name\n" in text
+    assert "rm -f /tmp/remove" in text
+
+
+def test_summary_and_error_use_translation_hook(monkeypatch, capsys):
+    def translate(message):
+        if message.startswith("summary:"):
+            return "SUM {group_count}/{dup_count}/{remove_count}"
+        if message.startswith(","):
+            return " SKIP {skipped_count}"
+        if message == "error: {message}":
+            return "ERR {message}"
+        return message
+
+    monkeypatch.setattr(rd, "_", translate)
+
+    assert rd._format_summary(3, 2, 1, 4) == "SUM 3/2/1 SKIP 4"
+    with pytest.raises(SystemExit) as exc:
+        rd._fail("boom", 7)
+
+    assert exc.value.code == 7
+    assert capsys.readouterr().err == "ERR boom\n"
+
+
 def test_output_starts_with_destructive_command_warning(monkeypatch, tmp_path):
     out = _run(monkeypatch, tmp_path, "h /a\nh /bb\n")
 

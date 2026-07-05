@@ -26,12 +26,15 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import gettext
 import io
 import os
 import shlex
 import sys
 from collections import defaultdict
 from typing import NoReturn
+
+_ = gettext.gettext
 
 # Order matters: UTF-32 BOMs share a 2-byte prefix with UTF-16 BOMs,
 # so the 4-byte UTF-32 entries must come first. The mapped codec names
@@ -45,7 +48,7 @@ BOM_TABLE = (
     (b"\xff\xfe",         "utf-16"),
     (b"\xef\xbb\xbf",     "utf-8-sig"),
 )
-SAFETY_BANNER = (
+SAFETY_BANNER_TEMPLATE = (
     "# WARNING: generated destructive rm -f commands.\n"
     "# Review this file before piping it to sh; this script does not delete files by itself.\n\n"
 )
@@ -62,16 +65,16 @@ def detect_encoding(path):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description="Emit `rm` commands to clear content-duplicates "
-                    "while keeping the entry with the longest basename.",
-        epilog="Exit codes: 0 success, 2 input file error, 3 decode error.")
-    ap.add_argument("file", help="hash file (one '<hash> <path>' per line)")
+        description=_("Emit `rm` commands to clear content-duplicates "
+                      "while keeping the entry with the longest basename."),
+        epilog=_("Exit codes: 0 success, 2 input file error, 3 decode error."))
+    ap.add_argument("file", help=_("hash file (one '<hash> <path>' per line)"))
     ap.add_argument("--encoding", default=None,
-                    help="Force encoding (e.g. utf-8, utf-16, gbk, "
-                         "latin-1). Default: BOM-detect → utf-8.")
+                    help=_("Force encoding (e.g. utf-8, utf-16, gbk, "
+                           "latin-1). Default: BOM-detect → utf-8."))
     ap.add_argument("--strict", action="store_true",
-                    help="Fail on undecodable bytes (default: "
-                         "surrogateescape).")
+                    help=_("Fail on undecodable bytes (default: "
+                           "surrogateescape)."))
     return ap.parse_args(argv)
 
 
@@ -88,7 +91,7 @@ def _configure_stdout_errors(err_mode):
     if buffer is not None:
         sys.stdout = io.TextIOWrapper(buffer, encoding="utf-8", errors=err_mode)
         return
-    _fail("stdout does not expose a binary buffer for utf-8 output", 2)
+    _fail(_("stdout does not expose a binary buffer for utf-8 output"), 2)
 
 
 def _read_groups(path, encoding, err_mode):
@@ -115,7 +118,13 @@ def _validate_encoding(encoding):
     try:
         codecs.lookup(encoding)
     except LookupError as e:
-        _fail(f"unknown encoding {encoding!r}: {e}", 3)
+        _fail(
+            _("unknown encoding {encoding!r}: {error}").format(
+                encoding=encoding,
+                error=e,
+            ),
+            3,
+        )
     return encoding
 
 
@@ -128,7 +137,7 @@ def _survivor(paths):
 
 
 def _emit_remove_commands(groups, out):
-    out(SAFETY_BANNER)
+    out(_(SAFETY_BANNER_TEMPLATE))
     groups_with_dups = 0
     files_to_remove = 0
     for h, paths in groups.items():
@@ -145,12 +154,27 @@ def _emit_remove_commands(groups, out):
         groups_with_dups += 1
         files_to_remove += len(to_remove)
         quoted = " ".join(shlex.quote(p) for p in to_remove)
-        out(f"# duplicates: {h}\n# saving: {keep}\nrm -f {quoted}\n\n")
+        out(_("# duplicates: {hash}\n# saving: {path}\n").format(hash=h, path=keep))
+        out(f"rm -f {quoted}\n\n")
     return groups_with_dups, files_to_remove
 
 
+def _format_summary(group_count, groups_with_dups, files_to_remove, skipped_lines):
+    summary = _(
+        "summary: {group_count} hash group(s), {dup_count} with duplicates, "
+        "{remove_count} file(s) queued for removal"
+    ).format(
+        group_count=group_count, dup_count=groups_with_dups, remove_count=files_to_remove
+    )
+    if skipped_lines:
+        summary += _(", {skipped_count} skipped line(s)").format(
+            skipped_count=skipped_lines
+        )
+    return summary
+
+
 def _fail(msg, code) -> NoReturn:
-    print(f"error: {msg}", file=sys.stderr)
+    print(_("error: {message}").format(message=msg), file=sys.stderr)
     sys.exit(code)
 
 
@@ -193,22 +217,25 @@ def main(argv=None):
     except OSError as e:
         _fail(e, 2)
     except UnicodeDecodeError as e:
-        print(f"decode error in {args.file} (encoding={encoding}): {e}\n"
-              f"hint: try --encoding <name> or omit --strict",
-              file=sys.stderr)
+        print(
+            _("decode error in {file} (encoding={encoding}): {error}\n"
+              "hint: try --encoding <name> or omit --strict").format(
+                file=args.file,
+                encoding=encoding,
+                error=e,
+            ),
+            file=sys.stderr,
+        )
         sys.exit(3)
 
     try:
         groups_with_dups, files_to_remove = _emit_remove_commands(groups, sys.stdout.write)
         # rdv3-obs-01: audit summary to stderr (groups with all-identical paths or a
         # single survivor are otherwise silently skipped with no trace).
-        summary = (
-            f"summary: {len(groups)} hash group(s), {groups_with_dups} with "
-            f"duplicates, {files_to_remove} file(s) queued for removal"
+        print(
+            _format_summary(len(groups), groups_with_dups, files_to_remove, skipped_lines),
+            file=sys.stderr,
         )
-        if skipped_lines:
-            summary += f", {skipped_lines} skipped line(s)"
-        print(summary, file=sys.stderr)
     except BrokenPipeError:
         _silence_stdout_after_broken_pipe()
         return

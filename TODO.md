@@ -283,7 +283,6 @@ id | status | effort | description | notes
 dnp-i18n-01 | open | low | dedupl_numpy.py:18 — user-facing strings ("Usage:", "equal files:") hardcoded, not routed through a catalog. Acceptable for a dev CLI; flagged for category completeness. | i18n — no translation seam; low value for a single-locale dev tool
 dnv3-i18n-01 | open | low | deduplicate-by-namev3.py:58 — user-facing diagnostics ("warning: threshold…", "dropped … empty cleaned line(s)") are hardcoded English with no catalog; route through a message layer if localization is in scope. |
 mkp-i18n-01 | open | low | minikeypad.py — all user-facing strings (labels, logs, status) are hardcoded English with no translation catalog; applicable only if localization is a goal. | marginal for single-file util
-rdv3-i18n-01 | open | low | remove-deduplv3.py:47 — user-facing strings (banner, `error:`, decode error, summary:) hardcoded, no catalog. Acceptable for a dev CLI; flagged for completeness. | i18n — no translation seam; low value single-locale tool
 
 ## release & deploy engineering
 
