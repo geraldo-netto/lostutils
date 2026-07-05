@@ -26,6 +26,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 import shutil
 from typing import Callable, Iterable, Iterator, NamedTuple, NoReturn, Protocol, Set
@@ -1697,7 +1698,7 @@ def plan_moves(
     # required for deterministic plans; iterators are accepted (we have
     # no way to assert order without consuming first).
     if isinstance(files, list):
-        if not all(a <= b for a, b in zip(files, files[1:])):
+        if not all(a <= b for a, b in pairwise(files)):
             raise ValueError(
                 "plan_moves expects `files` to be sorted; pass sorted(files)"
             )

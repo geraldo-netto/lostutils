@@ -1181,6 +1181,25 @@ class PlanMovesTests(unittest.TestCase):
             for p in files:
                 self.assertNotIn(p, head_cache)
 
+    def test_plan_moves_sortedness_check_does_not_slice_list(self):
+        class NoSliceList(list):
+            def __getitem__(self, item):
+                if isinstance(item, slice):
+                    raise AssertionError("sortedness check copied a slice")
+                return super().__getitem__(item)
+
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            files = NoSliceList([root / "a.txt", root / "b.txt"])
+            for p in files:
+                p.write_text("x")
+            mgr = BucketManager(root=root)
+
+            plan = list(plan_moves(
+                root, files, mgr, ctx=SniffContext(sniff=False)))
+
+            self.assertEqual([source.name for source, _ in plan], ["a.txt", "b.txt"])
+
 
 class HeadCacheTests(unittest.TestCase):
     """oze-perf-04: shared head_cache means one read per file."""
