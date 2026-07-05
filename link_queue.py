@@ -1532,31 +1532,40 @@ class Dispatcher:
         lq-rel-02). Caller holds `_immediate_lock`. Dead consumers are purged;
         a deficit spawns new ones; a surplus signals the highest-indexed live
         consumers to retire via their per-thread stop event."""
-        self._immediate_consumers = [
-            c for c in self._immediate_consumers if c["thread"].is_alive()]
-        # lq-rel-01: drop in-flight slots for consumers that have died so the
-        # dict can't grow unboundedly over a long churn session.
-        alive_ids = {c["idx"] for c in self._immediate_consumers}
-        self._immediate_current = {
-            cid: it for cid, it in self._immediate_current.items()
-            if cid in alive_ids}
+        self._prune_dead_consumers()
         live = [c for c in self._immediate_consumers if not c["stop"].is_set()]
         delta = self._immediate_pool_size - len(live)
         if delta > 0:
-            for _ in range(delta):
-                self._immediate_consumer_seq += 1
-                cid = self._immediate_consumer_seq
-                stop_self = threading.Event()
-                t = threading.Thread(
-                    target=self._immediate_consumer, args=(cid, stop_self),
-                    daemon=True, name=f"immediate-runner-{cid}")
-                self._immediate_consumers.append(
-                    {"idx": cid, "thread": t, "stop": stop_self})
-                t.start()
+            self._spawn_immediate_consumers(delta)
         elif delta < 0:
             for c in live[delta:]:   # retire the surplus tail
                 c["stop"].set()
             self._immediate_cv.notify_all()
+
+    def _prune_dead_consumers(self) -> None:
+        """Drop dead consumer threads and their in-flight slots (lq-cx-04 /
+        lq-rel-01) so the tracking dicts can't grow over a long churn session.
+        Caller holds `_immediate_lock`."""
+        self._immediate_consumers = [
+            c for c in self._immediate_consumers if c["thread"].is_alive()]
+        alive_ids = {c["idx"] for c in self._immediate_consumers}
+        self._immediate_current = {
+            cid: it for cid, it in self._immediate_current.items()
+            if cid in alive_ids}
+
+    def _spawn_immediate_consumers(self, count: int) -> None:
+        """Spawn `count` new immediate consumer threads (lq-cx-04). Caller holds
+        `_immediate_lock`."""
+        for _ in range(count):
+            self._immediate_consumer_seq += 1
+            cid = self._immediate_consumer_seq
+            stop_self = threading.Event()
+            t = threading.Thread(
+                target=self._immediate_consumer, args=(cid, stop_self),
+                daemon=True, name=f"immediate-runner-{cid}")
+            self._immediate_consumers.append(
+                {"idx": cid, "thread": t, "stop": stop_self})
+            t.start()
 
     @property
     def immediate_threads(self) -> "list[threading.Thread]":
