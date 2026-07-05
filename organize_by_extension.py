@@ -68,6 +68,9 @@ _BUCKET_FULL: frozenset[str] = frozenset()
 logger = logging.getLogger(__name__)
 
 
+WEAK_HEADER_LABELS = frozenset({"bmp", "bz2", "exe", "mp3"})
+
+
 def normalize_extension(path: Path) -> str:
     """Return the normalized extension string for a file path.
 
@@ -391,15 +394,18 @@ class SniffContext:
 _DEFAULT_SNIFF_CTX = SniffContext()
 
 
+def _weak_header_should_keep_declared(declared: str, detected: str) -> bool:
+    return declared != "no_extension" and detected in WEAK_HEADER_LABELS
+
+
 def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
     """Return the bucket extension for ``path`` (oze-dup-02).
 
-    Header detection **always wins** when it disagrees with the declared
-    extension (oze-perf-06): ``mypdf.doc`` → ``pdf``, ``photo.png`` declared as
-    ``.gif`` → ``png``, with a WARNING log line so the user notices misnamed
-    files. Family-compatible declarations (``.docx`` ↔ ZIP, ``.mov`` ↔ MP4
-    container, ``.jpeg`` alias of jpg) are not mismatches and are preserved
-    silently.
+    Header detection wins for strong mismatches (oze-perf-06): ``mypdf.doc`` →
+    ``pdf``, ``photo.png`` declared as ``.gif`` → ``png``, with a WARNING log
+    line so the user notices misnamed files. Family-compatible declarations
+    (``.docx`` ↔ ZIP, ``.mov`` ↔ MP4 container, ``.jpeg`` alias of jpg) and
+    weak 2-3 byte header coincidences on declared files are preserved silently.
 
     ``ctx`` bundles ``sniff``/``head_cache``/``extra_zip_family``; omit it to
     use the shared default :data:`_DEFAULT_SNIFF_CTX`.
@@ -429,6 +435,12 @@ def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
             path, detected,
         )
         return "pdf"
+    if _weak_header_should_keep_declared(declared, detected):
+        logger.info(
+            "weak header match on %s: declared .%s but header is %s — keeping declared extension",
+            path, declared, detected,
+        )
+        return declared
     # oze-perf-06: real mismatch — header authoritative. Warn so the user
     # notices misnamed / mistyped files.
     logger.warning(

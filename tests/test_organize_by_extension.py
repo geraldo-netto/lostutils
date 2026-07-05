@@ -1537,6 +1537,27 @@ class HeaderAlwaysWinsTests(unittest.TestCase):
                 # assertLogs raises if NO logs at the level were captured.
                 self.assertIn("no logs", str(e).lower())
 
+    def test_weak_magic_keeps_declared_extension(self):
+        cases = (
+            (b"MZ", "exe"),
+            (b"BM", "bmp"),
+            (b"ID3", "mp3"),
+            (b"BZh", "bz2"),
+        )
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            for header, detected in cases:
+                with self.subTest(detected=detected):
+                    f = root / f"notes-{detected}.txt"
+                    f.write_bytes(header + b" ordinary text")
+                    self.assertEqual(resolve_real_extension(f), "txt")
+
+    def test_weak_magic_still_classifies_no_extension_file(self):
+        with TemporaryDirectory() as d:
+            f = Path(d) / "program"
+            f.write_bytes(b"MZ" + b"\0" * 16)
+            self.assertEqual(resolve_real_extension(f), "exe")
+
 
 class ScanBucketIndicesTests(unittest.TestCase):
     """oze-perf-05: one scandir per ext_dir returns all prefix indices."""
