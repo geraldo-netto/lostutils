@@ -112,7 +112,8 @@ def _survivor(paths):
     # max key: (basename_length, path). Computing basename length via
     # rfind avoids building a basename string per call (str.rfind +
     # arithmetic is ~5× faster than os.path.basename).
-    return max(paths, key=lambda p: (len(p) - p.rfind("/") - 1, p))
+    seps = (os.sep,) if os.altsep is None else (os.sep, os.altsep)
+    return max(paths, key=lambda p: (len(p) - max(p.rfind(sep) for sep in seps) - 1, p))
 
 
 def _emit_remove_commands(groups, out):

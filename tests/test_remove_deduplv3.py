@@ -71,6 +71,18 @@ def test_no_duplicate_path_in_rm_line(monkeypatch, tmp_path):
         assert len(targets) == len(set(targets)), f"duplicate path in: {ln}"
 
 
+def test_survivor_uses_platform_separators(monkeypatch):
+    monkeypatch.setattr(rd.os, "sep", "\\")
+    monkeypatch.setattr(rd.os, "altsep", "/")
+
+    keep = rd._survivor([
+        r"C:\very\long\directory\a.txt",
+        r"C:\b\longer-name.txt",
+    ])
+
+    assert keep == r"C:\b\longer-name.txt"
+
+
 def test_output_starts_with_destructive_command_warning(monkeypatch, tmp_path):
     out = _run(monkeypatch, tmp_path, "h /a\nh /bb\n")
 

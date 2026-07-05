@@ -178,7 +178,6 @@ dnp-plat-01 | open | low | dedupl_numpy.py:22 — `mmap.mmap(..., prot=mmap.PROT
 hr-plat-04 | open | low | hash-recursive-ai5.py:563 — `_hash_file_windows` references `os.O_NOFOLLOW | os.O_CLOEXEC` unconditionally; both attributes are absent on Windows (AttributeError at hash time) and there is no platform guard or documented POSIX-only contract. Guard with `getattr(os, "O_NOFOLLOW", 0)` / `getattr(os, "O_CLOEXEC", 0)` or document the POSIX-only requirement. | cross-OS portability / POSIX-only primitive
 lq-plat-10 | open | med | link_queue.py:2603 — `LogSink._open_locked` passes `os.O_NOFOLLOW`, which is Unix-only; on Windows accessing `os.O_NOFOLLOW` raises AttributeError, caught by the broad `except Exception`, so the log file silently never opens despite the module advertising Windows support. Guard with `getattr(os, "O_NOFOLLOW", 0)`. | POSIX-only primitive on a cross-OS surface
 rf-plat-01 | open | low | relocate_folder.py:239 — `os.O_DIRECTORY` is used unguarded while `O_NOFOLLOW` uses `getattr(os, "O_NOFOLLOW", 0)`; on a platform lacking `O_DIRECTORY` this raises `AttributeError` at `_source_identity_fd` instead of degrading. Wrap it with the same `getattr(os, "O_DIRECTORY", 0)` fallback for consistency. | inconsistent-guard
-rdv3-plat-01 | open | low | remove-deduplv3.py:104 — `_survivor` hardcodes `"/"` for the basename split (`p.rfind("/")`); Windows `\` paths compute a wrong basename length, changing survivor selection. Document the POSIX-only assumption or use `os.sep`-aware logic. | tool targets Linux filename bytes
 
 ## caching strategy
 
