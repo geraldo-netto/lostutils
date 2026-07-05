@@ -123,7 +123,6 @@ dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None]
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-rob-01 | open | low | bookmark-tidy.py:442-448 — `_walk_firefox_rows` recurses on the parent/child graph with no visited-set/cycle guard; a corrupted `places.sqlite` with a parent cycle triggers unbounded recursion (RecursionError/crash). Track visited node ids. |
 dnp-robust-02 | open | low | dedupl_numpy.py:21 — `open()` has no error handling, so a missing/unreadable hash-file exits with a raw `FileNotFoundError`/`OSError` traceback instead of the clean `error:` + nonzero exit that remove-deduplv3.py uses. | graceful failure contract
 dnp-robust-01 | open | low | dedupl_numpy.py:22 — `mmap.mmap(f.fileno(), 0, ...)` on a zero-byte input raises `ValueError: cannot mmap an empty file` (uncaught traceback); guard `os.fstat(f.fileno()).st_size == 0` and return cleanly. | interrupted/empty-input recovery
 hr-rob-02 | open | med | hash-recursive-ai5.py:1895 — the `hashes.txt` dump is persisted only in the `finally`, so a SIGKILL/power-loss before it loses the entire dump, contradicting the "complete file on abrupt exit" intent (comment at :1730). Write head digest at stage-1 and patch the composite at stage-2, or flush `dump_pending` periodically. |

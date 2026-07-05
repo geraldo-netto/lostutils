@@ -441,14 +441,19 @@ def _walk_firefox_rows(
     children: Mapping[int, list[int]],
     source: str,
     out: list[Bookmark],
+    visited: frozenset[int] | None = None,
 ) -> None:
+    path_seen = (visited or frozenset()) | {node_id}
     for child_id in children.get(node_id, []):
+        if child_id in path_seen:
+            LOGGER.warning("skipping cyclic Firefox bookmark folder edge in %s: %s -> %s", source, node_id, child_id)
+            continue
         row = nodes[child_id]
         if int(row[1]) == 1 and row[7]:
             out.append(_firefox_bookmark(row, root, folders, source))
         elif int(row[1]) == 2:
             name = _clean_folder_part(row[3] or "")
-            _walk_firefox_rows(child_id, root, folders + (name,), nodes, children, source, out)
+            _walk_firefox_rows(child_id, root, folders + (name,), nodes, children, source, out, path_seen)
 
 
 def _firefox_bookmark(

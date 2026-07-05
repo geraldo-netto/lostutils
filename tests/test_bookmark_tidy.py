@@ -355,6 +355,21 @@ def test_read_firefox_sqlite_bookmarks_includes_wal_rows(tmp_path):
     assert bookmarks[0].url == "https://wal.example.test"
 
 
+def test_firefox_rows_to_bookmarks_skips_parent_cycle(caplog):
+    rows = [
+        (1, 2, 2, "toolbar", 0, 0, "toolbar_____", None, None),
+        (2, 2, 1, "Research", 0, 0, "folder______", None, None),
+        (3, 1, 2, "Leaf", 3000000, 4000000, "bookmark____", "https://example.test/a", "Place title"),
+    ]
+
+    caplog.set_level(logging.WARNING, logger="bookmark-tidy")
+    bookmarks = bookmark_tidy._firefox_rows_to_bookmarks(rows, "places.sqlite")
+
+    assert [bookmark.url for bookmark in bookmarks] == ["https://example.test/a"]
+    assert bookmarks[0].folder_path == ("Research",)
+    assert "cyclic Firefox bookmark folder edge" in caplog.text
+
+
 def test_read_firefox_json_bookmarks(tmp_path):
     path = tmp_path / "firefox.json"
     path.write_text(
