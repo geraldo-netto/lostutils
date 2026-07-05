@@ -321,6 +321,20 @@ def test_config_file_written_0600(tmp_path, monkeypatch):
         assert link_queue._yaml_load(f)["sleep_between_items"] == 11
 
 
+def test_config_store_sweeps_stale_temp_siblings_on_load(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "cfg.yaml"
+    stale = tmp_path / "cfg.yaml.crashed.tmp"
+    unrelated = tmp_path / "other.yaml.crashed.tmp"
+    stale.write_text("partial", encoding="utf-8")
+    unrelated.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(link_queue, "LEGACY_CONFIG_FILE", str(tmp_path / "cfg.json"))
+
+    link_queue.ConfigStore(str(cfg_file), link_queue.LEGACY_CONFIG_FILE)
+
+    assert not stale.exists()
+    assert unrelated.exists()
+
+
 def test_config_write_cleans_tmp_on_dump_failure(tmp_path, monkeypatch):
     # lq-sec-01: a YAML-dump failure must not leave an orphaned tempfile.
     monkeypatch.setattr(link_queue, "CONFIG_FILE", str(tmp_path / "cfg.yaml"))
@@ -430,6 +444,21 @@ def test_save_and_load_state(app):
     in_flight, pending = app._load_state_items()
     assert [it.url for it in pending] == ["http://a/1", "http://b/2"]
     assert in_flight == []
+
+
+def test_dispatcher_sweeps_stale_state_temp_siblings_on_load(tmp_path):
+    state_path = tmp_path / "state.yaml"
+    stale = tmp_path / "state.yaml.crashed.tmp"
+    unrelated = tmp_path / "state-other.yaml.crashed.tmp"
+    stale.write_text("partial", encoding="utf-8")
+    unrelated.write_text("keep", encoding="utf-8")
+
+    disp = link_queue.Dispatcher.headless(state_path=str(state_path))
+    try:
+        assert not stale.exists()
+        assert unrelated.exists()
+    finally:
+        disp.close()
 
 
 def test_headless_load_state_items_reads_pending_and_inflight(headless_dispatcher):

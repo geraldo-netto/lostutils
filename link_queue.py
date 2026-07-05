@@ -184,6 +184,27 @@ def _resolve_state_path(name: str) -> str:
         return legacy_path
     return user_path
 
+
+def _sweep_temp_siblings(path: str) -> None:
+    directory = os.path.dirname(path) or "."
+    base = os.path.basename(path)
+    prefix = base + "."
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not (name.startswith(prefix) and name.endswith(".tmp")):
+            continue
+        tmp = os.path.join(directory, name)
+        if not (os.path.isfile(tmp) or os.path.islink(tmp)):
+            continue
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 CONFIG_FILE = _resolve_state_path(CONFIG_FILE_NAME)
 LEGACY_CONFIG_FILE = _resolve_state_path(LEGACY_CONFIG_FILE_NAME)
 STATE_FILE = _resolve_state_path(STATE_FILE_NAME)
@@ -568,6 +589,7 @@ class ConfigStore(dict):
         super().__init__()
         self.config_file = config_file
         self.legacy_file = legacy_file
+        _sweep_temp_siblings(self.config_file)
         self.update(self._load())
 
     def _load(self) -> dict:
@@ -899,6 +921,7 @@ class Dispatcher:
         self._state_lock = StateFileLock(self.state_path) if acquire_state_lock else None
         if self._state_lock is not None:
             self._state_lock.acquire()
+        _sweep_temp_siblings(self.state_path)
 
         # ---- queue + dispatch state (relocated from LinkQueueApp) ----
         # _PendingQueue keeps the url-set + per-domain indexes the picker and
