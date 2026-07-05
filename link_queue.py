@@ -283,6 +283,11 @@ class StateFileLock:
     def _pid_is_running(pid: int) -> bool:
         if pid <= 0:
             return False
+        # lq-plat-11: os.kill(pid, 0) on Windows maps to TerminateProcess and
+        # would actually kill the target — the exact platform (fcntl is None)
+        # that forces the pidfile branch. Probe via OpenProcess there instead.
+        if sys.platform == "win32":  # pragma: no cover - win32-only
+            return StateFileLock._pid_is_running_windows(pid)
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
@@ -292,6 +297,26 @@ class StateFileLock:
         except OSError:
             return True
         return True
+
+    @staticmethod
+    def _pid_is_running_windows(pid: int) -> bool:  # pragma: no cover - win32-only
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            # ERROR_ACCESS_DENIED (5) => process exists but is not queryable.
+            return kernel32.GetLastError() == 5
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
 
     def _release_flock(self) -> None:
         if self._fh is None:

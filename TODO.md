@@ -204,7 +204,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-plat-01 | open | low | dedupl_numpy.py:22 — `mmap.mmap(..., prot=mmap.PROT_READ)` uses the POSIX-only `prot=` keyword and `PROT_READ`; on Windows this errors (needs `access=`). Document Linux-only support or branch on `os.name`. | POSIX-only primitive
 lq-plat-10 | open | med | link_queue.py:2603 — `LogSink._open_locked` passes `os.O_NOFOLLOW`, which is Unix-only; on Windows accessing `os.O_NOFOLLOW` raises AttributeError, caught by the broad `except Exception`, so the log file silently never opens despite the module advertising Windows support. Guard with `getattr(os, "O_NOFOLLOW", 0)`. | POSIX-only primitive on a cross-OS surface
-lq-plat-11 | open | med | link_queue.py:287 — `StateFileLock._pid_is_running` calls `os.kill(pid, 0)` as a liveness probe, but on Windows (the exact platform where `fcntl is None` forces this pidfile branch, 253-266) `os.kill(pid, 0)` calls `TerminateProcess(handle, 0)`, actually killing the target; a second instance reads the first's live pid and terminates it, then still refuses to start. Use `OpenProcess`/`GetExitCodeProcess` (or a `sys.platform`-guarded check) instead. | platform — POSIX-only primitive with destructive Windows semantics; STRIDE Denial-of-service. Distinct from lq-plat-10 (O_NOFOLLOW)
 
 ## caching strategy
 
