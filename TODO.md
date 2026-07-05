@@ -57,7 +57,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-mt-01 | open | low | organize_by_extension.py:1951-1952 — `_run_moves` `finally` does `executor.shutdown(wait=False)` with no `cancel_futures` on the non-KeyboardInterrupt exit path; an unexpected exception abandons in-flight futures (neither cancelled nor awaited), swallowing their exceptions while workers may still be moving files during unwind. Use `cancel_futures=True`. | swallowed futures / partial moves continue
 
 ## distributed systems
 

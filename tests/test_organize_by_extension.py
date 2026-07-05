@@ -3051,6 +3051,40 @@ class SourceCollisionResolution(unittest.TestCase):
                 )
             self.assertNotIn(src.name, mgr.state_cache[bucket.path])
 
+    def test_run_moves_cancels_pending_futures_on_unexpected_error(self):
+        shutdown_calls = []
+
+        class FakeFuture:
+            pass
+
+        class FakeExecutor:
+            def __init__(self, max_workers):
+                self.max_workers = max_workers
+
+            def submit(self, *_args):
+                return FakeFuture()
+
+            def shutdown(self, **kwargs):
+                shutdown_calls.append(kwargs)
+
+        def broken_plan():
+            yield Path("a.txt"), Path("bucket")
+            raise RuntimeError("plan failed")
+
+        with patch.object(_oze, "ThreadPoolExecutor", FakeExecutor):
+            with self.assertRaisesRegex(RuntimeError, "plan failed"):
+                _oze._run_moves(
+                    broken_plan(),
+                    lambda source, bucket: (source, bucket / source.name, None),
+                    num_threads=1,
+                    preview=False,
+                    total_files=1,
+                    head_cache={},
+                    manager=_oze.BucketManager(root=Path(".")),
+                )
+
+        self.assertEqual(shutdown_calls, [{"wait": False, "cancel_futures": True}])
+
     def test_progress_line_fires_at_threshold(self, ):
         # oze-obs-02: progress line every PROGRESS_EVERY items. Patch the
         # threshold low so the test stays fast.

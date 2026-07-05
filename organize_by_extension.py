@@ -1962,7 +1962,7 @@ def _run_moves(
                     f"skipped {stats.skipped} file(s).")
         raise SystemExit(1) from None
     finally:
-        executor.shutdown(wait=False)
+        executor.shutdown(wait=False, cancel_futures=True)
     return stats
 
 
