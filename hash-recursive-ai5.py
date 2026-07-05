@@ -1640,7 +1640,12 @@ def _dump_digest_field(digest: str) -> str:
 
 
 class HashDumpWriter:
-    """Append hash dump lines early and patch digest fields in place."""
+    """Stream hash dump lines as each hash completes.
+
+    Stage 1 writes a line immediately for every hashed inode, and stage 2
+    patches the fixed-width digest field in place when a composite digest
+    replaces the head-only digest.
+    """
 
     def __init__(self, handle):
         self._handle = handle

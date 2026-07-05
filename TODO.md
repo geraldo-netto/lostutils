@@ -231,7 +231,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-doc-01 | open | low | hash-recursive-ai5.py:1730 — comment claims the dump is "line-buffered so … a complete file on an abrupt exit", but no dump line is written during hashing (all writes happen in the finally at :1895); correct the comment or make writes incremental. | ties to hr-rob-02
 lq-doc-01 | open | low | link_queue.py:20 — module docstring says legacy `~/.link_queue_config.json` is migrated on first run, but `LEGACY_CONFIG_FILE_NAME="link_queue_config.json"` resolves via `_resolve_state_path` to the XDG/script dir, never `~/.link_queue_config.json`; correct the docstring to the actual location. | docs-vs-behavior drift
 
 ## UI / UX
