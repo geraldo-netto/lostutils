@@ -227,7 +227,6 @@ ie-cli-01 | open | low | import_events.py:3589 — `--timezone` is not validated
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-dep-01 | open | low | hash-recursive-ai5.py:44 — top-level `import blake3` is unguarded; a missing third-party dep aborts with a raw ImportError traceback instead of an actionable message. Wrap in try/except ImportError -> friendly `sys.exit`. | dependability / graceful degradation
 
 ## documentation
 

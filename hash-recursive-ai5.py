@@ -41,7 +41,13 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import NamedTuple
 
-import blake3
+try:
+    import blake3
+except ImportError as exc:  # pragma: no cover - exercised by monkeypatch tests
+    blake3 = None
+    _BLAKE3_IMPORT_ERROR = exc
+else:
+    _BLAKE3_IMPORT_ERROR = None
 
 CAP = 4 * 1024 * 1024          # 4 MiB head/tail window
 SAMPLE = 64 * 1024             # mid-file sample window
@@ -91,6 +97,16 @@ _REP_PROBE_LIMIT = 8
 # when a sibling thread / another process removes the file after open.
 # These are benign racy-delete skips, counted apart from real I/O errors.
 _VANISHED_ERRNOS = frozenset({errno.ENOENT, errno.ESTALE})
+
+
+def _require_blake3():
+    """Return the blake3 module or raise an actionable dependency error."""
+    if _BLAKE3_IMPORT_ERROR is not None:
+        raise RuntimeError(
+            "missing dependency: blake3; install it with "
+            "python -m pip install blake3"
+        ) from _BLAKE3_IMPORT_ERROR
+    return blake3
 
 
 class RunConfig:
@@ -570,7 +586,7 @@ def _hash_file_windows(path, windows, config=None):
             os.close(fd)
             raise
         with f:
-            h = blake3.blake3()
+            h = _require_blake3().blake3()
             for window in windows:
                 f.seek(window.offset, window.whence)
                 if not _read_window_into(
@@ -1853,6 +1869,11 @@ def _finalize_hash_dump(hashes_state, dump_overflow, hashes_file,
 def main():
     _configure_stdio_encoding()
     args = _build_arg_parser().parse_args()
+    try:
+        _require_blake3()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(1)
     # hr-rel-21: clamp jobs to >= 1. The walk already clamps via max(1, jobs)
     # but the hash path passes jobs straight to ThreadPoolExecutor, which
     # raises `max_workers must be greater than 0` once a stage crosses

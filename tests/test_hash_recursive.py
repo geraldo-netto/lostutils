@@ -1978,6 +1978,21 @@ def test_main_exits_on_bad_root(tmp_path, monkeypatch, capsys):
     assert "no such file" in capsys.readouterr().err
 
 
+def test_main_exits_cleanly_when_blake3_missing(tmp_path, monkeypatch, capsys):
+    # hr-dep-01: missing optional-at-import dependency should produce an
+    # actionable CLI error, not a raw ImportError traceback.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    monkeypatch.setattr(hr, "blake3", None)
+    monkeypatch.setattr(hr, "_BLAKE3_IMPORT_ERROR", ImportError("no blake3"))
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        hr.main()
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "missing dependency: blake3" in err
+    assert "python -m pip install blake3" in err
+
+
 # --- hr-obs-03 + hr-conc-05: end-of-run WARNINGs --------------------------
 
 def test_main_emits_hash_error_suppressed_warning(tmp_path, monkeypatch, capsys):
