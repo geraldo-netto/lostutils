@@ -73,7 +73,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-cx-02 | open | low | link_queue.py:901 — `Dispatcher._save_state` cyclomatic complexity is 14 (>10 bar); extract snapshot building and atomic YAML write handling. | radon CC=14
 lq-cx-03 | open | low | link_queue.py:1096 — `Dispatcher._restore_queue_from_state` cyclomatic complexity is 11 (>10 bar); split persisted item load, queue restore, and in-flight retry handling. | radon CC=11
 lq-cx-04 | open | low | link_queue.py:1337 — `Dispatcher._ensure_immediate_pool` cyclomatic complexity is 12 (>10 bar); extract consumer pruning and resize decisions. | radon CC=12
 lq-cx-05 | open | low | link_queue.py:1920 — `Dispatcher._run_item` cyclomatic complexity is 13 (>10 bar); split process spawn, streaming, timeout, and metric recording. | radon CC=13

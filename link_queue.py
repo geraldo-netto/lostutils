@@ -1082,6 +1082,59 @@ class Dispatcher:
         if t is not None:
             t.cancel()
 
+    def _build_state_snapshot(self) -> dict:
+        """Snapshot the pending queue, in-flight consumer items, and the
+        immediate-pool backlog under the appropriate locks (lq-cx-02).
+
+        lq-rel-01: the immediate work-queue backlog AND items in flight on a
+        consumer are captured so neither is lost on shutdown. lq-conc-10: the
+        in-flight slots and the queue backlog are read under a single
+        _immediate_lock hold (nesting the queue mutex) so an item reserved but
+        not yet recorded in-flight can't fall into a gap. In-flight items are
+        ordered FIRST so a restart retries them ahead of the queued backlog."""
+        with self.queue_lock:
+            pending = [self._serialize_item(it) for it in self.queue_items]
+            in_flight = [
+                self._serialize_item(it)
+                for it in self.current_items.values() if it is not None
+            ]
+        with self._immediate_lock:
+            inflight = [it for it in self._immediate_current.values()
+                        if it is not None]
+            with self._immediate_q.mutex:
+                backlog = list(self._immediate_q.queue)
+        immediate = [self._serialize_item(it) for it in inflight + backlog]
+        return {"queue": pending, "in_flight": in_flight, "immediate": immediate}
+
+    def _atomic_write_state(self, snapshot: dict) -> None:
+        """Write `snapshot` to state_path via a uniquely-named tempfile + atomic
+        os.replace (lq-cx-02). The unique tmp name (in the same directory, so the
+        replace stays on one filesystem) prevents two concurrent writers from
+        interleaving bytes; the tmp is unlinked on any failure. lq-sec-03: force
+        0o600 after the replace since os.replace preserves the prior mode bits
+        and STATE_FILE holds queued URLs (possibly with auth tokens)."""
+        d = os.path.dirname(self.state_path) or "."
+        base = os.path.basename(self.state_path)
+        fd, tmp = tempfile.mkstemp(prefix=base + ".", suffix=".tmp", dir=d)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                _yaml_dump(
+                    snapshot, f,
+                    default_flow_style=False, sort_keys=False,
+                    allow_unicode=True,
+                )
+            os.replace(tmp, self.state_path)
+            try:
+                os.chmod(self.state_path, 0o600)
+            except OSError:
+                pass
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:  # pragma: no cover - best-effort tmp cleanup on state save
+                pass
+            raise
+
     def _save_state(self) -> None:
         """Persist the queue to STATE_FILE so a restart can resume.
 
@@ -1103,62 +1156,7 @@ class Dispatcher:
         last-write-wins on the file.
         """
         try:
-            with self.queue_lock:
-                pending = [self._serialize_item(it) for it in self.queue_items]
-                in_flight = [
-                    self._serialize_item(it)
-                    for it in self.current_items.values() if it is not None
-                ]
-            # lq-rel-01: snapshot the immediate work-queue backlog AND the items
-            # currently in flight on a consumer. Before the bounded pool,
-            # immediate items had dedicated threads so no backlog could exist;
-            # now an unprocessed backlog (and, since this fix, an in-flight item
-            # pulled off the queue but not yet finished) was silently lost on
-            # shutdown. In-flight items are persisted FIRST so a restart retries
-            # them ahead of the still-queued backlog.
-            # lq-conc-10: read the in-flight slots AND the queue backlog under a
-            # single _immediate_lock hold (nesting the queue's own mutex). The
-            # consumer reserves an item (get + publish) under the same lock, so
-            # an item pulled off the queue but not yet recorded in-flight can
-            # never fall into the gap between two separate snapshot sections.
-            with self._immediate_lock:
-                inflight = [it for it in self._immediate_current.values()
-                            if it is not None]
-                with self._immediate_q.mutex:
-                    backlog = list(self._immediate_q.queue)
-            immediate = [self._serialize_item(it) for it in inflight + backlog]
-            # Use a tempfile in the same directory as STATE_FILE so the
-            # final os.replace() stays on the same filesystem and is atomic.
-            # The unique name prevents two concurrent writers from both
-            # opening "STATE_FILE.tmp" and producing interleaved garbage —
-            # which os.replace() cannot rescue once the bytes are mixed.
-            d = os.path.dirname(self.state_path) or "."
-            base = os.path.basename(self.state_path)
-            fd, tmp = tempfile.mkstemp(prefix=base + ".", suffix=".tmp", dir=d)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    _yaml_dump(
-                        {"queue": pending, "in_flight": in_flight,
-                         "immediate": immediate}, f,
-                        default_flow_style=False, sort_keys=False,
-                        allow_unicode=True,
-                    )
-                os.replace(tmp, self.state_path)
-                # lq-sec-03: os.replace preserves the destination's prior
-                # mode bits. Older versions wrote STATE_FILE 0o644, which
-                # leaks queued URLs (including auth tokens) to other users
-                # on the host. Force 0o600 after every write.
-                try:
-                    os.chmod(self.state_path, 0o600)
-                except OSError:
-                    pass
-            except Exception:
-                # Best-effort cleanup of the orphaned tmp file.
-                try:
-                    os.unlink(tmp)
-                except OSError:  # pragma: no cover - best-effort tmp cleanup on state save
-                    pass
-                raise
+            self._atomic_write_state(self._build_state_snapshot())
         except Exception as e:
             # Never let a state-save failure interrupt normal flow.
             msg = f"[warn] could not save queue state: {e}"
