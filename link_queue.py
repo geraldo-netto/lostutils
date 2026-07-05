@@ -34,6 +34,7 @@ import os
 import tempfile
 import queue
 import re
+import signal
 import shlex
 import subprocess
 import sys
@@ -2054,22 +2055,37 @@ class Dispatcher:
         if timeout <= 0:
             return None
 
+        def _terminate_tree() -> None:
+            try:
+                if hasattr(os, "killpg"):
+                    os.killpg(proc.pid, signal.SIGTERM)
+                else:
+                    proc.terminate()
+            except OSError:  # pragma: no cover - proc already exited
+                return
+
+        def _kill_tree() -> None:
+            try:
+                if hasattr(os, "killpg"):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+            except OSError:  # pragma: no cover - proc already exited
+                pass
+
         def _on_timeout() -> None:
             self._record_metric("timeouts")
             self._log(
                 f"[{label} timeout] {timeout}s expired, terminating  url={url}"
             )
-            try:
-                proc.terminate()
-            except OSError:  # pragma: no cover - proc already exited
-                return
+            _terminate_tree()
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:  # pragma: no cover - subprocess ignored SIGTERM
                 self._log(
                     f"[{label} timeout] terminate ignored, killing  url={url}"
                 )
-                proc.kill()
+                _kill_tree()
 
         timer = threading.Timer(timeout, _on_timeout)
         timer.daemon = True
@@ -2133,7 +2149,7 @@ class Dispatcher:
         return subprocess.Popen(
             resolved, shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=cwd,
+            text=True, bufsize=1, cwd=cwd, start_new_session=True,
         )
 
     def _warn_shell_template_trusted(self, template: str) -> None:
@@ -2170,7 +2186,7 @@ class Dispatcher:
         return subprocess.Popen(
             argv, shell=False,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=cwd,
+            text=True, bufsize=1, cwd=cwd, start_new_session=True,
         )
 
     def _run_item(self, item: QueueItem, label: str) -> int:

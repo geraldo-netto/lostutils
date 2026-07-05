@@ -3232,14 +3232,15 @@ def test_worker_step_spawn_failure_skips_domain_cooldown(headless_dispatcher):
     assert headless_dispatcher._cooldown_until == {}
 
 
-def test_command_timeout_increments_metric(headless_dispatcher):
+def test_command_timeout_increments_metric(headless_dispatcher, monkeypatch):
     class Proc:
-        def terminate(self):
-            pass
+        pid = 123
 
         def wait(self, timeout=None):
             pass
 
+    calls = []
+    monkeypatch.setattr(link_queue.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
     timer = headless_dispatcher._arm_command_timeout(Proc(), "queue#1", "http://u", 1)
     try:
         timer.function()
@@ -3247,6 +3248,28 @@ def test_command_timeout_increments_metric(headless_dispatcher):
         timer.cancel()
 
     assert headless_dispatcher.metrics["timeouts"] == 1
+    assert calls == [(123, link_queue.signal.SIGTERM)]
+
+
+def test_spawn_proc_starts_new_process_session(app, monkeypatch):
+    calls = []
+
+    class FakeProc:
+        stdout = iter(())
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        calls.append(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(link_queue.subprocess, "Popen", fake_popen)
+
+    app.dispatcher._spawn_exec_proc(q("http://x", template="echo {url}"), "t", None, "")
+    app.dispatcher._spawn_shell_proc(q("http://x", template="echo {url_quoted}", shell=True), "t", None, "")
+
+    assert [call["start_new_session"] for call in calls] == [True, True]
 
 
 def test_run_item_terminates_on_timeout(app, monkeypatch):
