@@ -3729,6 +3729,33 @@ def test_source_identity_fd_rejects_symlink(tmp_path):
         rf._source_identity_fd(link)
 
 
+def test_source_identity_fd_tolerates_missing_o_directory(tmp_path, monkeypatch):
+    """rf-plat-01: platforms without os.O_DIRECTORY still open with the
+    available source-identity flags instead of raising AttributeError."""
+    monkeypatch.delattr(rf.os, "O_DIRECTORY", raising=False)
+    calls = {}
+
+    class FakeStat:
+        st_dev = 10
+        st_ino = 20
+
+    def fake_open(path, flags):
+        calls["path"] = path
+        calls["flags"] = flags
+        return 99
+
+    monkeypatch.setattr(rf.os, "open", fake_open)
+    monkeypatch.setattr(rf.os, "fstat", lambda fd: FakeStat())
+    monkeypatch.setattr(rf.os, "close", lambda fd: calls.setdefault("closed", fd))
+
+    fd, identity = rf._source_identity_fd(tmp_path)
+
+    assert fd == 99
+    assert identity == (10, 20)
+    assert calls["path"] == tmp_path
+    assert calls["flags"] == rf.os.O_RDONLY | getattr(rf.os, "O_NOFOLLOW", 0)
+
+
 def test_assert_source_identity_detects_swap(tmp_path):
     """rf-sec-01: a changed inode at the source path is detected."""
     src = tmp_path / "src"; src.mkdir()

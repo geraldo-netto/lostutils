@@ -231,12 +231,13 @@ def _source_identity_fd(source: Path) -> tuple[int, tuple[int, int]]:
     (rf-sec-01), returning ``(fd, (st_dev, st_ino))``.
 
     ``O_NOFOLLOW`` makes the open fail (ELOOP) if ``source`` was swapped for a
-    symlink, and ``O_DIRECTORY`` fails (ENOTDIR) if it is no longer a directory —
+    symlink, and ``O_DIRECTORY`` (where available) fails (ENOTDIR) if it is no
+    longer a directory —
     closing the swap-for-symlink TOCTOU at open time. The caller holds the fd
     open across the migration (pinning the inode) and re-checks the path's
     identity against this fstat right before copying via
     :func:`_assert_source_identity`."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(source, flags)
     try:
         st = os.fstat(fd)
