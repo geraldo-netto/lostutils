@@ -126,7 +126,7 @@ def configure_stdout():
             pass
 
 
-def main():
+def _build_parser():
     ap = argparse.ArgumentParser(
         description="Find near-duplicate strings via batched Levenshtein.")
     ap.add_argument("file", help="text file, one string per line")
@@ -139,52 +139,60 @@ def main():
     ap.add_argument("--word-tokens", type=parse_word_tokens, default=WORD_TOKENS,
                     help=("comma-separated whole-word tokens removed during cleanup "
                           f"(default {DEFAULT_WORD_TOKENS!r}; empty disables)"))
-    args = ap.parse_args()
+    return ap
 
-    configure_stdout()
 
-    # dnv3-rel-02: keep the 1-based source line numbers behind each cleaned
-    # key so a self-collision report can point back at the input lines that
-    # produced it (the counts dict alone lost that mapping).
-    counts = {}
+def _load_cleaned_lines(path, replacements, word_re):
+    """Read the input, returning the per-cleaned-key 1-based source line numbers
+    and the count of lines that cleaned to empty.
+
+    dnv3-rel-02: line_nums keeps the source lines behind each cleaned key so a
+    self-collision report can point back at the input lines that produced it.
+    dnv3-di-01: surrogateescape (not "replace") so distinct undecodable byte
+    sequences stay distinguishable instead of collapsing to U+FFFD; round-trips
+    losslessly to stdout because configure_stdout() matches the error handler.
+    """
     line_nums = {}
     dropped_empty = 0
-    replacements = tuple(args.strip_chars)
-    word_re = compile_word_re(args.word_tokens)
-    # dnv3-di-01: surrogateescape (not "replace") so distinct undecodable byte
-    # sequences stay distinguishable instead of all collapsing to U+FFFD and
-    # being reported as the same cleaned string. Round-trips losslessly to
-    # stdout because configure_stdout() above matches the error handler.
-    with open(args.file, "r", encoding="utf-8", errors="surrogateescape") as f:
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
         for lineno, raw in enumerate(f, 1):
             cleaned = cleanup(raw, replacements, word_re)
             if not cleaned:
                 dropped_empty += 1
                 continue
-            counts[cleaned] = counts.get(cleaned, 0) + 1
             line_nums.setdefault(cleaned, []).append(lineno)
-    if dropped_empty:
-        print(f"dropped {dropped_empty} empty cleaned line(s)", file=sys.stderr)
+    return line_nums, dropped_empty
 
-    items = list(counts.items())
-    n = len(items)
-    if n == 0:
-        return
-    cleaned_strs = [c for c, _ in items]
-    threshold = clamp_threshold(args.threshold)
 
-    write = sys.stdout.write
-
-    # Self-collisions (multiple raw lines collapsed to the same cleaned form).
-    # cleaned_strs are distinct dict keys, so no two off-diagonal cells are
-    # distance 0; emit_pairs keeps only j > i (strict upper triangle), so these
-    # i==i reports never overlap with the cross-pair reports.
+def _emit_self_collisions(line_nums, write):
+    """Emit distance-0 reports for raw lines that collapsed to the same cleaned
+    form. Keys are distinct, so these i==i reports never overlap the strict
+    upper-triangle cross-pairs from emit_pairs."""
     for cleaned, lines in line_nums.items():
         if len(lines) > 1:
             src = ",".join(str(x) for x in lines)
             write(f"# source lines: {src}\n")
             write(f"{cleaned};{cleaned};0\n")
 
+
+def main():
+    args = _build_parser().parse_args()
+
+    configure_stdout()
+
+    replacements = tuple(args.strip_chars)
+    word_re = compile_word_re(args.word_tokens)
+    line_nums, dropped_empty = _load_cleaned_lines(args.file, replacements, word_re)
+    if dropped_empty:
+        print(f"dropped {dropped_empty} empty cleaned line(s)", file=sys.stderr)
+
+    cleaned_strs = list(line_nums)
+    if not cleaned_strs:
+        return
+    threshold = clamp_threshold(args.threshold)
+
+    write = sys.stdout.write
+    _emit_self_collisions(line_nums, write)
     emit_pairs(cleaned_strs, threshold, args.workers, write)
 
 
