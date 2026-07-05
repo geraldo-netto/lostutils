@@ -365,14 +365,25 @@ def _can_traverse(path: Path, uid: int, gid: int) -> bool:
     return bool(mode & 0o001)
 
 
-def already_migrated(source: Path, target: Path) -> bool:
+def _resolves_to(source: Path, target: Path) -> bool:
+    """True when `source` is a symlink whose target (relative links resolved
+    against the link's parent) resolves to the same path as `target`.
+
+    rf-dup-04: shared preamble for `already_migrated` and
+    `_symlink_points_at_empty_target` so the two symlink probes can't drift.
+    `resolve()` may raise OSError/PermissionError/RuntimeError (symlink loops,
+    EACCES); the caller wraps this so it can react to each case."""
     if not source.is_symlink():
         return False
     link_target = Path(os.readlink(source))
     if not link_target.is_absolute():
         link_target = source.parent / link_target
+    return link_target.resolve(strict=False) == target.resolve(strict=False)
+
+
+def already_migrated(source: Path, target: Path) -> bool:
     try:
-        if link_target.resolve(strict=False) != target.resolve(strict=False):
+        if not _resolves_to(source, target):
             return False
         # rf-rel-04: a stale or hand-made symlink can resolve equal to the
         # computed target while the target itself is missing or empty. Treating
@@ -417,13 +428,8 @@ def _symlink_points_at_empty_target(source: Path, target: Path) -> bool:
     `validate_source` with "source is already a symlink". The orchestrator uses
     this predicate to emit a distinct "already migrated (empty target)" skip
     instead of crashing on a legitimately-migrated directory."""
-    if not source.is_symlink():
-        return False
-    link_target = Path(os.readlink(source))
-    if not link_target.is_absolute():
-        link_target = source.parent / link_target
     try:
-        if link_target.resolve(strict=False) != target.resolve(strict=False):
+        if not _resolves_to(source, target):
             return False
         if not target.is_dir() or target.is_symlink():
             return False
