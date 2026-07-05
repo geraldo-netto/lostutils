@@ -373,8 +373,16 @@ def read_firefox_sqlite_bookmarks(path: Path) -> list[Bookmark]:
         return _read_firefox_sqlite_copy(snapshot, str(path))
 
 
+def _sqlite_ro_uri(path: Path) -> str:
+    # Build the read-only URI via Path.as_uri() so Windows paths (C:\...) and
+    # paths containing ?, #, or % are percent-encoded correctly; raw f-string
+    # interpolation would misparse them and silently open the wrong file or
+    # fail (bt-robust-01). as_uri() requires an absolute path.
+    return f"{path.resolve().as_uri()}?mode=ro"
+
+
 def _backup_sqlite_database(source: Path, target: Path) -> None:
-    src = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    src = sqlite3.connect(_sqlite_ro_uri(source), uri=True)
     try:
         dst = sqlite3.connect(target)
         try:
@@ -386,7 +394,7 @@ def _backup_sqlite_database(source: Path, target: Path) -> None:
 
 
 def _read_firefox_sqlite_copy(path: Path, source: str) -> list[Bookmark]:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(_sqlite_ro_uri(path), uri=True)
     try:
         rows = conn.execute(_firefox_places_query()).fetchall()
     finally:
