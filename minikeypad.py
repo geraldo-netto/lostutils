@@ -1448,17 +1448,26 @@ class App(tk.Tk):
         self._io_busy = False
         self._set_actions("normal")
         if outcome == "ok" and self._pending:
-            layer, kid, data, desc = self._pending
-            self._assignments[(layer, kid)] = {"data": data, "desc": desc}
+            self._record_pending_assignment(ambiguous=False)
             self._refresh_key_map()
         elif outcome == "reports":
             # Failure before the (last) flash commit: nothing was persisted.
             self.log("Not committed -- previous mapping intact. Press Write to retry.")
         elif outcome in ("flash", "error"):
             # Commit step ambiguous: re-writing resends the whole sequence.
+            if self._pending:
+                self._record_pending_assignment(ambiguous=True)
+                self._refresh_key_map()
             self.log("Commit may be partial -- write again to be safe.")
         self._pending = None
         self._dl_result(outcome == "ok")
+
+    def _record_pending_assignment(self, ambiguous):
+        layer, kid, data, desc = self._pending
+        rec = {"data": data, "desc": desc}
+        if ambiguous:
+            rec["ambiguous"] = True
+        self._assignments[(layer, kid)] = rec
 
     # ---- session profile: save / load / replay ---------------------------
     @staticmethod
@@ -1472,8 +1481,7 @@ class App(tk.Tk):
     def _save_profile(self, path):
         """Write the session map to `path` as JSON (atomic temp+rename)."""
         payload = {"version": PROFILE_VERSION, "assignments": [
-            {"layer": layer, "key_id": kid, "desc": rec["desc"],
-             "data": rec["data"].hex()}
+            self._profile_assignment(layer, kid, rec)
             for (layer, kid), rec in self._assignments.items()]}
         tmp = path + ".tmp"
         try:
@@ -1488,6 +1496,18 @@ class App(tk.Tk):
             except OSError:
                 pass
             raise
+
+    @staticmethod
+    def _profile_assignment(layer, kid, rec):
+        item = {
+            "layer": layer,
+            "key_id": kid,
+            "desc": rec["desc"],
+            "data": rec["data"].hex(),
+        }
+        if rec.get("ambiguous"):
+            item["ambiguous"] = True
+        return item
 
     def _load_profile(self, path):
         """Replace the session map from a JSON profile. Returns the count."""
@@ -1522,6 +1542,8 @@ class App(tk.Tk):
                     "assignment out of range: layer=%r key_id=%r" % (layer, kid))
             loaded[(layer, kid)] = {
                 "data": data, "desc": str(item.get("desc", ""))}
+            if item.get("ambiguous"):
+                loaded[(layer, kid)]["ambiguous"] = True
         self._assignments = loaded
         self._refresh_key_map()
         return len(loaded)

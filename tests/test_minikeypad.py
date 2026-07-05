@@ -1231,6 +1231,19 @@ def test_download_flash_failure_warns_partial(app):
     assert "partial" in app.log_box.get("1.0", "end").lower()
 
 
+def test_download_flash_failure_records_ambiguous_assignment(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=True, fail_index=3)
+    app.kp.select_physical_key(1)
+    app.kp.basic_key(4, "A")
+    app._download()
+    _wait_drain(app)
+
+    rec = app._assignments[(1, 1)]
+    assert rec["desc"] == "A"
+    assert rec["ambiguous"] is True
+
+
 def test_handlers_log_dropped_clicks_when_buffer_full(app):
     app._select_key(1)
     app.kp.KEY_Char_Num = len(app.kp.data)      # buffer pointer past the end
@@ -1443,6 +1456,19 @@ def test_save_and_load_profile_round_trip(app, tmp_path):
     assert app._load_profile(path) == 2
     assert app._assignments[(1, 1)]["desc"] == "A"
     assert app._assignments[(1, 1)]["data"] == bytes(range(65))
+
+
+def test_save_and_load_profile_preserves_ambiguous_flag(app, tmp_path):
+    app._assignments = {
+        (1, 1): {"data": bytes(range(65)), "desc": "A", "ambiguous": True}
+    }
+    path = str(tmp_path / "p.json")
+
+    app._save_profile(path)
+    app._assignments = {}
+    app._load_profile(path)
+
+    assert app._assignments[(1, 1)]["ambiguous"] is True
 
 
 def test_load_profile_rejects_bad_buffer_length(app, tmp_path):

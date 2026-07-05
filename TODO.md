@@ -40,7 +40,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-di-01 | open | low | minikeypad.py:1445 — on a `flash`/`error` outcome the flash-commit ACK is lost but the write may have landed on the write-only (unreadable) device; `_download_done` logs a warning yet never records the key in `_assignments`, so the session map can silently lack a mapping the device holds (Save…/Write all won't replay it) — the inverse of the documented partial-write case, equally unreconciled. Optimistically record ambiguous commits (flagged) or prompt a re-write. | data integrity — in-memory map diverges from device state on lost ACK
 
 ## performance
 
