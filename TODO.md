@@ -47,7 +47,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-perf-07 | open | low | relocate_folder.py:1233 — `_verify_ownership` re-`lstat`s `src_path` even though `_iter_verify_tasks` (line 1108) already `lstat`'d that entry to classify it; pass the cached `st_mode/st_uid/st_gid` through like `src_size` is passed to `_verify_file` to save one syscall per entry under `--verify-ownership`. | redundant-stat
 
 ## concurrency
 

@@ -2350,6 +2350,20 @@ def test_iter_verify_tasks_with_ownership_appends_extra(tmp_path):
     assert len(tasks_b) > len(tasks_a)   # ownership adds one task per entry
 
 
+def test_iter_verify_tasks_passes_cached_stat_to_ownership(tmp_path):
+    src = tmp_path / "s"; src.mkdir()
+    source_file = src / "f"
+    source_file.write_text("x")
+    dst = tmp_path / "t"
+    rf.copy_tree(src, dst)
+
+    tasks = list(rf._iter_verify_tasks(src, dst, checksum=False, verify_ownership=True))
+    ownership = [task for task in tasks if task.func is rf._verify_ownership]
+
+    assert len(ownership) == 1
+    assert ownership[0].args[3].st_ino == source_file.lstat().st_ino
+
+
 def test_iter_verify_tasks_skips_non_file_dir_symlink(tmp_path):
     # rf-rel-02: a FIFO is a special file copy_tree skips — it has no kind
     # branch AND (now) no ownership task, since there is no dst counterpart to

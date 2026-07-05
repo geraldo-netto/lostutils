@@ -1131,7 +1131,7 @@ def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
         # no dst counterpart, so its ownership check would lstat a missing path
         # and fail the whole --verify-ownership migration.
         if verify_ownership and is_copied_kind:
-            yield partial(_verify_ownership, full, counterpart, rel)
+            yield partial(_verify_ownership, full, counterpart, rel, st)
 
 
 def _run_verify_pool(tasks: Iterator[Callable[[], None]], *,
@@ -1230,11 +1230,16 @@ def _verify_dir(src_dir: Path, dst_dir: Path, rel: Path) -> None:
         raise RuntimeError(f"missing directory in copy: {rel} (src={src_dir})")
 
 
-def _verify_ownership(src_path: Path, dst_path: Path, rel: Path) -> None:
+def _verify_ownership(
+    src_path: Path,
+    dst_path: Path,
+    rel: Path,
+    src_stat: os.stat_result | None = None,
+) -> None:
     """Fail if uid/gid/mode on `dst_path` don't match `src_path` (rf-rel-04).
     Uses lstat so the comparison covers symlinks themselves, not their targets."""
     try:
-        s = src_path.lstat()
+        s = src_stat if src_stat is not None else src_path.lstat()
         d = dst_path.lstat()
     except OSError as exc:
         raise RuntimeError(
