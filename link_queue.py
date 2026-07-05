@@ -2384,14 +2384,22 @@ class Dispatcher:
         # Per-domain failure cooldown: skip any domain still cooling down so a
         # failed host pauses while every other domain keeps being claimed.
         cooling = self._active_cooldowns()
+        best, empty_domains = self._select_best_domain_head(
+            by_domain, seq_of, cooling, cap)
+        self._prune_empty_domains(empty_domains, by_domain)
+        self._sweep_stale_seq_of(seq_of)
+        return best
+
+    def _select_best_domain_head(self, by_domain, seq_of, cooling,
+                                 cap: int) -> "tuple[QueueItem | None, list]":
+        """Pick the claimable domain head with the FEWEST active workers, ties
+        broken by global FIFO seq (lq-cx-06 / conc-01). Domains in `cooling` or
+        already at `cap` active workers are skipped. Returns
+        `(best_item, empty_domains)`; empty buckets are collected for the caller
+        to prune, not dropped here."""
         best = None
         best_active: int | None = None
         best_seq: int | None = None
-        # lq-rel-01: opportunistically prune empty buckets we iterate so
-        # the dict can't grow unboundedly even if a future code path
-        # leaves stale empties behind (the normal `remove()` already
-        # prunes on the happy path, but the defensive sweep here keeps
-        # `by_domain` tight under any caller pattern).
         empty_domains: list = []
         for domain, bucket in by_domain.items():
             if not bucket:
@@ -2404,37 +2412,41 @@ class Dispatcher:
                 continue
             head = next(iter(bucket.values()))   # FIFO head of this domain
             seq = seq_of.get(head.url, 0)
-            if (best_active is None or best_seq is None or active < best_active
-                    or (active == best_active and seq < best_seq)):
+            if self._is_better_candidate(active, seq, best_active, best_seq):
                 best, best_active, best_seq = head, active, seq
+        return best, empty_domains
+
+    @staticmethod
+    def _is_better_candidate(active: int, seq: int, best_active: "int | None",
+                             best_seq: "int | None") -> bool:
+        """True when (active, seq) beats the running best: fewer active workers,
+        or equal-active but an earlier FIFO seq (lq-cx-06). No current best
+        (either bound None) always wins."""
+        return (best_active is None or best_seq is None or active < best_active
+                or (active == best_active and seq < best_seq))
+
+    def _prune_empty_domains(self, empty_domains: list, by_domain) -> None:
+        """Drop empty `by_domain` buckets and their lingering zero
+        `_domain_active` entries (lq-cx-06 / lq-rel-01 / lq-scal-02) so neither
+        dict grows unboundedly under a cap-rejected or defensive code path.
+        Caller holds the queue lock."""
         for domain in empty_domains:
             by_domain.pop(domain, None)
-            # lq-scal-02: also drop the matching `_domain_active` entry
-            # if it lingers at zero — `_release_item` does this on the
-            # decrement path, but a sweep here covers the case where a
-            # cap-rejected domain leaves a stale 0 entry behind.
             if self._domain_active.get(domain, 0) == 0:
                 self._domain_active.pop(domain, None)
-        # lq-scal-01 / lq-scal-03: opportunistic stale-key sweep on
-        # `seq_of`. `_PendingQueue.remove` already pops the key inline
-        # on the happy path, so the only way `seq_of` and `urls` drift
-        # is if a future code path mutates `urls` without going through
-        # `remove`. To bound pick-latency on long-running sessions with
-        # 1M-item churn (the linear O(len(seq_of)) scan ran on EVERY
-        # pick), the sweep now runs only when the gap exceeds
-        # `_SEQ_OF_SWEEP_GAP`. Under steady state the scan is skipped;
-        # under accumulated drift it runs at most every gap-many picks.
+
+    def _sweep_stale_seq_of(self, seq_of) -> None:
+        """Opportunistic stale-key sweep on `seq_of` (lq-cx-06 / lq-scal-01/03).
+
+        `_PendingQueue.remove` already pops keys inline on the happy path, so the
+        only drift is a future code path mutating `urls` without `remove`. To
+        bound pick-latency on 1M-item-churn sessions the O(n) scan runs only when
+        the gap exceeds the configured `seq_of_sweep_gap`. Caller holds the lock."""
         live_urls = self.queue_items.urls
         gap = len(seq_of) - len(live_urls)
-        # lq-decoup-04: read the live threshold from config so operators
-        # can tune it without editing source. Falls back to the module
-        # constant when the key is absent (legacy config files).
-        threshold = self._seq_of_sweep_gap()
-        if gap > threshold:
-            stale = [u for u in seq_of if u not in live_urls]
-            for u in stale:
+        if gap > self._seq_of_sweep_gap():
+            for u in [u for u in seq_of if u not in live_urls]:
                 seq_of.pop(u, None)
-        return best
 
     def _seq_of_sweep_gap(self) -> int:
         """Read `seq_of_sweep_gap` from live config (lq-decoup-04).
