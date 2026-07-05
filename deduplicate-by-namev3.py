@@ -155,7 +155,6 @@ def main():
     if n == 0:
         return
     cleaned_strs = [c for c, _ in items]
-    cnts = [c for _, c in items]
     threshold = clamp_threshold(args.threshold)
 
     write = sys.stdout.write
@@ -164,11 +163,11 @@ def main():
     # cleaned_strs are distinct dict keys, so no two off-diagonal cells are
     # distance 0; emit_pairs keeps only j > i (strict upper triangle), so these
     # i==i reports never overlap with the cross-pair reports.
-    for i in range(n):
-        if cnts[i] > 1:
-            src = ",".join(str(x) for x in line_nums[cleaned_strs[i]])
+    for cleaned, lines in line_nums.items():
+        if len(lines) > 1:
+            src = ",".join(str(x) for x in lines)
             write(f"# source lines: {src}\n")
-            write(f"{cleaned_strs[i]};{cleaned_strs[i]};0\n")
+            write(f"{cleaned};{cleaned};0\n")
 
     emit_pairs(cleaned_strs, threshold, args.workers, write)
 
