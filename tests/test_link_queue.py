@@ -3837,6 +3837,36 @@ def test_logsink_rejects_symlink_target(tmp_path):
         except Exception: pass
 
 
+def test_logsink_write_failure_warns_once(tmp_path, capsys):
+    path = tmp_path / "log.txt"
+    state = {"path": str(path)}
+    sink = link_queue.LogSink(lambda: state["path"])
+
+    class BrokenFile:
+        def write(self, _text):
+            raise OSError("disk full")
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    try:
+        sink._fh = BrokenFile()
+        sink._fh_path = str(path)
+        sink._flush_batch(["one\n"])
+        sink._fh = BrokenFile()
+        sink._fh_path = str(path)
+        sink._flush_batch(["two\n"])
+    finally:
+        sink.stop()
+
+    err = capsys.readouterr().err
+    assert err.count("write failed") == 1
+    assert "disk full" in err
+
+
 # --- lq-decoup-04: live config drives the sweep threshold ---------------
 
 def test_pick_next_item_skips_seq_of_sweep_under_threshold(app):

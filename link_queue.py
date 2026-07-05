@@ -2798,6 +2798,8 @@ class LogSink:
         # flaky / unreachable log target doesn't drown the operator.
         self._open_fail_path: str | None = None
         self._open_fail_first_t: float | None = None
+        self._write_fail_path: str | None = None
+        self._write_fail_first_t: float | None = None
         self._drop_lock = threading.Lock()
         self._drop_count = 0
         # obs-04: monotonic timestamp of the first drop in the current
@@ -2906,9 +2908,12 @@ class LogSink:
                 # flush() on an append-mode text file, tell() is the file's byte
                 # size, so rotation tracking stays exact with no second encode.
                 self._fh_size = self._fh.tell()
-            except Exception:
+            except Exception as exc:
+                self._note_write_failure(path, exc)
                 self._close_locked()
                 return
+            self._write_fail_path = None
+            self._write_fail_first_t = None
             if self._fh_size >= LOG_SINK_MAX_BYTES:
                 self._rotate_locked()
 
@@ -2986,6 +2991,17 @@ class LogSink:
             f"[warn] log file {path!r} cannot be opened ({exc}). Lines "
             f"will continue to be queued but won't be written until the "
             f"path becomes accessible.",
+            file=sys.stderr,
+        )
+
+    def _note_write_failure(self, path: str, exc: BaseException | None) -> None:
+        if path == getattr(self, "_write_fail_path", None):
+            return
+        self._write_fail_path = path
+        self._write_fail_first_t = time.monotonic()
+        print(
+            f"[warn] log file {path!r} write failed ({exc}). Lines in this "
+            "batch were dropped; future lines will retry the file.",
             file=sys.stderr,
         )
 
