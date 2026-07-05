@@ -40,6 +40,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import contextvars
@@ -96,6 +97,7 @@ def with_hash_fn(fn: "Callable[[Path], str]") -> "Iterator[Callable[[Path], str]
 BACKUP_SUFFIX = ".relocate-backup"
 STAGING_PREFIX = ".relocate-stage-"
 STAGING_PID_FILE = ".owner-pid"
+_CHOWN_WARNING_LIMIT = 10
 
 
 # rf-ddd-01: MigrationState makes the implicit lifecycle explicit. The
@@ -992,6 +994,7 @@ def _replicate_ownership(src: Path, dst: Path, *, jobs: int | None = None) -> No
     errors: list[BaseException] = []
     processed = [0]
     walk_error: list[OSError] = []
+    warning_limiter = _ChownWarningLimiter()
 
     def on_done(fut: "Future") -> bool:
         _collect_chown_error(fut, errors)
@@ -1010,11 +1013,12 @@ def _replicate_ownership(src: Path, dst: Path, *, jobs: int | None = None) -> No
     workers = _resolved_jobs(jobs)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         _run_streamed(
-            partial(ex.submit, _chown_pair),
+            partial(ex.submit, _chown_pair, warning_limiter=warning_limiter),
             counted_pairs(),
             _inflight_cap(workers),
             on_done,
         )
+    warning_limiter.summarize()
     if walk_error:
         _log().warning(
             "ownership replication: walk failed after %d pair(s): %s",
@@ -1034,7 +1038,54 @@ def _collect_chown_error(fut, errors: list[BaseException]) -> None:
         errors.append(exc)
 
 
-def _chown_pair(pair: tuple[Path, Path]) -> None:
+class _ChownWarningLimiter:
+    def __init__(self, limit: int | None = None) -> None:
+        self.limit = _CHOWN_WARNING_LIMIT if limit is None else limit
+        self.suppressed = 0
+        self._emitted = 0
+        self._lock = threading.Lock()
+
+    def warn(self, dst_path: Path, exc: BaseException, *, invalid: bool = False) -> None:
+        with self._lock:
+            should_emit = self._emitted < self.limit
+            if should_emit:
+                self._emitted += 1
+            else:
+                self.suppressed += 1
+        if not should_emit:
+            return
+        if invalid:
+            _log().warning("could not chown %s (invalid path): %s", dst_path, exc)
+        else:
+            _log().warning("could not chown %s: %s", dst_path, exc)
+
+    def summarize(self) -> None:
+        if self.suppressed:
+            _log().warning(
+                "ownership replication: suppressed %d additional chown warning(s)",
+                self.suppressed,
+            )
+
+
+def _warn_chown_failure(
+    dst_path: Path,
+    exc: BaseException,
+    warning_limiter: "_ChownWarningLimiter | None",
+    *,
+    invalid: bool = False,
+) -> None:
+    if warning_limiter is not None:
+        warning_limiter.warn(dst_path, exc, invalid=invalid)
+    elif invalid:
+        _log().warning("could not chown %s (invalid path): %s", dst_path, exc)
+    else:
+        _log().warning("could not chown %s: %s", dst_path, exc)
+
+
+def _chown_pair(
+    pair: tuple[Path, Path],
+    warning_limiter: "_ChownWarningLimiter | None" = None,
+) -> None:
     """Replicate one (src, dst) pair's uid/gid. We do NOT pre-check existence:
     the dst can vanish between the check and the chown (rf-conc-03), and the
     common skip-during-copy case (sockets, FIFOs) shows up as
@@ -1053,11 +1104,11 @@ def _chown_pair(pair: tuple[Path, Path]) -> None:
     except FileNotFoundError:
         return  # dst skipped during copy (socket / FIFO / device) or vanished
     except (PermissionError, OSError) as exc:
-        _log().warning("could not chown %s: %s", dst_path, exc)
+        _warn_chown_failure(dst_path, exc, warning_limiter)
     except ValueError as exc:
         # rf-rel-13: NUL byte in src/dst path. Attributed here so the
         # operator sees which entry caused it.
-        _log().warning("could not chown %s (invalid path): %s", dst_path, exc)
+        _warn_chown_failure(dst_path, exc, warning_limiter, invalid=True)
 
 
 def _pair_walk(src: Path, dst: Path) -> Iterable[tuple[Path, Path]]:

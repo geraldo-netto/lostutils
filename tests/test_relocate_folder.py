@@ -303,6 +303,23 @@ def test_replicate_ownership_logs_on_chown_failure(tmp_path, monkeypatch, caplog
     assert any("could not chown" in r.message for r in caplog.records)
 
 
+def test_replicate_ownership_caps_chown_failure_logs(tmp_path, monkeypatch, caplog):
+    src = tmp_path / "s"; src.mkdir()
+    for i in range(4):
+        (src / f"f{i}.txt").write_text("x")
+    dst = tmp_path / "t"
+    rf.copy_tree(src, dst)
+    caplog.clear()
+    monkeypatch.setattr(rf, "_CHOWN_WARNING_LIMIT", 2)
+    monkeypatch.setattr(rf.os, "chown", _raise_os)
+    rf._replicate_ownership(src, dst, jobs=1)
+    chown_warnings = [r.message for r in caplog.records
+                      if r.message.startswith("could not chown")]
+    assert len(chown_warnings) == 2
+    assert any("suppressed 3 additional chown warning" in r.message
+               for r in caplog.records)
+
+
 def test_replicate_ownership_parallel(tmp_path, monkeypatch):
     # rf-conc-01: every (src,dst) pair under _pair_walk should reach _chown_pair
     # exactly once, even with several worker threads.
