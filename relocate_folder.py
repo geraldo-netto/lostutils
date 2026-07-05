@@ -2167,6 +2167,9 @@ def _run_recover(ns: argparse.Namespace) -> int:
             "<source>.relocate-backup directory to <source>", ns.dest_root,
         )
     source = Path(ns.source).expanduser().absolute()
+    if not source.name:
+        _log().error("FAILED: source has no basename to recover: %s", source)
+        return 1
     backup = source.with_name(source.name + BACKUP_SUFFIX)
     if getattr(ns, "dry_run", False):
         _log().info("dry-run: would recover %s -> %s", backup, source)
