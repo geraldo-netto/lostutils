@@ -278,7 +278,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-ds-01 | open | low | deduplicate-by-namev3.py:138 — the `counts` dict is fully redundant with `line_nums` (`counts[k] == len(line_nums[k])`, and line 168's `cnts[i] > 1` is `len(line_nums[...]) > 1`); drop `counts` and derive from `line_nums` to remove parallel-state drift. |
 
 ## unused code
 

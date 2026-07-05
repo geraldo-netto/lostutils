@@ -110,6 +110,19 @@ def test_main_reports_all_cleaned_empty_before_noop(monkeypatch, tmp_path, capsy
     assert "dropped 2 empty cleaned line(s)" in captured.err
 
 
+def test_load_cleaned_lines_keeps_line_numbers_as_source_of_truth(tmp_path):
+    f = tmp_path / "in.txt"
+    f.write_text("same\nsame\nother\n", encoding="utf-8")
+    line_nums, dropped = dn._load_cleaned_lines(
+        f,
+        dn.REPLACEMENTS,
+        dn.compile_word_re(dn.WORD_TOKENS),
+    )
+
+    assert line_nums == {"same": [1, 2], "other": [3]}
+    assert dropped == 0
+
+
 # --- dnv3-rel-02: cleanup strips only standalone "xxx"/"monography" ---------
 
 def test_cleanup_strips_standalone_tokens():
