@@ -73,7 +73,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cx-13 | open | med | import_events.py:2223 — `_paddle_texts` complexity 13 from deep dict/list/tuple recursion branches; split per container type. | radon CC=13
 lq-cx-01 | open | med | link_queue.py:520 — `ConfigStore._normalize_config_schema` cyclomatic complexity is 16 (>10 bar); split protocol normalization from scalar coercion. | radon CC=16
 lq-cx-02 | open | low | link_queue.py:901 — `Dispatcher._save_state` cyclomatic complexity is 14 (>10 bar); extract snapshot building and atomic YAML write handling. | radon CC=14
 lq-cx-03 | open | low | link_queue.py:1096 — `Dispatcher._restore_queue_from_state` cyclomatic complexity is 11 (>10 bar); split persisted item load, queue restore, and in-flight retry handling. | radon CC=11

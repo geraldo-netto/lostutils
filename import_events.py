@@ -2484,24 +2484,37 @@ def _merge_text_blocks(blocks: List[str], max_chars: int = MAX_CONTENT_CHARS) ->
     return "\n".join(merged)[:max_chars]
 
 
+def _paddle_texts_from_dict(value: Dict[Any, Any]) -> List[str]:
+    """Collect PaddleOCR text strings from a result dict (ie-cx-13): the
+    `rec_texts`/`texts` string lists plus a recurse into every value."""
+    texts: List[str] = []
+    for key in ("rec_texts", "texts"):
+        items = value.get(key)
+        if isinstance(items, list):
+            texts.extend(str(item) for item in items if str(item).strip())
+    for item in value.values():
+        texts.extend(_paddle_texts(item))
+    return texts
+
+
+def _paddle_texts_from_seq(value: Any) -> List[str]:
+    """Collect PaddleOCR text strings from a list/tuple node (ie-cx-13). A
+    `[box, [text, score]]` detection pair yields just its text; any other
+    shape recurses into each element."""
+    if (len(value) >= 2 and isinstance(value[1], (list, tuple)) and value[1]
+            and isinstance(value[1][0], str)):
+        return [value[1][0]]
+    texts: List[str] = []
+    for item in value:
+        texts.extend(_paddle_texts(item))
+    return texts
+
+
 def _paddle_texts(value: Any) -> List[str]:
     if isinstance(value, dict):
-        texts: List[str] = []
-        for key in ("rec_texts", "texts"):
-            items = value.get(key)
-            if isinstance(items, list):
-                texts.extend(str(item) for item in items if str(item).strip())
-        for item in value.values():
-            texts.extend(_paddle_texts(item))
-        return texts
+        return _paddle_texts_from_dict(value)
     if isinstance(value, (list, tuple)):
-        if len(value) >= 2 and isinstance(value[1], (list, tuple)) and value[1]:
-            if isinstance(value[1][0], str):
-                return [value[1][0]]
-        texts = []
-        for item in value:
-            texts.extend(_paddle_texts(item))
-        return texts
+        return _paddle_texts_from_seq(value)
     return []
 
 
