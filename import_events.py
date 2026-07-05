@@ -2738,13 +2738,19 @@ def _resolve_tesseract_executable(raw_path: str) -> Optional[str]:
     return shutil.which(requested)
 
 
+def reset_tesseract_path_cache() -> None:
+    with _TESSERACT_PATH_LOCK:
+        _TESSERACT_PATH_CACHE.clear()
+
+
 def _resolve_tesseract_path(config: ModelConfig) -> Optional[str]:
     requested = config.tesseract_path or DEFAULT_TESSERACT_PATH
     with _TESSERACT_PATH_LOCK:
         if requested in _TESSERACT_PATH_CACHE:
             return _TESSERACT_PATH_CACHE[requested]
         resolved = _resolve_tesseract_executable(requested)
-        _TESSERACT_PATH_CACHE[requested] = resolved
+        if resolved is not None:
+            _TESSERACT_PATH_CACHE[requested] = resolved
     if resolved:
         logger.info("Using Tesseract executable: %s", _display_path(resolved))
     else:

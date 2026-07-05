@@ -1691,6 +1691,34 @@ def test_resolve_tesseract_path_caches_shutil_lookup(monkeypatch):
     assert calls == ["tesseract"]
 
 
+def test_resolve_tesseract_path_does_not_cache_missing_lookup(monkeypatch):
+    results = [None, "/usr/bin/tesseract"]
+
+    def fake_which(name):
+        assert name == "tesseract"
+        return results.pop(0)
+
+    monkeypatch.setattr(import_events.shutil, "which", fake_which)
+    cfg = import_events.ModelConfig()
+
+    assert import_events._resolve_tesseract_path(cfg) is None
+    assert import_events._resolve_tesseract_path(cfg) == "/usr/bin/tesseract"
+    assert results == []
+
+
+def test_reset_tesseract_path_cache_clears_positive_lookup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(import_events.shutil, "which",
+                        lambda name: calls.append(name) or "/usr/bin/tesseract")
+    cfg = import_events.ModelConfig()
+
+    assert import_events._resolve_tesseract_path(cfg) == "/usr/bin/tesseract"
+    import_events.reset_tesseract_path_cache()
+    assert import_events._resolve_tesseract_path(cfg) == "/usr/bin/tesseract"
+
+    assert calls == ["tesseract", "tesseract"]
+
+
 def test_ocr_image_path_auto_uses_paddle_when_usable(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
