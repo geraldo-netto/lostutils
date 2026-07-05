@@ -897,6 +897,20 @@ def _fill_window(ex, batch_fn, batches, inflight, window, cancel_event) -> bool:
     return False
 
 
+def _drain_stage_futures_after_error(first_exc, done, inflight) -> None:
+    """Inspect sibling futures before re-raising a stage failure."""
+    for fut in inflight:
+        fut.cancel()
+    for fut in tuple(done) + tuple(inflight):
+        if fut.cancelled():
+            continue
+        try:
+            fut.result()
+        except BaseException:
+            pass
+    raise first_exc
+
+
 def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event,
                         on_progress=None) -> int:
     """Threaded hash dispatch with BOUNDED submission (hr-scal-02).
@@ -923,8 +937,15 @@ def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event,
             ex, batch_fn, batches, inflight, window, cancel_event)
         while inflight:
             done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
+            pending_done = set(done)
             for fut in done:
-                batch_errors, count = _collect_batch(fut.result(), out)
+                pending_done.remove(fut)
+                try:
+                    result = fut.result()
+                except BaseException as exc:
+                    _drain_stage_futures_after_error(
+                        exc, pending_done, inflight)
+                batch_errors, count = _collect_batch(result, out)
                 errors += batch_errors
                 done_count += count
                 _notify_stage_progress(on_progress, done_count, total)

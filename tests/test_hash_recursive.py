@@ -380,6 +380,65 @@ def test_run_stage_windowed_collects_all_and_counts_errors(monkeypatch):
     assert errors == 10
 
 
+def test_run_stage_windowed_drains_siblings_after_exception(monkeypatch):
+    class FakeFuture:
+        def __init__(self, value=None, exc=None):
+            self.value = value
+            self.exc = exc
+            self.cancel_calls = 0
+            self.result_calls = 0
+
+        def cancel(self):
+            self.cancel_calls += 1
+            return False
+
+        def cancelled(self):
+            return False
+
+        def result(self):
+            self.result_calls += 1
+            if self.exc is not None:
+                raise self.exc
+            return self.value
+
+    bad = FakeFuture(exc=RuntimeError("boom"))
+    sibling = FakeFuture(value=[("/p/sibling", "digest")])
+    running = FakeFuture(value=[("/p/running", "digest")])
+    submitted = [bad, sibling, running]
+
+    class FakeExecutor:
+        def __init__(self, max_workers):
+            self.max_workers = max_workers
+            self._submitted = iter(submitted)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def submit(self, _fn, _batch):
+            return next(self._submitted)
+
+    def fake_wait(inflight, return_when):
+        assert return_when is hr.FIRST_COMPLETED
+        assert set(inflight) == set(submitted)
+        return {bad, sibling}, {running}
+
+    monkeypatch.setattr(hr, "HASH_BATCH", 1)
+    monkeypatch.setattr(hr, "SUBMIT_WINDOW", 3)
+    monkeypatch.setattr(hr, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(hr, "wait", fake_wait)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        hr._run_stage_windowed(
+            ["bad", "sibling", "running"], lambda batch: batch, 1,
+            {}, hr.threading.Event())
+    assert sibling.result_calls == 1
+    assert running.cancel_calls == 1
+    assert running.result_calls == 1
+
+
 @given(n=st.integers(min_value=0, max_value=300),
        jobs=st.integers(min_value=1, max_value=4),
        hash_batch=st.integers(min_value=1, max_value=8),

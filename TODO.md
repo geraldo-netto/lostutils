@@ -69,7 +69,6 @@ ie-conc-01 | open | low | import_events.py:3657 — `_atomic_write_bytes` names 
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-mt-01 | open | low | hash-recursive-ai5.py:921 — in `_run_stage_windowed`, when one `fut.result()` raises, sibling futures already in the completed `done` set (and those still in `inflight`) are never `.result()`-checked, so their exceptions are swallowed while `shutdown(wait=True)` still blocks on them. `batch_fn` only returns None on OSError today, so defense-in-depth. Drain/inspect or cancel remaining futures before re-raising. | multithreading — swallowed-future audit
 
 ## distributed systems
 
