@@ -14,6 +14,7 @@ import secrets
 import logging
 import argparse
 import faulthandler
+import math
 import tempfile
 import unicodedata
 import contextlib
@@ -94,6 +95,7 @@ STAGE_CACHE_VERSION = 1
 FILE_SHA256_CACHE_MAX = 128
 PDF_VISION_MAX_PAGES = 0
 PDF_VISION_DPI = 150
+PDF_RENDER_MAX_PIXELS = 40_000_000
 TEXT_CHARS_PER_TOKEN = 4
 TEXT_PROMPT_RESERVED_TOKENS = 768
 MIN_CONTENT_CHARS = 512
@@ -2955,10 +2957,29 @@ def _render_pdf_image_paths(
                 logger.info("Capping vision scan of %s at %d pages",
                             file_path.name, runtime_config.pdf_vision_max_pages)
                 break
+            pixel_count = _pdf_page_pixel_count(page, runtime_config.pdf_vision_dpi)
+            if pixel_count is not None and pixel_count > PDF_RENDER_MAX_PIXELS:
+                logger.warning(
+                    "Skipping oversized PDF page %d in %s: %d pixels exceeds cap %d",
+                    len(image_paths) + 1, file_path.name, pixel_count, PDF_RENDER_MAX_PIXELS,
+                )
+                continue
             image_path = output_dir / f"page-{len(image_paths) + 1:06d}.png"
             image_path.write_bytes(page.get_pixmap(dpi=runtime_config.pdf_vision_dpi).tobytes("png"))
             image_paths.append(image_path)
     return image_paths
+
+
+def _pdf_page_pixel_count(page: Any, dpi: int) -> Optional[int]:
+    rect = getattr(page, "rect", None)
+    if rect is None or dpi <= 0:
+        return None
+    try:
+        width = max(0.0, float(rect.width))
+        height = max(0.0, float(rect.height))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return math.ceil(width * dpi / 72) * math.ceil(height * dpi / 72)
 
 
 def _pdf_to_images(file_path: Path, config: Optional[ModelConfig] = None) -> List[bytes]:

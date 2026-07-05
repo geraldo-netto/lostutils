@@ -3587,6 +3587,8 @@ class _FakePixmap:
 
 
 class _FakePage:
+    rect = None
+
     def get_pixmap(self, dpi=None):
         return _FakePixmap(dpi)
 
@@ -3647,6 +3649,37 @@ def test_pdf_to_images_uses_runtime_config(monkeypatch):
     )
 
     assert images == [b"png:96", b"png:96"]
+
+
+def test_render_pdf_image_paths_skips_oversized_page(monkeypatch, tmp_path, caplog):
+    import logging
+    import types
+
+    class HugePage:
+        rect = types.SimpleNamespace(width=200_000, height=200_000)
+
+        def get_pixmap(self, dpi=None):
+            raise AssertionError("oversized PDF page should not render")
+
+    class HugeDoc:
+        def __iter__(self):
+            return iter([HugePage()])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    fake = types.ModuleType("fitz")
+    fake.open = lambda path: HugeDoc()
+    monkeypatch.setitem(__import__("sys").modules, "fitz", fake)
+
+    with caplog.at_level(logging.WARNING):
+        images = import_events._render_pdf_image_paths(Path("huge.pdf"), tmp_path)
+
+    assert images == []
+    assert "Skipping oversized PDF page" in caplog.text
 
 
 def test_pdf_to_images_returns_empty_without_pymupdf(monkeypatch):
