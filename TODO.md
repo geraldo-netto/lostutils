@@ -54,7 +54,6 @@ dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[h
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 oze-scal-08 | open | low | organize_by_extension.py:781 — `_find_reusable_bucket` restarts its scan at next_expected=0 and walks every already-full bucket on EVERY choose; as K full buckets accumulate per (ext,prefix) the per-file cost is O(K) → O(K²) over the run. Cache a "first non-full index" cursor per (ext_dir,prefix) for O(1) amortized. | scalability / performance — linear rescan of full buckets on the hot planning path
-rdv3-scal-01 | open | low | remove-deduplv3.py:16 — docstring claims "Streams the file; no readlines() into memory," but `_read_groups` accumulates every path into a defaultdict held wholly in RAM → memory is O(total paths), not streaming. Soften the doc or spill for very large inputs. | scalability / documentation drift — reading is streamed but state materialization is not
 
 ## N+1 / call efficiency
 

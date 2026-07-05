@@ -13,7 +13,8 @@ while keeping one survivor. Drop-in for v1/v2 with a few critical fixes:
     what the kernel already does with filename bytes on Linux).
   * Stable tiebreaker (longest basename, then lexicographic path) — the
     same input always nominates the same survivor across runs.
-  * Streams the file; no readlines() into memory.
+  * Reads the input incrementally, while retaining hash groups in memory
+    so survivor selection stays stable and deterministic.
   * Errors go to stderr; exit code reflects success.
 
 Format expected: one record per line, `<hash><whitespace><path>`. The
