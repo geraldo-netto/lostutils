@@ -83,19 +83,22 @@ def _configure_stdout_errors(err_mode):
 
 def _read_groups(path, encoding, err_mode):
     groups = defaultdict(list)
+    skipped = 0
     with open(path, "r", encoding=encoding, errors=err_mode) as f:
         for raw in f:
             line = raw.rstrip("\r\n")
             if not line:
+                skipped += 1
                 continue
             # split(None, 1) consumes any leading whitespace AND the
             # whole gap between hash and path; the path keeps its
             # interior whitespace (tabs, multiple spaces, etc.).
             parts = line.split(None, 1)
             if len(parts) < 2:
+                skipped += 1
                 continue
             groups[parts[0]].append(parts[1])
-    return groups
+    return groups, skipped
 
 
 def _survivor(paths):
@@ -144,7 +147,7 @@ def main(argv=None):
     _configure_stdout_errors(err_mode)
 
     try:
-        groups = _read_groups(args.file, encoding, err_mode)
+        groups, skipped_lines = _read_groups(args.file, encoding, err_mode)
     except OSError as e:
         _fail(e, 2)
     except UnicodeDecodeError as e:
@@ -156,11 +159,13 @@ def main(argv=None):
     groups_with_dups, files_to_remove = _emit_remove_commands(groups, sys.stdout.write)
     # rdv3-obs-01: audit summary to stderr (groups with all-identical paths or a
     # single survivor are otherwise silently skipped with no trace).
-    print(
+    summary = (
         f"summary: {len(groups)} hash group(s), {groups_with_dups} with "
-        f"duplicates, {files_to_remove} file(s) queued for removal",
-        file=sys.stderr,
+        f"duplicates, {files_to_remove} file(s) queued for removal"
     )
+    if skipped_lines:
+        summary += f", {skipped_lines} skipped line(s)"
+    print(summary, file=sys.stderr)
 
 
 if __name__ == "__main__":

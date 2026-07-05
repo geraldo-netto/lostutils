@@ -91,6 +91,16 @@ def test_emits_stderr_summary(monkeypatch, tmp_path, capsys):
     assert "1 file(s) queued for removal" in err
 
 
+def test_summary_reports_skipped_malformed_lines(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "hashes.txt"
+    f.write_text("\nmissing-path\nh1 /a\nh1 /bb\n", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["remove-deduplv3.py", str(f)])
+
+    rd.main()
+
+    assert "2 skipped line(s)" in capsys.readouterr().err
+
+
 def test_configure_stdout_forces_utf8_and_error_mode(monkeypatch):
     stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
     monkeypatch.setattr(rd.sys, "stdout", stream)

@@ -154,7 +154,6 @@ lq-obs-22 | open | low | link_queue.py:3607 — `_on_add` folds a `"rejected"` o
 lq-obs-23 | open | low | link_queue.py:4715 — `_on_queue_rerun` logs "[queue] re-queued {len(items)}" but `_process_link` silently skips items whose URL is still pending/running (returns "duplicate"), so the count overstates what was re-queued. Count non-duplicate outcomes. | metrics accuracy
 mkp-obs-01 | open | low | minikeypad.py:93,95,101,105 — `_ensure_pyusb`/`_pip_install` emit progress with `print()` rather than `LOG`, bypassing the configured handler/format/level (logging is configured in `main` before the call). Route through `LOG`. | inconsistent with rest of module
 rf-obs-07 | open | med | relocate_folder.py:1033 — `_chown_pair` logs one `could not chown …` warning per entry on `PermissionError`, and `_replicate_ownership` always fans out the full pool regardless of euid; a non-root migration of a tree owned by another user emits one warning per file (log flood). Summarize like the rmtree cleanup (cap at N + suppressed count) and/or skip when `os.geteuid() != 0` can't change owner. | silent-failure/log-flood
-rdv3-obs-01 | open | low | remove-deduplv3.py:88 — blank and single-token lines are silently `continue`d in `_read_groups`; malformed/dropped input never surfaces and the summary counts only groups, so corrupt input reads as "0 duplicates". Count skipped lines and include in the stderr summary. | silent-failure audit
 
 ## watchdog
 
