@@ -1452,8 +1452,11 @@ def _categorizer_from_args(args: argparse.Namespace, bookmarks: Sequence[Bookmar
         return None
     if args.model is None:
         raise UserError("missing --model for LLM categorization")
+    model_path = args.model.expanduser()
+    if not model_path.is_file():
+        raise UserError(f"model file not found: {model_path}")
     return LlamaCategorizer(
-        model_path=args.model.expanduser(),
+        model_path=model_path,
         auto_install=args.auto_install_llama,
         context=args.llm_context,
         gpu_layers=args.llm_gpu_layers,

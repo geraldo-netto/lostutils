@@ -123,7 +123,6 @@ dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None]
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-rob-03 | open | low | bookmark-tidy.py:1424-1430 — an invalid `--model` GGUF path is passed straight to `Llama(...)`; the non-`UserError` exception escapes `main`'s handler as a raw traceback. Validate `model_path.is_file()` and raise `UserError`. |
 bt-rob-01 | open | low | bookmark-tidy.py:442-448 — `_walk_firefox_rows` recurses on the parent/child graph with no visited-set/cycle guard; a corrupted `places.sqlite` with a parent cycle triggers unbounded recursion (RecursionError/crash). Track visited node ids. |
 dnp-robust-02 | open | low | dedupl_numpy.py:21 — `open()` has no error handling, so a missing/unreadable hash-file exits with a raw `FileNotFoundError`/`OSError` traceback instead of the clean `error:` + nonzero exit that remove-deduplv3.py uses. | graceful failure contract
 dnp-robust-01 | open | low | dedupl_numpy.py:22 — `mmap.mmap(f.fileno(), 0, ...)` on a zero-byte input raises `ValueError: cannot mmap an empty file` (uncaught traceback); guard `os.fstat(f.fileno()).st_size == 0` and return cleanly. | interrupted/empty-input recovery

@@ -807,10 +807,19 @@ def test_parse_args_logging_and_cli_helpers(tmp_path, monkeypatch, capsys):
             return {index: ["Imported"] for index, _ in enumerate(bookmarks)}
 
     monkeypatch.setattr(bookmark_tidy, "LlamaCategorizer", FakeCategorizer)
-    assert bookmark_tidy.main([str(html), "--model", str(tmp_path / "model.gguf"), "-o", str(output)]) == 0
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    assert bookmark_tidy.main([str(html), "--model", str(model), "-o", str(output)]) == 0
     assert output.exists()
     assert bookmark_tidy.main([str(tmp_path / "missing.html")]) == 1
     assert "missing bookmark file" in capsys.readouterr().err
+
+
+def test_categorizer_from_args_rejects_missing_model(tmp_path):
+    args = bookmark_tidy.parse_args(["--model", str(tmp_path / "missing.gguf")])
+
+    with pytest.raises(bookmark_tidy.UserError, match="model file not found"):
+        bookmark_tidy._categorizer_from_args(args, [_sample_bookmark()])
 
 
 def test_run_without_inputs_reports_error(monkeypatch):
