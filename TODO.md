@@ -156,7 +156,6 @@ _clean — `ruff check *.py` reports no issues across all root files (rescan 202
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-pyright-01 | open | low | hash-recursive-ai5.py:627 — `_require_blake3().blake3()` flagged `reportOptionalMemberAccess` ("blake3" is not a known attribute of "None"); pyright can't correlate the `_BLAKE3_IMPORT_ERROR` sentinel with the `blake3` global (`ModuleType | None`). Narrow inside `_require_blake3` (`if blake3 is None: raise ...; return blake3`) so the return is non-Optional — no `# type: ignore`. | pyright (reportOptionalMemberAccess) — prefer narrowing over suppression
 
 ## observability
 

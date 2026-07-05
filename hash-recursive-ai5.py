@@ -108,6 +108,11 @@ def _require_blake3():
             "missing dependency: blake3; install it with "
             "python -m pip install blake3"
         ) from _BLAKE3_IMPORT_ERROR
+    if blake3 is None:
+        raise RuntimeError(
+            "missing dependency: blake3; install it with "
+            "python -m pip install blake3"
+        )
     return blake3
 
 
