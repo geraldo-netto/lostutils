@@ -1177,9 +1177,7 @@ class App(tk.Tk):
         idx = self.nb.index(self.nb.select())
         page = self._page_map.get(idx, 1)
         self.kp.KEY_Cur_Page = page
-        # LED and Mouse pages clear the working buffer on entry (as in C#).
-        if page in (4, 5):
-            self._clear()
+        self._clear()
 
     def _on_layer(self):
         self.kp.KEY_Cur_Layer = self.layer_var.get()

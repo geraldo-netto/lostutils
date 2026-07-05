@@ -1115,6 +1115,19 @@ def test_on_page_clears_on_led(app):
     assert app.set_text.get() == ""
 
 
+def test_on_page_clears_keys_before_multimedia(app):
+    app._select_key(1)
+    app._basic_key(4, "A")
+    assert app.kp.data[KeyParam.KeyType_Num] & 0xF == 1
+
+    app.nb.select(app.tab_mul)
+    app._on_page()
+
+    assert app.kp.KEY_Cur_Page == 3
+    assert app.kp.data[KeyParam.KeyType_Num] == 0
+    assert app.set_text.get() == ""
+
+
 def test_on_layer(app):
     app.layer_var.set(2)
     app._on_layer()
