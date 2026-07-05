@@ -340,6 +340,37 @@ def _scan_dir(d, state: "_WalkState", wstats) -> None:
                 wstats["entry_errors"] += 1
 
 
+def _post_walk_sentinel(threads, out_q, sentinel_out) -> None:
+    for t in threads:
+        t.join()
+    out_q.put(sentinel_out)
+
+
+def _start_walk_coordinator(state: "_WalkState", sentinel_out):
+    threads = [
+        threading.Thread(target=_walk_worker, args=(i, state), daemon=True)
+        for i in range(state.jobs)
+    ]
+    for t in threads:
+        t.start()
+    coord_thread = threading.Thread(
+        target=_post_walk_sentinel,
+        args=(threads, state.out_q, sentinel_out),
+        daemon=True,
+    )
+    coord_thread.start()
+    return coord_thread
+
+
+def _finalise_walk_stats(stats, per_worker_stats, worker_failures) -> None:
+    for k in ("dirs", "files", "dir_errors", "entry_errors"):
+        stats[k] = sum(w[k] for w in per_worker_stats)
+    stats["worker_failures"] = len(worker_failures)
+    if worker_failures:
+        _idx, last_error = worker_failures[-1]
+        stats["last_worker_error"] = last_error
+
+
 class _WalkIter:
     """Iterator implementation behind :func:`iter_threaded_walk`
     (hr-scal-05).
@@ -388,22 +419,7 @@ class _WalkIter:
         )
         state.pending.put(self._root)
 
-        threads = [threading.Thread(target=_walk_worker, args=(i, state),
-                                    daemon=True)
-                   for i in range(jobs)]
-        for t in threads:
-            t.start()
-
-        # Coordinator joins workers and posts the end-of-stream sentinel
-        # so the consumer can unblock from `out_q.get()` once production
-        # is done.
-        def coordinator():
-            for t in threads:
-                t.join()
-            state.out_q.put(SENTINEL_OUT)
-
-        coord_thread = threading.Thread(target=coordinator, daemon=True)
-        coord_thread.start()
+        coord_thread = _start_walk_coordinator(state, SENTINEL_OUT)
 
         stream_ended = False
         try:
@@ -427,12 +443,8 @@ class _WalkIter:
                 while state.out_q.get() is not SENTINEL_OUT:
                     pass
             coord_thread.join()
-            for k in ("dirs", "files", "dir_errors", "entry_errors"):
-                self.stats[k] = sum(w[k] for w in per_worker_stats)
-            self.stats["worker_failures"] = len(state.worker_failures)
-            if state.worker_failures:
-                _idx, last_error = state.worker_failures[-1]
-                self.stats["last_worker_error"] = last_error
+            _finalise_walk_stats(
+                self.stats, per_worker_stats, state.worker_failures)
 
 
 def _log_prefix(now=None) -> str:

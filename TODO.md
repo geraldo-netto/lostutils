@@ -86,7 +86,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cmplx-05 | open | low | hash-recursive-ai5.py:365 — `_WalkIter.__iter__` is CC 11 (radon), the only function still over the ≤10 ceiling; extract the coordinator-thread setup + post-iteration stats-finalisation block (395-431) into a helper. | code complexity — still >10 per radon after the refactor pass
 ie-cx-17 | open | med | import_events.py:2581 — `_get_paddle_ocr` is CC 12 per radon (still >10): import/miss/build branches plus the `_PADDLE_OCR_DISABLED/_MISSING` guards inline. The double-checked store half is now `_store_or_reuse_paddle_ocr`; extract the import+device-resolution half too. | code complexity — radon CC 12 > 10 (was 14; store half extracted with ie-mt-01)
 ie-cx-18 | open | low | import_events.py:3928 — `_run_main` is CC 11 per radon (still >10): arg parse, cache reset, folder-create shortcut, ModelUnavailableError partial-emit branch, dedup, dual output writes, and failure-count exit all inline. Split the ModelUnavailableError partial-emit path and the normal write/emit path into helpers. | code complexity — radon CC 11 > 10
 
