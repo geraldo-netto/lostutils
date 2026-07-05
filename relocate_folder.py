@@ -2180,8 +2180,12 @@ def _run_recover(ns: argparse.Namespace) -> int:
     if not source.name:
         _log().error("FAILED: source has no basename to recover: %s", source)
         return 1
-    backup = source.with_name(source.name + BACKUP_SUFFIX)
+    backup_path = source.with_name(source.name + BACKUP_SUFFIX)
     if getattr(ns, "dry_run", False):
+        backup = _orphaned_backup(source)
+        if backup is None:
+            _log().error("FAILED: no orphaned backup to recover at %s", backup_path)
+            return 1
         _log().info("dry-run: would recover %s -> %s", backup, source)
         return 0
     try:

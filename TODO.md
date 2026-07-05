@@ -222,7 +222,6 @@ id | status | effort | description | notes
 dnp-cli-01 | open | low | dedupl_numpy.py:18 — usage text is printed to stdout (should be stderr) on the error path, and the script hand-rolls arg handling with no `--help`; migrate to argparse for a consistent CLI surface. | error output on wrong stream
 hr-cli-01 | open | low | hash-recursive-ai5.py:1683 — `args.jobs = max(1, args.jobs)` only lower-clamps; `-j 100000` spawns that many walk threads and a `ThreadPoolExecutor(max_workers=100000)`, exhausting threads/FDs. Add a sane upper clamp (e.g. multiple of cpu_count). | resource exhaustion / DoS
 ie-cli-01 | open | low | import_events.py:3589 — `--timezone` is not validated at parse time; an invalid IANA name only raises inside `_apply_default_tz` per ICS file, surfacing as per-file failures instead of one upfront error. Validate with `ZoneInfo` in an argparse `type`. |
-rf-cli-01 | open | low | relocate_folder.py:2155 — `--recover --dry-run` prints "would recover <backup> -> <source>" unconditionally, even when no backup exists or it's a symlink/regular file; gate the message on `_orphaned_backup(source)` like `recover()` checks. | docs-vs-behavior on dry-run surface
 
 ## dependency
 
