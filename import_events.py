@@ -1775,26 +1775,57 @@ def _split_table_date(line: str, order: Tuple[str, ...],
     return (parts, " ".join(tokens[needed:])) if parts else None
 
 
+def _digit_at(parts: List[str], index: int) -> bool:
+    """True when `parts[index]` exists and is all digits (ie-cx-11)."""
+    return len(parts) > index and parts[index].isdigit()
+
+
+def _hms_suffix(hour: int, minute: int, second: int) -> str:
+    """Render a `THH:MM[:SS]` ISO time suffix, omitting seconds when 0 (ie-cx-11)."""
+    return f"T{hour:02d}:{minute:02d}" + (f":{second:02d}" if second else "")
+
+
+def _split_time_columns(text: str) -> Optional[Tuple[str, str]]:
+    """Parse whitespace-separated `HH [MM [SS]]` leading columns from a table
+    row (ie-cx-11), returning `(Tsuffix, remaining_title)` or None when the
+    leading tokens aren't a valid time followed by a title."""
+    parts = text.split(maxsplit=3)
+    if not _digit_at(parts, 0) or not 0 <= int(parts[0]) <= 23:
+        return None
+    has_min, has_sec = _digit_at(parts, 1), _digit_at(parts, 2)
+    minute = int(parts[1]) if has_min else 0
+    second = int(parts[2]) if has_sec else 0
+    consumed = 3 if has_sec else (2 if has_min else 1)
+    if minute > 59 or second > 59 or len(parts) <= consumed:
+        return None
+    return _hms_suffix(int(parts[0]), minute, second), " ".join(parts[consumed:])
+
+
+def _split_time_explicit(text: str, has_time_columns: bool) -> Optional[Tuple[str, str]]:
+    """Parse an explicit `HH[:h MM][:m SS] title` prefix (ie-cx-11), returning
+    `(Tsuffix, title)` or None. A bare leading number with no `:`/`h` separator
+    is treated as a time only when the table declared time columns."""
+    explicit = re.match(r"^(\d{1,2})(?:(?:[:hH])(\d{2}))?(?:[:mM](\d{2}))?\s+(.+)$", text)
+    if not explicit:
+        return None
+    if not (has_time_columns or ":" in explicit.group(0) or "h" in explicit.group(0).lower()):
+        return None
+    hour = int(explicit.group(1))
+    minute = int(explicit.group(2) or 0)
+    second = int(explicit.group(3) or 0)
+    return _hms_suffix(hour, minute, second), explicit.group(4).strip()
+
+
 def _split_table_time(text: str, has_time_columns: bool) -> Tuple[str, str]:
     if not text:
         return "", ""
     if has_time_columns:
-        parts = text.split(maxsplit=3)
-        if parts and parts[0].isdigit() and 0 <= int(parts[0]) <= 23:
-            minute = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-            consumed = 2 if len(parts) > 1 and parts[1].isdigit() else 1
-            second = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-            consumed = 3 if len(parts) > 2 and parts[2].isdigit() else consumed
-            if minute <= 59 and second <= 59 and len(parts) > consumed:
-                suffix = f"T{int(parts[0]):02d}:{minute:02d}" + (f":{second:02d}" if second else "")
-                return suffix, " ".join(parts[consumed:])
-    explicit = re.match(r"^(\d{1,2})(?:(?:[:hH])(\d{2}))?(?:[:mM](\d{2}))?\s+(.+)$", text)
-    if explicit and (has_time_columns or ":" in explicit.group(0) or "h" in explicit.group(0).lower()):
-        hour = int(explicit.group(1))
-        minute = int(explicit.group(2) or 0)
-        second = int(explicit.group(3) or 0)
-        suffix = f"T{hour:02d}:{minute:02d}" + (f":{second:02d}" if second else "")
-        return suffix, explicit.group(4).strip()
+        columns = _split_time_columns(text)
+        if columns is not None:
+            return columns
+    explicit = _split_time_explicit(text, has_time_columns)
+    if explicit is not None:
+        return explicit
     return "", text
 
 
