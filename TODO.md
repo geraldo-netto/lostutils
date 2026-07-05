@@ -79,7 +79,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-dep-01 | open | med | bookmark-tidy.py:1034 — after `--auto-install-llama`, `subprocess.check_call(pip install ...)` raising `CalledProcessError` and the follow-up `from llama_cpp import Llama` (:1035) raising `ImportError` are not wrapped in `UserError`, so a failed install crashes with a traceback rather than an actionable message. Wrap both in try/except → `UserError`. | dependability — fallback chain must not amplify into raw failure
 dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no BrokenPipeError guard, so piping into `head` raises a BrokenPipeError traceback on close. Wrap the write/flush in a BrokenPipeError handler or restore SIGPIPE to default. | common CLI pipe pattern
 
 ## code complexity

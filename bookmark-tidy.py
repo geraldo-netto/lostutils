@@ -1039,8 +1039,14 @@ def _import_llama(auto_install: bool) -> Any:
         if not auto_install:
             raise UserError("llama-cpp-python is missing; install it or pass --auto-install-llama") from exc
     LOGGER.warning("Installing %s with pip because --auto-install-llama was provided.", LLAMA_CPP_PYTHON_REQUIREMENT)
-    subprocess.check_call([sys.executable, "-m", "pip", "install", LLAMA_CPP_PYTHON_REQUIREMENT])
-    from llama_cpp import Llama
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", LLAMA_CPP_PYTHON_REQUIREMENT])
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise UserError(f"failed to install {LLAMA_CPP_PYTHON_REQUIREMENT}: {exc}") from exc
+    try:
+        from llama_cpp import Llama
+    except ImportError as exc:
+        raise UserError(f"{LLAMA_CPP_PYTHON_REQUIREMENT} is still unavailable after install") from exc
     return Llama
 
 

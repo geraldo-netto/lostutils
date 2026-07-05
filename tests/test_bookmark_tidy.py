@@ -669,6 +669,41 @@ def test_import_llama_missing_and_auto_install(monkeypatch):
     assert calls[0] == [sys.executable, "-m", "pip", "install", bookmark_tidy.LLAMA_CPP_PYTHON_REQUIREMENT]
 
 
+def test_import_llama_wraps_auto_install_failures(monkeypatch):
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "llama_cpp":
+            raise ImportError("missing")
+        return real_import(name, globals, locals, fromlist, level)
+
+    def fail_install(_cmd):
+        raise bookmark_tidy.subprocess.CalledProcessError(1, "pip")
+
+    monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(bookmark_tidy.subprocess, "check_call", fail_install)
+
+    with pytest.raises(bookmark_tidy.UserError, match="failed to install"):
+        bookmark_tidy._import_llama(True)
+
+
+def test_import_llama_wraps_auto_install_import_miss(monkeypatch):
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "llama_cpp":
+            raise ImportError("missing")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(bookmark_tidy.subprocess, "check_call", lambda _cmd: None)
+
+    with pytest.raises(bookmark_tidy.UserError, match="still unavailable"):
+        bookmark_tidy._import_llama(True)
+
+
 def test_exports_and_write_output(tmp_path):
     bookmarks = [
         _sample_bookmark("https://example.test/a", "A", ("Folder",)),
