@@ -28,6 +28,7 @@ DEFAULT_LLM_BATCH_SIZE = 30
 DEFAULT_LLM_CONTEXT = 4096
 DEFAULT_LLM_MAX_TOKENS = 1024
 LLAMA_CPP_PYTHON_REQUIREMENT = "llama-cpp-python==0.3.32"
+LLAMA_INSTALL_TIMEOUT_SECONDS = 300
 MOZLZ4_MAGIC = b"mozLz40\x00"
 TRACKING_PARAM_NAMES = frozenset(
     {
@@ -1040,8 +1041,11 @@ def _import_llama(auto_install: bool) -> Any:
             raise UserError("llama-cpp-python is missing; install it or pass --auto-install-llama") from exc
     LOGGER.warning("Installing %s with pip because --auto-install-llama was provided.", LLAMA_CPP_PYTHON_REQUIREMENT)
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", LLAMA_CPP_PYTHON_REQUIREMENT])
-    except (OSError, subprocess.CalledProcessError) as exc:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", LLAMA_CPP_PYTHON_REQUIREMENT],
+            timeout=LLAMA_INSTALL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise UserError(f"failed to install {LLAMA_CPP_PYTHON_REQUIREMENT}: {exc}") from exc
     try:
         from llama_cpp import Llama

@@ -664,9 +664,16 @@ def test_import_llama_missing_and_auto_install(monkeypatch):
 
     state["calls"] = 0
     calls = []
-    monkeypatch.setattr(bookmark_tidy.subprocess, "check_call", lambda cmd: calls.append(cmd))
+    monkeypatch.setattr(
+        bookmark_tidy.subprocess,
+        "check_call",
+        lambda cmd, timeout: calls.append((cmd, timeout)),
+    )
     assert bookmark_tidy._import_llama(True) is FakeLlamaChat
-    assert calls[0] == [sys.executable, "-m", "pip", "install", bookmark_tidy.LLAMA_CPP_PYTHON_REQUIREMENT]
+    assert calls[0] == (
+        [sys.executable, "-m", "pip", "install", bookmark_tidy.LLAMA_CPP_PYTHON_REQUIREMENT],
+        bookmark_tidy.LLAMA_INSTALL_TIMEOUT_SECONDS,
+    )
 
 
 def test_import_llama_wraps_auto_install_failures(monkeypatch):
@@ -677,12 +684,32 @@ def test_import_llama_wraps_auto_install_failures(monkeypatch):
             raise ImportError("missing")
         return real_import(name, globals, locals, fromlist, level)
 
-    def fail_install(_cmd):
+    def fail_install(_cmd, timeout):
+        assert timeout == bookmark_tidy.LLAMA_INSTALL_TIMEOUT_SECONDS
         raise bookmark_tidy.subprocess.CalledProcessError(1, "pip")
 
     monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
     monkeypatch.setattr(builtins, "__import__", fake_import)
     monkeypatch.setattr(bookmark_tidy.subprocess, "check_call", fail_install)
+
+    with pytest.raises(bookmark_tidy.UserError, match="failed to install"):
+        bookmark_tidy._import_llama(True)
+
+
+def test_import_llama_wraps_auto_install_timeout(monkeypatch):
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "llama_cpp":
+            raise ImportError("missing")
+        return real_import(name, globals, locals, fromlist, level)
+
+    def timeout_install(_cmd, timeout):
+        raise bookmark_tidy.subprocess.TimeoutExpired("pip", timeout)
+
+    monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(bookmark_tidy.subprocess, "check_call", timeout_install)
 
     with pytest.raises(bookmark_tidy.UserError, match="failed to install"):
         bookmark_tidy._import_llama(True)
@@ -698,7 +725,8 @@ def test_import_llama_wraps_auto_install_import_miss(monkeypatch):
 
     monkeypatch.delitem(sys.modules, "llama_cpp", raising=False)
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    monkeypatch.setattr(bookmark_tidy.subprocess, "check_call", lambda _cmd: None)
+    monkeypatch.setattr(
+        bookmark_tidy.subprocess, "check_call", lambda _cmd, timeout: None)
 
     with pytest.raises(bookmark_tidy.UserError, match="still unavailable"):
         bookmark_tidy._import_llama(True)

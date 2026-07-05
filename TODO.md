@@ -172,7 +172,6 @@ rf-obs-07 | open | med | relocate_folder.py:1033 — `_chown_pair` logs one `cou
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-wd-02 | open | low | bookmark-tidy.py:1006 — `subprocess.check_call([pip install …])` has no timeout; a hung network/pip resolve stalls the process indefinitely. Pass a timeout and surface failure. |
 bt-wd-01 | open | med | bookmark-tidy.py:986-995 — `LlamaCategorizer._complete` calls the model with no timeout; a stuck/looping llama.cpp inference hangs the whole run with no stall detection or abort. Add a timeout/watchdog around inference. |
 lq-wd-01 | open | med | link_queue.py:2025 — `Popen` (both `_spawn_exec_proc` and `_spawn_shell_proc:1988`) starts children without `start_new_session`; `_arm_command_timeout` (:1905) only terminate()/kill()s the direct child, so grandchildren (yt-dlp→ffmpeg, aria2c) keep the inherited stdout pipe open, the reader never sees EOF, and the worker hangs past the timeout. Use `start_new_session=True` and `os.killpg` on timeout. | timeout can't reap the process tree
 mkp-wd-01 | open | med | minikeypad.py:1290,1315,225 — probe threads set `_io_busy=True` then call libusb (`usb.core.find`/claim/`still_connected`) with no timeout/watchdog; a stuck libusb call leaves `_io_busy` True forever, silently wedging all writes and polls. Bound the probe with a deadline, force-reset `_io_busy`, and surface the stall. | write path has WRITE_TIMEOUT_MS; connect/enumerate paths don't
