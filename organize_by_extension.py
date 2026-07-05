@@ -938,11 +938,12 @@ class BucketManager:
         ``BUCKET_SIZE`` (oze-scal-02).
         """
         indices = self._indices_for(ext_dir, prefix)
-        # oze-obs-01 / oze-hyg-01: snapshot of bucket paths before the
-        # call so we can tell whether choose_bucket reused or freshly
-        # allocated. Single-name binding now (the prior chained
-        # assignment kept an unused alias).
-        pre_known = set(self.state_cache.keys())
+        # oze-obs-01 / oze-hyg-01: tell reuse from fresh allocation for the
+        # stats counter. oze-perf-11: only `_allocate_new_bucket` appends to
+        # `indices`, so a length delta is an O(1) signal — the old
+        # `set(state_cache.keys())` snapshot copied the whole keyset per file,
+        # O(files × buckets) on the hot planning path.
+        pre_indices = len(indices)
         bucket_path = choose_bucket(
             ext_dir, prefix, source.name, self.state_cache, indices)
         names = self.state_cache[bucket_path]
@@ -950,10 +951,10 @@ class BucketManager:
             raise RuntimeError(
                 f"choose_bucket returned full bucket {bucket_path}"
             )
-        if bucket_path in pre_known:
-            self.stats["bucket_reused"] += 1
-        else:
+        if len(indices) > pre_indices:
             self.stats["new_bucket_allocated"] += 1
+        else:
+            self.stats["bucket_reused"] += 1
         names.add(source.name)
         self._reserved_names.setdefault(bucket_path, set()).add(source.name)
         match = BUCKET_NAME_PATTERN.match(bucket_path.name)

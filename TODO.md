@@ -49,7 +49,6 @@ mkp-di-01 | open | low | minikeypad.py:1445 — on a `flash`/`error` outcome the
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
-oze-perf-11 | open | high | organize_by_extension.py:945 — `BucketManager.choose` does `pre_known = set(self.state_cache.keys())` on EVERY file solely to classify reuse-vs-new for a stats counter; state_cache grows to ~files/BUCKET_SIZE entries, so this copies the whole keyset per file → O(files × buckets) quadratic allocation on the hot planning path. Have choose_bucket/_find_reusable_bucket/_allocate_new_bucket return a reused flag, or test the single returned `bucket_path` against state_cache captured before the call. | performance / scalability / N+1 — per-item O(N) work for a stat the callee already knows
 
 ## scalability
 
