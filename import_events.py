@@ -1726,13 +1726,22 @@ def _calendar_event_line(year: int, month: int, day: int, title: str) -> str:
     return f"{start} - {title}"
 
 
-def _date_parts_from_values(values: List[str], order: Tuple[str, ...],
-                            default_year: Optional[int]) -> Optional[Tuple[int, int, int]]:
+def _map_date_units(values: List[str], order: Tuple[str, ...],
+                    default_year: Optional[int]) -> Dict[str, str]:
+    """Map ordered date tokens onto day/month/year, filling year from
+    `default_year` when absent (ie-cx-16)."""
     mapped: Dict[str, str] = {}
     for unit, value in zip((unit for unit in order if unit in {"day", "month", "year"}), values):
         mapped[unit] = value
     if "year" not in mapped and default_year is not None:
         mapped["year"] = str(default_year)
+    return mapped
+
+
+def _ymd_from_mapped(mapped: Dict[str, str]) -> Optional[Tuple[int, int, int]]:
+    """Validate a day/month/year mapping and return `(year, month, day)`, or
+    None when a field is missing or non-numeric (ie-cx-16). Two-digit years
+    expand to 2000+."""
     if not {"day", "month", "year"} <= set(mapped):
         return None
     month = _month_value(mapped["month"])
@@ -1743,6 +1752,11 @@ def _date_parts_from_values(values: List[str], order: Tuple[str, ...],
     year = int(mapped["year"])
     year = 2000 + year if year < 100 else year
     return year, month, int(mapped["day"])
+
+
+def _date_parts_from_values(values: List[str], order: Tuple[str, ...],
+                            default_year: Optional[int]) -> Optional[Tuple[int, int, int]]:
+    return _ymd_from_mapped(_map_date_units(values, order, default_year))
 
 
 def _split_table_date(line: str, order: Tuple[str, ...],
