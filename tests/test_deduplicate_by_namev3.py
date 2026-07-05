@@ -63,6 +63,10 @@ def _run_main(monkeypatch, tmp_path, lines, threshold):
     return "".join(out)
 
 
+def _cleanup_default(text):
+    return dn.cleanup(text, dn.REPLACEMENTS, dn.compile_word_re(dn.WORD_TOKENS))
+
+
 def test_main_large_threshold_clamped_not_wrapped(monkeypatch, tmp_path):
     # Two far-apart strings; an unclamped uint8 wrap could falsely match them.
     lines = ["a", "z" * 50]
@@ -126,21 +130,21 @@ def test_load_cleaned_lines_keeps_line_numbers_as_source_of_truth(tmp_path):
 # --- dnv3-rel-02: cleanup strips only standalone "xxx"/"monography" ---------
 
 def test_cleanup_strips_standalone_tokens():
-    assert dn.cleanup("xxx monography") == " "
+    assert _cleanup_default("xxx monography") == " "
 
 
 def test_cleanup_keeps_words_containing_tokens():
-    assert dn.cleanup("xxxl") == "xxxl"
-    assert dn.cleanup("monographymania") == "monographymania"
-    assert dn.cleanup("amonography") == "amonography"
+    assert _cleanup_default("xxxl") == "xxxl"
+    assert _cleanup_default("monographymania") == "monographymania"
+    assert _cleanup_default("amonography") == "amonography"
 
 
 def test_cleanup_strips_token_among_words():
-    assert dn.cleanup("my xxx file") == "my  file"
+    assert _cleanup_default("my xxx file") == "my  file"
 
 
 def test_cleanup_basic_replacements_and_case():
-    assert dn.cleanup("  A,[B] ") == "ab"
+    assert _cleanup_default("  A,[B] ") == "ab"
 
 
 def test_cleanup_accepts_custom_replacements_and_word_tokens():
@@ -170,13 +174,13 @@ def test_cleanup_never_strips_token_inside_longer_word(word):
     # but not equal to it, must survive intact (no boundary).
     for tok in dn.WORD_TOKENS:
         if tok in word and word != tok:
-            assert dn.cleanup(word) == word
+            assert _cleanup_default(word) == word
 
 
 @given(st.lists(st.sampled_from(["xxx", "monography", "alpha", "beta"]),
                 min_size=1, max_size=6))
 def test_cleanup_drops_all_standalone_tokens(words):
-    result = dn.cleanup(" ".join(words))
+    result = _cleanup_default(" ".join(words))
     for tok in dn.WORD_TOKENS:
         assert tok not in result.split()
 
@@ -333,7 +337,7 @@ def test_emit_pairs_blocking_invariant(lines, t, block_rows):
     cleaned = []
     seen = set()
     for ln in lines:
-        c = dn.cleanup(ln)
+        c = _cleanup_default(ln)
         if c and c not in seen:
             seen.add(c)
             cleaned.append(c)
@@ -426,8 +430,8 @@ def test_emit_pairs_threshold_zero_short_circuits(monkeypatch):
 def test_cleanup_strips_semicolon_delimiter():
     """dnv3-cli-03: ';' is removed so a cleaned value can't break the ;-delimited
     output format."""
-    assert ";" not in dn.cleanup("foo;bar")
-    assert dn.cleanup("a;b") == "ab"
+    assert ";" not in _cleanup_default("foo;bar")
+    assert _cleanup_default("a;b") == "ab"
 
 
 def test_main_cleanup_flags_override_defaults(monkeypatch, tmp_path, capsys):

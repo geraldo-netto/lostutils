@@ -53,9 +53,6 @@ def compile_word_re(word_tokens):
     return re.compile(r"\b(?:%s)\b" % "|".join(map(re.escape, word_tokens)))
 
 
-_WORD_RE = compile_word_re(WORD_TOKENS)
-
-
 def clamp_threshold(threshold):
     if threshold > MAX_THRESHOLD:
         print(
@@ -111,7 +108,7 @@ def parse_word_tokens(value):
     return tuple(token.strip().lower() for token in value.split(",") if token.strip())
 
 
-def cleanup(entry, replacements=REPLACEMENTS, word_re=_WORD_RE):
+def cleanup(entry, replacements, word_re):
     s = entry.strip().lower()
     for tok in replacements:
         s = s.replace(tok, "")
