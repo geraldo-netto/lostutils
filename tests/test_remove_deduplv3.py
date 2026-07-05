@@ -42,6 +42,20 @@ def test_help_documents_exit_codes(capsys):
     assert "3 decode error" in out
 
 
+def test_invalid_encoding_clean_error_exit3(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "hashes.txt"
+    f.write_text("h /a\n", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["remove-deduplv3.py", "--encoding", "bogus", str(f)])
+
+    with pytest.raises(SystemExit) as exc:
+        rd.main()
+
+    assert exc.value.code == 3
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "unknown encoding" in err
+
+
 def _run(monkeypatch, tmp_path, text):
     f = tmp_path / "hashes.txt"
     f.write_text(text, encoding="utf-8")

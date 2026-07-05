@@ -31,7 +31,6 @@ rf-sec-04 | open | med | relocate_folder.py:1787 — source inode identity is as
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-val-01 | open | med | hash-recursive-ai5.py:1940 — main validates `--block-size >= 1` and `--sample-size >= 1` but not sample-size relative to block-size; stage 2 fires for size > block-size and its windows are `strict=True`, so `--sample-size` larger than the smallest stage-2 file short-reads, ticks `_tick_shrank`, discards the digest, and reports identical files as NON-duplicates (silent false negative). Reject `sample-size >= block-size` at the CLI boundary, or relax strict when the window exceeds file size. | input validation / reliability — CLI knob without a guard, silent loss of true duplicates
-rdv3-input-01 | open | med | remove-deduplv3.py:156 — an invalid `--encoding` value (e.g. `bogus`) makes `open(..., encoding=encoding)` raise `LookupError`, which the try at 164-172 does not catch (only OSError/UnicodeDecodeError), so it escapes as a traceback instead of the advertised clean exit. Validate with `codecs.lookup(encoding)` up front or catch `LookupError` → `_fail(...,3)`. | input validation / CLI-option integrity — unvalidated CLI input reaches codec lookup; violates the exit-code contract
 
 ## data governance
 

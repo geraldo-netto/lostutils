@@ -24,6 +24,7 @@ spaces).
 from __future__ import annotations
 
 import argparse
+import codecs
 import io
 import os
 import shlex
@@ -109,6 +110,14 @@ def _read_groups(path, encoding, err_mode):
     return groups, skipped
 
 
+def _validate_encoding(encoding):
+    try:
+        codecs.lookup(encoding)
+    except LookupError as e:
+        _fail(f"unknown encoding {encoding!r}: {e}", 3)
+    return encoding
+
+
 def _survivor(paths):
     # max key: (basename_length, path). Computing basename length via
     # rfind avoids building a basename string per call (str.rfind +
@@ -159,6 +168,7 @@ def main(argv=None):
         # Same clean contract as the read loop below: a missing/unreadable
         # input gets `error:` + exit 2, not an uncaught traceback (rdv3-robust-01).
         _fail(e, 2)
+    encoding = _validate_encoding(encoding)
     err_mode = "strict" if args.strict else "surrogateescape"
     _configure_stdout_errors(err_mode)
 
