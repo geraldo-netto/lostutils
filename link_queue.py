@@ -93,6 +93,8 @@ def _yaml_emittable(s: str) -> bool:
     URL carrying such a char would make _save_state raise and silently lose
     the queue item (rel-03), so we treat it as needing a base64 sidecar.
     """
+    if all(0x20 <= ord(ch) <= 0x7E for ch in s):
+        return True
     try:
         yaml.dump(s, Dumper=_YamlDumper, allow_unicode=True)
         return True

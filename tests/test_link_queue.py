@@ -3590,6 +3590,15 @@ def test_yaml_emittable_oversize_string():
     assert link_queue._yaml_emittable(s) is True
 
 
+def test_yaml_emittable_fast_paths_printable_ascii(monkeypatch):
+    def fail_dump(*_args, **_kwargs):
+        raise AssertionError("printable ASCII should not call yaml.dump")
+
+    monkeypatch.setattr(link_queue.yaml, "dump", fail_dump)
+
+    assert link_queue._yaml_emittable("https://example.test/a?x=1&y=2") is True
+
+
 def test_yaml_emittable_sidecar_roundtrip_for_nel_ls_ps_chars():
     for value in ["a\x85b", "a\u2028b", "a\u2029b"]:
         entry = {}
