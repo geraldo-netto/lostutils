@@ -42,7 +42,6 @@ dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[h
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-scal-01 | open | med | import_events.py:1334 — `extract_from_ics` does `Calendar.from_ical(f.read())`, reading the whole `.ics` unbounded unlike `_read_text` which caps the byte window; a large/hostile `.ics` balloons RAM. Bound the read. | only ICS path lacks a size bound
 
 ## N+1 / call efficiency
 

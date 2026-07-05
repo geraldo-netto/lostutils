@@ -775,6 +775,7 @@ PDF_EXTENSIONS = {".pdf"}
 # file cannot blow the context window.
 MAX_CONTENT_CHARS = _text_budget_from_context(DEFAULT_LLM_CONTEXT_SIZE,
                                               DEFAULT_LLM_MAX_TOKENS)
+MAX_ICS_BYTES = MAX_CONTENT_CHARS * 4
 
 # Scanned-PDF vision fallback: 0 pages means no page cap. 150 DPI is legible
 # enough for vision OCR without the memory blow-up of full-resolution pixmaps.
@@ -1331,7 +1332,12 @@ def extract_from_ics(file_path: Path, default_tz: Optional[str] = None) -> List[
     with open(file_path, "rb") as f:
         # Pass raw bytes; icalendar sniffs the encoding itself, so latin-1 /
         # other non-UTF-8 ICS files are not silently dropped on a decode error.
-        gcal = Calendar.from_ical(f.read())
+        raw = f.read(MAX_ICS_BYTES + 1)
+        if len(raw) > MAX_ICS_BYTES:
+            logger.warning("Truncating %s to %d bytes for ICS extraction.",
+                           file_path.name, MAX_ICS_BYTES)
+            raw = raw[:MAX_ICS_BYTES]
+        gcal = Calendar.from_ical(raw)
         for component in gcal.walk():
             if component.name != "VEVENT":
                 continue

@@ -2303,6 +2303,34 @@ def test_extract_from_ics_reads_non_utf8_without_dropping(tmp_path):
     assert "Caf" in events[0]["title"]
 
 
+def test_extract_from_ics_bounds_raw_read(tmp_path, monkeypatch, caplog):
+    import logging
+    import sys
+    import types
+
+    seen = {}
+
+    class FakeCalendar:
+        @staticmethod
+        def from_ical(raw):
+            seen["raw"] = raw
+            return types.SimpleNamespace(walk=lambda: [])
+
+    fake = types.ModuleType("icalendar")
+    fake.Calendar = FakeCalendar
+    monkeypatch.setitem(sys.modules, "icalendar", fake)
+    monkeypatch.setattr(import_events, "MAX_ICS_BYTES", 8)
+    ics = tmp_path / "large.ics"
+    ics.write_bytes(b"1234567890abcdef")
+
+    with caplog.at_level(logging.WARNING):
+        events = import_events.extract_from_ics(ics)
+
+    assert events == []
+    assert seen["raw"] == b"12345678"
+    assert "Truncating large.ics to 8 bytes" in caplog.text
+
+
 def test_build_ics_emits_importable_calendar():
     pytest.importorskip("icalendar")
     events = [
