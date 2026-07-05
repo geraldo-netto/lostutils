@@ -1729,9 +1729,8 @@ def test_main_hashes_file_exists_on_cancel_during_walk(tmp_path, monkeypatch):
 def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
         tmp_path, monkeypatch):
     # hr-log-03 + hr-obs-02: a Ctrl-C (KeyboardInterrupt) mid-pipeline must
-    # leave the dump flushed and closed. The dump is now written in main's
-    # finally (the composite digest can only be known after stage 2), so a
-    # digest recorded via on_hashed before the interrupt still survives.
+    # leave the dump flushed and closed. A digest recorded via on_hashed before
+    # the interrupt still survives.
     (tmp_path / "a.bin").write_bytes(b"x")
     out = tmp_path / "hashes.txt"
     digest = "ab" * 32                          # 64-char hex
@@ -1751,6 +1750,32 @@ def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
     with pytest.raises(KeyboardInterrupt):
         hr.main()
     assert digest in out.read_text()            # survived the finally close
+
+
+def test_main_hashes_file_written_before_finally(tmp_path, monkeypatch):
+    # hr-rob-02: on_hashed writes and flushes the head digest immediately, so
+    # a hard crash before main's finally would not lose every hashed entry.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    out = tmp_path / "hashes.txt"
+    digest = "cd" * 32
+    observed = {}
+
+    def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
+             cancel_event=None, on_hashed=None, on_stage_progress=None,
+             on_composite=None):
+        list(files)
+        if on_walk_done is not None:
+            on_walk_done()
+        on_hashed(1, 1, digest, (1, 1), {(1, 1): [str(tmp_path / "a.bin")]})
+        observed["dump"] = out.read_text()
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(hr, "find_duplicate_groups", stub)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
+    with pytest.raises(KeyboardInterrupt):
+        hr.main()
+    assert digest in observed["dump"]
 
 
 def test_main_hashes_close_failure_warns(tmp_path, monkeypatch, capsys):
@@ -1774,6 +1799,9 @@ def test_main_hashes_close_failure_warns(tmp_path, monkeypatch, capsys):
         def close(self):
             self._f.close()
             raise OSError("disk full on flush")
+
+        def __getattr__(self, name):
+            return getattr(self._f, name)
 
     def fake_open(path, *a, **kw):
         if str(path) == str(out):
@@ -1811,6 +1839,9 @@ def test_main_hashes_closed_when_dump_write_interrupted(tmp_path, monkeypatch):
         def close(self):
             closed["n"] += 1
             self._f.close()
+
+        def __getattr__(self, name):
+            return getattr(self._f, name)
 
     def fake_open(path, *a, **kw):
         if str(path) == str(out):

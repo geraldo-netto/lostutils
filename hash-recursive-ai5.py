@@ -1584,6 +1584,74 @@ def _log_line(msg, quiet) -> None:
         print(f"{_log_prefix()} {msg}", file=sys.stderr)
 
 
+_DUMP_COMPOSITE_DIGEST_WIDTH = len(("00" * 32) + ":" + ("00" * 32))
+
+
+def _dump_digest_field(digest: str) -> str:
+    return digest.ljust(_DUMP_COMPOSITE_DIGEST_WIDTH)
+
+
+class HashDumpWriter:
+    """Append hash dump lines early and patch digest fields in place."""
+
+    def __init__(self, handle):
+        self._handle = handle
+        self._offsets: dict = {}
+        self._digests: dict = {}
+
+    def write_head(self, key, digest: str, paths) -> None:
+        offsets = []
+        for path in paths:
+            offsets.append(self._write_line(digest, path))
+        self._offsets[key] = offsets
+        self._digests[key] = digest
+        self._handle.flush()
+
+    def patch_composite(self, key, digest: str) -> None:
+        offsets = self._offsets.get(key)
+        if not offsets:
+            return
+        current = self._handle.tell()
+        try:
+            for offset in offsets:
+                self._handle.seek(offset)
+                self._handle.write(_dump_digest_field(digest))
+            self._handle.flush()
+            self._digests[key] = digest
+        finally:
+            self._handle.seek(current)
+
+    def write_overflow(self, overflow) -> None:
+        self._handle.seek(0, os.SEEK_END)
+        for key, elided in overflow.items():
+            if elided > 0 and key in self._digests:
+                self._write_line(
+                    self._digests[key], f"+{elided} more (alias-cap)")
+        self._handle.flush()
+
+    def close(self) -> None:
+        self._handle.close()
+
+    def fileno(self) -> int:
+        return self._handle.fileno()
+
+    def _write_line(self, digest: str, path: str) -> int:
+        offset = self._handle.tell()
+        self._handle.write(f"{_dump_digest_field(digest)} {path}\n")
+        return offset
+
+
+def _open_hash_dump(path: str):
+    try:
+        fh = open(path, "r+", buffering=1, encoding="utf-8",
+                  errors="surrogateescape")
+    except FileNotFoundError:
+        fh = open(path, "w+", buffering=1, encoding="utf-8",
+                  errors="surrogateescape")
+    fh.seek(0, os.SEEK_END)
+    return fh
+
+
 def _configure_stdio_encoding() -> None:
     """Keep path output writable for Unicode and surrogate-escaped names."""
     for stream in (sys.stdout, sys.stderr):
@@ -1713,32 +1781,22 @@ def main():
     # the run (e.g. when main() is invoked from a long-lived host).
     previous_sigint = _install_sigint_cancel(cancel_event)
 
-    hashes_state: dict = {"fh": None}
-    # hr-obs-02: per-key (digest, paths) accumulated during hashing so a stage-2
-    # file's digest can be upgraded to the composite head:tail before the dump
-    # is written. Declared before the try so the finally can flush it on a
-    # Ctrl-C (with whatever digests resolved so far). Bounded by candidate count.
-    dump_pending: dict = {}
+    hashes_state: dict = {"writer": None}
     # hr-obs-10: per-inode count of aliases elided AT INGEST by the alias cap, so
     # the dump can append a `+N more` marker instead of silently omitting
     # hardlinks past the cap.
     dump_overflow: dict = {}
 
     try:
-        # hr-log-04: open the hashes dump BEFORE the walk so it always
-        # exists — even on a Ctrl-C during the walk, before any file is
-        # hashed. hr-log-03: line-buffered so each dumped line is flushed
-        # to the OS as written, leaving a complete file on an abrupt exit.
-        # Capture its inode so the walk excludes the dump from its own
-        # results (no self-count, no self-hash, no self-list).
+        # hr-log-04: open the hashes dump BEFORE the walk so it always exists
+        # even on a Ctrl-C during the walk. hr-rob-02: write each stage-1 head
+        # line immediately, then patch the fixed-width digest field if stage 2
+        # upgrades it to a composite head:tail digest.
         skip_ino = None
         try:
-            fh = open(
-                args.hashes_file, "a", buffering=1,
-                encoding="utf-8", errors="surrogateescape",
-            )
-            hashes_state["fh"] = fh
-            dump_stat = os.fstat(fh.fileno())
+            writer = HashDumpWriter(_open_hash_dump(args.hashes_file))
+            hashes_state["writer"] = writer
+            dump_stat = os.fstat(writer.fileno())
             skip_ino = (dump_stat.st_dev, dump_stat.st_ino)
         except OSError as exc:
             _log_line(f"WARNING: cannot write {args.hashes_file}: {exc}", False)
@@ -1755,6 +1813,16 @@ def main():
         def _mark_walk_done():
             walk_boundary[0] = time.perf_counter()
 
+        def _disable_hash_dump(exc):
+            writer = hashes_state["writer"]
+            hashes_state["writer"] = None
+            _log_line(f"WARNING: writing {args.hashes_file} failed: {exc}", False)
+            if writer is not None:
+                try:
+                    writer.close()
+                except OSError:
+                    pass
+
         # hr-scal-02: stream groups straight to stdout so the result set
         # never buffers in memory. Pipeline-internal `final_groups` stays
         # empty because the callback consumes every group inline.
@@ -1764,15 +1832,22 @@ def main():
         def _on_hashed(done, total, head, key, aliases):
             # hr-log-02: record every hashed file for the dump. Live progress is
             # emitted by `_on_stage_progress` as each hash batch completes.
-            if head is not None and hashes_state["fh"] is not None:
-                dump_pending[key] = (head, list(aliases.get(key, ())))
+            writer = hashes_state["writer"]
+            if head is not None and writer is not None:
+                try:
+                    writer.write_head(key, head, aliases.get(key, ()))
+                except OSError as exc:
+                    _disable_hash_dump(exc)
 
         def _on_composite(key, composite):
             # hr-obs-02: upgrade the stage-1 head digest to the composite
             # head:tail once stage 2 has resolved the tail for this key.
-            entry = dump_pending.get(key)
-            if entry is not None:
-                dump_pending[key] = (composite, entry[1])
+            writer = hashes_state["writer"]
+            if writer is not None:
+                try:
+                    writer.patch_composite(key, composite)
+                except OSError as exc:
+                    _disable_hash_dump(exc)
 
         def _on_stage_progress(stage, done, total):
             state = progress_state.setdefault(
@@ -1886,19 +1961,11 @@ def main():
         # KeyboardInterrupt (a second Ctrl-C, after the cooperative cancel),
         # so the file is always closed. The close is guarded so a flush
         # error can't skip the SIGINT-handler restore below.
-        if hashes_state["fh"] is not None:
+        if hashes_state["writer"] is not None:
             try:
-                # hr-obs-02: write the accumulated dump (composite head:tail for
-                # resolved stage-2 keys, head for the rest) here so it is flushed
-                # on a normal return AND on a Ctrl-C, then close.
-                _fh = hashes_state["fh"]
-                for _key, (_digest, _paths) in dump_pending.items():
-                    _fh.write("".join(f"{_digest} {p}\n" for p in _paths))
-                    # hr-obs-10: surface hardlinks elided at ingest by the alias
-                    # cap instead of silently omitting them from the dump.
-                    _elided = dump_overflow.get(_key, 0)
-                    if _elided > 0:
-                        _fh.write(f"{_digest} +{_elided} more (alias-cap)\n")
+                # hr-obs-10: surface hardlinks elided at ingest by the alias
+                # cap instead of silently omitting them from the dump.
+                hashes_state["writer"].write_overflow(dump_overflow)
             except OSError as exc:
                 _log_line(f"WARNING: writing {args.hashes_file} failed: {exc}",
                           False)
@@ -1908,7 +1975,7 @@ def main():
                 # the close would be skipped and the fd leaked. Close here so
                 # the fd is released on every exit path.
                 try:
-                    hashes_state["fh"].close()
+                    hashes_state["writer"].close()
                 except OSError as exc:
                     _log_line(
                         f"WARNING: closing {args.hashes_file} failed: {exc}",
