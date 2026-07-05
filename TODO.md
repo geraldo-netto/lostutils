@@ -52,7 +52,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-conc-01 | open | med | organize_by_extension.py:960-962 — `release()` reconstructs the bucket name set only on the `_BUCKET_FULL` path, discarding the "every accepted destination is in the cache" reservation invariant `choose()` relies on; a full-bucket move failure is the trigger for the collision. Retain in-flight reservations across the re-read. | STRIDE Tampering on in-memory plan state; same root as oze-int-01
 
 ## multithreading
 

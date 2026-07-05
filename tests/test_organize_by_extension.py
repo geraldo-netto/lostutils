@@ -1056,6 +1056,30 @@ class BucketManagerTests(unittest.TestCase):
             self.assertIn("aa.txt", mgr.state_cache[bucket.path])
             self.assertNotIn("ab.txt", mgr.state_cache[bucket.path])
 
+    def test_release_keeps_reserved_name_blocking_later_same_name(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            ext_dir = root / "txt"
+            bucket_path = ext_dir / "a00000"
+            bucket_path.mkdir(parents=True)
+            mgr = BucketManager(root=root)
+            mgr.state_cache[bucket_path] = {f"f{i}.txt" for i in range(BUCKET_SIZE - 2)}
+            mgr.indices_cache[(ext_dir, "a")] = [0]
+            pending = root / "dir1" / "aa.txt"
+            failed = root / "ab.txt"
+            later = root / "dir2" / "aa.txt"
+            for p in (pending, failed, later):
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"x")
+
+            mgr.choose(pending, ext_dir, "a")
+            full_bucket = mgr.choose(failed, ext_dir, "a")
+            mgr.release(failed, full_bucket.path)
+
+            later_bucket = mgr.choose(later, ext_dir, "a")
+
+            self.assertNotEqual(later_bucket.path, bucket_path)
+
 
 class PlanMovesBucketExhaustionTests(unittest.TestCase):
     """oze-rel-02: a bucket-space exhaustion during planning skips one file
