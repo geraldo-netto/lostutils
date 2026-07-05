@@ -239,7 +239,6 @@ hr-dep-01 | open | low | hash-recursive-ai5.py:44 — top-level `import blake3` 
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-doc-01 | open | low | deduplicate-by-namev3.py:16 — docstring says a single N×N call is fine "for N≤30 K" before row-blocking, but `BLOCK_THRESHOLD = 4000` triggers blocking at N>4000; reconcile the 30K narrative with the 4000 threshold. |
 hr-doc-01 | open | low | hash-recursive-ai5.py:1730 — comment claims the dump is "line-buffered so … a complete file on an abrupt exit", but no dump line is written during hashing (all writes happen in the finally at :1895); correct the comment or make writes incremental. | ties to hr-rob-02
 lq-doc-01 | open | low | link_queue.py:20 — module docstring says legacy `~/.link_queue_config.json` is migrated on first run, but `LEGACY_CONFIG_FILE_NAME="link_queue_config.json"` resolves via `_resolve_state_path` to the XDG/script dir, never `~/.link_queue_config.json`; correct the docstring to the actual location. | docs-vs-behavior drift
 rf-doc-02 | open | low | relocate_folder.py:7 — module docstring usage example invokes `sudo python relocate.py …`, but the script is `relocate_folder.py`; the documented command as written won't run. Update the example to the real filename. | docs-vs-behavior drift

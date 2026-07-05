@@ -12,10 +12,9 @@ Wins vs v2:
 
 Tradeoff:
   * A single N×N call costs N² bytes (uint8 dtype + score_cutoff clips
-    above-threshold cells to threshold+1). For N≤30 K (~900 MB) this is
-    fine; beyond that the lower triangle is wasted memory, so for large N
-    we compute the matrix in row blocks (BLOCK_ROWS×N peak) and emit the
-    upper-triangle pairs per block. Output is identical either way.
+    above-threshold cells to threshold+1). By default, N>4000 switches to
+    row-blocked computation (BLOCK_ROWS×N peak) and emits the upper-triangle
+    pairs per block. Output is identical either way.
   * Input lines are read incrementally, but cleaned unique strings and their
     source line numbers are retained for comparison; peak memory still grows
     with the number of distinct cleaned inputs.
