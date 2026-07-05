@@ -126,6 +126,11 @@ def _emit_remove_commands(groups, out):
     return groups_with_dups, files_to_remove
 
 
+def _fail(msg, code):
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
 def main(argv=None):
     args = parse_args(argv)
     try:
@@ -133,16 +138,14 @@ def main(argv=None):
     except OSError as e:
         # Same clean contract as the read loop below: a missing/unreadable
         # input gets `error:` + exit 2, not an uncaught traceback (rdv3-robust-01).
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(2)
+        _fail(e, 2)
     err_mode = "strict" if args.strict else "surrogateescape"
     _configure_stdout_errors(err_mode)
 
     try:
         groups = _read_groups(args.file, encoding, err_mode)
     except OSError as e:
-        print(f"error: {e}", file=sys.stderr)
-        sys.exit(2)
+        _fail(e, 2)
     except UnicodeDecodeError as e:
         print(f"decode error in {args.file} (encoding={encoding}): {e}\n"
               f"hint: try --encoding <name> or omit --strict",

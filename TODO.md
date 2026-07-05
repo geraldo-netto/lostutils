@@ -90,7 +90,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 bt-dup-01 | open | med | bookmark-tidy.py:1442-1449 — `_run` duplicates the full body of `tidy_bookmarks` (deduplicate → guard → `_assign_categories`); collapse `_run` onto `tidy_bookmarks` to keep one code path. | within-file dup
-rdv3-dup-01 | open | low | remove-deduplv3.py:136 — the `print(f"error: {e}", file=sys.stderr); sys.exit(2)` block is duplicated verbatim at 143-145; hoist to a `_fail(msg, code)` helper. | within-file dup
 
 ## architecture/modularity/SOLID
 
