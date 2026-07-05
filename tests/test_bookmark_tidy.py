@@ -131,6 +131,23 @@ def test_main_reports_missing_bookmark_file(capsys):
     assert "missing bookmark file" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("exc", "message"),
+    [
+        (OSError("disk full"), "disk full"),
+        (sqlite3.OperationalError("database locked"), "database locked"),
+        (RuntimeError("model failed"), "model failed"),
+    ],
+)
+def test_main_formats_operational_errors(monkeypatch, capsys, exc, message):
+    monkeypatch.setattr(bookmark_tidy, "_run", lambda _args: (_ for _ in ()).throw(exc))
+
+    assert bookmark_tidy.main([]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert message in err
+
+
 def test_normalize_url_defaults_strip_noise_and_collapse_web_scheme():
     key, display = bookmark_tidy.normalize_url(
         "HTTP://www.Example.test:80/path/?utm_source=news&keep=1#section",

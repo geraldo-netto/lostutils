@@ -1552,7 +1552,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     _configure_logging(args.verbose)
     try:
         return _run(args)
-    except UserError as exc:
+    except (UserError, OSError, sqlite3.Error, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
