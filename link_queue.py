@@ -84,6 +84,21 @@ def _yaml_dump(data, stream, **kwargs):
     return yaml.dump(data, stream, Dumper=_YamlDumper, **kwargs)
 
 
+def _fsync_dir(path: str) -> None:
+    """Best-effort fsync of a directory so a preceding os.replace is durable
+    (lq-rob-01). No-op where a directory fd can't be opened/fsynced (Windows)."""
+    try:
+        dir_fd = os.open(path, os.O_RDONLY)
+    except OSError:  # pragma: no cover - platform without dir-fd open (Windows)
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:  # pragma: no cover - platform without dir fsync
+        pass
+    finally:
+        os.close(dir_fd)
+
+
 def _yaml_emittable(s: str) -> bool:
     """True iff the active YAML backend can serialise `s`. The pure-Python
     PyYAML emitter rejects C1 control chars (NEL \\x85) and the line/paragraph
@@ -788,7 +803,11 @@ class ConfigStore(dict):
                     sort_keys=False,
                     allow_unicode=True,
                 )
+                # lq-rob-01: durability — see _atomic_write_state.
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.config_file)
+            _fsync_dir(d)
             try:
                 os.chmod(self.config_file, 0o600)
             except OSError:
@@ -1148,7 +1167,13 @@ class Dispatcher:
                     default_flow_style=False, sort_keys=False,
                     allow_unicode=True,
                 )
+                # lq-rob-01: os.replace is atomic vs readers but not vs power
+                # loss; flush data blocks before the rename, then fsync the dir
+                # after so the rename itself survives a crash (1s-debounced path).
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, self.state_path)
+            _fsync_dir(d)
             try:
                 os.chmod(self.state_path, 0o600)
             except OSError:
