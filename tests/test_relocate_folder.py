@@ -1952,6 +1952,104 @@ def test_copy_tree_progress_cb_handles_lstat_failure(tmp_path, monkeypatch):
     assert calls   # cb still got called even though size accounting failed
 
 
+def test_operation_stall_watchdog_warns_after_idle(caplog):
+    import logging
+    now = [0.0]
+    watchdog = rf._OperationStallWatchdog(
+        "copytree",
+        warning_after=5.0,
+        now_fn=lambda: now[0],
+    )
+    with caplog.at_level(logging.WARNING, logger="relocate"):
+        watchdog._maybe_warn()
+        now[0] = 6.0
+        watchdog._maybe_warn()
+    assert any("copytree stalled: no progress for 6s" in r.message
+               for r in caplog.records)
+
+
+def test_copy_tree_uses_stall_watchdog(tmp_path, monkeypatch):
+    created = []
+
+    class FakeWatchdog:
+        def __init__(self, operation, *args, **kwargs):
+            self.operation = operation
+            self.touches = []
+            created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return None
+
+        def touch(self, operation=None):
+            self.touches.append(operation or self.operation)
+
+    monkeypatch.setattr(rf, "_OperationStallWatchdog", FakeWatchdog)
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "a").write_text("x")
+    rf.copy_tree(src, tmp_path / "d", check_space=False)
+    assert any(w.operation == "copytree" and "copytree" in w.touches
+               for w in created)
+
+
+def test_verify_copy_uses_stall_watchdog(tmp_path, monkeypatch):
+    created = []
+
+    class FakeWatchdog:
+        def __init__(self, operation, *args, **kwargs):
+            self.operation = operation
+            self.touches = []
+            created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return None
+
+        def touch(self, operation=None):
+            self.touches.append(operation or self.operation)
+
+    monkeypatch.setattr(rf, "_OperationStallWatchdog", FakeWatchdog)
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "a").write_text("x")
+    dst = tmp_path / "d"
+    rf.copy_tree(src, dst, check_space=False)
+    created.clear()
+    rf.verify_copy(src, dst, checksum=False)
+    assert any(w.operation == "verify_copy" and "verify_copy" in w.touches
+               for w in created)
+
+
+def test_sha256_uses_stall_watchdog(tmp_path, monkeypatch):
+    created = []
+
+    class FakeWatchdog:
+        def __init__(self, operation, *args, **kwargs):
+            self.operation = operation
+            self.touches = []
+            created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return None
+
+        def touch(self, operation=None):
+            self.touches.append(operation or self.operation)
+
+    monkeypatch.setattr(rf, "_OperationStallWatchdog", FakeWatchdog)
+    src = tmp_path / "data"
+    src.write_text("x")
+    rf._sha256(src)
+    assert any(w.operation == f"sha256 {src}" and w.touches for w in created)
+
+
 # --- rf-obs-05: _device_mount_point boundary cases ------------------------
 
 def test_device_mount_point_returns_a_string(tmp_path):

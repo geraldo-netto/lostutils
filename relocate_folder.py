@@ -41,6 +41,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 import contextvars
@@ -98,6 +99,7 @@ BACKUP_SUFFIX = ".relocate-backup"
 STAGING_PREFIX = ".relocate-stage-"
 STAGING_PID_FILE = ".owner-pid"
 _CHOWN_WARNING_LIMIT = 10
+_STALL_WARN_SECONDS = 60.0
 
 
 # rf-ddd-01: MigrationState makes the implicit lifecycle explicit. The
@@ -125,6 +127,71 @@ def _path_taken(p: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+class _OperationStallWatchdog:
+    """Warn when a filesystem operation goes idle for too long."""
+
+    def __init__(
+        self,
+        operation: str,
+        *,
+        warning_after: float = _STALL_WARN_SECONDS,
+        now_fn: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._operation = operation
+        self._warning_after = warning_after
+        self._now = now_fn
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._last_progress = self._now()
+        self._last_warning = self._last_progress
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "_OperationStallWatchdog":
+        self.start()
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.stop()
+
+    def start(self) -> None:
+        self.touch()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def touch(self, operation: str | None = None) -> None:
+        now = self._now()
+        with self._lock:
+            if operation is not None:
+                self._operation = operation
+            self._last_progress = now
+            self._last_warning = now
+
+    def _run(self) -> None:
+        interval = max(1.0, min(self._warning_after / 4.0, 10.0))
+        while not self._stop.wait(interval):
+            self._maybe_warn()
+
+    def _maybe_warn(self) -> None:
+        now = self._now()
+        with self._lock:
+            idle = now - self._last_progress
+            recently_warned = now - self._last_warning < self._warning_after
+            if idle < self._warning_after or recently_warned:
+                return
+            self._last_warning = now
+            operation = self._operation
+        _log().warning(
+            "%s stalled: no progress for %.0fs; filesystem I/O may be blocked",
+            operation,
+            idle,
+        )
 
 
 def _swallow_or_warn(label: str, fn: Callable, *args, **kwargs):
@@ -670,6 +737,47 @@ def _rmtree_logging(path: Path, context: str) -> None:
             "removal may be needed before re-running", path)
 
 
+def _copytree_copy_function(
+    progress_cb: "Callable[[int, int], None] | None",
+    total: int,
+    watchdog: _OperationStallWatchdog,
+) -> Callable[..., Path]:
+    done = [0]
+
+    def tracking_copy2(s, d, *, follow_symlinks=True):
+        result = shutil.copy2(s, d, follow_symlinks=follow_symlinks)
+        watchdog.touch("copytree")
+        if progress_cb is not None:
+            _record_copy_progress(d, follow_symlinks, done, total, progress_cb)
+        return result
+
+    return tracking_copy2
+
+
+def _record_copy_progress(
+    dst: Path,
+    follow_symlinks: bool,
+    done: list[int],
+    total: int,
+    progress_cb: Callable[[int, int], None],
+) -> None:
+    try:
+        # rf-rel-05 / rf-robust-04: account the bytes actually written
+        # at the DESTINATION. Statting the source would let a concurrent
+        # writer changing `s` between copytree's read and here skew
+        # `done` past (or below) the total; the freshly-written `d` is
+        # stable. follow_symlinks=False copies the link itself, so the
+        # dst is a symlink — lstat it; otherwise it's the regular file.
+        stat_fn = os.stat if follow_symlinks else os.lstat
+        done[0] += stat_fn(dst).st_size
+    except OSError:
+        pass
+    try:
+        progress_cb(done[0], total)
+    except Exception:   # pragma: no cover - cb is user code
+        pass
+
+
 def copy_tree(src: Path, dst: Path, *,
               mode_cache: dict[Path, int] | None = None,
               jobs: int | None = None,
@@ -715,38 +823,16 @@ def copy_tree(src: Path, dst: Path, *,
         _check_disk_space(src, dst, total_bytes=alloc_total)
     skipped: list[Path] = []
     cache = mode_cache if mode_cache is not None else {}
-    copy_function = shutil.copy2
-    if progress_cb is not None:
-        total = apparent_total
-        done = [0]
-
-        def tracking_copy2(s, d, *, follow_symlinks=True):
-            result = shutil.copy2(s, d, follow_symlinks=follow_symlinks)
-            try:
-                # rf-rel-05 / rf-robust-04: account the bytes actually written
-                # at the DESTINATION. Statting the source would let a concurrent
-                # writer changing `s` between copytree's read and here skew
-                # `done` past (or below) the total; the freshly-written `d` is
-                # stable. follow_symlinks=False copies the link itself, so the
-                # dst is a symlink — lstat it; otherwise it's the regular file.
-                stat_fn = os.stat if follow_symlinks else os.lstat
-                done[0] += stat_fn(d).st_size
-            except OSError:
-                pass
-            try:
-                progress_cb(done[0], total)
-            except Exception:   # pragma: no cover - cb is user code
-                pass
-            return result
-
-        copy_function = tracking_copy2
+    watchdog = _OperationStallWatchdog("copytree")
+    copy_function = _copytree_copy_function(progress_cb, apparent_total, watchdog)
     try:
-        shutil.copytree(
-            src, dst,
-            symlinks=True,
-            copy_function=copy_function,
-            ignore=_make_ignore_specials(skipped, cache),
-        )
+        with watchdog:
+            shutil.copytree(
+                src, dst,
+                symlinks=True,
+                copy_function=copy_function,
+                ignore=_make_ignore_specials(skipped, cache),
+            )
     except BaseException:
         # rf-robust-02: catch BaseException (not just Exception) so a
         # KeyboardInterrupt mid-copy also cleans the half-written `dst` instead
@@ -1152,13 +1238,15 @@ def verify_copy(src: Path, dst: Path, checksum: bool = False,
     bounded by the inflight cap regardless of tree size, at the cost
     of giving up the ability to report a stable `len(tasks)` upfront."""
     tasks = _iter_verify_tasks(src, dst, checksum, verify_ownership)
-    if not checksum:
-        # cheap stat-only / readlink ops: sequential is fast and keeps the
-        # error path deterministic for tests.
-        for task in tasks:
-            task()
-        return
-    _run_verify_pool(tasks, jobs=jobs)
+    with _OperationStallWatchdog("verify_copy") as watchdog:
+        if not checksum:
+            # cheap stat-only / readlink ops: sequential is fast and keeps the
+            # error path deterministic for tests.
+            for task in tasks:
+                task()
+                watchdog.touch("verify_copy")
+            return
+        _run_verify_pool(tasks, jobs=jobs, watchdog=watchdog)
 
 
 def _kind_verify_task(full: Path, counterpart: Path, rel: Path,
@@ -1217,8 +1305,12 @@ def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
             yield partial(_verify_ownership, full, counterpart, rel, st)
 
 
-def _run_verify_pool(tasks: Iterator[Callable[[], None]], *,
-                     jobs: int | None = None) -> None:
+def _run_verify_pool(
+    tasks: Iterator[Callable[[], None]],
+    *,
+    jobs: int | None = None,
+    watchdog: _OperationStallWatchdog | None = None,
+) -> None:
     """Drive `tasks` through `_run_streamed` over a bounded
     ThreadPoolExecutor (rf-perf-02 / rf-arch-06).
 
@@ -1246,6 +1338,8 @@ def _run_verify_pool(tasks: Iterator[Callable[[], None]], *,
     dropped = [0]
 
     def on_done(fut: "Future") -> bool:
+        if watchdog is not None:
+            watchdog.touch("verify_copy")
         exc = fut.exception()
         if exc is None:
             return False
@@ -1446,7 +1540,10 @@ def _sha256(path: Path) -> str:
     last_exc: BaseException | None = None
     for attempt in range(_SHA256_RETRY_ATTEMPTS):
         try:
-            return _hash_once_strict(path)
+            with _OperationStallWatchdog(f"sha256 {path}") as watchdog:
+                digest = _hash_once_strict(path)
+                watchdog.touch()
+                return digest
         except (_HashTruncatedError, _HashVanishedError) as exc:
             last_exc = exc
             continue
