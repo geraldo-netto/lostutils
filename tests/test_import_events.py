@@ -2336,6 +2336,23 @@ def test_atomic_write_fsyncs_parent_directory(tmp_path, monkeypatch):
     assert ("close", dir_fd) in calls
 
 
+def test_atomic_write_uses_unique_tempfile_in_target_dir(tmp_path, monkeypatch):
+    out = tmp_path / "events.json"
+    calls = []
+    real_mkstemp = import_events.tempfile.mkstemp
+
+    def fake_mkstemp(prefix, suffix, dir):
+        calls.append((prefix, suffix, Path(dir)))
+        return real_mkstemp(prefix=prefix, suffix=suffix, dir=dir)
+
+    monkeypatch.setattr(import_events.tempfile, "mkstemp", fake_mkstemp)
+
+    import_events._atomic_write_bytes(out, b"new")
+
+    assert out.read_bytes() == b"new"
+    assert calls == [(".events.json.", ".tmp", tmp_path)]
+
+
 ICS_TEMPLATE = (
     "BEGIN:VCALENDAR\r\n"
     "VERSION:2.0\r\n"

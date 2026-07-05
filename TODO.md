@@ -62,7 +62,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-conc-01 | open | low | import_events.py:3657 — `_atomic_write_bytes` names its temp `.{name}.{os.getpid()}.tmp` keyed only on PID, not thread; under `--stage-cache` with 2+ workers processing files whose content+options hash to the SAME cache key, both compute the same tmp path → concurrent `open("wb")` + `os.replace` interleave (one replace moves the tmp out from under the other, which keeps writing into the published cache file then fails its own replace with FileNotFoundError). Add thread id or use `tempfile.mkstemp` in the target dir. | concurrency / robustness — non-unique temp filename across threads; corrupts stage cache for duplicate-content inputs
 
 ## multithreading
 

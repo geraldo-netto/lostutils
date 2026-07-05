@@ -3673,15 +3673,27 @@ def _output_lock(output_path: Path):
 
 
 def _atomic_write_bytes(output_path: Path, data: bytes) -> None:
-    tmp = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=output_path.parent,
+    )
+    tmp = Path(tmp_name)
     try:
-        with open(tmp, "wb") as f:
+        f = os.fdopen(fd, "wb")
+        fd = -1
+        with f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, output_path)
         _fsync_parent_dir(output_path)
     except BaseException:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             tmp.unlink()
         except OSError:
