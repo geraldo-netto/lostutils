@@ -4018,6 +4018,27 @@ def _print_run_output(events: List[Dict[str, Any]], targets: str, summary_only: 
         print(f"[{event['start']}] {event['title']}{location} (Source: {event['source']})")
 
 
+def _handle_model_unavailable(exc: ModelUnavailableError, args: argparse.Namespace) -> int:
+    partial = exc.partial_events
+    if not args.no_dedup:
+        partial = dedupe_events(partial)
+    logger.error(
+        "Model could not be run (%s). Emitting PARTIAL output with %d "
+        "event(s) and aborting.", exc, len(partial))
+    write_events_json(partial, Path(args.output))
+    if args.emit_ics:
+        write_events_ics(partial, Path(args.emit_ics))
+    return 2
+
+
+def _write_and_print_run_outputs(events: List[Dict[str, Any]], args: argparse.Namespace) -> None:
+    write_events_json(events, Path(args.output))
+    if args.emit_ics:
+        write_events_ics(events, Path(args.emit_ics))
+    targets = args.output + (f", {args.emit_ics}" if args.emit_ics else "")
+    _print_run_output(events, targets, args.summary_only)
+
+
 def _run_main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     model_config = ModelConfig.from_args(args)
@@ -4039,27 +4060,11 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
         events = process_folder(str(folder), recursive=args.recursive,
                                 default_tz=args.timezone, model_config=model_config)
     except ModelUnavailableError as exc:
-        # ie-robust-01: the model could not be run; emit whatever was extracted
-        # before the failure, warn loudly, and abort with a distinct exit code.
-        partial = exc.partial_events
-        if not args.no_dedup:
-            partial = dedupe_events(partial)
-        logger.error(
-            "Model could not be run (%s). Emitting PARTIAL output with %d "
-            "event(s) and aborting.", exc, len(partial))
-        write_events_json(partial, Path(args.output))
-        if args.emit_ics:
-            write_events_ics(partial, Path(args.emit_ics))
-        return 2
+        return _handle_model_unavailable(exc, args)
     if not args.no_dedup:
         events = dedupe_events(events)
 
-    write_events_json(events, Path(args.output))
-    if args.emit_ics:
-        write_events_ics(events, Path(args.emit_ics))
-
-    targets = args.output + (f", {args.emit_ics}" if args.emit_ics else "")
-    _print_run_output(events, targets, args.summary_only)
+    _write_and_print_run_outputs(events, args)
 
     failures = extraction_failure_count()
     if failures:

@@ -83,7 +83,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cx-18 | open | low | import_events.py:3928 — `_run_main` is CC 11 per radon (still >10): arg parse, cache reset, folder-create shortcut, ModelUnavailableError partial-emit branch, dedup, dual output writes, and failure-count exit all inline. Split the ModelUnavailableError partial-emit path and the normal write/emit path into helpers. | code complexity — radon CC 11 > 10
 
 ## code duplication
 
