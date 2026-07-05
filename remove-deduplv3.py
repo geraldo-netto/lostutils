@@ -154,10 +154,25 @@ def _fail(msg, code) -> NoReturn:
 
 
 def _silence_stdout_after_broken_pipe():
+    devnull_fd = None
     try:
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
     except OSError:
-        pass
+        return
+    try:
+        try:
+            os.dup2(devnull_fd, sys.stdout.fileno())
+        except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+            pass
+        try:
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            pass
+    finally:
+        try:
+            os.close(devnull_fd)
+        except OSError:
+            pass
 
 
 def main(argv=None):

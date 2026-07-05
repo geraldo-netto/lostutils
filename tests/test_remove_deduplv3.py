@@ -1,4 +1,5 @@
 """Tests for remove-deduplv3.py — clean error contract (rdv3-robust-01)."""
+import builtins
 import io
 import importlib.util
 from pathlib import Path
@@ -138,6 +139,32 @@ def test_broken_pipe_exits_cleanly(monkeypatch, tmp_path):
     rd.main()
 
     assert silenced == [True]
+
+
+def test_silence_stdout_after_broken_pipe_redirects_fd(monkeypatch):
+    class FakeStdout:
+        def fileno(self):
+            return 7
+
+    class FakeDevnull:
+        pass
+
+    opened = []
+    duped = []
+    closed = []
+    replacement = FakeDevnull()
+    monkeypatch.setattr(rd.sys, "stdout", FakeStdout())
+    monkeypatch.setattr(rd.os, "open", lambda path, flags: opened.append((path, flags)) or 99)
+    monkeypatch.setattr(rd.os, "dup2", lambda src, dst: duped.append((src, dst)))
+    monkeypatch.setattr(rd.os, "close", lambda fd: closed.append(fd))
+    monkeypatch.setattr(builtins, "open", lambda *args, **kwargs: replacement)
+
+    rd._silence_stdout_after_broken_pipe()
+
+    assert opened == [(rd.os.devnull, rd.os.O_WRONLY)]
+    assert duped == [(99, 7)]
+    assert closed == [99]
+    assert rd.sys.stdout is replacement
 
 
 def test_configure_stdout_forces_utf8_and_error_mode(monkeypatch):
