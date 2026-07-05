@@ -95,6 +95,7 @@ def with_hash_fn(fn: "Callable[[Path], str]") -> "Iterator[Callable[[Path], str]
 
 BACKUP_SUFFIX = ".relocate-backup"
 STAGING_PREFIX = ".relocate-stage-"
+STAGING_PID_FILE = ".owner-pid"
 
 
 # rf-ddd-01: MigrationState makes the implicit lifecycle explicit. The
@@ -1568,8 +1569,13 @@ def _create_symlink(link: Path, target: Path, *,
     classifying the error retroactively closes the window and removes
     the redundant syscall."""
     parent = link.parent
+    _sweep_orphaned_staging_dirs(parent)
     try:
-        staging = Path(tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=str(parent)))
+        staging = Path(tempfile.mkdtemp(
+            prefix=f"{STAGING_PREFIX}{os.getpid()}-",
+            dir=str(parent),
+        ))
+        _write_staging_pid(staging)
     except PermissionError as exc:
         raise RuntimeError(
             f"link parent not writable: {parent} "
@@ -1604,6 +1610,83 @@ def _create_symlink(link: Path, target: Path, *,
             _chown_to_owner(link, owner)
     finally:
         _cleanup_staging(staging)
+
+
+def _write_staging_pid(staging: Path) -> None:
+    marker = staging / STAGING_PID_FILE
+    try:
+        marker.write_text(f"{os.getpid()}\n", encoding="ascii")
+    except OSError as exc:
+        _log().warning("could not write staging owner marker %s: %s", marker, exc)
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _staging_pid_from_name(path: Path) -> "int | None":
+    if not path.name.startswith(STAGING_PREFIX):
+        return None
+    pid_text = path.name[len(STAGING_PREFIX):].split("-", 1)[0]
+    try:
+        return int(pid_text)
+    except ValueError:
+        return None
+
+
+def _staging_owner_pid(path: Path) -> "int | None":
+    try:
+        pid_text = (path / STAGING_PID_FILE).read_text(encoding="ascii").strip()
+        return int(pid_text)
+    except (OSError, ValueError):
+        return _staging_pid_from_name(path)
+
+
+def _staging_dir_orphaned(path: Path) -> bool:
+    pid = _staging_owner_pid(path)
+    if pid is None:
+        return True
+    return not _pid_alive(pid)
+
+
+def _sweep_orphaned_staging_dirs(parent: Path) -> int:
+    removed = 0
+    try:
+        entries = list(parent.iterdir())
+    except OSError as exc:
+        _log().warning("could not scan staging dir parent %s: %s", parent, exc)
+        return 0
+    for entry in entries:
+        if not entry.name.startswith(STAGING_PREFIX):
+            continue
+        try:
+            mode = entry.lstat().st_mode
+        except OSError:
+            continue
+        if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
+            continue
+        if not _staging_dir_orphaned(entry):
+            continue
+        _cleanup_staging(entry)
+        if not _path_taken(entry):
+            removed += 1
+    if removed:
+        _log().warning(
+            "removed %d orphaned relocate staging dir(s) from %s",
+            removed,
+            parent,
+        )
+    return removed
 
 
 def _chown_to_owner(path: Path, owner: tuple[int, int]) -> None:

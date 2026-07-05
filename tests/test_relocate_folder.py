@@ -1010,6 +1010,33 @@ def test_cleanup_staging_tolerates_oserror(tmp_path, monkeypatch):
     rf._cleanup_staging(staging)
 
 
+def test_sweep_orphaned_staging_dirs_removes_legacy_stage(tmp_path):
+    staging = tmp_path / f"{rf.STAGING_PREFIX}legacy"
+    staging.mkdir()
+    (staging / "leftover").write_text("x")
+    assert rf._sweep_orphaned_staging_dirs(tmp_path) == 1
+    assert not staging.exists()
+
+
+def test_sweep_orphaned_staging_dirs_keeps_live_pid_stage(tmp_path):
+    staging = tmp_path / f"{rf.STAGING_PREFIX}{os.getpid()}-active"
+    staging.mkdir()
+    (staging / rf.STAGING_PID_FILE).write_text(f"{os.getpid()}\n")
+    assert rf._sweep_orphaned_staging_dirs(tmp_path) == 0
+    assert staging.exists()
+
+
+def test_create_symlink_sweeps_orphaned_staging_dir(tmp_path):
+    stale = tmp_path / f"{rf.STAGING_PREFIX}legacy"
+    stale.mkdir()
+    (stale / "leftover").write_text("x")
+    link = tmp_path / "the-link"
+    target = tmp_path / "target"; target.mkdir()
+    rf._create_symlink(link, target)
+    assert link.is_symlink()
+    assert not stale.exists()
+
+
 # --- rf-sec-02: _create_missing_dirs mkdir(0o700) -> chown -> chmod ---------
 
 def test_create_missing_dirs_secure_sequence(tmp_path, monkeypatch):
