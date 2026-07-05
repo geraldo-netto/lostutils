@@ -126,7 +126,6 @@ rf-robust-08 | open | low | relocate_folder.py:697 — a SIGKILL during `copy_tr
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-sm-01 | open | low | minikeypad.py:1419 — `_run_download` (:1419) and `_run_write_all` (:1573) set `_io_busy=True` + disable action buttons before `threading.Thread(...).start()`, with no try/except; if `start()` raises (`RuntimeError: can't start new thread`) the exception unwinds to the Tk dispatcher and `_io_busy` stays True with buttons permanently disabled — no error path resets it. Wrap the spawn so a failed start re-enables actions and clears `_io_busy`. | state machine integrity / robustness — error path leaves stuck terminal state, no cleanup
 
 ## testing
 

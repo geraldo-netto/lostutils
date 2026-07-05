@@ -1414,6 +1414,18 @@ class App(tk.Tk):
         for b in self._action_buttons:
             b.configure(state=state)
 
+    def _start_action_worker(self, target, label):
+        try:
+            threading.Thread(target=target, daemon=True).start()
+            return True
+        except Exception as e:
+            LOG.exception("%s worker failed to start", label)
+            self.log("%s error: %s" % (label, e))
+            self._io_busy = False
+            self._set_actions("normal")
+            self._update_state()
+            return False
+
     def _run_download(self, reports, flash):
         """Send all reports on a worker thread; the UI stays responsive."""
         self._io_busy = True
@@ -1430,7 +1442,7 @@ class App(tk.Tk):
                 outcome = "error"
             self._ui_q.put(lambda: self._download_done(outcome))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_action_worker(worker, "Write")
 
     def _download_done(self, outcome):
         self._io_busy = False
@@ -1589,7 +1601,7 @@ class App(tk.Tk):
                     self.log("Write-all: %s failed (%s)" % (self._key_name(kid), outcome))
             self._ui_q.put(lambda: self._write_all_done(ok, len(jobs)))
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_action_worker(worker, "Write-all")
 
     def _write_all_done(self, ok, total):
         self._io_busy = False

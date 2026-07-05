@@ -1533,6 +1533,42 @@ def test_write_all_worker_crash_logged(app):
     assert app._io_busy is False
 
 
+def test_run_download_start_failure_clears_busy(app, monkeypatch):
+    class BrokenThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(minikeypad.threading, "Thread", BrokenThread)
+    app._io_busy = False
+
+    app._run_download([], "kbd")
+    _wait_drain(app)
+
+    assert app._io_busy is False
+    assert "can't start new thread" in app.log_box.get("1.0", "end")
+
+
+def test_run_write_all_start_failure_clears_busy(app, monkeypatch):
+    class BrokenThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(minikeypad.threading, "Thread", BrokenThread)
+    app._io_busy = False
+
+    app._run_write_all([])
+    _wait_drain(app)
+
+    assert app._io_busy is False
+    assert "can't start new thread" in app.log_box.get("1.0", "end")
+
+
 def test_connect_done_clears_busy(app):
     app._io_busy = True
     app._connect_done(True)
