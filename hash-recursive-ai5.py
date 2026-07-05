@@ -205,7 +205,7 @@ def threaded_walk(root, jobs, cancel_event=None, skip_ino=None):
     -------
     results : list of ``(path, size, dev, ino)`` tuples.
     stats : dict with keys ``dirs``, ``files``, ``dir_errors``,
-        ``entry_errors``.
+        ``entry_errors``, ``worker_failures``, and ``last_worker_error``.
     """
     it = iter_threaded_walk(
         root, jobs, cancel_event=cancel_event, skip_ino=skip_ino)
@@ -219,7 +219,8 @@ def iter_threaded_walk(root, jobs, cancel_event=None, skip_ino=None):
     Returns a :class:`_WalkIter`; iterate it to receive
     ``(path, size, dev, ino)`` tuples as workers produce them. Read
     ``.stats`` AFTER iteration completes for the
-    ``{dirs, files, dir_errors, entry_errors}`` totals.
+    ``{dirs, files, dir_errors, entry_errors, worker_failures,
+    last_worker_error}`` totals.
 
     Unlike :func:`threaded_walk`, the full file list is never
     materialised — RAM tracks "currently buffered" entries, not "every
@@ -250,6 +251,7 @@ class _WalkState(NamedTuple):
     lock: threading.Lock
     inflight: list
     per_worker_stats: list
+    worker_failures: list
     jobs: int
     sentinel: object
     cancel_event: "threading.Event | None"
@@ -279,20 +281,22 @@ def _walk_worker(idx, state: "_WalkState") -> None:
         except (OSError, ValueError):
             wstats["dir_errors"] += 1
             scanned = False
-        except BaseException:
-            # hr-rel-18: any non-OSError/ValueError escape would leave the
-            # consumer hanging on out_q.get(); count + re-raise so the
-            # finally still decrements inflight and the coordinator joins.
+        except BaseException as exc:
+            # hr-rel-18 / hr-obs-01: any non-OSError/ValueError escape would
+            # leave the consumer hanging on out_q.get() or surface only
+            # through threading.excepthook. Record it in shared state, retry
+            # the directory on a surviving worker, and let this worker exit.
             # hr-conc-01: re-enqueue `d` (under the same lock that guards
-            # inflight) BEFORE re-raising so the dying worker doesn't drop
+            # inflight) before exiting so the dying worker doesn't drop
             # the directory's not-yet-scanned subtree — a surviving worker
             # retries it. The +1 here balances the unconditional -1 in the
             # finally, so inflight nets the re-enqueued directory.
             scanned = False
             with state.lock:
+                state.worker_failures.append((idx, repr(exc)))
                 state.inflight[0] += 1
                 state.pending.put(d)
-            raise
+            return
         finally:
             if scanned:
                 wstats["dirs"] += 1
@@ -349,7 +353,14 @@ class _WalkIter:
         self._jobs = _clamp_jobs(jobs)
         self._cancel = cancel_event
         self._skip_ino = skip_ino
-        self.stats = {"dirs": 0, "files": 0, "dir_errors": 0, "entry_errors": 0}
+        self.stats = {
+            "dirs": 0,
+            "files": 0,
+            "dir_errors": 0,
+            "entry_errors": 0,
+            "worker_failures": 0,
+            "last_worker_error": "",
+        }
 
     def __iter__(self):
         jobs = self._jobs
@@ -364,6 +375,7 @@ class _WalkIter:
             lock=threading.Lock(),
             inflight=[1],
             per_worker_stats=per_worker_stats,
+            worker_failures=[],
             jobs=jobs,
             sentinel=object(),     # signals worker termination
             cancel_event=self._cancel,
@@ -410,8 +422,12 @@ class _WalkIter:
                 while state.out_q.get() is not SENTINEL_OUT:
                     pass
             coord_thread.join()
-            for k in self.stats:
+            for k in ("dirs", "files", "dir_errors", "entry_errors"):
                 self.stats[k] = sum(w[k] for w in per_worker_stats)
+            self.stats["worker_failures"] = len(state.worker_failures)
+            if state.worker_failures:
+                _idx, last_error = state.worker_failures[-1]
+                self.stats["last_worker_error"] = last_error
 
 
 def _log_prefix(now=None) -> str:
@@ -1850,6 +1866,13 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
         - config.hash_skipped_vanished
         - config.hash_skipped_shrank,
     )
+    worker_failure_suffix = ""
+    worker_failures = walk_stats.get("worker_failures", 0)
+    if worker_failures:
+        worker_failure_suffix = (
+            f" walk_worker_failures={f(worker_failures)}"
+            f" last_worker_error={walk_stats.get('last_worker_error', '')!r}"
+        )
     _log_line(
         f"dirs={f(walk_stats['dirs'])} "
         f"files={f(walk_stats['files'])} "
@@ -1864,7 +1887,8 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
         f"hash_errors={f(real_hash_errors)} "
         f"hash_skipped={f(config.hash_skipped_vanished)} "
         f"hash_shrank={f(config.hash_skipped_shrank)} "
-        f"walk_s={walk_seconds:.2f} hash_s={hash_seconds:.2f}",
+        f"walk_s={walk_seconds:.2f} hash_s={hash_seconds:.2f}"
+        f"{worker_failure_suffix}",
         False,
     )
 

@@ -770,6 +770,21 @@ def test_threaded_walk_records_entry_error(tmp_path, monkeypatch):
     assert stats.get("entry_errors", 0) >= 1
 
 
+def test_iter_threaded_walk_records_worker_failure(monkeypatch, tmp_path):
+    # hr-obs-01: unexpected worker crashes are captured in walk stats instead
+    # of surfacing only through threading.excepthook.
+    (tmp_path / "a.txt").write_text("x")
+
+    def boom(_directory, _state, _wstats):
+        raise RuntimeError("walk exploded")
+
+    monkeypatch.setattr(hr, "_scan_dir", boom)
+    it = hr.iter_threaded_walk(tmp_path, 1)
+    assert list(it) == []
+    assert it.stats["worker_failures"] == 1
+    assert "RuntimeError('walk exploded')" in it.stats["last_worker_error"]
+
+
 def test_run_stage_serial_records_hash_error():
     # batch_fn returns d=None -> errors counter increments (covers L233).
     items = [("/x", 100), ("/y", 200)]
@@ -1028,6 +1043,22 @@ def test_main_summary_surfaces_stage2_failures_as_hash_errors(
     assert "hashed_stage2_skipped" not in err
     # Both dropped tails surface as real hash errors (no vanished/shrank).
     assert "hash_errors=2 " in err
+
+
+def test_main_summary_surfaces_walk_worker_failure(
+        tmp_path, monkeypatch, capsys):
+    # hr-obs-01: the end summary exposes unexpected walk worker crashes.
+    (tmp_path / "a.bin").write_bytes(b"x")
+
+    def boom(_directory, _state, _wstats):
+        raise RuntimeError("walk exploded")
+
+    monkeypatch.setattr(hr, "_scan_dir", boom)
+    monkeypatch.setattr(hr.sys, "argv", ["hr", "-j", "1", str(tmp_path)])
+    hr.main()
+    err = capsys.readouterr().err
+    assert "walk_worker_failures=1" in err
+    assert "RuntimeError('walk exploded')" in err
 
 
 def test_main_summary_omits_removed_stage2_skipped_field(
