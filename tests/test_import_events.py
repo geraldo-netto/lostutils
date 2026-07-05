@@ -1368,6 +1368,38 @@ def test_get_paddle_ocr_cached_language_not_blocked_by_other_build(monkeypatch):
     assert built and results[0] is built[0][2]
 
 
+def test_get_paddle_ocr_eviction_closes_lru_engine(monkeypatch):
+    import types
+
+    created = []
+    closed = []
+
+    class FakePaddleOCR:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created.append(self)
+
+        def close(self):
+            closed.append(self.kwargs["lang"])
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(__import__("sys").modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
+
+    first = import_events._get_paddle_ocr("en")
+    second = import_events._get_paddle_ocr("de")
+    third = import_events._get_paddle_ocr("fr")
+
+    assert first is created[0]
+    assert second is created[1]
+    assert third is created[2]
+    assert closed == [import_events._paddle_language("en")]
+    assert ("en", "cpu") not in import_events._PADDLE_OCR
+    assert (import_events._paddle_language("de"), "cpu") in import_events._PADDLE_OCR
+    assert (import_events._paddle_language("fr"), "cpu") in import_events._PADDLE_OCR
+
+
 def test_reset_paddle_ocr_state_closes_cached_engines_once(monkeypatch):
     closed = []
 

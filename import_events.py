@@ -84,6 +84,7 @@ DEFAULT_TESSERACT_PSM = "6"
 DEFAULT_TESSERACT_PATH = "tesseract"
 DEFAULT_OCR_ENGINE = "auto"
 DEFAULT_PADDLE_OCR_DEVICE = "cpu"
+PADDLE_OCR_CACHE_SIZE = 2
 DEFAULT_PDF_OCR_MODE = "never"
 DEFAULT_TENTATIVE_EVENTS = "keep"
 DEFAULT_NO_ACTIVITY_EVENTS = "skip"
@@ -883,6 +884,35 @@ def _close_paddle_ocr_engine(engine: Any) -> None:
         except Exception as exc:
             logger.warning("Failed to close PaddleOCR engine: %s", exc)
         return
+
+
+def _paddle_cache_locked() -> "OrderedDict[Tuple[str, str], Any]":
+    global _PADDLE_OCR
+    if _PADDLE_OCR is None:
+        _PADDLE_OCR = OrderedDict()
+    elif not isinstance(_PADDLE_OCR, OrderedDict):
+        _PADDLE_OCR = OrderedDict(_PADDLE_OCR.items())
+    return _PADDLE_OCR
+
+
+def _touch_paddle_ocr_engine(
+    cache: "OrderedDict[Tuple[str, str], Any]",
+    engine: Any,
+) -> None:
+    for key, value in list(cache.items()):
+        if value is engine:
+            cache.move_to_end(key)
+
+
+def _trim_paddle_ocr_cache(
+    cache: "OrderedDict[Tuple[str, str], Any]",
+) -> List[Any]:
+    evicted: List[Any] = []
+    while len({id(engine) for engine in cache.values()}) > PADDLE_OCR_CACHE_SIZE:
+        _key, engine = cache.popitem(last=False)
+        if all(existing is not engine for existing in cache.values()):
+            evicted.append(engine)
+    return evicted
 
 
 def reset_paddle_ocr_state() -> None:
@@ -2606,10 +2636,10 @@ def _get_paddle_ocr(
     with _PADDLE_OCR_LOCK:
         if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
             return None
-        if _PADDLE_OCR is None:
-            _PADDLE_OCR = {}
-        cached = _PADDLE_OCR.get(cache_key)
+        cache = _paddle_cache_locked()
+        cached = cache.get(cache_key)
         if cached is not None:
+            _touch_paddle_ocr_engine(cache, cached)
             return cached
     try:
         engine, effective_device = _build_paddle_ocr(PaddleOCR, paddle_lang, device)
@@ -2619,8 +2649,8 @@ def _get_paddle_ocr(
                    paddle_lang, device, exc)
         return None
     effective_key = (paddle_lang, effective_device)
-    resolved, redundant = _store_or_reuse_paddle_ocr(cache_key, effective_key, engine)
-    if redundant is not None:
+    resolved, to_close = _store_or_reuse_paddle_ocr(cache_key, effective_key, engine)
+    for redundant in to_close:
         # ie-mt-01: another thread won the build race (or OCR was disabled)
         # while we constructed our own engine; close the redundant one instead
         # of leaking hundreds of MB. Done outside the lock — close() may block.
@@ -2636,7 +2666,7 @@ def _store_or_reuse_paddle_ocr(
     cache_key: Tuple[str, str],
     effective_key: Tuple[str, str],
     engine: Any,
-) -> Tuple[Optional[Any], Optional[Any]]:
+) -> Tuple[Optional[Any], List[Any]]:
     """Publish a freshly built engine, or discard it if the cache already holds
     one for ``cache_key``. Returns ``(resolved, redundant)`` where ``resolved``
     is the engine to use (None if OCR was disabled meanwhile) and ``redundant``
@@ -2644,15 +2674,16 @@ def _store_or_reuse_paddle_ocr(
     global _PADDLE_OCR
     with _PADDLE_OCR_LOCK:
         if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
-            return None, engine
-        if _PADDLE_OCR is None:
-            _PADDLE_OCR = {}
-        cached = _PADDLE_OCR.get(cache_key)
+            return None, [engine]
+        cache = _paddle_cache_locked()
+        cached = cache.get(cache_key)
         if cached is not None:
-            return cached, engine
-        _PADDLE_OCR[effective_key] = engine
-        _PADDLE_OCR[cache_key] = engine
-        return engine, None
+            _touch_paddle_ocr_engine(cache, cached)
+            return cached, [engine]
+        cache[effective_key] = engine
+        cache[cache_key] = engine
+        _touch_paddle_ocr_engine(cache, engine)
+        return engine, _trim_paddle_ocr_cache(cache)
 
 
 def _run_paddle_ocr(engine: Any, image_path: Path) -> Any:

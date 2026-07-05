@@ -189,7 +189,6 @@ lq-plat-10 | open | med | link_queue.py:2603 — `LogSink._open_locked` passes `
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cache-02 | open | med | import_events.py:2581 — `_get_paddle_ocr` caches engines in `_PADDLE_OCR` keyed by (lang,device) with no size cap/LRU (unlike `_LLM_CACHE`/`_FILE_SHA256_CACHE`); the default 6-language chain leaves 6+ heavy engines resident for the process. Add a cap/eviction. | reset hook exists; cap+invalidation missing
 ie-cache-03 | open | low | import_events.py:2687 — `_TESSERACT_PATH_CACHE` has no reset hook (every other cache does) and permanently caches a negative (`None`) result, so tesseract installed after the first miss is never re-detected in-process. Add a reset and/or don't cache the miss. | sticky negative + no invalidation
 ie-cache-04 | open | low | import_events.py:3001 — the `llm_text` stage-cache key omits any hash of SYSTEM_PROMPT/USER_PROMPT, so editing a prompt serves stale cached responses unless `STAGE_CACHE_VERSION` is bumped manually. Fold a prompt digest into the key. |
 
