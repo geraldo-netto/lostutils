@@ -2414,34 +2414,48 @@ def _get_paddle_ocr(
     with _PADDLE_OCR_LOCK:
         if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
             return None
+    try:
+        import paddleocr as paddleocr_module
+        PaddleOCR = paddleocr_module.PaddleOCR
+        import paddle as paddle_module
+    except ImportError:
+        with _PADDLE_OCR_LOCK:
+            _PADDLE_OCR_MISSING = True
+        _warn_once("paddle-missing", "PaddleOCR not installed; skipping Paddle OCR.")
+        return None
+    device = _resolve_paddle_ocr_device(runtime_config.paddle_ocr_device, paddle_module)
+    cache_key = (paddle_lang, device)
+    with _PADDLE_OCR_LOCK:
+        if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
+            return None
         if _PADDLE_OCR is None:
             _PADDLE_OCR = {}
-        try:
-            import paddleocr as paddleocr_module
-            PaddleOCR = paddleocr_module.PaddleOCR
-            import paddle as paddle_module
-        except ImportError:
-            _PADDLE_OCR_MISSING = True
-            _warn_once("paddle-missing", "PaddleOCR not installed; skipping Paddle OCR.")
+        cached = _PADDLE_OCR.get(cache_key)
+        if cached is not None:
+            return cached
+    try:
+        engine, effective_device = _build_paddle_ocr(PaddleOCR, paddle_lang, device)
+    except Exception as exc:
+        _warn_once(f"paddle-init-{paddle_lang}",
+                   "PaddleOCR failed to initialize for language %s on %s: %s",
+                   paddle_lang, device, exc)
+        return None
+    effective_key = (paddle_lang, effective_device)
+    with _PADDLE_OCR_LOCK:
+        if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
             return None
-        device = _resolve_paddle_ocr_device(runtime_config.paddle_ocr_device, paddle_module)
+        if _PADDLE_OCR is None:
+            _PADDLE_OCR = {}
         cache_key = (paddle_lang, device)
-        if cache_key in _PADDLE_OCR:
-            return _PADDLE_OCR[cache_key]
-        try:
-            engine, effective_device = _build_paddle_ocr(PaddleOCR, paddle_lang, device)
-        except Exception as exc:
-            _warn_once(f"paddle-init-{paddle_lang}",
-                       "PaddleOCR failed to initialize for language %s on %s: %s",
-                       paddle_lang, device, exc)
-            return None
-        effective_key = (paddle_lang, effective_device)
+        cached = _PADDLE_OCR.get(cache_key)
+        if cached is not None:
+            return cached
         _PADDLE_OCR[effective_key] = engine
         _PADDLE_OCR[cache_key] = engine
-        version = getattr(paddleocr_module, "__version__", "unknown")
-        logger.info("Using PaddleOCR %s with language %s on %s.",
-                    version, paddle_lang, effective_device)
-        return engine
+    version = getattr(paddleocr_module, "__version__", "unknown")
+    logger.info("Using PaddleOCR %s with language %s on %s.",
+                version, paddle_lang, effective_device)
+    return engine
 
 
 def _run_paddle_ocr(engine: Any, image_path: Path) -> Any:

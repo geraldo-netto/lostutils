@@ -1327,6 +1327,47 @@ def test_get_paddle_ocr_missing_logs_once(monkeypatch, caplog):
     assert caplog.text.count("PaddleOCR not installed") == 1
 
 
+def test_get_paddle_ocr_cached_language_not_blocked_by_other_build(monkeypatch):
+    import sys
+    import types
+
+    cached = object()
+    built = []
+    started = threading.Event()
+    release = threading.Event()
+
+    class FakePaddleOCR:
+        pass
+
+    fake = types.ModuleType("paddleocr")
+    fake.PaddleOCR = FakePaddleOCR
+    monkeypatch.setitem(sys.modules, "paddleocr", fake)
+    _install_fake_paddle(monkeypatch)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", {("en", "cpu"): cached})
+
+    def slow_build(PaddleOCR, paddle_lang, device):
+        started.set()
+        release.wait(3)
+        engine = object()
+        built.append((paddle_lang, device, engine))
+        return engine, "cpu"
+
+    monkeypatch.setattr(import_events, "_build_paddle_ocr", slow_build)
+    results = []
+    worker = threading.Thread(
+        target=lambda: results.append(import_events._get_paddle_ocr("de")),
+    )
+    worker.start()
+    assert started.wait(3), "slow PaddleOCR build did not start"
+
+    assert import_events._get_paddle_ocr("en") is cached
+
+    release.set()
+    worker.join(3)
+    assert not worker.is_alive()
+    assert built and results[0] is built[0][2]
+
+
 def test_ocr_warning_summary_counts_suppressed_repeats(caplog):
     import logging
 

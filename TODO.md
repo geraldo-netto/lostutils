@@ -57,7 +57,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-mt-01 | open | low | import_events.py:2408 — `_get_paddle_ocr` holds `_PADDLE_OCR_LOCK` across the paddle import and the multi-second `_build_paddle_ocr`, blocking all workers from reading an already-cached engine for a different language. Build outside the lock / double-checked insert. | lock granularity
 oze-mt-01 | open | low | organize_by_extension.py:1951-1952 — `_run_moves` `finally` does `executor.shutdown(wait=False)` with no `cancel_futures` on the non-KeyboardInterrupt exit path; an unexpected exception abandons in-flight futures (neither cancelled nor awaited), swallowing their exceptions while workers may still be moving files during unwind. Use `cancel_futures=True`. | swallowed futures / partial moves continue
 
 ## distributed systems
