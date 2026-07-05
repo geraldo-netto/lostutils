@@ -1654,6 +1654,45 @@ def test_help_documents_kernel_io_stall_limitation():
     assert "mount-level timeouts" in help_text
 
 
+def test_progress_stall_monitor_warns_once_until_progress(monkeypatch):
+    now = [0.0]
+    lines = []
+    monkeypatch.setattr(
+        hr, "_log_line", lambda msg, quiet: lines.append((msg, quiet)))
+    monitor = hr._ProgressStallMonitor(
+        warning_after=10.0, now_fn=lambda: now[0])
+    monitor.touch("scan")
+
+    now[0] = 9.9
+    monitor._maybe_warn()
+    assert lines == []
+
+    now[0] = 10.0
+    monitor._maybe_warn()
+    assert lines == [(
+        "WARNING: no scan progress for 0:10; filesystem I/O may be stalled",
+        False,
+    )]
+
+    monitor._maybe_warn()
+    assert len(lines) == 1
+
+    monitor.touch("hash")
+    now[0] = 20.0
+    monitor._maybe_warn()
+    assert lines[-1][0].startswith("WARNING: no hash progress")
+
+
+def test_progress_walk_touches_each_entry(capsys):
+    entries = [("a", 1, 1, 1), ("b", 1, 1, 2)]
+    seen = []
+    assert list(hr._progress_walk(
+        iter(entries), quiet=True, every=10, on_progress=seen.append,
+    )) == entries
+    assert seen == [1, 2]
+    assert capsys.readouterr().err == ""
+
+
 def test_main_logs_start_progress_done(tmp_path, monkeypatch, capsys):
     # hr-log-01: a start line, a progress line every 50 files, and a done
     # line all land on stderr.

@@ -39,7 +39,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
-from typing import NamedTuple
+from typing import NamedTuple, NoReturn
 
 try:
     import blake3
@@ -81,6 +81,7 @@ DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
 # alongside the end-of-run summary. The same cadence drives stage-1/stage-2
 # hash progress.
 LOG_EVERY_N_FILES = 50
+STALL_WARN_SECONDS = 60.0
 # hr-ux-01: the hash dump is opt-in so a normal run does not create
 # hashes.txt in the caller's current working directory.
 DEFAULT_HASHES_FILE = None
@@ -909,7 +910,7 @@ def _fill_window(ex, batch_fn, batches, inflight, window, cancel_event) -> bool:
     return False
 
 
-def _drain_stage_futures_after_error(first_exc, done, inflight) -> None:
+def _drain_stage_futures_after_error(first_exc, done, inflight) -> NoReturn:
     """Inspect sibling futures before re-raising a stage failure."""
     for fut in inflight:
         fut.cancel()
@@ -1704,6 +1705,57 @@ def _log_line(msg, quiet) -> None:
         print(f"{_log_prefix()} {msg}", file=sys.stderr)
 
 
+class _ProgressStallMonitor:
+    """Warn when scan/hash progress stops for longer than the threshold."""
+
+    def __init__(self, warning_after=STALL_WARN_SECONDS, now_fn=time.monotonic):
+        self._warning_after = warning_after
+        self._now = now_fn
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._last_progress = self._now()
+        self._last_warning = self._last_progress
+        self._phase = "work"
+        self._thread = None
+
+    def start(self, phase: str) -> None:
+        self.touch(phase)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def touch(self, phase: str) -> None:
+        now = self._now()
+        with self._lock:
+            self._phase = phase
+            self._last_progress = now
+            self._last_warning = now
+
+    def _run(self) -> None:
+        interval = max(1.0, min(self._warning_after / 4.0, 10.0))
+        while not self._stop.wait(interval):
+            self._maybe_warn()
+
+    def _maybe_warn(self) -> None:
+        now = self._now()
+        with self._lock:
+            idle = now - self._last_progress
+            recently_warned = now - self._last_warning < self._warning_after
+            if idle < self._warning_after or recently_warned:
+                return
+            self._last_warning = now
+            phase = self._phase
+        _log_line(
+            f"WARNING: no {phase} progress for {_fmt_elapsed(idle)}; "
+            "filesystem I/O may be stalled",
+            False,
+        )
+
+
 _DUMP_COMPOSITE_DIGEST_WIDTH = len(("00" * 32) + ":" + ("00" * 32))
 
 
@@ -1789,7 +1841,8 @@ def _configure_stdio_encoding() -> None:
             continue
 
 
-def _progress_walk(walk_iter, quiet, every=LOG_EVERY_N_FILES):
+def _progress_walk(
+        walk_iter, quiet, every=LOG_EVERY_N_FILES, on_progress=None):
     """Pass-through generator over the walk that logs a progress line every
     ``every`` files scanned (hr-log-01).
 
@@ -1802,6 +1855,8 @@ def _progress_walk(walk_iter, quiet, every=LOG_EVERY_N_FILES):
     started = time.monotonic()
     for entry in walk_iter:
         n += 1
+        if on_progress is not None:
+            on_progress(n)
         if n % every == 0:
             elapsed = time.monotonic() - started
             _log_line(
@@ -2018,8 +2073,10 @@ def main():
     # the dump can append a `+N more` marker instead of silently omitting
     # hardlinks past the cap.
     dump_overflow: dict = {}
+    stall_monitor = _ProgressStallMonitor()
 
     try:
+        stall_monitor.start("scan")
         # hr-log-04: open the hashes dump BEFORE the walk so it always exists
         # even on a Ctrl-C during the walk. hr-rob-02: write each stage-1 head
         # line immediately, then patch the fixed-width digest field if stage 2
@@ -2045,6 +2102,7 @@ def main():
         walk_boundary: list[float | None] = [None]
 
         def _mark_walk_done():
+            stall_monitor.touch("hash")
             walk_boundary[0] = time.perf_counter()
 
         def _disable_hash_dump(exc):
@@ -2066,6 +2124,7 @@ def main():
         def _on_hashed(done, total, head, key, aliases):
             # hr-log-02: record every hashed file for the dump. Live progress is
             # emitted by `_on_stage_progress` as each hash batch completes.
+            stall_monitor.touch("hash")
             writer = hashes_state["writer"]
             if head is not None and writer is not None:
                 try:
@@ -2084,6 +2143,7 @@ def main():
                     _disable_hash_dump(exc)
 
         def _on_stage_progress(stage, done, total):
+            stall_monitor.touch(stage)
             state = progress_state.setdefault(
                 stage, {"started": time.monotonic(), "last": 0})
             if done != total and done - state["last"] < LOG_EVERY_N_FILES:
@@ -2101,7 +2161,12 @@ def main():
         # hr-log-01: wrap the walk so a progress line prints every N files;
         # find_duplicate_groups still consumes the stream exactly once.
         result = find_duplicate_groups(
-            _progress_walk(walk_iter, args.quiet), args.jobs,
+            _progress_walk(
+                walk_iter,
+                args.quiet,
+                on_progress=lambda _n: stall_monitor.touch("scan"),
+            ),
+            args.jobs,
             on_group=on_group, config=config, on_walk_done=_mark_walk_done,
             cancel_event=cancel_event, on_hashed=_on_hashed,
             on_stage_progress=_on_stage_progress, on_composite=_on_composite,
@@ -2140,6 +2205,7 @@ def main():
         # hr-log-02 / hr-log-03 / hr-rel-20: flush + close the dump and restore
         # the SIGINT handler on every exit path (normal return AND second
         # Ctrl-C KeyboardInterrupt).
+        stall_monitor.stop()
         _finalize_hash_dump(hashes_state, dump_overflow, args.hashes_file,
                             previous_sigint)
 
