@@ -31,7 +31,6 @@ lq-gov-01 | open | low | link_queue.py:261 — `DEFAULT_CONFIG["output_folder"]`
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnv3-int-01 | open | med | deduplicate-by-namev3.py:120 — `--strip-chars` default includes `;` (the output field delimiter) but a user override can omit it; a cleaned value then containing `;` corrupts the `{a};{b};{dist}` line for a `;`-splitting downstream parser. Force-add `;` to the effective strip set or escape `;` on output. | user override re-enables the injection the default guards
-oze-int-01 | open | med | organize_by_extension.py:955-966 — `BucketManager.release` rebuilds a bucket's name set from disk and overwrites `state_cache` on the `_BUCKET_FULL` path, silently dropping still-in-flight reservations for other files targeting the same bucket; a later file can be routed into a colliding name. Track reserved-but-unmoved names separately or merge with the disk re-read. | reservations are the planner's only collision guard; disk lags in-flight workers
 
 ## performance
 

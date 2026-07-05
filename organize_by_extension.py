@@ -875,6 +875,7 @@ class BucketManager:
     # ``BucketManager.indices_cache[(ext_dir, prefix)]``. Populated lazily on
     # each ``_indices_for`` call from the directory-level cache.
     indices_cache: dict[tuple[Path, str], list[int]] = field(default_factory=dict)
+    _reserved_names: dict[Path, set[str]] = field(default_factory=dict)
     # oze-obs-01: per-allocation counters surfaced in the end-of-run
     # debug line so the user can tune BUCKET_SIZE / spot pathological
     # name distributions. Incremented inside `choose` and `choose_bucket`.
@@ -928,6 +929,7 @@ class BucketManager:
         else:
             self.stats["new_bucket_allocated"] += 1
         names.add(source.name)
+        self._reserved_names.setdefault(bucket_path, set()).add(source.name)
         match = BUCKET_NAME_PATTERN.match(bucket_path.name)
         if match is None:
             raise RuntimeError(
@@ -959,11 +961,17 @@ class BucketManager:
             return
         if names is _BUCKET_FULL:
             names = bucket_file_names(bucket_dir)
+            names.update(self._reserved_names.get(bucket_dir, set()))
             self.state_cache[bucket_dir] = names
         if (bucket_dir / source.name).exists():
             return
         if isinstance(names, set):
             names.discard(source.name)
+            reserved = self._reserved_names.get(bucket_dir)
+            if reserved is not None:
+                reserved.discard(source.name)
+                if not reserved:
+                    self._reserved_names.pop(bucket_dir, None)
 
 
 def ensure_directory(path: Path) -> None:

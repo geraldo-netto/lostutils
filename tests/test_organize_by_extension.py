@@ -1032,6 +1032,30 @@ class BucketManagerTests(unittest.TestCase):
 
             self.assertEqual(mgr.state_cache[bucket_path], {"old.txt"})
 
+    def test_release_preserves_inflight_reservations_after_full_rescan(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            ext_dir = root / "txt"
+            bucket_path = ext_dir / "a00000"
+            bucket_path.mkdir(parents=True)
+            (bucket_path / "old.txt").write_bytes(b"x")
+            mgr = BucketManager(root=root)
+            mgr.state_cache[bucket_path] = {f"f{i}.txt" for i in range(BUCKET_SIZE - 2)}
+            mgr.indices_cache[(ext_dir, "a")] = [0]
+            pending = root / "aa.txt"
+            failed = root / "ab.txt"
+            pending.write_bytes(b"x")
+            failed.write_bytes(b"x")
+
+            mgr.choose(pending, ext_dir, "a")
+            bucket = mgr.choose(failed, ext_dir, "a")
+            self.assertIs(mgr.state_cache[bucket.path], _BUCKET_FULL)
+
+            mgr.release(failed, bucket.path)
+
+            self.assertIn("aa.txt", mgr.state_cache[bucket.path])
+            self.assertNotIn("ab.txt", mgr.state_cache[bucket.path])
+
 
 class PlanMovesBucketExhaustionTests(unittest.TestCase):
     """oze-rel-02: a bucket-space exhaustion during planning skips one file
