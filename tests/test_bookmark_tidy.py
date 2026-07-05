@@ -80,6 +80,18 @@ class FakeLlamaText:
         return {"choices": [{"text": '{"0":"Reference/Docs"}'}]}
 
 
+class HangingLlama:
+    kwargs = {}
+
+    def __init__(self, **kwargs):
+        HangingLlama.kwargs = kwargs
+
+    def create_chat_completion(self, **kwargs):
+        assert "messages" in kwargs
+        bookmark_tidy.threading.Event().wait(0.2)
+        return {"choices": [{"message": {"content": '{"items":[]}'}}]}
+
+
 def _install_fake_llama(monkeypatch, llama_cls):
     module = types.ModuleType("llama_cpp")
     module.Llama = llama_cls
@@ -641,6 +653,15 @@ def test_llama_categorizer_chat_and_text_paths(monkeypatch, tmp_path):
 
     assert text([_sample_bookmark()]) == {0: ("Reference", "Docs")}
     assert FakeLlamaText.kwargs["n_gpu_layers"] == 1
+
+
+def test_llama_categorizer_inference_timeout(monkeypatch, tmp_path):
+    _install_fake_llama(monkeypatch, HangingLlama)
+    monkeypatch.setattr(bookmark_tidy, "LLAMA_INFERENCE_TIMEOUT_SECONDS", 0.01)
+    chat = bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
+
+    with pytest.raises(bookmark_tidy.UserError, match="LLM inference timed out"):
+        chat._complete("prompt")
 
 
 def test_import_llama_missing_and_auto_install(monkeypatch):

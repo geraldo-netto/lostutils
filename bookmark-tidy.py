@@ -5,10 +5,12 @@ import argparse
 import json
 import logging
 import os
+import queue
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -29,6 +31,7 @@ DEFAULT_LLM_CONTEXT = 4096
 DEFAULT_LLM_MAX_TOKENS = 1024
 LLAMA_CPP_PYTHON_REQUIREMENT = "llama-cpp-python==0.3.32"
 LLAMA_INSTALL_TIMEOUT_SECONDS = 300
+LLAMA_INFERENCE_TIMEOUT_SECONDS = 120
 MOZLZ4_MAGIC = b"mozLz40\x00"
 TRACKING_PARAM_NAMES = frozenset(
     {
@@ -1021,6 +1024,13 @@ class LlamaCategorizer:
         return parse_category_response(self._complete(prompt), len(bookmarks))
 
     def _complete(self, prompt: str) -> str:
+        return _call_with_timeout(
+            lambda: self._complete_sync(prompt),
+            LLAMA_INFERENCE_TIMEOUT_SECONDS,
+            "LLM inference",
+        )
+
+    def _complete_sync(self, prompt: str) -> str:
         if hasattr(self._llm, "create_chat_completion"):
             response = self._llm.create_chat_completion(
                 messages=[{"role": "user", "content": prompt}],
@@ -1030,6 +1040,26 @@ class LlamaCategorizer:
             return str(response["choices"][0]["message"]["content"])
         response = self._llm(prompt, temperature=0, max_tokens=self._max_tokens)
         return str(response["choices"][0]["text"])
+
+
+def _call_with_timeout(call, timeout_seconds: float, label: str):
+    done: queue.Queue = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            done.put((True, call()))
+        except Exception as exc:
+            done.put((False, exc))
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    try:
+        ok, value = done.get(timeout=timeout_seconds)
+    except queue.Empty as exc:
+        raise UserError(f"{label} timed out after {timeout_seconds:g}s") from exc
+    if ok:
+        return value
+    raise value
 
 
 def _import_llama(auto_install: bool) -> Any:
