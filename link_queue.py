@@ -2145,13 +2145,7 @@ class Dispatcher:
         # be matched even when several workers interleave in the log.
         label = f"{label} {self._item_log_id(item)}"
         folder = self.config.get("output_folder", "")
-        cwd = self._resolve_cwd(folder)
-        if cwd is None and (folder or "").strip():
-            self._log(
-                f"[warn] output folder {(folder or '').strip()!r} does not "
-                f"exist or is not a directory — inheriting current directory"
-            )
-        cwd_note = f"  (cwd={cwd})" if cwd else ""
+        cwd, cwd_note = self._resolve_item_cwd(folder)
         try:
             proc = self._spawn_proc(item, label, cwd, cwd_note)
             if proc is None:
@@ -2177,34 +2171,8 @@ class Dispatcher:
             # lq-obs-01: snapshot verbosity once per item so a mid-item
             # config edit can't fragment the stream between modes.
             verbosity = self._command_log_verbosity()
-            timer = self._arm_command_timeout(proc, label, url, timeout)
-            try:
-                self._stream_subprocess_output(proc.stdout, label, verbosity)
-                # lq-rel-02: bounded wait after streaming so a zombie
-                # subprocess that ignored both SIGTERM and SIGKILL can't
-                # hang the worker forever and shrink the pool. With a
-                # configured timeout, the safety-net = 2 * timeout + 5
-                # (covers the timer's own terminate→kill ladder).
-                # lq-rel-06: when `command_timeout_seconds == 0` the
-                # user is opting OUT of the timer — "wait forever" is
-                # the documented semantics for long idempotent downloads
-                # (yt-dlp on a slow archive). The old code capped that
-                # at 30s and silently abandoned the proc, breaking the
-                # contract. None disables the hard deadline entirely.
-                hard_deadline = (timeout * 2 + 5) if timeout > 0 else None
-                try:
-                    proc.wait(timeout=hard_deadline)
-                except subprocess.TimeoutExpired:
-                    self._log(
-                        f"[{label} stuck] subprocess unresponsive after "
-                        f"{hard_deadline}s; abandoning  url={url}"
-                    )
-                    # Leave the proc to the OS reaper; return -1 so the
-                    # dispatcher can decide on cooldown / retry.
-                    return -1
-            finally:
-                if timer is not None:
-                    timer.cancel()
+            if not self._stream_and_wait(proc, label, url, timeout, verbosity):
+                return -1
             self._log(f"[{label} done] exit={proc.returncode}  url={url}")
             return proc.returncode
         except FileNotFoundError as e:
@@ -2214,6 +2182,48 @@ class Dispatcher:
         except Exception as e:  # pragma: no cover - worker step caught exception
             self._log(f"[{label} error] {e}  url={url}")  # pragma: no cover - log + return -1 after exception
             return -1  # pragma: no cover - log + return -1 after exception
+
+    def _resolve_item_cwd(self, folder: str) -> "tuple[str | None, str]":
+        """Resolve the configured output folder to a subprocess cwd (lq-cx-05),
+        warning and inheriting the current directory when the folder is set but
+        does not exist / is not a directory. Returns `(cwd, cwd_note)`."""
+        cwd = self._resolve_cwd(folder)
+        if cwd is None and (folder or "").strip():
+            self._log(
+                f"[warn] output folder {(folder or '').strip()!r} does not "
+                f"exist or is not a directory — inheriting current directory"
+            )
+        cwd_note = f"  (cwd={cwd})" if cwd else ""
+        return cwd, cwd_note
+
+    def _stream_and_wait(self, proc: "subprocess.Popen", label: str, url: str,
+                         timeout: float, verbosity: str) -> bool:
+        """Stream the subprocess output under the command-timeout timer, then
+        wait for exit with a hard deadline (lq-cx-05). Returns True on a clean
+        exit; False when the process stayed unresponsive past the deadline and
+        was abandoned to the OS reaper (caller returns -1 for cooldown/retry).
+
+        lq-rel-02: the bounded wait after streaming stops a SIGTERM/SIGKILL-proof
+        zombie from hanging the worker; the safety net is 2*timeout+5 to cover
+        the timer's terminate->kill ladder. lq-rel-06: `command_timeout_seconds
+        == 0` opts out of the timer entirely ("wait forever" for long idempotent
+        downloads), so the hard deadline is None in that case."""
+        timer = self._arm_command_timeout(proc, label, url, timeout)
+        try:
+            self._stream_subprocess_output(proc.stdout, label, verbosity)
+            hard_deadline = (timeout * 2 + 5) if timeout > 0 else None
+            try:
+                proc.wait(timeout=hard_deadline)
+            except subprocess.TimeoutExpired:
+                self._log(
+                    f"[{label} stuck] subprocess unresponsive after "
+                    f"{hard_deadline}s; abandoning  url={url}"
+                )
+                return False
+        finally:
+            if timer is not None:
+                timer.cancel()
+        return True
 
     def _item_display(self, item: QueueItem) -> str:
         """Render a queue item for the Treeview. Does not execute anything."""
