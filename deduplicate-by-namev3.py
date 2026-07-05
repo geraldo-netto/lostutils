@@ -71,14 +71,19 @@ def worker_limit():
     return max(1, os.cpu_count() or 1)
 
 
+def _parse_int(value, name):
+    """Parse an argparse value to int, raising a uniform CLI error on failure."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"{name} must be an integer, got {value!r}")
+
+
 def valid_workers(value):
     """argparse `type=` validator (dnv3-val-01): rapidfuzz cdist accepts only
     -1 (all cores) or a positive thread count; reject everything else (e.g.
     -5, 0) with a CLI error instead of passing it straight into cdist."""
-    try:
-        iv = int(value)
-    except (TypeError, ValueError):
-        raise argparse.ArgumentTypeError(f"workers must be an integer, got {value!r}")
+    iv = _parse_int(value, "workers")
     if iv != -1 and iv < 1:
         raise argparse.ArgumentTypeError(
             f"workers must be -1 (all cores) or a positive count, got {iv}")
@@ -96,10 +101,7 @@ def valid_threshold(value):
     """argparse `type=` validator (dnv3-cli-01): a negative --threshold becomes
     a negative score_cutoff that makes rapidfuzz crash with OverflowError; reject
     it with a clean CLI error instead. Upper bound is handled by clamp_threshold."""
-    try:
-        iv = int(value)
-    except (TypeError, ValueError):
-        raise argparse.ArgumentTypeError(f"threshold must be an integer, got {value!r}")
+    iv = _parse_int(value, "threshold")
     if iv < 0:
         raise argparse.ArgumentTypeError(f"threshold must be >= 0, got {iv}")
     return iv
