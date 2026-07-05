@@ -2050,6 +2050,56 @@ def test_sha256_uses_stall_watchdog(tmp_path, monkeypatch):
     assert any(w.operation == f"sha256 {src}" and w.touches for w in created)
 
 
+def test_find_open_file_holders_uses_preflight_watchdog(tmp_path, monkeypatch):
+    created = []
+
+    class FakeWatchdog:
+        def __init__(self, operation, *args, **kwargs):
+            self.operation = operation
+            self.touches = []
+            created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return None
+
+        def touch(self, operation=None):
+            self.touches.append(operation or self.operation)
+
+    monkeypatch.setattr(rf, "_OperationStallWatchdog", FakeWatchdog)
+    rf.find_open_file_holders(tmp_path)
+    assert any(w.operation.startswith("open-file precheck") for w in created)
+
+
+def test_check_cross_device_uses_preflight_watchdog(tmp_path, monkeypatch):
+    created = []
+
+    class FakeWatchdog:
+        def __init__(self, operation, *args, **kwargs):
+            self.operation = operation
+            self.touches = []
+            created.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return None
+
+        def touch(self, operation=None):
+            self.touches.append(operation or self.operation)
+
+    class Stat:
+        st_dev = 7
+
+    monkeypatch.setattr(rf, "_OperationStallWatchdog", FakeWatchdog)
+    plan = rf.Plan(source=tmp_path, target=tmp_path / "dst" / "src")
+    rf._check_cross_device(plan, stat_fn=lambda _path: Stat())
+    assert any("cross-device source stat" in w.touches for w in created)
+
+
 # --- rf-obs-05: _device_mount_point boundary cases ------------------------
 
 def test_device_mount_point_returns_a_string(tmp_path):

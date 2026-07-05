@@ -156,7 +156,6 @@ dnp-obs-01 | open | low | dedupl_numpy.py:58 — the `equal files: X / N` summar
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-wd-02 | open | low | relocate_folder.py:518 — the pre-flight open-files check reaches a hung mount before rf-wd-01's scope: `find_open_file_holders` calls `source.resolve()` (:518) and iterates `/proc/<pid>/fd` symlinks (:548) whose targets may sit on a stalled mount, and `_check_cross_device`→`os.stat` / `_device_mount_point`→`resolve` (1915/1947) run before any copy, all without timeout. rf-wd-01 covers only copytree/verify/_sha256. Extend the stall/timeout guard to the pre-flight resolve/stat/scan phase. | watchdog — hung-mount stall in the pre-flight phase, distinct from rf-wd-01
 
 ## time & scheduling correctness
 

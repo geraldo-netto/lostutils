@@ -582,28 +582,31 @@ def find_open_file_holders(source: Path) -> OpenFileSnapshot:
     ``stale_pids``. The result shape now surfaces this so callers can
     warn the operator instead of trusting a possibly-partial snapshot.
     """
-    proc_dir = Path("/proc")
-    if not proc_dir.is_dir():
-        return OpenFileSnapshot(holders=(), stale_pids=0)
-    src_resolved = source.resolve()
-    results: list[tuple[int, str, tuple[Path, ...]]] = []
-    stale = 0
-    for entry in proc_dir.iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        files = _process_open_files_in(entry, src_resolved)
-        if files is None:
-            # rf-rel-15: process exited mid-scan — snapshot is partial.
-            stale += 1
-            continue
-        if files:
-            # rf-rel-18: tuple-of-tuples so the snapshot is fully
-            # immutable. Caller can still iterate / index normally;
-            # mutation via `snap.holders.append(...)` is no longer
-            # possible.
-            results.append((pid, _read_comm(pid), tuple(files)))
-    return OpenFileSnapshot(holders=tuple(results), stale_pids=stale)
+    with _OperationStallWatchdog("open-file precheck") as watchdog:
+        proc_dir = Path("/proc")
+        if not proc_dir.is_dir():
+            return OpenFileSnapshot(holders=(), stale_pids=0)
+        src_resolved = source.resolve()
+        watchdog.touch("open-file precheck resolve")
+        results: list[tuple[int, str, tuple[Path, ...]]] = []
+        stale = 0
+        for entry in proc_dir.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            files = _process_open_files_in(entry, src_resolved)
+            watchdog.touch("open-file precheck scan")
+            if files is None:
+                # rf-rel-15: process exited mid-scan — snapshot is partial.
+                stale += 1
+                continue
+            if files:
+                # rf-rel-18: tuple-of-tuples so the snapshot is fully
+                # immutable. Caller can still iterate / index normally;
+                # mutation via `snap.holders.append(...)` is no longer
+                # possible.
+                results.append((pid, _read_comm(pid), tuple(files)))
+        return OpenFileSnapshot(holders=tuple(results), stale_pids=stale)
 
 
 def _process_open_files_in(proc_entry: Path, root: Path) -> "list[Path] | None":
@@ -2170,28 +2173,33 @@ def _check_cross_device(plan: Plan, *,
     probe instead of monkeypatching `Path.stat` globally. Defaults to
     `os.stat`."""
     probe_stat = stat_fn if stat_fn is not None else os.stat
-    try:
-        src_dev = probe_stat(plan.source).st_dev
-        probe = _nearest_existing_dir(plan.target.parent)
-        if probe is None:
+    with _OperationStallWatchdog("cross-device precheck") as watchdog:
+        try:
+            src_dev = probe_stat(plan.source).st_dev
+            watchdog.touch("cross-device source stat")
+            probe = _nearest_existing_dir(plan.target.parent)
+            watchdog.touch("cross-device target probe")
+            if probe is None:
+                return
+            dst_dev = probe_stat(probe).st_dev
+            watchdog.touch("cross-device target stat")
+        except OSError:
             return
-        dst_dev = probe_stat(probe).st_dev
-    except OSError:
-        return
-    if src_dev != dst_dev:
-        return
-    # rf-obs-05: include the mount point so the operator doesn't have to
-    # run `stat -c '%m'` themselves to figure out which volume to switch.
-    mount = _device_mount_point(plan.source)
-    mount_note = f" at {mount}" if mount else ""
-    msg = (
-        f"source and destination are on the same filesystem "
-        f"(st_dev={src_dev}{mount_note}); "
-        f"migration would duplicate data rather than free the source volume"
-    )
-    if plan.strict_cross_device:
-        raise RuntimeError(msg + " — refusing under --strict-cross-device")
-    _log().warning("%s — pass --strict-cross-device to refuse instead", msg)
+        if src_dev != dst_dev:
+            return
+        # rf-obs-05: include the mount point so the operator doesn't have to
+        # run `stat -c '%m'` themselves to figure out which volume to switch.
+        mount = _device_mount_point(plan.source)
+        watchdog.touch("cross-device mount probe")
+        mount_note = f" at {mount}" if mount else ""
+        msg = (
+            f"source and destination are on the same filesystem "
+            f"(st_dev={src_dev}{mount_note}); "
+            f"migration would duplicate data rather than free the source volume"
+        )
+        if plan.strict_cross_device:
+            raise RuntimeError(msg + " — refusing under --strict-cross-device")
+        _log().warning("%s — pass --strict-cross-device to refuse instead", msg)
 
 
 def _device_mount_point(path: Path) -> "str | None":
