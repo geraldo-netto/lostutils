@@ -1672,6 +1672,17 @@ def test_queue_rerun(app):
     pump(app, 0.2)
 
 
+def test_queue_rerun_logs_non_duplicate_count(app, monkeypatch):
+    _setup_two_selected(app)
+    outcomes = iter(["duplicate", "queue"])
+    monkeypatch.setattr(app.dispatcher, "_process_link", lambda _url, _extra=(): next(outcomes))
+
+    app._on_queue_rerun()
+    pump(app, 0.2)
+
+    assert "[queue] re-queued 1 item(s)" in app.log_text.get("1.0", "end-1c")
+
+
 def test_queue_rerun_preserves_extra(app):
     # lq-rel-03: re-running a queued item must carry its mapped flags (extra),
     # not drop them.

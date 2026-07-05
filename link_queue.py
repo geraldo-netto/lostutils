@@ -4919,12 +4919,14 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         items = self._selected_queue_items()
         if not items:
             return
+        requeued = 0
         with self._batch_dispatch():
             for it in items:
                 # lq-rel-03: carry the item's mapped flags through the re-run so
                 # re-queueing doesn't silently drop e.g. ("-o", "clip.mp4").
-                self._process_link(it.url, it.extra)
-        self._log(f"[queue] re-queued {len(items)} item(s)")
+                if self._process_link(it.url, it.extra) != "duplicate":
+                    requeued += 1
+        self._log(f"[queue] re-queued {requeued} item(s)")
 
     def _on_queue_copy_url(self) -> None:
         items = self._selected_queue_items()
