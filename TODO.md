@@ -237,7 +237,6 @@ lq-doc-01 | open | low | link_queue.py:20 — module docstring says legacy `~/.l
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-ux-01 | open | low | hash-recursive-ai5.py:78 — default `--hashes-file=hashes.txt` writes/appends a persistent dump into the current working directory on every run with no opt-in, silently polluting cwd. Make the dump opt-in or default off. | Laws of UX (least surprise)
 
 ## accessibility
 

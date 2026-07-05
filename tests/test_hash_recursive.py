@@ -27,9 +27,7 @@ def _assert_timestamped(text: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _isolate_cwd(tmp_path, monkeypatch):
-    # hr-log-02: main() now writes ./hashes.txt by default. Run every test
-    # from its own tmp dir so that dump never lands in the repo working
-    # tree (and is auto-cleaned with the tmp dir).
+    # Keep every main() call away from the repo working tree.
     monkeypatch.chdir(tmp_path)
 
 
@@ -1523,6 +1521,16 @@ def test_main_logs_start_progress_done(tmp_path, monkeypatch, capsys):
     assert "progress: 50 files scanned" in err
     assert "progress: 100 files scanned" in err
     assert "done: 120 files scanned" in err
+
+
+def test_main_default_does_not_create_hashes_dump(tmp_path, monkeypatch):
+    # hr-ux-01: dumping every hashed file is opt-in so a default run does
+    # not leave ./hashes.txt in the caller's current directory.
+    (tmp_path / "a.bin").write_bytes(b"same")
+    (tmp_path / "b.bin").write_bytes(b"same")
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
+    hr.main()
+    assert not Path("hashes.txt").exists()
 
 
 def test_main_quiet_suppresses_logs(tmp_path, monkeypatch, capsys):

@@ -79,9 +79,9 @@ DEFAULT_HASH_ERROR_VERBOSE_CAP = 20
 # alongside the end-of-run summary. The same cadence drives stage-1/stage-2
 # hash progress.
 LOG_EVERY_N_FILES = 50
-# hr-log-02: default path for the dump of every hashed file
-# (``<digest> <path>`` per alias). Appended to each run.
-DEFAULT_HASHES_FILE = "hashes.txt"
+# hr-ux-01: the hash dump is opt-in so a normal run does not create
+# hashes.txt in the caller's current working directory.
+DEFAULT_HASHES_FILE = None
 # hr-cmplx-01: the alias cap is stored as Optional[int] — `None` means
 # "no cap". The disabled state is detected via `alias_cap is not None`
 # (see `alias_cap_active`), so a legitimate positive cap of any size
@@ -1792,9 +1792,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=(f"Mid-file point-sample window in bytes (default: {SAMPLE} "
               "= 64 KiB) (hr-adapt-01)."))
     ap.add_argument(
-        "--hashes-file", default=DEFAULT_HASHES_FILE,
+        "--hashes-file", default=DEFAULT_HASHES_FILE, metavar="PATH",
         help=(f"Dump '<digest> <path>' for every hashed file to this path, "
-              f"appending to it (default: {DEFAULT_HASHES_FILE}) (hr-log-02)."))
+              "appending to it (default: disabled)."))
     return ap
 
 
@@ -1938,13 +1938,15 @@ def main():
         # line immediately, then patch the fixed-width digest field if stage 2
         # upgrades it to a composite head:tail digest.
         skip_ino = None
-        try:
-            writer = HashDumpWriter(_open_hash_dump(args.hashes_file))
-            hashes_state["writer"] = writer
-            dump_stat = os.fstat(writer.fileno())
-            skip_ino = (dump_stat.st_dev, dump_stat.st_ino)
-        except OSError as exc:
-            _log_line(f"WARNING: cannot write {args.hashes_file}: {exc}", False)
+        if args.hashes_file is not None:
+            try:
+                writer = HashDumpWriter(_open_hash_dump(args.hashes_file))
+                hashes_state["writer"] = writer
+                dump_stat = os.fstat(writer.fileno())
+                skip_ino = (dump_stat.st_dev, dump_stat.st_ino)
+            except OSError as exc:
+                _log_line(
+                    f"WARNING: cannot write {args.hashes_file}: {exc}", False)
         # hr-obs-02 + hr-scal-05: stream the walk so we never materialise
         # the full `files` list. `on_walk_done` snaps the walk/hash
         # boundary so the per-stage durations remain meaningful.
