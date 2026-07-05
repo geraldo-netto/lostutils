@@ -1055,6 +1055,40 @@ def test_main_clamps_zero_jobs_no_crash(tmp_path, monkeypatch, capsys):
     _assert_timestamped(err)
 
 
+def test_main_clamps_huge_jobs_before_pipeline(tmp_path, monkeypatch):
+    # hr-cli-01: a runaway -j value must be capped before walk/hash worker
+    # pools can allocate threads.
+    (tmp_path / "a.bin").write_bytes(b"x")
+    captured = {}
+
+    def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
+             cancel_event=None, on_hashed=None, on_stage_progress=None,
+             on_composite=None):
+        list(files)
+        if on_walk_done is not None:
+            on_walk_done()
+        captured["jobs"] = jobs
+        return hr.DedupResult(
+            groups={},
+            aliases={},
+            info={
+                "inodes": 0,
+                "candidates": 0,
+                "stage1": 0,
+                "stage1_errors": 0,
+                "stage2": 0,
+                "stage2_errors": 0,
+            },
+            overflow={},
+        )
+
+    monkeypatch.setattr(hr, "_max_jobs", lambda: 3)
+    monkeypatch.setattr(hr, "find_duplicate_groups", stub)
+    monkeypatch.setattr(hr.sys, "argv", ["hr", "-j", "100000", str(tmp_path)])
+    hr.main()
+    assert captured["jobs"] == 3
+
+
 def _run_main_with_stage_stub(tmp_path, monkeypatch, capsys, *, none_tails,
                               cfg_mutate):
     # Helper: two big files forced through stage 2, every tail None, with a

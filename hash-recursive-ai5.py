@@ -70,6 +70,8 @@ SUBMIT_WINDOW = 2
 # work, ThreadPoolExecutor setup + per-task overhead exceeds the gain.
 THREAD_THRESHOLD_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_JOBS = 8
+MAX_JOBS_PER_CPU = 4
+MAX_JOBS_HARD_CAP = 64
 WALK_OUT_QUEUE_PER_JOB = 4096
 
 DEFAULT_ALIAS_CAP = 1024
@@ -342,9 +344,9 @@ class _WalkIter:
 
     def __init__(self, root, jobs, cancel_event, skip_ino=None):
         self._root = root
-        # jobs=0/negative would spawn no workers → silent empty result
-        # (hr-rel-01).
-        self._jobs = max(1, jobs)
+        # jobs=0/negative would spawn no workers; huge job counts exhaust
+        # threads / file descriptors. Clamp both ends at the boundary.
+        self._jobs = _clamp_jobs(jobs)
         self._cancel = cancel_event
         self._skip_ino = skip_ino
         self.stats = {"dirs": 0, "files": 0, "dir_errors": 0, "entry_errors": 0}
@@ -438,6 +440,17 @@ def _fmt_rate(done: int, elapsed: float) -> str:
 def _default_jobs() -> int:
     """Conservative default for mixed disk I/O; users can still override."""
     return max(1, min(DEFAULT_MAX_JOBS, os.cpu_count() or 1))
+
+
+def _max_jobs() -> int:
+    """Upper bound for user-supplied worker counts."""
+    cpu_bound = (os.cpu_count() or 1) * MAX_JOBS_PER_CPU
+    return max(1, min(MAX_JOBS_HARD_CAP, cpu_bound))
+
+
+def _clamp_jobs(jobs: int) -> int:
+    """Clamp jobs to a resource-safe range."""
+    return min(max(1, jobs), _max_jobs())
 
 
 def _emit_hash_error_line(path, exc) -> None:
@@ -917,6 +930,7 @@ def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None,
     ``out`` collected so far is returned, so a Ctrl-C during a long hash
     phase takes effect at the next batch boundary instead of waiting for
     every queued batch."""
+    jobs = _clamp_jobs(jobs)
     out = {}
     errors = 0
     if total_bytes < THREAD_THRESHOLD_BYTES:
@@ -1765,7 +1779,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "-j", "--jobs", type=int, default=_default_jobs(),
         help=("Walk + hash worker threads "
               f"(default: min(cpu_count, {DEFAULT_MAX_JOBS}); override for "
-              "fast SSDs or slower disks)."))
+              "fast SSDs or slower disks; high values are clamped to "
+              f"{_max_jobs()})."))
     ap.add_argument("-q", "--quiet", action="store_true",
                     help="Suppress the end-of-run summary on stderr.")
     ap.add_argument("--alias-cap", type=int, default=DEFAULT_ALIAS_CAP,
@@ -1888,12 +1903,9 @@ def main():
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
-    # hr-rel-21: clamp jobs to >= 1. The walk already clamps via max(1, jobs)
-    # but the hash path passes jobs straight to ThreadPoolExecutor, which
-    # raises `max_workers must be greater than 0` once a stage crosses
-    # THREAD_THRESHOLD_BYTES — so `-j 0` aborted big trees while silently
-    # working on small ones.
-    args.jobs = max(1, args.jobs)
+    # hr-rel-21 / hr-cli-01: clamp jobs at the CLI boundary before either
+    # the walk or hash pool can allocate threads.
+    args.jobs = _clamp_jobs(args.jobs)
     # hr-adapt-01: validate then apply the window-size overrides before the
     # pipeline reads CAP/SAMPLE.
     if args.block_size < 1 or args.sample_size < 1:
