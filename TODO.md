@@ -92,7 +92,6 @@ lq-cx-06 | open | med | link_queue.py:2140 — `Dispatcher._pick_next_item` cycl
 lq-cx-07 | open | low | link_queue.py:3704 — `LinkQueueApp._update_status` cyclomatic complexity is 12 (>10 bar); extract status counters and message formatting. | radon CC=12
 oze-cx-01 | open | low | organize_by_extension.py:534 — `list_files` cyclomatic complexity is 13 (>10 bar); split skip-path checks, bucket detection, and verbose logging. | radon CC=13
 oze-cx-02 | open | med | organize_by_extension.py:1938 — `organize` cyclomatic complexity is 21 (>10 bar); split scan, plan, execute, and prune phases into smaller helpers. | radon CC=21
-rf-cx-01 | open | low | relocate_folder.py:1091 — `_iter_verify_tasks` cyclomatic complexity is 11 (>10 bar); split file/dir/symlink task creation from ownership task creation. | radon CC=11
 
 ## code duplication
 

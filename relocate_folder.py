@@ -1104,6 +1104,21 @@ def verify_copy(src: Path, dst: Path, checksum: bool = False,
     _run_verify_pool(tasks, jobs=jobs)
 
 
+def _kind_verify_task(full: Path, counterpart: Path, rel: Path,
+                      st: os.stat_result, checksum: bool) -> Callable[[], None] | None:
+    """Return the copy-kind verify task for `st` (symlink/regular/dir), or None
+    for a special file (socket/FIFO/device) that copy_tree did not copy and so
+    has no dst counterpart to check."""
+    mode = st.st_mode
+    if stat.S_ISLNK(mode):
+        return partial(_verify_symlink, full, counterpart, rel)
+    if stat.S_ISREG(mode):
+        return partial(_verify_file, full, counterpart, rel, checksum, src_size=st.st_size)
+    if stat.S_ISDIR(mode):
+        return partial(_verify_dir, full, counterpart, rel)
+    return None
+
+
 def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
                        verify_ownership: bool) -> Iterator[Callable[[], None]]:
     """Yield zero-arg callables, one per check, for parallel execution.
@@ -1132,23 +1147,16 @@ def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
             # couldn't be classified, not just the eventual verify failure.
             _log().warning("verify: cannot stat source entry %s: %s", full, exc)
             yield partial(_verify_unreadable_src, full, rel, exc)
-            st = None
-        is_copied_kind = False
-        if st is not None and stat.S_ISLNK(st.st_mode):
-            yield partial(_verify_symlink, full, counterpart, rel)
-            is_copied_kind = True
-        elif st is not None and stat.S_ISREG(st.st_mode):
-            yield partial(_verify_file, full, counterpart, rel, checksum,
-                          src_size=st.st_size)
-            is_copied_kind = True
-        elif st is not None and stat.S_ISDIR(st.st_mode):
-            yield partial(_verify_dir, full, counterpart, rel)
-            is_copied_kind = True
+            continue
+        kind_task = _kind_verify_task(full, counterpart, rel, st, checksum)
+        if kind_task is None:
+            continue
+        yield kind_task
         # rf-rel-02: only verify ownership for entries copy_tree actually copied
         # (symlink/regular/dir). A skipped special file (socket/FIFO/device) has
         # no dst counterpart, so its ownership check would lstat a missing path
         # and fail the whole --verify-ownership migration.
-        if verify_ownership and is_copied_kind:
+        if verify_ownership:
             yield partial(_verify_ownership, full, counterpart, rel, st)
 
 
