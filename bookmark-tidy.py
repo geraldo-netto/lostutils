@@ -1415,10 +1415,14 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--keep-www", dest="strip_www", action="store_false", default=True)
     parser.add_argument("--keep-tracking-params", dest="strip_tracking_params", action="store_false", default=True)
     parser.add_argument("--preserve-url-host-case", dest="lowercase_host", action="store_false", default=True)
-    parser.add_argument("--llm-context", type=int, default=DEFAULT_LLM_CONTEXT)
-    parser.add_argument("--llm-gpu-layers", type=int, default=0)
-    parser.add_argument("--llm-max-tokens", type=int, default=DEFAULT_LLM_MAX_TOKENS)
-    parser.add_argument("--llm-batch-size", type=int, default=DEFAULT_LLM_BATCH_SIZE)
+    parser.add_argument("--llm-context", type=int, default=DEFAULT_LLM_CONTEXT,
+                        help=f"llama.cpp context size in tokens (default {DEFAULT_LLM_CONTEXT})")
+    parser.add_argument("--llm-gpu-layers", type=int, default=0,
+                        help="number of llama.cpp model layers to offload to GPU (default 0)")
+    parser.add_argument("--llm-max-tokens", type=int, default=DEFAULT_LLM_MAX_TOKENS,
+                        help=f"maximum tokens generated for categorization (default {DEFAULT_LLM_MAX_TOKENS})")
+    parser.add_argument("--llm-batch-size", type=int, default=DEFAULT_LLM_BATCH_SIZE,
+                        help=f"llama.cpp prompt batch size (default {DEFAULT_LLM_BATCH_SIZE})")
     parser.add_argument("--fallback-category", default=DEFAULT_FALLBACK_CATEGORY)
     parser.add_argument("-v", "--verbose", action="count", default=0)
     return parser.parse_args(argv)

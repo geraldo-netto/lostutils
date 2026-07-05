@@ -220,7 +220,6 @@ oze-api-01 | open | med | organize_by_extension.py:2236,2265 — `BUCKET_SIZE` i
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-cli-01 | open | low | bookmark-tidy.py:1382-1386 — `--llm-context`, `--llm-gpu-layers`, `--llm-max-tokens`, `--llm-batch-size` have no `help=` text (unlike other flags), so `--help` shows them undocumented. Add help strings. |
 dnp-cli-01 | open | low | dedupl_numpy.py:18 — usage text is printed to stdout (should be stderr) on the error path, and the script hand-rolls arg handling with no `--help`; migrate to argparse for a consistent CLI surface. | error output on wrong stream
 hr-cli-01 | open | low | hash-recursive-ai5.py:1683 — `args.jobs = max(1, args.jobs)` only lower-clamps; `-j 100000` spawns that many walk threads and a `ThreadPoolExecutor(max_workers=100000)`, exhausting threads/FDs. Add a sane upper clamp (e.g. multiple of cpu_count). | resource exhaustion / DoS
 ie-cli-01 | open | low | import_events.py:3589 — `--timezone` is not validated at parse time; an invalid IANA name only raises inside `_apply_default_tz` per ICS file, surfacing as per-file failures instead of one upfront error. Validate with `ZoneInfo` in an argparse `type`. |

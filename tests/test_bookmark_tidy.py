@@ -830,6 +830,18 @@ def test_parse_args_logging_and_cli_helpers(tmp_path, monkeypatch, capsys):
     assert "missing bookmark file" in capsys.readouterr().err
 
 
+def test_parse_args_help_documents_llm_tuning_flags(capsys):
+    with pytest.raises(SystemExit) as exc:
+        bookmark_tidy.parse_args(["--help"])
+
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "llama.cpp context size" in out
+    assert "model layers to offload" in out
+    assert "maximum tokens generated" in out
+    assert "prompt batch size" in out
+
+
 def test_categorizer_from_args_rejects_missing_model(tmp_path):
     args = bookmark_tidy.parse_args(["--model", str(tmp_path / "missing.gguf")])
 
