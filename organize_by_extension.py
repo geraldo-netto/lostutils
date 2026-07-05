@@ -2000,6 +2000,58 @@ def _log_run_stats(head_cache: dict[Path, HeadBytes], manager: BucketManager) ->
     )
 
 
+def _clamp_num_threads(num_threads: int) -> int:
+    """Validate and ceiling-clamp the worker count (oze-robust-11)."""
+    if not isinstance(num_threads, int) or isinstance(num_threads, bool) or num_threads < 1:
+        raise ValueError(f"num_threads must be a positive integer (>=1), got {num_threads!r}")
+    if num_threads > MAX_NUM_THREADS:
+        logger.warning(
+            "num_threads %d exceeds the ceiling %d; clamping.",
+            num_threads, MAX_NUM_THREADS)
+        return MAX_NUM_THREADS
+    return num_threads
+
+
+def _run_move_stage(root: Path, files: list[Path], ctx: SniffContext, *,
+                    preview: bool, verbose: bool, num_threads: int,
+                    bucket_manager: BucketManager | None,
+                    head_cache: dict[Path, HeadBytes]) -> None:
+    """Plan then execute the moves for the scanned `files` (oze-arch pipeline
+    stage): plan_moves over a BucketManager, run the pool, and log run stats."""
+    manager = bucket_manager if bucket_manager is not None else BucketManager(root=root)
+    plan = plan_moves(root, sorted(files), manager, ctx=ctx, preview=preview)
+    stats = _run_moves(
+        plan,
+        worker=make_worker(preview),
+        num_threads=num_threads,
+        preview=preview,
+        total_files=len(files),
+        head_cache=head_cache,
+        manager=manager,
+    )
+    if verbose or preview or stats.processed > 0 or stats.skipped > 0:
+        logger.info(
+            f"Finished. Processed {stats.processed} file(s), "
+            f"skipped {stats.skipped} file(s)."
+        )
+    _log_run_stats(head_cache, manager)
+
+
+def _run_prune_stage(root: Path, *, preview: bool, verbose: bool) -> None:
+    """Prune empty directories under `root`, or count them under `--preview`
+    without mutating the tree."""
+    if preview:
+        # Preview mode never touches the filesystem during planning; honour
+        # that contract here too — count what *would* be removed.
+        count = _count_prunable_dirs(root)
+        if verbose or count > 0:
+            logger.info("Preview: would remove %d empty directory/ies under %s", count, root)
+    else:
+        count = prune_empty_dirs(root, verbose=verbose)
+        if verbose or count > 0:
+            logger.info("Pruned %d empty directory/ies under %s", count, root)
+
+
 def organize(
     root: str | Path,
     preview: bool = False,
@@ -2027,15 +2079,7 @@ def organize(
     returned by :func:`make_worker` submitted to a thread pool). The pipeline
     stays streaming: plans are issued one at a time, never buffered.
     """
-    if not isinstance(num_threads, int) or isinstance(num_threads, bool) or num_threads < 1:
-        raise ValueError(f"num_threads must be a positive integer (>=1), got {num_threads!r}")
-    if num_threads > MAX_NUM_THREADS:
-        # oze-robust-11: clamp a runaway thread count instead of spawning a
-        # ThreadPoolExecutor that exhausts memory/FDs before the first move.
-        logger.warning(
-            "num_threads %d exceeds the ceiling %d; clamping.",
-            num_threads, MAX_NUM_THREADS)
-        num_threads = MAX_NUM_THREADS
+    num_threads = _clamp_num_threads(num_threads)
     root = resolve_root(root)
     if verbose:
         logger.info(f"Organizing files in: {root}")
@@ -2062,36 +2106,14 @@ def organize(
         if preview or verbose:
             logger.info(f"No files to organize under {root} (already bucketed or empty).")
     else:
-        manager = bucket_manager if bucket_manager is not None else BucketManager(root=root)
-        plan = plan_moves(root, sorted(files), manager, ctx=ctx, preview=preview)
-        stats = _run_moves(
-            plan,
-            worker=make_worker(preview),
-            num_threads=num_threads,
-            preview=preview,
-            total_files=len(files),
-            head_cache=head_cache,
-            manager=manager,
+        _run_move_stage(
+            root, files, ctx,
+            preview=preview, verbose=verbose, num_threads=num_threads,
+            bucket_manager=bucket_manager, head_cache=head_cache,
         )
-        if verbose or preview or stats.processed > 0 or stats.skipped > 0:
-            logger.info(
-                f"Finished. Processed {stats.processed} file(s), "
-                f"skipped {stats.skipped} file(s)."
-            )
-        _log_run_stats(head_cache, manager)
 
     if prune_empty:
-        if preview:
-            # Preview mode never touches the filesystem during planning; honour
-            # that contract here too — count what *would* be removed without
-            # mutating the tree.
-            count = _count_prunable_dirs(root)
-            if verbose or count > 0:
-                logger.info("Preview: would remove %d empty directory/ies under %s", count, root)
-        else:
-            count = prune_empty_dirs(root, verbose=verbose)
-            if verbose or count > 0:
-                logger.info("Pruned %d empty directory/ies under %s", count, root)
+        _run_prune_stage(root, preview=preview, verbose=verbose)
 
 
 def _count_prunable_dirs(root: Path) -> int:
