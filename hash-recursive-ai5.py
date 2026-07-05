@@ -1319,6 +1319,33 @@ def _split_stage1_buckets(by_head, rep, accept_group):
     return stage2_items
 
 
+def _stage_progress_cb(on_stage_progress, stage):
+    """Bind a stage label onto ``on_stage_progress`` (hr-log-05), returning a
+    ``(done, total)`` callback or None when no callback was supplied."""
+    if on_stage_progress is None:
+        return None
+
+    def _cb(done, total):
+        on_stage_progress(stage, done, total)
+    return _cb
+
+
+def _emit_stage2_groups(regrouped, on_composite, accept_group):
+    """Emit confirmed stage-2 ``(head, tail)`` groups (hr-cmplx-04).
+
+    hr-obs-02: reports the composite ``head:tail`` digest per key so the hashes
+    dump records the true dup-grouping identity (two files sharing a head but
+    differing past it get DISTINCT dump digests). Groups with <2 members are
+    dropped."""
+    for combined, keys in regrouped.items():
+        if on_composite is not None:
+            head, tail = combined
+            for key in keys:
+                on_composite(key, f"{head}:{tail}")
+        if len(keys) >= 2:
+            accept_group(combined, keys)
+
+
 def find_duplicate_groups(files, jobs, on_group=None, config=None,
                           on_walk_done=None, cancel_event=None,
                           on_hashed=None, on_stage_progress=None,
@@ -1410,34 +1437,18 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
             final_groups.setdefault(digest_key, []).extend(keys)
 
     # ---- Stage 1: head hash ----
-    def _progress(stage):
-        if on_stage_progress is None:
-            return None
-
-        cb_fn = on_stage_progress
-        def _cb(done, total):
-            cb_fn(stage, done, total)
-        return _cb
-
     by_head, stage1_info = _stage1_hash(
         candidates, rep, jobs, config, cancel_event, aliases=aliases,
-        on_hashed=on_hashed, on_progress=_progress("stage1"))
+        on_hashed=on_hashed,
+        on_progress=_stage_progress_cb(on_stage_progress, "stage1"))
     stage2_items = _split_stage1_buckets(by_head, rep, _accept_group)
 
     # ---- Stage 2: tail + center + middle samples for size+head collisions ----
     regrouped, stage2_info = _stage2_hash(
         stage2_items, jobs, config, cancel_event,
-        on_progress=_progress("stage2"), aliases=aliases)
-    for combined, keys in regrouped.items():
-        # hr-obs-02: report the composite head:tail digest per stage-2 key so
-        # the hashes dump can record the true dup-grouping identity (two files
-        # sharing a head but differing past it get DISTINCT dump digests).
-        if on_composite is not None:
-            head, tail = combined
-            for key in keys:
-                on_composite(key, f"{head}:{tail}")
-        if len(keys) >= 2:
-            _accept_group(combined, keys)
+        on_progress=_stage_progress_cb(on_stage_progress, "stage2"),
+        aliases=aliases)
+    _emit_stage2_groups(regrouped, on_composite, _accept_group)
 
     info = {
         "inodes": n_inodes,
