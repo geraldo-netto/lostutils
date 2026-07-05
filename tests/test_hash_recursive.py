@@ -2525,6 +2525,31 @@ def test_walk_worker_deterministic_base_exception_terminates(tmp_path, monkeypat
     assert done.is_set(), "deterministic BaseException re-enqueue looped forever"
 
 
+def test_walk_worker_last_live_base_exception_terminates(tmp_path, monkeypatch):
+    # hr-rob-01: with a single worker, a BaseException leaves no sibling to
+    # retry the re-enqueued directory; the coordinator must still end the
+    # output stream so the consumer does not block forever.
+    (tmp_path / "a.bin").write_bytes(b"x")
+
+    def always_boom(d, st, wstats):
+        raise _ScanBoom("last worker died")
+
+    monkeypatch.setattr(hr, "_scan_dir", always_boom)
+    import threading
+    done = threading.Event()
+    results = []
+
+    def run():
+        results.extend(list(hr.iter_threaded_walk(tmp_path, jobs=1)))
+        done.set()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    done.wait(timeout=10)
+    assert done.is_set(), "last live worker death left the consumer blocked"
+    assert results == []
+
+
 # --- hr-test-01: a true BaseException in _scan_dir re-enqueues the dir -----
 
 class _ScanBoom(BaseException):
