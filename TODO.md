@@ -41,7 +41,6 @@ lq-gov-01 | open | low | link_queue.py:261 — `DEFAULT_CONFIG["output_folder"]`
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-int-01 | open | med | deduplicate-by-namev3.py:120 — `--strip-chars` default includes `;` (the output field delimiter) but a user override can omit it; a cleaned value then containing `;` corrupts the `{a};{b};{dist}` line for a `;`-splitting downstream parser. Force-add `;` to the effective strip set or escape `;` on output. | user override re-enables the injection the default guards
 
 ## performance
 

@@ -482,6 +482,13 @@ def test_cleanup_strips_semicolon_delimiter():
     assert _cleanup_default("a;b") == "ab"
 
 
+def test_strip_chars_override_still_strips_output_delimiter():
+    replacements = dn.effective_replacements("#")
+
+    assert replacements == ("#", ";")
+    assert dn.cleanup("a;b#c", replacements, None) == "abc"
+
+
 def test_main_cleanup_flags_override_defaults(monkeypatch, tmp_path, capsys):
     f = tmp_path / "names.txt"
     f.write_text("A# skip\nA\n", encoding="utf-8")

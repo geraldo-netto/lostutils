@@ -38,9 +38,8 @@ DEFAULT_THRESHOLD = 7
 MAX_THRESHOLD = 254  # uint8 distance matrix caps at 255; stay below to avoid wrap
 BLOCK_THRESHOLD = 4000  # N above which the matrix is computed in row blocks
 BLOCK_ROWS = 2000  # rows per block when row-blocking (peak BLOCK_ROWS×N bytes)
-REPLACEMENTS = (",", "[", "]", ";")  # dnv3-cli-03: ";" is the output field
-# delimiter (`{a};{b};{dist}`); strip it from cleaned strings so a value
-# containing ";" can't produce rows a downstream ;-split parser mis-reads.
+OUTPUT_DELIMITER = ";"
+REPLACEMENTS = (",", "[", "]", OUTPUT_DELIMITER)
 WORD_TOKENS = ()
 DEFAULT_STRIP_CHARS = "".join(REPLACEMENTS)
 DEFAULT_WORD_TOKENS = ",".join(WORD_TOKENS)
@@ -121,6 +120,13 @@ def parse_word_tokens(value):
     return tuple(token.strip().lower() for token in value.split(",") if token.strip())
 
 
+def effective_replacements(strip_chars):
+    replacements = list(dict.fromkeys(strip_chars))
+    if OUTPUT_DELIMITER not in replacements:
+        replacements.append(OUTPUT_DELIMITER)
+    return tuple(replacements)
+
+
 def cleanup(entry, replacements, word_re):
     s = entry.strip().lower()
     for tok in replacements:
@@ -149,7 +155,8 @@ def _build_parser():
     ap.add_argument("--block-rows", type=valid_block_rows, default=BLOCK_ROWS,
                     help=f"rows per cdist block after --block-threshold (default {BLOCK_ROWS})")
     ap.add_argument("--strip-chars", default=DEFAULT_STRIP_CHARS,
-                    help=f"characters removed during cleanup (default {DEFAULT_STRIP_CHARS!r})")
+                    help=("characters removed during cleanup "
+                          f"(default {DEFAULT_STRIP_CHARS!r}; ';' is always removed)"))
     ap.add_argument("--word-tokens", type=parse_word_tokens, default=WORD_TOKENS,
                     help=("comma-separated whole-word tokens removed during cleanup "
                           f"(default {DEFAULT_WORD_TOKENS!r}; empty disables)"))
@@ -194,7 +201,7 @@ def main():
 
     configure_stdout()
 
-    replacements = tuple(args.strip_chars)
+    replacements = effective_replacements(args.strip_chars)
     word_re = compile_word_re(args.word_tokens)
     line_nums, dropped_empty = _load_cleaned_lines(args.file, replacements, word_re)
     if dropped_empty:
