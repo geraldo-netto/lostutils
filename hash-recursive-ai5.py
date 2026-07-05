@@ -1649,7 +1649,11 @@ def _install_sigint_cancel(cancel_event):
 
     def _handle(signum, frame):
         cancel_event.set()
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        # hr-rel-31: restore Python's default_int_handler (raises
+        # KeyboardInterrupt), NOT SIG_DFL — SIG_DFL terminates the process
+        # abruptly, skipping main's finally / _finalize_hash_dump so the
+        # hashes dump is never flushed and the prior handler never restored.
+        signal.signal(signal.SIGINT, signal.default_int_handler)
 
     signal.signal(signal.SIGINT, _handle)
     return previous

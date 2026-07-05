@@ -2067,7 +2067,9 @@ def test_install_sigint_cancel_sets_event_and_restores_default():
         # Invoke the handler synchronously — exercises the body.
         installed(signal.SIGINT, None)
         assert ev.is_set()
-        assert signal.getsignal(signal.SIGINT) is signal.SIG_DFL
+        # hr-rel-31: default_int_handler (raises KeyboardInterrupt), not SIG_DFL
+        # (terminates, skipping the hashes-dump finally).
+        assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
     finally:
         signal.signal(signal.SIGINT, signal.default_int_handler)
 
