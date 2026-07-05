@@ -314,14 +314,17 @@ def read_netscape_bookmarks(path: Path) -> list[Bookmark]:
 
 
 def read_chromium_bookmarks(path: Path) -> list[Bookmark]:
-    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    return chromium_json_data_to_bookmarks(_load_json_bookmark(path), str(path))
+
+
+def chromium_json_data_to_bookmarks(data: Any, source: str) -> list[Bookmark]:
     roots = data.get("roots", {})
     bookmarks: list[Bookmark] = []
     for root_key, node in roots.items():
         root = root_key if root_key in ROOT_DISPLAY else "other"
         for child in node.get("children", []):
             if isinstance(child, Mapping):
-                _walk_chromium_node(child, root, (), str(path), bookmarks)
+                _walk_chromium_node(child, root, (), source, bookmarks)
     return bookmarks
 
 
@@ -467,8 +470,7 @@ def _firefox_bookmark(
 
 
 def read_firefox_json_bookmarks(path: Path) -> list[Bookmark]:
-    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-    return firefox_json_data_to_bookmarks(data, str(path))
+    return firefox_json_data_to_bookmarks(_load_json_bookmark(path), str(path))
 
 
 def read_firefox_jsonlz4_bookmarks(path: Path) -> list[Bookmark]:
@@ -588,24 +590,37 @@ def _firefox_json_bookmark(
 
 
 def detect_bookmark_format(path: Path) -> str:
+    fmt, _ = _detect_bookmark_format_with_data(path)
+    return fmt
+
+
+def _detect_bookmark_format_with_data(path: Path) -> tuple[str, Any | None]:
     if path.suffix.casefold() == ".jsonlz4":
-        return "firefox-jsonlz4"
+        return "firefox-jsonlz4", None
     if path.name == "places.sqlite" or path.suffix.casefold() in {".sqlite", ".sqlite3"}:
-        return "firefox-sqlite"
+        return "firefox-sqlite", None
     sample = path.read_text(encoding="utf-8", errors="replace")[:4096]
     stripped = sample.lstrip()
     if stripped.startswith("<"):
-        return "netscape"
+        return "netscape", None
     if stripped.startswith("{"):
-        return _detect_json_format(path)
+        data = _load_json_bookmark(path)
+        return _json_bookmark_format(data, path), data
     raise UserError(f"unsupported bookmark file: {path}")
 
 
-def _detect_json_format(path: Path) -> str:
+def _load_json_bookmark(path: Path) -> Any:
     try:
-        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError as exc:
         raise UserError(f"invalid JSON bookmark file {path}: {exc}") from exc
+
+
+def _detect_json_format(path: Path) -> str:
+    return _json_bookmark_format(_load_json_bookmark(path), path)
+
+
+def _json_bookmark_format(data: Any, path: Path) -> str:
     if isinstance(data, Mapping) and "roots" in data:
         return "chromium"
     if isinstance(data, Mapping) and ("children" in data or "typeCode" in data):
@@ -614,12 +629,16 @@ def _detect_json_format(path: Path) -> str:
 
 
 def read_bookmark_file(path: Path) -> list[Bookmark]:
-    fmt = detect_bookmark_format(path)
+    fmt, data = _detect_bookmark_format_with_data(path)
     if fmt == "chromium":
+        if data is not None:
+            return chromium_json_data_to_bookmarks(data, str(path))
         return read_chromium_bookmarks(path)
     if fmt == "firefox-sqlite":
         return read_firefox_sqlite_bookmarks(path)
     if fmt == "firefox-json":
+        if data is not None:
+            return firefox_json_data_to_bookmarks(data, str(path))
         return read_firefox_json_bookmarks(path)
     if fmt == "firefox-jsonlz4":
         return read_firefox_jsonlz4_bookmarks(path)

@@ -479,13 +479,33 @@ def test_read_bookmark_file_dispatches_every_format(monkeypatch, tmp_path):
     }
 
     for fmt, marker in readers.items():
-        monkeypatch.setattr(bookmark_tidy, "detect_bookmark_format", lambda _path, value=fmt: value)
+        monkeypatch.setattr(
+            bookmark_tidy,
+            "_detect_bookmark_format_with_data",
+            lambda _path, value=fmt: (value, None),
+        )
         monkeypatch.setattr(bookmark_tidy, "read_chromium_bookmarks", lambda _path: ["chrome"])
         monkeypatch.setattr(bookmark_tidy, "read_firefox_sqlite_bookmarks", lambda _path: ["sqlite"])
         monkeypatch.setattr(bookmark_tidy, "read_firefox_json_bookmarks", lambda _path: ["json"])
         monkeypatch.setattr(bookmark_tidy, "read_firefox_jsonlz4_bookmarks", lambda _path: ["jsonlz4"])
 
         assert bookmark_tidy.read_bookmark_file(path) == [marker]
+
+
+def test_read_bookmark_file_parses_json_once(monkeypatch, tmp_path):
+    path = tmp_path / "chrome.json"
+    path.write_text('{"roots":{"bookmark_bar":{"children":[]}}}', encoding="utf-8")
+    real_loads = bookmark_tidy.json.loads
+    calls = []
+
+    def counting_loads(text):
+        calls.append(text)
+        return real_loads(text)
+
+    monkeypatch.setattr(bookmark_tidy.json, "loads", counting_loads)
+
+    assert bookmark_tidy.read_bookmark_file(path) == []
+    assert len(calls) == 1
 
 
 def test_expand_inputs_and_discovery_helpers(tmp_path, monkeypatch):

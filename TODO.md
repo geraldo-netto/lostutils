@@ -47,7 +47,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-n1-01 | open | low | bookmark-tidy.py:317,591,602 — a JSON input is read+parsed up to 3×: `detect_bookmark_format` samples 4 KB (591), `_detect_json_format` reads+parses the whole file (602), then `read_chromium_bookmarks`/`read_firefox_json_bookmarks` (317) reads+parses again. Parse once and pass the decoded object down. |
 rf-perf-07 | open | low | relocate_folder.py:1233 — `_verify_ownership` re-`lstat`s `src_path` even though `_iter_verify_tasks` (line 1108) already `lstat`'d that entry to classify it; pass the cached `st_mode/st_uid/st_gid` through like `src_size` is passed to `_verify_file` to save one syscall per entry under `--verify-ownership`. | redundant-stat
 
 ## concurrency
