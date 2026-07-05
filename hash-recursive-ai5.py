@@ -1725,8 +1725,8 @@ def _configure_windows(block_size: int, sample_size: int) -> None:
     HEAD_TAIL_THRESHOLD = CAP
 
 
-def main():
-    _configure_stdio_encoding()
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Construct the CLI parser (hr-cmplx-02)."""
     ap = argparse.ArgumentParser(
         description="Duplicate finder (head + tail + center + mid-samples, "
                     "hardlink-aware, two-stage hash).")
@@ -1765,7 +1765,94 @@ def main():
         "--hashes-file", default=DEFAULT_HASHES_FILE,
         help=(f"Dump '<digest> <path>' for every hashed file to this path, "
               f"appending to it (default: {DEFAULT_HASHES_FILE}) (hr-log-02)."))
-    args = ap.parse_args()
+    return ap
+
+
+def _emit_run_warnings(config, cancel_event, quiet) -> None:
+    """One-shot end-of-run warnings: alias-cap truncation (hr-scal-04),
+    suppressed hash errors (hr-obs-03), and partial results after a SIGINT
+    cancel (hr-conc-05). All are gated on ``not quiet``."""
+    if quiet:
+        return
+    if config.alias_cap_hits > 0:
+        _log_line(
+            f"WARNING: alias cap ({config.alias_cap}) truncated "
+            f"{config.alias_cap_hits} group(s); rerun with "
+            f"--alias-cap=0 to print every hardlink.", False)
+    if config.hash_error_suppressed > 0:
+        _log_line(
+            f"WARNING: {config.hash_error_suppressed} additional "
+            f"hash error(s) suppressed (showed first "
+            f"{config.hash_error_logged}); rerun with a larger "
+            "--hash-error-verbose-cap to see more.", False)
+    if cancel_event.is_set():
+        _log_line("WARNING: cancelled by SIGINT; results are partial.", False)
+
+
+def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
+                       walk_seconds, hash_seconds) -> None:
+    """Emit the end-of-run summary line on stderr (the user's safety net).
+
+    hr-obs-02: the per-stage ``*_errors`` totals count EVERY None digest,
+    including benign vanished (ENOENT/ESTALE) and shrank (truncated mid-run)
+    skips. Subtract those subsets so the printed ``hash_errors`` is the count of
+    REAL failures worth investigating, matching the counter's contract."""
+    f = _fmt_count
+    total_hash_errors = info["stage1_errors"] + info["stage2_errors"]
+    real_hash_errors = max(
+        0,
+        total_hash_errors
+        - config.hash_skipped_vanished
+        - config.hash_skipped_shrank,
+    )
+    _log_line(
+        f"dirs={f(walk_stats['dirs'])} "
+        f"files={f(walk_stats['files'])} "
+        f"inodes={f(info['inodes'])} "
+        f"size_collision_inodes={f(info['candidates'])} "
+        f"hashed_stage1={f(info['stage1'])} "
+        f"hashed_stage2={f(info['stage2'])} "
+        f"dup_groups={f(dup_groups)} "
+        f"dup_paths={f(dup_paths)} "
+        f"walk_errors={f(walk_stats['dir_errors'])}+"
+        f"{f(walk_stats['entry_errors'])} "
+        f"hash_errors={f(real_hash_errors)} "
+        f"hash_skipped={f(config.hash_skipped_vanished)} "
+        f"hash_shrank={f(config.hash_skipped_shrank)} "
+        f"walk_s={walk_seconds:.2f} hash_s={hash_seconds:.2f}",
+        False,
+    )
+
+
+def _finalize_hash_dump(hashes_state, dump_overflow, hashes_file,
+                        previous_sigint) -> None:
+    """Flush + close the hashes dump (if opened) and restore the SIGINT handler.
+
+    Runs from main's finally on every exit path (normal return AND a second
+    Ctrl-C KeyboardInterrupt), so the fd is always released (hr-rob-01) and the
+    previous signal handler is always restored (hr-rel-20)."""
+    if hashes_state["writer"] is not None:
+        try:
+            # hr-obs-10: surface hardlinks elided at ingest by the alias cap.
+            hashes_state["writer"].write_overflow(dump_overflow)
+        except OSError as exc:
+            _log_line(f"WARNING: writing {hashes_file} failed: {exc}", False)
+        finally:
+            try:
+                hashes_state["writer"].close()
+            except OSError as exc:
+                _log_line(f"WARNING: closing {hashes_file} failed: {exc}", False)
+    # `signal.getsignal` returns None when the previous handler was installed
+    # from C; `signal.signal` rejects None, so fall back to SIG_DFL.
+    signal.signal(
+        signal.SIGINT,
+        previous_sigint if previous_sigint is not None else signal.SIG_DFL,
+    )
+
+
+def main():
+    _configure_stdio_encoding()
+    args = _build_arg_parser().parse_args()
     # hr-rel-21: clamp jobs to >= 1. The walk already clamps via max(1, jobs)
     # but the hash path passes jobs straight to ThreadPoolExecutor, which
     # raises `max_workers must be greater than 0` once a stage crosses
@@ -1918,100 +2005,19 @@ def main():
         walk_seconds = walk_end - t_start
         hash_seconds = t_end - walk_end
 
-        # hr-scal-04: one-shot warning so the operator knows printed alias
-        # lists may be partial.
-        if config.alias_cap_hits > 0 and not args.quiet:
-            _log_line(
-                f"WARNING: alias cap ({config.alias_cap}) truncated "
-                f"{config.alias_cap_hits} group(s); rerun with "
-                f"--alias-cap=0 to print every hardlink.",
-                False,
-            )
-
-        # hr-obs-03: one-shot summary of suppressed hash errors instead of
-        # per-file stderr spam.
-        if config.hash_error_suppressed > 0 and not args.quiet:
-            _log_line(
-                f"WARNING: {config.hash_error_suppressed} additional "
-                f"hash error(s) suppressed (showed first "
-                f"{config.hash_error_logged}); rerun with a larger "
-                "--hash-error-verbose-cap to see more.",
-                False,
-            )
-
-        # hr-conc-05: surface partial results when the user hit Ctrl-C.
-        if cancel_event.is_set() and not args.quiet:
-            _log_line("WARNING: cancelled by SIGINT; results are partial.",
-                      False)
+        # hr-scal-04 / hr-obs-03 / hr-conc-05: one-shot end-of-run warnings.
+        _emit_run_warnings(config, cancel_event, args.quiet)
 
         # ---- Summary on stderr (the user's safety net) ----
         if not args.quiet:
-            # hr-obs-01: abbreviate big counts so the line stays readable.
-            f = _fmt_count
-            # hr-obs-02: the per-stage `*_errors` totals count EVERY None
-            # digest, including benign vanished (ENOENT/ESTALE) and shrank
-            # (truncated mid-run) skips. Subtract those subsets so the
-            # printed `hash_errors` is the count of REAL failures worth
-            # investigating (EACCES/EIO/...), matching the counter's
-            # documented contract. Clamp at 0 in case of any miscount.
-            total_hash_errors = info["stage1_errors"] + info["stage2_errors"]
-            real_hash_errors = max(
-                0,
-                total_hash_errors
-                - config.hash_skipped_vanished
-                - config.hash_skipped_shrank,
-            )
-            _log_line(
-                f"dirs={f(walk_stats['dirs'])} "
-                f"files={f(walk_stats['files'])} "
-                f"inodes={f(info['inodes'])} "
-                f"size_collision_inodes={f(info['candidates'])} "
-                f"hashed_stage1={f(info['stage1'])} "
-                f"hashed_stage2={f(info['stage2'])} "
-                f"dup_groups={f(dup_groups)} "
-                f"dup_paths={f(dup_paths)} "
-                f"walk_errors={f(walk_stats['dir_errors'])}+"
-                f"{f(walk_stats['entry_errors'])} "
-                f"hash_errors={f(real_hash_errors)} "
-                f"hash_skipped={f(config.hash_skipped_vanished)} "
-                f"hash_shrank={f(config.hash_skipped_shrank)} "
-                f"walk_s={walk_seconds:.2f} hash_s={hash_seconds:.2f}",
-                False,
-            )
+            _print_run_summary(walk_stats, info, config, dup_groups,
+                               dup_paths, walk_seconds, hash_seconds)
     finally:
-        # hr-log-02 / hr-log-03: flush + close the hashes dump if it was
-        # opened. This finally runs on a normal return AND on a Ctrl-C
-        # KeyboardInterrupt (a second Ctrl-C, after the cooperative cancel),
-        # so the file is always closed. The close is guarded so a flush
-        # error can't skip the SIGINT-handler restore below.
-        if hashes_state["writer"] is not None:
-            try:
-                # hr-obs-10: surface hardlinks elided at ingest by the alias
-                # cap instead of silently omitting them from the dump.
-                hashes_state["writer"].write_overflow(dump_overflow)
-            except OSError as exc:
-                _log_line(f"WARNING: writing {args.hashes_file} failed: {exc}",
-                          False)
-            finally:
-                # hr-rob-01: a second Ctrl-C landing inside the write loop above
-                # raises KeyboardInterrupt (not OSError); without this finally
-                # the close would be skipped and the fd leaked. Close here so
-                # the fd is released on every exit path.
-                try:
-                    hashes_state["writer"].close()
-                except OSError as exc:
-                    _log_line(
-                        f"WARNING: closing {args.hashes_file} failed: {exc}",
-                        False)
-        # hr-rel-20: always restore the previous SIGINT handler so a
-        # second run (or a host that imports and calls main()) gets a
-        # clean signal stack. `signal.getsignal` returns None when the
-        # previous handler was installed from C (or wasn't installed at
-        # all); `signal.signal` rejects None, so fall back to SIG_DFL.
-        signal.signal(
-            signal.SIGINT,
-            previous_sigint if previous_sigint is not None else signal.SIG_DFL,
-        )
+        # hr-log-02 / hr-log-03 / hr-rel-20: flush + close the dump and restore
+        # the SIGINT handler on every exit path (normal return AND second
+        # Ctrl-C KeyboardInterrupt).
+        _finalize_hash_dump(hashes_state, dump_overflow, args.hashes_file,
+                            previous_sigint)
 
 
 def _fmt_count(n: int) -> str:

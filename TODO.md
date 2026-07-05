@@ -73,7 +73,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cmplx-02 | open | med | hash-recursive-ai5.py:1637 — `main()` spans ~1637-1924 (~190 lines) with 5 nested closures and many try/if branches; cognitive complexity far above the ceiling. Extract stdio setup, dump flush, and the summary block into helpers. | AGENTS complexity<=10
 ie-cx-14 | open | low | import_events.py:690 — `ModelConfig.from_args` cyclomatic complexity is 12 (>10 bar); split path/default resolution, digest selection, and numeric option normalization. | radon CC=12
 ie-cx-15 | open | med | import_events.py:1044 — `_download_to_cache` cyclomatic complexity is 12 (>10 bar); split resume setup, request/read loop, and completion/verification handling. | radon CC=12
 ie-cx-10 | open | med | import_events.py:1435 — `_normalize_loose_time` cyclomatic complexity 15 (>10 bar); split the AM/PM vs 24h coercion into helpers. | radon CC=15
