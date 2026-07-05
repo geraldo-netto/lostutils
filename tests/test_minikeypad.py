@@ -470,10 +470,11 @@ def test_ensure_pyusb_short_circuits_when_already_loaded(monkeypatch):
     assert minikeypad._ensure_pyusb() is True
 
 
-def test_ensure_pyusb_returns_false_when_install_fails(monkeypatch):
+def test_ensure_pyusb_returns_false_when_install_fails(monkeypatch, caplog):
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
     monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: False)
     assert minikeypad._ensure_pyusb() is False
+    assert "Automatic install failed" in caplog.text
 
 
 def test_ensure_pyusb_installs_pinned_requirement(monkeypatch):

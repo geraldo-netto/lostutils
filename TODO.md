@@ -155,7 +155,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-obs-01 | open | low | dedupl_numpy.py:58 — the `equal files: X / N` summary is `print()`ed to stdout, intermixed with the machine-readable duplicate-path list written to `sys.stdout.buffer` (lines 55-57); route the summary to stderr (as remove-deduplv3.py does) so stdout stays a clean path stream. | three-pillars logs; stdout hygiene
-mkp-obs-01 | open | low | minikeypad.py:93,95,101,105 — `_ensure_pyusb`/`_pip_install` emit progress with `print()` rather than `LOG`, bypassing the configured handler/format/level (logging is configured in `main` before the call). Route through `LOG`. | inconsistent with rest of module
 rf-obs-07 | open | med | relocate_folder.py:1033 — `_chown_pair` logs one `could not chown …` warning per entry on `PermissionError`, and `_replicate_ownership` always fans out the full pool regardless of euid; a non-root migration of a tree owned by another user emits one warning per file (log flood). Summarize like the rmtree cleanup (cap at N + suppressed count) and/or skip when `os.geteuid() != 0` can't change owner. | silent-failure/log-flood
 
 ## watchdog

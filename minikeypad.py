@@ -90,19 +90,19 @@ def _ensure_pyusb():
     global _USB_OK, _USB_ERR, usb
     if _USB_OK:
         return True
-    print(f"pyusb not found; installing pinned dependency ({PYUSB_REQUIREMENT})...")
+    LOG.warning("pyusb not found; installing pinned dependency (%s)...", PYUSB_REQUIREMENT)
     if not _pip_install(PYUSB_REQUIREMENT):
-        print(f"Automatic install failed. Install manually: pip install {PYUSB_REQUIREMENT}")
+        LOG.error("Automatic install failed. Install manually: pip install %s", PYUSB_REQUIREMENT)
         return False
     try:
         import usb.core
         import usb.util
         _USB_OK, _USB_ERR = True, ""
-        print("pyusb installed.")
+        LOG.info("pyusb installed.")
         return True
     except Exception as e:
         _USB_ERR = repr(e)
-        print("pyusb installed but import still failed: %s" % _USB_ERR)
+        LOG.error("pyusb installed but import still failed: %s", _USB_ERR)
         return False
 
 
