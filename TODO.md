@@ -99,7 +99,6 @@ rf-cx-01 | open | low | relocate_folder.py:1091 — `_iter_verify_tasks` cycloma
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 bt-dup-01 | open | med | bookmark-tidy.py:1442-1449 — `_run` duplicates the full body of `tidy_bookmarks` (deduplicate → guard → `_assign_categories`); collapse `_run` onto `tidy_bookmarks` to keep one code path. | within-file dup
-rf-dup-05 | open | med | relocate_folder.py:716 — the rmtree `onerror` collector (failures list + `_record` closure + first-10 warn + overflow warn) is duplicated in `copy_tree` (716-734) and `_copy_and_verify` (1956-1971); extract a shared `_rmtree_logging(path, context)` helper. | AGENTS "shared I/O in one place"
 rdv3-dup-01 | open | low | remove-deduplv3.py:136 — the `print(f"error: {e}", file=sys.stderr); sys.exit(2)` block is duplicated verbatim at 143-145; hoist to a `_fail(msg, code)` helper. | within-file dup
 
 ## architecture/modularity/SOLID

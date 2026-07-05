@@ -638,6 +638,34 @@ def _format_open_file_warning(
 
 # --- copy + verify ----------------------------------------------------------
 
+def _rmtree_logging(path: Path, context: str) -> None:
+    """Best-effort `rmtree(path)` that collects per-entry OSError failures and
+    logs them instead of silently dropping them (rf-obs-02). `context` names the
+    failing operation for the log lines. The caller re-raises the original
+    exception; this only cleans up and records what it could not remove.
+
+    rf-dup-05: shared by the copy_tree and _copy_and_verify cleanup paths so the
+    collector + capped warnings live in one place."""
+    failures: list[tuple[str, OSError]] = []
+
+    def _record(_fn, entry, excinfo):
+        exc = excinfo[1] if isinstance(excinfo, tuple) else excinfo
+        if isinstance(exc, OSError):   # pragma: no branch - rmtree passes OSError-shaped excinfo
+            failures.append((str(entry), exc))
+
+    shutil.rmtree(path, onerror=_record)
+    for entry, exc in failures[:10]:
+        _log().warning("cleanup after %s: could not remove %s: %s", context, entry, exc)
+    if len(failures) > 10:
+        _log().warning(
+            "cleanup: %d more removal errors suppressed; manual cleanup of %s "
+            "may be needed", len(failures) - 10, path)
+    elif failures:
+        _log().warning(
+            "partial target %s may still exist after a failed cleanup; manual "
+            "removal may be needed before re-running", path)
+
+
 def copy_tree(src: Path, dst: Path, *,
               mode_cache: dict[Path, int] | None = None,
               jobs: int | None = None,
@@ -719,25 +747,7 @@ def copy_tree(src: Path, dst: Path, *,
         # half-written `dst` survived a failed copy (read-only mount,
         # permission-denied target). The original exception is still
         # raised — the warning is informational.
-        rmtree_failures: list[tuple[str, OSError]] = []
-
-        def _record(_fn, path, excinfo):
-            exc = excinfo[1] if isinstance(excinfo, tuple) else excinfo
-            if isinstance(exc, OSError):   # pragma: no branch - shutil.rmtree only passes OSError-shaped excinfo
-                rmtree_failures.append((str(path), exc))
-
-        shutil.rmtree(dst, onerror=_record)
-        for path, exc in rmtree_failures[:10]:
-            _log().warning(
-                "cleanup after failed copy: could not remove %s: %s",
-                path, exc,
-            )
-        if len(rmtree_failures) > 10:
-            _log().warning(
-                "cleanup: %d more removal errors suppressed; "
-                "manual cleanup of %s may be needed",
-                len(rmtree_failures) - 10, dst,
-            )
+        _rmtree_logging(dst, "failed copy")
         raise
     _replicate_ownership(src, dst, jobs=jobs)
     return skipped
@@ -1975,22 +1985,7 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
         # rf-obs-02: record rmtree failures (like the copy_tree cleanup) instead
         # of ignore_errors=True silently dropping them and the log above claiming
         # a deletion that may not have happened.
-        rmtree_failures: list[tuple[str, OSError]] = []
-
-        def _record(_fn, path, excinfo):
-            exc = excinfo[1] if isinstance(excinfo, tuple) else excinfo
-            if isinstance(exc, OSError):  # pragma: no branch
-                rmtree_failures.append((str(path), exc))
-
-        shutil.rmtree(plan.target, onerror=_record)
-        for path, exc in rmtree_failures[:10]:
-            _log().warning(
-                "cleanup after verify failure: could not remove %s: %s",
-                path, exc)
-        if rmtree_failures:
-            _log().warning(
-                "partial target %s may still exist after a failed cleanup; "
-                "manual removal may be needed before re-running", plan.target)
+        _rmtree_logging(plan.target, "verify failure")
         raise
 
 
