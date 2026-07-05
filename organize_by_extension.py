@@ -548,6 +548,32 @@ def is_bucketed_file(
     return ext_dir == resolve_real_extension(path, ctx=ctx)
 
 
+def _scan_regular_path(
+    entry: "os.DirEntry[str]",
+    skip: set[str],
+    root: Path,
+    symlink_resolve_cache: dict[Path, Path | None],
+) -> Path | None:
+    """Return the :class:`Path` for a regular, non-skipped file entry, else None.
+
+    oze-conc-04: a single `stat(follow_symlinks=False)` and a branch on
+    `st_mode` so a hostile filesystem can't swap a symlink for a regular file
+    between checks. oze-sec-02: a skipped symlink that escapes `root` is logged
+    as defence-in-depth (the file is never read or moved regardless)."""
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return None
+    mode = st.st_mode
+    if _stat.S_ISLNK(mode) or not _stat.S_ISREG(mode):
+        if _stat.S_ISLNK(mode):
+            _warn_if_symlink_escapes_root(Path(entry.path), root, symlink_resolve_cache)
+        return None
+    if entry.path in skip:
+        return None
+    return Path(entry.path)
+
+
 def list_files(
     root: Path,
     skip_paths: Iterable[Path],
@@ -573,25 +599,8 @@ def list_files(
     scanned = 0   # oze-obs-04: regular files examined so far (for scan progress)
     symlink_resolve_cache: dict[Path, Path | None] = {}
     for entry in _walk_scandir(root):
-        # oze-conc-04: single `stat(follow_symlinks=False)` and branch on
-        # `st_mode` so a hostile filesystem can't swap a symlink for a
-        # regular file between `is_symlink()` and `is_file()` checks.
-        try:
-            st = entry.stat(follow_symlinks=False)
-        except OSError:
-            continue
-        mode = st.st_mode
-        if _stat.S_ISLNK(mode) or not _stat.S_ISREG(mode):
-            # oze-sec-02: log when a symlink we're already skipping
-            # points OUTSIDE `root`. The skip itself is the safety
-            # guarantee; the log is defence-in-depth so a sysadmin who
-            # accidentally added a symlink pointing into /etc sees that
-            # the script ignored it instead of silently following it.
-            if _stat.S_ISLNK(mode):
-                _warn_if_symlink_escapes_root(Path(entry.path), root, symlink_resolve_cache)
-            continue
-        path = Path(entry.path)
-        if entry.path in skip:
+        path = _scan_regular_path(entry, skip, root, symlink_resolve_cache)
+        if path is None:
             continue
         # oze-obs-04: the scan can run for minutes on a large tree (every file
         # is opened for header sniffing) and previously emitted nothing until

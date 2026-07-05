@@ -90,7 +90,6 @@ lq-cx-04 | open | low | link_queue.py:1337 — `Dispatcher._ensure_immediate_poo
 lq-cx-05 | open | low | link_queue.py:1920 — `Dispatcher._run_item` cyclomatic complexity is 13 (>10 bar); split process spawn, streaming, timeout, and metric recording. | radon CC=13
 lq-cx-06 | open | med | link_queue.py:2140 — `Dispatcher._pick_next_item` cyclomatic complexity is 19 (>10 bar); isolate eligibility checks, domain-cap scoring, and claim mutation. | radon CC=19
 lq-cx-07 | open | low | link_queue.py:3704 — `LinkQueueApp._update_status` cyclomatic complexity is 12 (>10 bar); extract status counters and message formatting. | radon CC=12
-oze-cx-01 | open | low | organize_by_extension.py:534 — `list_files` cyclomatic complexity is 13 (>10 bar); split skip-path checks, bucket detection, and verbose logging. | radon CC=13
 oze-cx-02 | open | med | organize_by_extension.py:1938 — `organize` cyclomatic complexity is 21 (>10 bar); split scan, plan, execute, and prune phases into smaller helpers. | radon CC=21
 
 ## code duplication
