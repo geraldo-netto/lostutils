@@ -73,7 +73,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cx-15 | open | med | import_events.py:1044 — `_download_to_cache` cyclomatic complexity is 12 (>10 bar); split resume setup, request/read loop, and completion/verification handling. | radon CC=12
 ie-cx-10 | open | med | import_events.py:1435 — `_normalize_loose_time` cyclomatic complexity 15 (>10 bar); split the AM/PM vs 24h coercion into helpers. | radon CC=15
 ie-cx-16 | open | low | import_events.py:1637 — `_date_parts_from_values` cyclomatic complexity is 11 (>10 bar); extract year/month/day validation and two-digit-year expansion. | radon CC=11
 ie-cx-11 | open | med | import_events.py:1672 — `_split_table_time` cyclomatic complexity 25, by far the worst in the file; extract the has-time-columns token parse and the explicit-regex parse into named helpers. | radon CC=25

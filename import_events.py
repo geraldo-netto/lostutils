@@ -1099,6 +1099,35 @@ def _guard_download_stall(part: Path, now: float, last_progress_at: float) -> No
         )
 
 
+def _perform_download(request, part: Path, path: Path, start_at: int,
+                      shown_path: str) -> None:
+    """Open `request`, stream to the `.part` file (resuming when the server
+    honors the range with a 206), then publish the completed file (ie-cx-15)."""
+    with urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+        status = _response_status(response)
+        mode = "ab" if start_at and status == 206 else "wb"
+        if start_at and status != 206:
+            logger.warning("Server did not honor resume for %s; restarting download.", shown_path)
+            start_at = 0
+        downloaded = _stream_download(response, part, mode, start_at)
+    _publish_complete_part(part, path)
+    _log_download_progress(path, downloaded, downloaded)
+
+
+def _try_complete_on_416(exc: HTTPError, part: Path, path: Path,
+                         start_at: int) -> bool:
+    """Handle a 416 during a resume: the `.part` is already complete when its
+    size matches the server's Content-Range total, so publish it (ie-cx-15).
+    Returns True when the download was completed this way."""
+    if not start_at:
+        return False
+    total = _content_range_total(exc.headers.get("Content-Range"))
+    if total == _path_size(part):
+        _publish_complete_part(part, path)
+        return True
+    return False
+
+
 def _download_to_cache(url: str, path_str: str) -> None:
     """Download to a stable .part file, resuming it on the next run when possible."""
     path = Path(path_str)
@@ -1115,21 +1144,10 @@ def _download_to_cache(url: str, path_str: str) -> None:
 
     request = _download_request(url, start_at)
     try:
-        with urlopen(request, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
-            status = _response_status(response)
-            mode = "ab" if start_at and status == 206 else "wb"
-            if start_at and status != 206:
-                logger.warning("Server did not honor resume for %s; restarting download.", shown_path)
-                start_at = 0
-            downloaded = _stream_download(response, part, mode, start_at)
-        _publish_complete_part(part, path)
-        _log_download_progress(path, downloaded, downloaded)
+        _perform_download(request, part, path, start_at, shown_path)
     except HTTPError as exc:
-        if exc.code == 416 and start_at:
-            total = _content_range_total(exc.headers.get("Content-Range"))
-            if total == _path_size(part):
-                _publish_complete_part(part, path)
-                return
+        if exc.code == 416 and _try_complete_on_416(exc, part, path, start_at):
+            return
         logger.warning("Download failed for %s; keeping partial %s (%d bytes): %s",
                        shown_path, shown_part, _path_size(part), exc)
         raise
