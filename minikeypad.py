@@ -222,9 +222,7 @@ class KeypadDevice:
             if self.dev is None:
                 return False
             try:
-                if usb.core.find(idVendor=VID, idProduct=PID) is None:
-                    self.close()
-                    return False
+                self.dev.get_active_configuration()
                 return True
             except Exception:
                 self.close()

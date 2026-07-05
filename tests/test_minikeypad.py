@@ -661,32 +661,28 @@ def test_still_connected_none_when_no_dev():
 
 
 def test_still_connected_true(monkeypatch):
-    usb, _ = make_usb(find_dev=object())
+    usb, _ = make_usb()
     _install_usb(monkeypatch, usb)
     d = minikeypad.KeypadDevice()
-    d.dev = object()
+    d.dev = FakeUsbDev()
     assert d.still_connected() is True
 
 
-def test_still_connected_drops_when_absent(monkeypatch):
-    usb, _ = make_usb(find_dev=None)
+def test_still_connected_uses_existing_handle_not_bus_scan(monkeypatch):
+    usb, _ = make_usb()
     _install_usb(monkeypatch, usb)
+    usb.core.find = lambda **_kw: (_ for _ in ()).throw(AssertionError("bus scan"))
     d = minikeypad.KeypadDevice()
     d.dev = FakeUsbDev()
-    assert d.still_connected() is False
-    assert d.dev is None
+    assert d.still_connected() is True
 
 
 def test_still_connected_exception_drops(monkeypatch):
-    usb, _ = make_usb()
+    usb, USBError = make_usb()
     _install_usb(monkeypatch, usb)
 
-    def boom(**kw):
-        raise RuntimeError("x")
-
-    usb.core.find = boom
     d = minikeypad.KeypadDevice()
-    d.dev = FakeUsbDev()
+    d.dev = FakeUsbDev(cfg_exc=USBError("gone"))
     assert d.still_connected() is False
     assert d.dev is None
 
