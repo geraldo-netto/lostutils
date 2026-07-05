@@ -1682,6 +1682,28 @@ def _warn_orphaned_backup(backup: Path, source: Path) -> None:
     )
 
 
+def _warn_stranded_backup(source: Path) -> None:
+    """rf-robust-06: a SIGKILL between the symlink creation and the backup
+    rmtree in `_backup_target` strands the full-size `<source>.relocate-backup`
+    dir while `source` is already a valid symlink. `already_migrated` then skips
+    and `_orphaned_backup` misses it (source is 'taken'), so the leftover copy
+    silently consumes the space the migration existed to free. Surface it on the
+    skip path with a manual-cleanup hint (never auto-delete a real dir)."""
+    backup = source.with_name(source.name + BACKUP_SUFFIX)
+    try:
+        mode = os.lstat(backup).st_mode
+    except OSError:
+        return
+    if stat.S_ISDIR(mode) and not stat.S_ISLNK(mode):
+        _log().warning(
+            "leftover backup still parked: %s exists though %s is already "
+            "migrated — a previous run was likely killed before removing the "
+            "backup. It still consumes disk; remove it manually once verified: "
+            "`rm -rf %s`",
+            backup, source, backup,
+        )
+
+
 _RENAME_NOREPLACE = 1  # linux/fs.h: fail with EEXIST if the new path exists
 
 
@@ -1785,12 +1807,14 @@ def execute(plan: Plan) -> str:
     try:
         if already_migrated(plan.source, plan.target):
             _advance(MigrationState.ALREADY_MIGRATED)
+            _warn_stranded_backup(plan.source)
             return f"skipped: {plan.source} already symlinks to {plan.target}"
         if _symlink_points_at_empty_target(plan.source, plan.target):
             # rf-rel-01: the symlink is correct but the target was later
             # emptied. validate_source would crash with "already a symlink";
             # treat it as a legitimately-migrated dir and skip instead.
             _advance(MigrationState.ALREADY_MIGRATED)
+            _warn_stranded_backup(plan.source)
             return (f"skipped: {plan.source} already symlinks to {plan.target} "
                     f"(already migrated, empty target)")
         orphan = _orphaned_backup(plan.source)

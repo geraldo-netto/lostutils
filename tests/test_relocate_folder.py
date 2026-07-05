@@ -441,6 +441,26 @@ def test_execute_end_to_end_migrates_and_verifies():
         assert (dst_root / "cache" / "sub" / "file.txt").read_text() == "hello world"
 
 
+# --- rf-robust-06: stranded backup on the already-migrated skip path ---------
+
+def test_execute_warns_on_stranded_backup_when_already_migrated(tmp_path, caplog):
+    source = tmp_path / "cache"
+    _make_tree(source)
+    plan = rf.Plan(source=source, target=tmp_path / "dest" / "cache")
+    assert rf.execute(plan).startswith("ok:")
+    # Simulate a kill between the symlink creation and the backup rmtree: a
+    # full-size <source>.relocate-backup dir is left parked while source is
+    # already a valid symlink.
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    backup.mkdir()
+    (backup / "leftover.txt").write_text("stale")
+    import logging
+    with caplog.at_level(logging.WARNING, logger="relocate"):
+        result = rf.execute(plan)
+    assert result.startswith("skipped:")
+    assert any("leftover backup still parked" in r.message for r in caplog.records)
+
+
 # --- rf-scal-03: stream pairs, don't materialise the full list ---------------
 
 def test_replicate_ownership_streams_lazily(tmp_path, monkeypatch):
