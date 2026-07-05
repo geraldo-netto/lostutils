@@ -514,6 +514,18 @@ def test_state_file_lock_pidfile_rejects_live_pid(tmp_path, monkeypatch):
         link_queue.StateFileLock(state_path).acquire()
 
 
+def test_state_file_lock_flock_release_keeps_lockfile(tmp_path):
+    if link_queue.fcntl is None:
+        pytest.skip("fcntl flock path unavailable")
+    state_path = str(tmp_path / "state.yaml")
+    lock = link_queue.StateFileLock(state_path)
+
+    lock.acquire()
+    lock.release()
+
+    assert os.path.exists(state_path + ".lock")
+
+
 def test_save_state_persists_immediate_backlog(tmp_path, monkeypatch):
     # lq-rel-01: the immediate work-queue backlog is snapshotted into a third
     # "immediate" bucket so an unprocessed paste survives shutdown.

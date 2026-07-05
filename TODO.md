@@ -62,7 +62,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-dist-02 | open | med | link_queue.py:248 — `StateFileLock._release_flock` unlinks the lockfile on release — the classic flock+unlink race: another process can open+flock the same inode before the unlink, then a third creates a fresh inode and also locks, so two instances both own the queue. Don't unlink the flock lockfile on release (or unlink only under a guard). | STRIDE Elevation/Tampering; single-instance guarantee broken
 
 ## dependability
 

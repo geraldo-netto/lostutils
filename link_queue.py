@@ -281,7 +281,6 @@ class StateFileLock:
         finally:
             self._fh.close()
             self._fh = None
-            self._unlink_lock_file()
 
     def _release_pidfile(self) -> None:
         if self._fd is None:
