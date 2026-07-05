@@ -700,20 +700,31 @@ class ModelConfig:
     workers: int = DEFAULT_WORKERS
     deterministic_order: bool = DEFAULT_DETERMINISTIC_ORDER
 
-    @classmethod
-    def from_args(cls, args: argparse.Namespace) -> "ModelConfig":
-        cache_dir = (Path(args.model_cache_dir).expanduser()
-                     if args.model_cache_dir else _default_cache_dir())
-        default_model_path = str(cache_dir / MODEL_FILENAME)
-        default_clip_path = str(cache_dir / CLIP_FILENAME)
-        model_path = args.model_path or default_model_path
-        clip_path = args.clip_path or default_clip_path
+    @staticmethod
+    def _resolve_paths_and_digests(
+        args: argparse.Namespace, cache_dir: Path,
+    ) -> Tuple[str, str, Optional[str], Optional[str]]:
+        """Resolve model/clip file paths and their SHA-256 pins (ie-cx-14).
+
+        A custom --model-path/--clip-path disables the shipped default pin
+        (so a hand-supplied file isn't rejected for hash mismatch) unless the
+        caller pins it explicitly with --model-sha256/--clip-sha256."""
+        model_path = args.model_path or str(cache_dir / MODEL_FILENAME)
+        clip_path = args.clip_path or str(cache_dir / CLIP_FILENAME)
         model_sha256 = args.model_sha256 if args.model_sha256 is not None else (
             MODEL_SHA256 if args.model_path is None else None
         )
         clip_sha256 = args.clip_sha256 if args.clip_sha256 is not None else (
             CLIP_SHA256 if args.clip_path is None else None
         )
+        return model_path, clip_path, model_sha256, clip_sha256
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "ModelConfig":
+        cache_dir = (Path(args.model_cache_dir).expanduser()
+                     if args.model_cache_dir else _default_cache_dir())
+        model_path, clip_path, model_sha256, clip_sha256 = \
+            cls._resolve_paths_and_digests(args, cache_dir)
         return cls(
             model_path=model_path,
             clip_path=clip_path,
