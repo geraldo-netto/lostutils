@@ -73,7 +73,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cmplx-03 | open | low | hash-recursive-ai5.py:1174 — `_stage1_hash` cyclomatic complexity is 11 (>10 bar); split progress callback construction and alias/head bucketing branches. | radon CC=11
 hr-cmplx-04 | open | med | hash-recursive-ai5.py:1310 — `find_duplicate_groups` spans 128 lines and orchestrates indexing, staged hashing, alias handling, callbacks, and final grouping in one function. Split stage orchestration from result assembly. | fat function / AGENTS complexity bar
 hr-cmplx-02 | open | med | hash-recursive-ai5.py:1637 — `main()` spans ~1637-1924 (~190 lines) with 5 nested closures and many try/if branches; cognitive complexity far above the ceiling. Extract stdio setup, dump flush, and the summary block into helpers. | AGENTS complexity<=10
 ie-cx-14 | open | low | import_events.py:690 — `ModelConfig.from_args` cyclomatic complexity is 12 (>10 bar); split path/default resolution, digest selection, and numeric option normalization. | radon CC=12

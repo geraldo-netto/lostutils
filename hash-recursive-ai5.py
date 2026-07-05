@@ -1200,6 +1200,18 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
     head_by_key, errors = _run_stage(
         candidates, _make_head_candidate_batch(rep, config), stage1_bytes,
         jobs, **run_kwargs)
+    by_head = _bucket_stage1_heads(
+        candidates, head_by_key, rep, aliases, config, on_hashed)
+    return by_head, {"stage1": len(head_by_key), "stage1_errors": errors}
+
+
+def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashed):
+    """Bucket hashed candidates by ``(size, head)`` (hr-cmplx-03).
+
+    A None head on a multi-alias inode is retried on the next readable sibling
+    (hr-rel-02); ``on_hashed(done, total, head, key, aliases)`` is invoked once
+    per candidate on the main thread (hr-log-02). Keys absent from
+    ``head_by_key`` or still None after retry are dropped from the buckets."""
     by_head: dict = defaultdict(list)
     total = len(candidates)
     for done, (size, key) in enumerate(candidates, 1):
@@ -1213,7 +1225,7 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
         if head is None:
             continue
         by_head[(size, head)].append(key)
-    return by_head, {"stage1": len(head_by_key), "stage1_errors": errors}
+    return by_head
 
 
 def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
