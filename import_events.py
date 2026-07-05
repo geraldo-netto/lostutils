@@ -1513,21 +1513,9 @@ def _format_normalized_time(hour: int, minute: int = 0, second: int = 0) -> Opti
     return f"{hour:02d}:{minute:02d}{suffix}"
 
 
-def _normalize_loose_time(clock: str) -> Optional[str]:
-    """Coerces a loosely-formatted clock (e.g. '2 PM', '21.15') into HH:MM."""
-    clock = clock.strip()
-    if _TIME_SHAPE.fullmatch(clock):
-        hour, minute, *rest = [int(part) for part in clock.split(":")]
-        return _format_normalized_time(hour, minute, rest[0] if rest else 0)
-    match = _LOOSE_TIME_AMPM.match(clock)
-    if not match:
-        match = _LOOSE_TIME_24H.match(clock)
-        if not match:
-            return None
-        return _format_normalized_time(
-            int(match.group(1)), int(match.group(2) or match.group(4) or 0),
-            int(match.group(3) or 0),
-        )
+def _parse_ampm_time(match: "re.Match[str]") -> Optional[str]:
+    """Coerce a 12-hour AM/PM regex match into HH:MM (ie-cx-10), or None when
+    the hour falls outside the 1-12 range."""
     hour = int(match.group(1))
     if not 1 <= hour <= 12:
         return None
@@ -1537,6 +1525,29 @@ def _normalize_loose_time(clock: str) -> Optional[str]:
     elif match.group(3).lower() == "a" and hour == 12:
         hour = 0
     return _format_normalized_time(hour, minute)
+
+
+def _parse_24h_time(match: "re.Match[str]") -> Optional[str]:
+    """Coerce a 24-hour regex match into HH:MM (ie-cx-10)."""
+    return _format_normalized_time(
+        int(match.group(1)), int(match.group(2) or match.group(4) or 0),
+        int(match.group(3) or 0),
+    )
+
+
+def _normalize_loose_time(clock: str) -> Optional[str]:
+    """Coerces a loosely-formatted clock (e.g. '2 PM', '21.15') into HH:MM."""
+    clock = clock.strip()
+    if _TIME_SHAPE.fullmatch(clock):
+        hour, minute, *rest = [int(part) for part in clock.split(":")]
+        return _format_normalized_time(hour, minute, rest[0] if rest else 0)
+    match = _LOOSE_TIME_AMPM.match(clock)
+    if match:
+        return _parse_ampm_time(match)
+    match = _LOOSE_TIME_24H.match(clock)
+    if match:
+        return _parse_24h_time(match)
+    return None
 
 
 def _coerce_start(event: Dict[str, Any]) -> str:
