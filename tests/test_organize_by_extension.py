@@ -3108,6 +3108,35 @@ class SourceCollisionResolution(unittest.TestCase):
                 )
             self.assertNotIn(src.name, mgr.state_cache[bucket.path])
 
+    def test_drain_futures_logs_stalled_move_worker(self):
+        from concurrent.futures import Future
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            src = root / "f.txt"
+            fut: Future = Future()
+            fut.set_result((src, root / "dst", None))
+            futures = {fut: src}
+            stats = _oze._RunStats()
+            calls = []
+
+            def fake_wait(futures_arg, timeout, return_when):
+                self.assertEqual(timeout, 0.01)
+                self.assertIs(return_when, _oze.FIRST_COMPLETED)
+                calls.append(len(calls))
+                if len(calls) == 1:
+                    return set(), set(futures_arg)
+                return {fut}, set()
+
+            with patch.object(_oze, "wait", side_effect=fake_wait):
+                with self.assertLogs("organize_by_extension", level="WARNING") as cm:
+                    _oze._drain_futures(
+                        futures, stats, preview=False, head_cache={},
+                        wait_timeout=0.01,
+                    )
+
+            self.assertIn("move stage stalled", "\n".join(cm.output))
+            self.assertEqual(stats.processed, 1)
+
     def test_run_moves_cancels_pending_futures_on_unexpected_error(self):
         shutdown_calls = []
 

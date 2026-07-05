@@ -54,6 +54,7 @@ ROOT_MAX_LENGTH = 4096
 # in MAGIC_SIGNATURES (longest is the OLE2 8-byte stamp; ISO BMFF needs offset
 # 4 + 4 bytes; RIFF subtype needs offset 8 + 4 bytes), with slack.
 HEADER_SNIFF_BYTES = 32
+MOVE_STALL_WARN_SECONDS = 60.0
 # oze-rel-05/oze-rel-08: refuse to treat out-of-range bucket indices as the
 # floor for new allocations. Matches the regex contract exactly: 5 digits → 0..99999.
 BUCKET_INDEX_MAX = 99_999
@@ -1922,10 +1923,20 @@ def _drain_futures(
     preview: bool,
     head_cache: dict[Path, HeadBytes],
     manager: BucketManager | None = None,
+    wait_timeout: float = MOVE_STALL_WARN_SECONDS,
 ) -> None:
     """Block until at least one future completes, then log results and prune
     the head_cache for finished sources (oze-conc-03 / oze-scal-05)."""
-    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+    while True:
+        done, _ = wait(
+            futures, timeout=wait_timeout, return_when=FIRST_COMPLETED)
+        if done:
+            break
+        logger.warning(
+            "move stage stalled: no completed worker for %.0fs "
+            "(%d in flight)",
+            wait_timeout, len(futures),
+        )
     for fut in done:
         source = futures.pop(fut)
         head_cache.pop(source, None)
