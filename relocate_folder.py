@@ -4,7 +4,7 @@
 Typical use: move heavyweight cache/state directories off the home volume.
 
 Example:
-    sudo python relocate.py ~/.cache /backups/disk1/apps/profile
+    sudo python relocate_folder.py ~/.cache /backups/disk1/apps/profile
     # result: ~/.cache -> /backups/disk1/apps/profile/.cache (symlink)
 
 What it does
