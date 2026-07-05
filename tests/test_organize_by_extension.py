@@ -3843,6 +3843,61 @@ def test_drain_futures_skips_unexpected_worker_exception(tmp_path):
     assert src not in head_cache, "head_cache not pruned for failed source"
 
 
+def test_scan_stall_monitor_warns_once_until_entry_finishes():
+    now = [0.0]
+    path = Path("slow.bin")
+    monitor = oze._ScanStallMonitor(warning_after=5.0, now_fn=lambda: now[0])
+
+    with patch.object(oze.logger, "warning") as warning:
+        monitor.begin(path)
+        now[0] = 4.9
+        monitor._maybe_warn()
+        warning.assert_not_called()
+
+        now[0] = 5.0
+        monitor._maybe_warn()
+        warning.assert_called_once()
+
+        monitor._maybe_warn()
+        warning.assert_called_once()
+
+        monitor.end(path)
+        now[0] = 10.0
+        monitor._maybe_warn()
+        warning.assert_called_once()
+
+
+def test_list_files_wraps_bucket_check_with_scan_monitor(tmp_path):
+    source = tmp_path / "a.txt"
+    source.write_text("x", encoding="utf-8")
+    events = []
+
+    class FakeMonitor:
+        def start(self):
+            events.append(("start", None))
+
+        def stop(self):
+            events.append(("stop", None))
+
+        def begin(self, path):
+            events.append(("begin", path))
+
+        def end(self, path):
+            events.append(("end", path))
+
+    with patch.object(oze, "_ScanStallMonitor", FakeMonitor):
+        files = oze.list_files(
+            tmp_path, [], ctx=oze.SniffContext(sniff=False))
+
+    assert files == [source]
+    assert events == [
+        ("start", None),
+        ("begin", source),
+        ("end", source),
+        ("stop", None),
+    ]
+
+
 def test_cross_device_source_unlink_failure_surfaced_not_raised(tmp_path, monkeypatch, caplog):
     """oze-robust-01: a failed source removal after a committed cross-device
     copy is logged loudly (duplicate left) and does NOT raise — the target is

@@ -22,6 +22,7 @@ import os
 import secrets
 import stat as _stat
 import re
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
@@ -54,6 +55,7 @@ ROOT_MAX_LENGTH = 4096
 # in MAGIC_SIGNATURES (longest is the OLE2 8-byte stamp; ISO BMFF needs offset
 # 4 + 4 bytes; RIFF subtype needs offset 8 + 4 bytes), with slack.
 HEADER_SNIFF_BYTES = 32
+SCAN_STALL_WARN_SECONDS = 60.0
 MOVE_STALL_WARN_SECONDS = 60.0
 # oze-rel-05/oze-rel-08: refuse to treat out-of-range bucket indices as the
 # floor for new allocations. Matches the regex contract exactly: 5 digits → 0..99999.
@@ -395,6 +397,61 @@ class SniffContext:
 _DEFAULT_SNIFF_CTX = SniffContext()
 
 
+class _ScanStallMonitor:
+    """Warn when one scan-stage file check is stuck for too long."""
+
+    def __init__(self, warning_after=SCAN_STALL_WARN_SECONDS, now_fn=time.monotonic):
+        self._warning_after = warning_after
+        self._now = now_fn
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._path: Path | None = None
+        self._started = self._now()
+        self._warned = False
+        self._thread = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+    def begin(self, path: Path) -> None:
+        with self._lock:
+            self._path = path
+            self._started = self._now()
+            self._warned = False
+
+    def end(self, path: Path) -> None:
+        with self._lock:
+            if self._path == path:
+                self._path = None
+
+    def _run(self) -> None:
+        interval = max(1.0, min(self._warning_after / 4.0, 10.0))
+        while not self._stop.wait(interval):
+            self._maybe_warn()
+
+    def _maybe_warn(self) -> None:
+        now = self._now()
+        with self._lock:
+            if self._path is None or self._warned:
+                return
+            elapsed = now - self._started
+            if elapsed < self._warning_after:
+                return
+            self._warned = True
+            path = self._path
+        logger.warning(
+            "scan stage stalled: checking %s has taken %.0fs; "
+            "header sniff I/O may be blocked",
+            path, elapsed,
+        )
+
+
 def _weak_header_should_keep_declared(declared: str, detected: str) -> bool:
     return declared != "no_extension" and detected in WEAK_HEADER_LABELS
 
@@ -599,37 +656,47 @@ def list_files(
     already_bucketed = 0
     scanned = 0   # oze-obs-04: regular files examined so far (for scan progress)
     symlink_resolve_cache: dict[Path, Path | None] = {}
-    for entry in _walk_scandir(root):
-        path = _scan_regular_path(entry, skip, root, symlink_resolve_cache)
-        if path is None:
-            continue
-        # oze-obs-04: the scan can run for minutes on a large tree (every file
-        # is opened for header sniffing) and previously emitted nothing until
-        # the single "Scanning complete" line at the end. Emit a heartbeat every
-        # PROGRESS_EVERY regular files so `--verbose` shows the scan is alive and
-        # a Ctrl+C isn't mistaken for a freeze. Logs at INFO (visible under -v),
-        # matching the move-stage progress cadence.
-        scanned += 1
-        # oze-obs-06: -vv emits one line per file so a long silent scan on a
-        # smaller-but-slow tree (header sniff opens each file) shows live
-        # progress before the 10k-file INFO heartbeat would ever fire.
-        logger.debug("scan: %s", path)
-        if scanned % PROGRESS_EVERY == 0:
-            logger.info(
-                "scanning: %d files seen (%d to move, %d already bucketed)",
-                scanned, len(files), already_bucketed,
-            )
-        if is_bucketed_file(root, path, ctx=ctx):
-            already_bucketed += 1
-            # oze-scal-02: an already-bucketed file is dropped from the plan, so
-            # its head-bytes are never re-read in planning. Evict the scan-phase
-            # cache entry now instead of leaving it pinned for the whole run —
-            # peak head_cache no longer holds one HeadBytes per *scanned* file,
-            # only per file still pending a move (drained as moves complete).
-            if ctx.head_cache is not None:
-                ctx.head_cache.pop(path, None)
-            continue
-        files.append(path)
+    scan_monitor = _ScanStallMonitor()
+    scan_monitor.start()
+    try:
+        for entry in _walk_scandir(root):
+            path = _scan_regular_path(entry, skip, root, symlink_resolve_cache)
+            if path is None:
+                continue
+            # oze-obs-04: the scan can run for minutes on a large tree (every file
+            # is opened for header sniffing) and previously emitted nothing until
+            # the single "Scanning complete" line at the end. Emit a heartbeat every
+            # PROGRESS_EVERY regular files so `--verbose` shows the scan is alive and
+            # a Ctrl+C isn't mistaken for a freeze. Logs at INFO (visible under -v),
+            # matching the move-stage progress cadence.
+            scanned += 1
+            # oze-obs-06: -vv emits one line per file so a long silent scan on a
+            # smaller-but-slow tree (header sniff opens each file) shows live
+            # progress before the 10k-file INFO heartbeat would ever fire.
+            logger.debug("scan: %s", path)
+            if scanned % PROGRESS_EVERY == 0:
+                logger.info(
+                    "scanning: %d files seen (%d to move, %d already bucketed)",
+                    scanned, len(files), already_bucketed,
+                )
+            scan_monitor.begin(path)
+            try:
+                bucketed = is_bucketed_file(root, path, ctx=ctx)
+            finally:
+                scan_monitor.end(path)
+            if bucketed:
+                already_bucketed += 1
+                # oze-scal-02: an already-bucketed file is dropped from the plan, so
+                # its head-bytes are never re-read in planning. Evict the scan-phase
+                # cache entry now instead of leaving it pinned for the whole run —
+                # peak head_cache no longer holds one HeadBytes per *scanned* file,
+                # only per file still pending a move (drained as moves complete).
+                if ctx.head_cache is not None:
+                    ctx.head_cache.pop(path, None)
+                continue
+            files.append(path)
+    finally:
+        scan_monitor.stop()
     if verbose: # Use logger.info for verbose output
         logger.info(f"Scanning complete. Found {len(files)} files to organize ({already_bucketed} already bucketed).")
     return files
