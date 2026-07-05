@@ -109,6 +109,15 @@ def _require_blake3():
     return blake3
 
 
+def _hash_open_flags() -> int:
+    """Portable flags for opening a file to hash."""
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
 class RunConfig:
     """Per-run configuration + counters (hr-arch-05 / hr-decoup-02).
 
@@ -576,7 +585,7 @@ def _hash_file_windows(path, windows, config=None):
     windows = [w if isinstance(w, FileWindow) else FileWindow(*w)
                for w in windows]
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, _hash_open_flags())
         try:
             f = os.fdopen(fd, "rb", buffering=0)
         except BaseException:

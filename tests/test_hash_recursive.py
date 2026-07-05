@@ -1890,6 +1890,16 @@ def test_read_window_chunks_match_single_read(tmp_path, monkeypatch):
     assert got == blake3.blake3(payload[:hr.CAP]).hexdigest()
 
 
+def test_hash_open_flags_tolerate_missing_posix_flags(tmp_path, monkeypatch):
+    # hr-plat-04: Windows lacks O_NOFOLLOW/O_CLOEXEC; hashing should still
+    # build valid open flags instead of raising AttributeError.
+    f = tmp_path / "f.bin"
+    f.write_bytes(b"abc")
+    monkeypatch.delattr(hr.os, "O_NOFOLLOW", raising=False)
+    monkeypatch.delattr(hr.os, "O_CLOEXEC", raising=False)
+    assert hr.hash_head(str(f)) is not None
+
+
 def test_preflight_root_probe_error_raises_root_error(monkeypatch):
     # An OSError/ValueError from the os.path probes is translated to a
     # typed RootError ("invalid path" branch), never allowed to escape raw.
