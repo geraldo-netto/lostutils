@@ -416,6 +416,33 @@ def test_valid_threshold_rejects_negative_and_garbage(bad):
         dn.valid_threshold(bad)
 
 
+def test_block_knobs_parse_from_cli():
+    args = dn._build_parser().parse_args([
+        "names.txt",
+        "--block-threshold",
+        "12",
+        "--block-rows",
+        "3",
+    ])
+
+    assert args.block_threshold == 12
+    assert args.block_rows == 3
+
+
+@pytest.mark.parametrize("bad", ["-1", "x", "1.5"])
+def test_valid_block_threshold_rejects_negative_and_garbage(bad):
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError):
+        dn.valid_block_threshold(bad)
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "x", "1.5"])
+def test_valid_block_rows_rejects_nonpositive_and_garbage(bad):
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError):
+        dn.valid_block_rows(bad)
+
+
 def test_emit_pairs_threshold_zero_short_circuits(monkeypatch):
     """dnv3-cli-02: threshold 0 emits no cross pairs and does not walk the
     matrix (cdist must not be called)."""

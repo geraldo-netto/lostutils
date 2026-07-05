@@ -103,6 +103,20 @@ def valid_threshold(value):
     return iv
 
 
+def valid_block_threshold(value):
+    iv = _parse_int(value, "block-threshold")
+    if iv < 0:
+        raise argparse.ArgumentTypeError(f"block-threshold must be >= 0, got {iv}")
+    return iv
+
+
+def valid_block_rows(value):
+    iv = _parse_int(value, "block-rows")
+    if iv < 1:
+        raise argparse.ArgumentTypeError(f"block-rows must be >= 1, got {iv}")
+    return iv
+
+
 def parse_word_tokens(value):
     return tuple(token.strip().lower() for token in value.split(",") if token.strip())
 
@@ -130,6 +144,10 @@ def _build_parser():
                     help=f"max distance to report (default {DEFAULT_THRESHOLD})")
     ap.add_argument("-w", "--workers", type=valid_workers, default=-1,
                     help="cdist worker threads (-1 = all cores)")
+    ap.add_argument("--block-threshold", type=valid_block_threshold, default=BLOCK_THRESHOLD,
+                    help=f"row-block matrix when unique cleaned strings exceed this count (default {BLOCK_THRESHOLD})")
+    ap.add_argument("--block-rows", type=valid_block_rows, default=BLOCK_ROWS,
+                    help=f"rows per cdist block after --block-threshold (default {BLOCK_ROWS})")
     ap.add_argument("--strip-chars", default=DEFAULT_STRIP_CHARS,
                     help=f"characters removed during cleanup (default {DEFAULT_STRIP_CHARS!r})")
     ap.add_argument("--word-tokens", type=parse_word_tokens, default=WORD_TOKENS,
@@ -189,10 +207,17 @@ def main():
 
     write = sys.stdout.write
     _emit_self_collisions(line_nums, write)
-    emit_pairs(cleaned_strs, threshold, args.workers, write)
+    emit_pairs(
+        cleaned_strs,
+        threshold,
+        args.workers,
+        write,
+        block_threshold=args.block_threshold,
+        block_rows=args.block_rows,
+    )
 
 
-def emit_pairs(cleaned_strs, threshold, workers, write):
+def emit_pairs(cleaned_strs, threshold, workers, write, block_threshold=None, block_rows=None):
     """Emit upper-triangle pairs with distance ≤ threshold.
 
     cdist clips above-threshold cells to threshold+1 (255 at the 254 cap, no
@@ -207,7 +232,9 @@ def emit_pairs(cleaned_strs, threshold, workers, write):
     if threshold <= 0:
         return
     n = len(cleaned_strs)
-    step = n if n <= BLOCK_THRESHOLD else BLOCK_ROWS
+    block_threshold = BLOCK_THRESHOLD if block_threshold is None else block_threshold
+    block_rows = BLOCK_ROWS if block_rows is None else block_rows
+    step = n if n <= block_threshold else block_rows
     for start in range(0, n, step):
         # dnv3-perf-01: only columns >= start can yield an upper-triangle pair
         # (j > i >= start), so compute against cleaned_strs[start:] instead of
