@@ -68,7 +68,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no BrokenPipeError guard, so piping into `head` raises a BrokenPipeError traceback on close. Wrap the write/flush in a BrokenPipeError handler or restore SIGPIPE to default. | common CLI pipe pattern
-lq-dep-01 | open | med | link_queue.py:2420 — `_worker_step` treats `_run_item`'s `-1` return (spawn rejected: command-not-found, empty/invalid template) identically to a real non-zero subprocess exit and arms a per-domain failure cooldown; a permanently broken protocol then stalls every item on that domain for `failure_sleep_seconds` (default 300 s) in a loop. Skip the cooldown for spawn/infra failure. | fallback amplifies instead of contains a config error
 
 ## code complexity
 

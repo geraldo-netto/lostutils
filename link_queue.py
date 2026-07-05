@@ -2467,7 +2467,8 @@ class Dispatcher:
 
         if exit_code != 0:
             self._record_metric("failures")
-            self._trigger_failure_cooldown(idx, item, exit_code)  # pragma: no cover - trigger cooldown after failure
+            if exit_code != -1:
+                self._trigger_failure_cooldown(idx, item, exit_code)  # pragma: no cover - trigger cooldown after failure
         else:
             self._record_metric("completions")
         self._update_status()

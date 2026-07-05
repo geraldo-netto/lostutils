@@ -3184,6 +3184,21 @@ def test_worker_step_failing_item_records_failure(headless_dispatcher):
     assert headless_dispatcher.metrics["completions"] == 0
 
 
+def test_worker_step_spawn_failure_skips_domain_cooldown(headless_dispatcher):
+    headless_dispatcher.config["sleep_between_items"] = 0
+    headless_dispatcher.config["failure_sleep_seconds"] = 300
+    with headless_dispatcher._dispatch_cv:
+        headless_dispatcher.queue_items[:] = [
+            q("http://fail/1", template="   ")
+        ]
+    ev = threading.Event()
+
+    headless_dispatcher._worker_step(idx=78, stop_self=ev)
+
+    assert headless_dispatcher.metrics["failures"] == 1
+    assert headless_dispatcher._cooldown_until == {}
+
+
 def test_command_timeout_increments_metric(headless_dispatcher):
     class Proc:
         def terminate(self):
