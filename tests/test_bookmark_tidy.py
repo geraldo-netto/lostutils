@@ -747,6 +747,11 @@ def test_load_immutable_file_and_read_all_bookmarks(tmp_path, caplog):
     assert "unsupported bookmark file" in caplog.text
 
 
+def test_load_immutable_file_missing_path_is_user_error(tmp_path):
+    with pytest.raises(bookmark_tidy.UserError, match="could not read immutable file"):
+        bookmark_tidy.load_immutable_file(str(tmp_path / "missing.txt"))
+
+
 def test_read_all_bookmarks_skips_unexpected_parser_error(monkeypatch, tmp_path, caplog):
     bad = tmp_path / "places.sqlite"
     good = tmp_path / "bookmarks.html"

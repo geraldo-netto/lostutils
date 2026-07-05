@@ -1363,9 +1363,14 @@ def default_output_path(output_format: str) -> Path:
 def load_immutable_file(path: str | None) -> list[str]:
     if path is None:
         return []
+    immutable_path = Path(path).expanduser()
+    try:
+        text = immutable_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise UserError(f"could not read immutable file {immutable_path}: {exc}") from exc
     return [
         line.strip()
-        for line in Path(path).expanduser().read_text(encoding="utf-8").splitlines()
+        for line in text.splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
 
