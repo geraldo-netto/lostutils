@@ -849,12 +849,40 @@ def reset_ocr_warnings() -> None:
         _OCR_WARNING_COUNTS.clear()
 
 
+def _cached_paddle_engines(cache: Optional[Any]) -> List[Any]:
+    if not isinstance(cache, dict):
+        return [] if cache is None else [cache]
+    engines = []
+    seen = set()
+    for engine in cache.values():
+        marker = id(engine)
+        if marker not in seen:
+            seen.add(marker)
+            engines.append(engine)
+    return engines
+
+
+def _close_paddle_ocr_engine(engine: Any) -> None:
+    for method_name in ("close", "release"):
+        method = getattr(engine, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            method()
+        except Exception as exc:
+            logger.warning("Failed to close PaddleOCR engine: %s", exc)
+        return
+
+
 def reset_paddle_ocr_state() -> None:
     global _PADDLE_OCR, _PADDLE_OCR_DISABLED, _PADDLE_OCR_MISSING
     with _PADDLE_OCR_LOCK:
+        engines = _cached_paddle_engines(_PADDLE_OCR)
         _PADDLE_OCR = None
         _PADDLE_OCR_DISABLED = False
         _PADDLE_OCR_MISSING = False
+    for engine in engines:
+        _close_paddle_ocr_engine(engine)
 
 
 def _disable_paddle_ocr() -> None:

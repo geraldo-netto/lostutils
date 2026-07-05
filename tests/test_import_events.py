@@ -1368,6 +1368,40 @@ def test_get_paddle_ocr_cached_language_not_blocked_by_other_build(monkeypatch):
     assert built and results[0] is built[0][2]
 
 
+def test_reset_paddle_ocr_state_closes_cached_engines_once(monkeypatch):
+    closed = []
+
+    class Engine:
+        def close(self):
+            closed.append("close")
+
+    engine = Engine()
+    monkeypatch.setattr(
+        import_events,
+        "_PADDLE_OCR",
+        {("en", "cpu"): engine, ("english", "cpu"): engine},
+    )
+    monkeypatch.setattr(import_events, "_PADDLE_OCR_DISABLED", True)
+    monkeypatch.setattr(import_events, "_PADDLE_OCR_MISSING", True)
+
+    import_events.reset_paddle_ocr_state()
+
+    assert closed == ["close"]
+    assert import_events._PADDLE_OCR is None
+    assert import_events._PADDLE_OCR_DISABLED is False
+    assert import_events._PADDLE_OCR_MISSING is False
+
+
+def test_reset_paddle_ocr_state_uses_release_fallback(monkeypatch):
+    released = []
+    engine = type("Engine", (), {"release": lambda self: released.append("release")})()
+    monkeypatch.setattr(import_events, "_PADDLE_OCR", {("en", "cpu"): engine})
+
+    import_events.reset_paddle_ocr_state()
+
+    assert released == ["release"]
+
+
 def test_ocr_warning_summary_counts_suppressed_repeats(caplog):
     import logging
 
