@@ -440,27 +440,31 @@ def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
 
 _PDF_MAGIC = b"%PDF-"
 _PDF_SCAN_CHUNK = 1 << 20   # 1 MiB read window for the embedded-PDF scan
+_PDF_SCAN_MAX_BYTES = 16 << 20
 
 
 def _file_contains_pdf(path: Path) -> bool:
-    """True when the ``%PDF-`` marker appears ANYWHERE in ``path`` (oze-pdf-01).
+    """True when the ``%PDF-`` marker appears near the start of ``path``.
 
     Used only for declared-``.pdf`` files whose header isn't a PDF, to route a
     carrier (Wrapster-style MP3 wrapper, etc.) holding an embedded PDF into
-    pdf/. Streams the whole file in chunks with a small overlap so the marker is
-    never split across a boundary; any read error answers False (treat as
-    not-a-PDF)."""
+    pdf/. Scans a bounded prefix in chunks with a small overlap so the marker is
+    never split across a boundary inside the budget; any read error answers
+    False (treat as not-a-PDF)."""
     overlap = len(_PDF_MAGIC) - 1
     try:
         with open(path, "rb") as fh:
             prev = b""
-            while True:
-                chunk = fh.read(_PDF_SCAN_CHUNK)
+            remaining = _PDF_SCAN_MAX_BYTES
+            while remaining > 0:
+                chunk = fh.read(min(_PDF_SCAN_CHUNK, remaining))
                 if not chunk:
                     return False
+                remaining -= len(chunk)
                 if _PDF_MAGIC in prev + chunk:
                     return True
                 prev = chunk[-overlap:]
+            return False
     except OSError:
         return False
 

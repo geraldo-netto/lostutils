@@ -37,7 +37,6 @@ dnv3-int-01 | open | med | deduplicate-by-namev3.py:120 — `--strip-chars` defa
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
-oze-perf-01 | open | med | organize_by_extension.py:444 — `_file_contains_pdf` streams the ENTIRE file with no size cap, and it is invoked from `resolve_real_extension` (425) inside the single-threaded `_preplan_resolve_collisions` loop (1731); one multi-GB mislabeled `.pdf` (non-PDF header) blocks the whole pipeline before any worker starts, and many serialize. Cap the embedded-PDF scan to first N MiB or move it off the serial plan path. | hot-path/serial planning
 
 ## scalability
 

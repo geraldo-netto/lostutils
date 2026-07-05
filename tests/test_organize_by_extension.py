@@ -4028,6 +4028,14 @@ def test_file_contains_pdf_marker_split_across_chunk(tmp_path, monkeypatch):
     assert _oze._file_contains_pdf(f) is True
 
 
+def test_file_contains_pdf_stops_at_scan_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(_oze, "_PDF_SCAN_CHUNK", 4)
+    monkeypatch.setattr(_oze, "_PDF_SCAN_MAX_BYTES", 8)
+    f = tmp_path / "late.bin"
+    f.write_bytes(b"12345678%PDF-1.4")
+    assert _oze._file_contains_pdf(f) is False
+
+
 def test_file_contains_pdf_absent(tmp_path):
     f = tmp_path / "n.bin"
     f.write_bytes(b"no marker here at all")
