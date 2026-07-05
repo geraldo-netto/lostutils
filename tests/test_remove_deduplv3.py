@@ -33,6 +33,24 @@ def test_unreadable_input_clean_error_exit2(monkeypatch, tmp_path, capsys):
     assert capsys.readouterr().err.startswith("error:")
 
 
+@pytest.mark.parametrize(
+    ("bom", "expected"),
+    [
+        (b"\xff\xfe\x00\x00", "utf-32"),
+        (b"\x00\x00\xfe\xff", "utf-32"),
+        (b"\xff\xfe", "utf-16"),
+        (b"\xfe\xff", "utf-16"),
+        (b"\xef\xbb\xbf", "utf-8-sig"),
+        (b"abcd", "utf-8"),
+    ],
+)
+def test_detect_encoding_from_bom(tmp_path, bom, expected):
+    f = tmp_path / "hashes.txt"
+    f.write_bytes(bom + b"h /a\n")
+
+    assert rd.detect_encoding(f) == expected
+
+
 def test_help_documents_exit_codes(capsys):
     with pytest.raises(SystemExit) as exc:
         rd.parse_args(["--help"])
@@ -55,6 +73,20 @@ def test_invalid_encoding_clean_error_exit3(monkeypatch, tmp_path, capsys):
     err = capsys.readouterr().err
     assert err.startswith("error:")
     assert "unknown encoding" in err
+
+
+def test_strict_decode_error_exits3(monkeypatch, tmp_path, capsys):
+    f = tmp_path / "hashes.txt"
+    f.write_bytes(b"h /a\xff\n")
+    monkeypatch.setattr("sys.argv", ["remove-deduplv3.py", "--strict", str(f)])
+
+    with pytest.raises(SystemExit) as exc:
+        rd.main()
+
+    assert exc.value.code == 3
+    err = capsys.readouterr().err
+    assert "decode error" in err
+    assert "try --encoding" in err
 
 
 def _run(monkeypatch, tmp_path, text):
@@ -96,6 +128,34 @@ def test_survivor_uses_platform_separators(monkeypatch):
     ])
 
     assert keep == r"C:\b\longer-name.txt"
+
+
+def test_survivor_tiebreaks_by_lexicographic_path():
+    keep = rd._survivor(["/z/aa", "/a/bb", "/m/cc"])
+
+    assert keep == "/z/aa"
+
+
+def test_emit_remove_commands_shell_quotes_paths():
+    out = []
+
+    groups, removed = rd._emit_remove_commands(
+        {
+            "h": [
+                "/tmp/keep-this-longest-survivor-name.txt",
+                "/tmp/has spaces.txt",
+                "/tmp/quote'and;$dollar.txt",
+            ]
+        },
+        out.append,
+    )
+
+    text = "".join(out)
+    assert groups == 1
+    assert removed == 2
+    assert rd.shlex.quote("/tmp/has spaces.txt") in text
+    assert rd.shlex.quote("/tmp/quote'and;$dollar.txt") in text
+    assert "rm -f " in text
 
 
 def test_output_starts_with_destructive_command_warning(monkeypatch, tmp_path):

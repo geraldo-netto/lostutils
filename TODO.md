@@ -142,7 +142,6 @@ mkp-sm-01 | open | low | minikeypad.py:1419 — `_run_download` (:1419) and `_ru
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves the array-bounds path (dnp-rel-01) untested; add fixtures with short lines, single line, and md5-vs-sha256 widths to lock behavior. | coverage
-rdv3-test-01 | open | med | remove-deduplv3.py:1 — no unit tests for BOM detection (`detect_encoding`), `_survivor` tiebreak, in-group `dict.fromkeys` dedup, `shlex.quote` command building, or the exit-code contract (2/3). Add focused tests for these critical parse/command-build paths. | test coverage / test-fuzz — command-builder + parser lack the ≥80% focused coverage
 
 ## test / fuzz coverage
 
