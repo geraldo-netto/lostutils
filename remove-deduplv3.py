@@ -59,7 +59,8 @@ def detect_encoding(path):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description="Emit `rm` commands to clear content-duplicates "
-                    "while keeping the entry with the longest basename.")
+                    "while keeping the entry with the longest basename.",
+        epilog="Exit codes: 0 success, 2 input file error, 3 decode error.")
     ap.add_argument("file", help="hash file (one '<hash> <path>' per line)")
     ap.add_argument("--encoding", default=None,
                     help="Force encoding (e.g. utf-8, utf-16, gbk, "

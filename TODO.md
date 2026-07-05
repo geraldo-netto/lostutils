@@ -222,7 +222,6 @@ rf-cfg-01 | open | low | relocate_folder.py:2120 — `main` hardcodes `logging.b
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 oze-api-01 | open | med | organize_by_extension.py:2236,2265 — `BUCKET_SIZE` is a mutable module global reassigned by `main()` via `global`; `organize()` exposes no `bucket_size` param, so library callers can't set it and the mutation is process-global and never restored (leaks across successive `organize()`/test calls in one process). Thread `bucket_size` through `organize()`/`BucketManager`. | config discoverability: --bucket-size has no per-call accessor
-rdv3-api-01 | open | low | remove-deduplv3.py:137 — exit codes 2 (OSError) and 3 (UnicodeDecodeError, line 150) are part of the CLI contract but documented nowhere in `--help` or the docstring; note them in the argparse epilog. | callers scripting this can't branch reliably
 
 ## CLI / option integrity
 

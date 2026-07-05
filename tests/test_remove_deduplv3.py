@@ -32,6 +32,16 @@ def test_unreadable_input_clean_error_exit2(monkeypatch, tmp_path, capsys):
     assert capsys.readouterr().err.startswith("error:")
 
 
+def test_help_documents_exit_codes(capsys):
+    with pytest.raises(SystemExit) as exc:
+        rd.parse_args(["--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "Exit codes:" in out
+    assert "2 input file error" in out
+    assert "3 decode error" in out
+
+
 def _run(monkeypatch, tmp_path, text):
     f = tmp_path / "hashes.txt"
     f.write_text(text, encoding="utf-8")
