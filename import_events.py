@@ -2617,16 +2617,8 @@ def _build_paddle_ocr(PaddleOCR: Any, paddle_lang: str, device: str) -> Tuple[An
     raise RuntimeError("no PaddleOCR constructor candidates")
 
 
-def _get_paddle_ocr(
-    language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
-    config: Optional[ModelConfig] = None,
-) -> Optional[Any]:
-    global _PADDLE_OCR, _PADDLE_OCR_MISSING
-    runtime_config = config or ModelConfig()
-    paddle_lang = _paddle_language(_normalize_language(language))
-    with _PADDLE_OCR_LOCK:
-        if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
-            return None
+def _load_paddle_ocr_runtime(runtime_config: ModelConfig) -> Optional[Tuple[Any, Any, str]]:
+    global _PADDLE_OCR_MISSING
     try:
         import paddleocr as paddleocr_module
         PaddleOCR = paddleocr_module.PaddleOCR
@@ -2636,8 +2628,12 @@ def _get_paddle_ocr(
             _PADDLE_OCR_MISSING = True
         _warn_once("paddle-missing", "PaddleOCR not installed; skipping Paddle OCR.")
         return None
-    device = _resolve_paddle_ocr_device(runtime_config.paddle_ocr_device, paddle_module)
-    cache_key = (paddle_lang, device)
+    device = _resolve_paddle_ocr_device(
+        runtime_config.paddle_ocr_device, paddle_module)
+    return paddleocr_module, PaddleOCR, device
+
+
+def _get_cached_paddle_ocr(cache_key: Tuple[str, str]) -> Optional[Any]:
     with _PADDLE_OCR_LOCK:
         if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
             return None
@@ -2645,7 +2641,26 @@ def _get_paddle_ocr(
         cached = cache.get(cache_key)
         if cached is not None:
             _touch_paddle_ocr_engine(cache, cached)
-            return cached
+        return cached
+
+
+def _get_paddle_ocr(
+    language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
+    config: Optional[ModelConfig] = None,
+) -> Optional[Any]:
+    runtime_config = config or ModelConfig()
+    paddle_lang = _paddle_language(_normalize_language(language))
+    with _PADDLE_OCR_LOCK:
+        if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
+            return None
+    runtime = _load_paddle_ocr_runtime(runtime_config)
+    if runtime is None:
+        return None
+    paddleocr_module, PaddleOCR, device = runtime
+    cache_key = (paddle_lang, device)
+    cached = _get_cached_paddle_ocr(cache_key)
+    if cached is not None:
+        return cached
     try:
         engine, effective_device = _build_paddle_ocr(PaddleOCR, paddle_lang, device)
     except Exception as exc:
