@@ -3217,6 +3217,25 @@ def test_worker_step_failing_item_records_failure(headless_dispatcher):
     assert headless_dispatcher.metrics["completions"] == 0
 
 
+def test_worker_step_timeout_is_timeout_only(headless_dispatcher, monkeypatch):
+    headless_dispatcher.config["sleep_between_items"] = 0
+    headless_dispatcher.metrics["timeouts"] = 1
+    with headless_dispatcher._dispatch_cv:
+        headless_dispatcher.queue_items[:] = [
+            q("http://slow/1", template="sleep 5")
+        ]
+    monkeypatch.setattr(
+        headless_dispatcher, "_run_item",
+        lambda _item, _label: link_queue.COMMAND_TIMEOUT_EXIT,
+    )
+
+    headless_dispatcher._worker_step(idx=79, stop_self=threading.Event())
+
+    assert headless_dispatcher.metrics["timeouts"] == 1
+    assert headless_dispatcher.metrics["failures"] == 0
+    assert headless_dispatcher.metrics["completions"] == 0
+
+
 def test_worker_step_spawn_failure_skips_domain_cooldown(headless_dispatcher):
     headless_dispatcher.config["sleep_between_items"] = 0
     headless_dispatcher.config["failure_sleep_seconds"] = 300

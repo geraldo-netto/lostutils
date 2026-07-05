@@ -402,6 +402,7 @@ def _template_has_bare_url(template: str) -> bool:
 # unaffected.
 QueueItem = namedtuple("QueueItem", "url protocol template shell extra")
 QueueItem.__new__.__defaults__ = ((),)
+COMMAND_TIMEOUT_EXIT = -124
 
 # lq-scal-03: default threshold for the opportunistic stale-key sweep
 # in `_pick_next_item`. The sweep runs only when `len(seq_of) - len(urls)`
@@ -2074,6 +2075,7 @@ class Dispatcher:
                 pass
 
         def _on_timeout() -> None:
+            setattr(proc, "_link_queue_timed_out", True)
             self._record_metric("timeouts")
             self._log(
                 f"[{label} timeout] {timeout}s expired, terminating  url={url}"
@@ -2240,6 +2242,8 @@ class Dispatcher:
             if not self._stream_and_wait(proc, label, url, timeout, verbosity):
                 return -1
             self._log(f"[{label} done] exit={proc.returncode}  url={url}")
+            if getattr(proc, "_link_queue_timed_out", False):
+                return COMMAND_TIMEOUT_EXIT
             return proc.returncode
         except FileNotFoundError as e:
             # Common cause: the first argv element isn't on PATH.
@@ -2600,7 +2604,9 @@ class Dispatcher:
                 )
             self._refresh_queue_list()
 
-        if exit_code != 0:
+        if exit_code == COMMAND_TIMEOUT_EXIT:
+            pass
+        elif exit_code != 0:
             self._record_metric("failures")
             if exit_code != -1:
                 self._trigger_failure_cooldown(idx, item, exit_code)  # pragma: no cover - trigger cooldown after failure
