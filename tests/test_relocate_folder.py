@@ -279,7 +279,7 @@ def test_copy_tree_skips_specials_and_rejects_existing_target(tmp_path):
     assert not (dst / "f.fifo").exists()
     assert fifo in skipped
     # second call into an existing target -> FileExistsError
-    with pytest.raises(FileExistsError):
+    with pytest.raises(FileExistsError, match="stale partial target"):
         rf.copy_tree(src, dst)
 
 

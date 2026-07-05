@@ -694,7 +694,11 @@ def copy_tree(src: Path, dst: Path, *,
     same cleanup. The walk is also skipped entirely when neither the
     precheck nor a `progress_cb` needs the byte total."""
     if _path_taken(dst):
-        raise FileExistsError(f"target already exists: {dst}")
+        raise FileExistsError(
+            f"target already exists: {dst}; if a previous run was killed "
+            "during copy, this may be a stale partial target. Inspect and "
+            "remove it manually before re-running."
+        )
     # rf-rel-14 / rf-perf-02: compute total bytes ONCE and share between the
     # precheck and (when present) the progress callback. The walk runs only
     # when something needs the total: the disk-space precheck (unless
