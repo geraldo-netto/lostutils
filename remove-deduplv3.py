@@ -29,6 +29,7 @@ import os
 import shlex
 import sys
 from collections import defaultdict
+from typing import NoReturn
 
 # Order matters: UTF-32 BOMs share a 2-byte prefix with UTF-16 BOMs,
 # so the 4-byte UTF-32 entries must come first. The mapped codec names
@@ -138,7 +139,7 @@ def _emit_remove_commands(groups, out):
     return groups_with_dups, files_to_remove
 
 
-def _fail(msg, code):
+def _fail(msg, code) -> NoReturn:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
 

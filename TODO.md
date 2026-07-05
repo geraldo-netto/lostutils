@@ -167,7 +167,6 @@ _clean — `ruff check *.py` reports no issues across all root files (rescan 202
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-pyright-01 | open | low | hash-recursive-ai5.py:627 — `_require_blake3().blake3()` flagged `reportOptionalMemberAccess` ("blake3" is not a known attribute of "None"); pyright can't correlate the `_BLAKE3_IMPORT_ERROR` sentinel with the `blake3` global (`ModuleType | None`). Narrow inside `_require_blake3` (`if blake3 is None: raise ...; return blake3`) so the return is non-Optional — no `# type: ignore`. | pyright (reportOptionalMemberAccess) — prefer narrowing over suppression
-rdv3-pyright-01 | open | high | remove-deduplv3.py:165 — `encoding`/`groups`/`skipped_lines` "possibly unbound" (:165,169,175,179,182): pyright can't see that `_fail()` never returns, so `except: _fail(...)` paths look like they fall through. Annotate `def _fail(msg, code) -> NoReturn:` (`from typing import NoReturn`) — resolves all 5. | pyright (reportPossiblyUnboundVariable) — single root cause
 
 ## observability
 
