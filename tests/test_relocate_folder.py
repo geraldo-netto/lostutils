@@ -663,6 +663,14 @@ def test_verify_ownership_stat_failure(tmp_path):
                              Path("rel"))
 
 
+def test_verify_ownership_missing_dst_is_explicit(tmp_path):
+    src = tmp_path / "src"
+    src.write_text("x")
+
+    with pytest.raises(RuntimeError, match="missing copied entry before ownership check"):
+        rf._verify_ownership(src, tmp_path / "missing-dst", Path("rel"))
+
+
 def test_parse_args_verify_ownership_flag():
     plan = rf.parse_args(["/x", "/y"])
     assert plan.verify_ownership is False

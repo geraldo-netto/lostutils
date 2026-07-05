@@ -1094,7 +1094,9 @@ def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
 
     Symlink/dir checks are cheap but ride along in the same iterator so the
     walk happens only once. Ownership is appended after the kind-specific
-    check so a missing entry fails with the more useful message first.
+    check, and `_verify_ownership` also gates missing destinations itself so
+    the parallel checksum path cannot downgrade that case to a generic stat
+    failure.
 
     rf-perf-01: each entry is lstat'd ONCE here and classified from
     `st_mode` (S_ISLNK/S_ISREG/S_ISDIR) instead of the previous
@@ -1240,6 +1242,15 @@ def _verify_ownership(
     Uses lstat so the comparison covers symlinks themselves, not their targets."""
     try:
         s = src_stat if src_stat is not None else src_path.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            f"ownership stat failed for {rel} (src={src_path}): {exc}"
+        ) from exc
+    if not os.path.lexists(dst_path):
+        raise RuntimeError(
+            f"missing copied entry before ownership check: {rel} (src={src_path})"
+        )
+    try:
         d = dst_path.lstat()
     except OSError as exc:
         raise RuntimeError(
