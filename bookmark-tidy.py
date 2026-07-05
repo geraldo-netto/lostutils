@@ -1531,6 +1531,9 @@ def _run(args: argparse.Namespace) -> int:
     immutable = list(args.immutable_root) + load_immutable_file(args.immutable_file)
     options = _normalization_from_args(args)
     immutable_bookmarks, mutable_bookmarks = deduplicate_bookmarks(bookmarks, _immutable_names(immutable), options)
+    duplicate_count = len(bookmarks) - len(immutable_bookmarks) - len(mutable_bookmarks)
+    if duplicate_count:
+        LOGGER.warning("Merged/removed %d duplicate bookmark(s).", duplicate_count)
     categorizer = _categorizer_from_args(args, mutable_bookmarks)
     organized = immutable_bookmarks + _assign_categories(
         mutable_bookmarks,

@@ -914,6 +914,33 @@ def test_parse_args_logging_and_cli_helpers(tmp_path, monkeypatch, capsys):
     assert "missing bookmark file" in capsys.readouterr().err
 
 
+def test_main_logs_duplicate_summary(tmp_path, monkeypatch, caplog):
+    html = tmp_path / "bookmarks.html"
+    output = tmp_path / "out.json"
+    html.write_text(
+        """<!DOCTYPE NETSCAPE-Bookmark-file-1><DL><p>
+        <DT><A HREF="http://www.example.test/a/#old">A</A>
+        <DT><A HREF="https://example.test/a">Longer title</A>
+        </DL><p>""",
+        encoding="utf-8",
+    )
+
+    class FakeCategorizer:
+        def __init__(self, **kwargs):
+            pass
+
+        def __call__(self, bookmarks):
+            return {index: ["Imported"] for index, _ in enumerate(bookmarks)}
+
+    monkeypatch.setattr(bookmark_tidy, "LlamaCategorizer", FakeCategorizer)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    caplog.set_level(logging.WARNING, logger="bookmark-tidy")
+
+    assert bookmark_tidy.main([str(html), "--model", str(model), "-o", str(output)]) == 0
+    assert "Merged/removed 1 duplicate bookmark(s)." in caplog.text
+
+
 def test_parse_args_help_documents_llm_tuning_flags(capsys):
     with pytest.raises(SystemExit) as exc:
         bookmark_tidy.parse_args(["--help"])
