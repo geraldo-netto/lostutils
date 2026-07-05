@@ -101,6 +101,19 @@ def test_summary_reports_skipped_malformed_lines(monkeypatch, tmp_path, capsys):
     assert "2 skipped line(s)" in capsys.readouterr().err
 
 
+def test_broken_pipe_exits_cleanly(monkeypatch, tmp_path):
+    f = tmp_path / "hashes.txt"
+    f.write_text("h /a\nh /bb\n", encoding="utf-8")
+    monkeypatch.setattr("sys.argv", ["remove-deduplv3.py", str(f)])
+    monkeypatch.setattr("sys.stdout.write", lambda _s: (_ for _ in ()).throw(BrokenPipeError()))
+    silenced = []
+    monkeypatch.setattr(rd, "_silence_stdout_after_broken_pipe", lambda: silenced.append(True))
+
+    rd.main()
+
+    assert silenced == [True]
+
+
 def test_configure_stdout_forces_utf8_and_error_mode(monkeypatch):
     stream = io.TextIOWrapper(io.BytesIO(), encoding="ascii", errors="strict")
     monkeypatch.setattr(rd.sys, "stdout", stream)

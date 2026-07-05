@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import shlex
 import sys
 from collections import defaultdict
@@ -135,6 +136,13 @@ def _fail(msg, code):
     sys.exit(code)
 
 
+def _silence_stdout_after_broken_pipe():
+    try:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    except OSError:
+        pass
+
+
 def main(argv=None):
     args = parse_args(argv)
     try:
@@ -156,16 +164,20 @@ def main(argv=None):
               file=sys.stderr)
         sys.exit(3)
 
-    groups_with_dups, files_to_remove = _emit_remove_commands(groups, sys.stdout.write)
-    # rdv3-obs-01: audit summary to stderr (groups with all-identical paths or a
-    # single survivor are otherwise silently skipped with no trace).
-    summary = (
-        f"summary: {len(groups)} hash group(s), {groups_with_dups} with "
-        f"duplicates, {files_to_remove} file(s) queued for removal"
-    )
-    if skipped_lines:
-        summary += f", {skipped_lines} skipped line(s)"
-    print(summary, file=sys.stderr)
+    try:
+        groups_with_dups, files_to_remove = _emit_remove_commands(groups, sys.stdout.write)
+        # rdv3-obs-01: audit summary to stderr (groups with all-identical paths or a
+        # single survivor are otherwise silently skipped with no trace).
+        summary = (
+            f"summary: {len(groups)} hash group(s), {groups_with_dups} with "
+            f"duplicates, {files_to_remove} file(s) queued for removal"
+        )
+        if skipped_lines:
+            summary += f", {skipped_lines} skipped line(s)"
+        print(summary, file=sys.stderr)
+    except BrokenPipeError:
+        _silence_stdout_after_broken_pipe()
+        return
 
 
 if __name__ == "__main__":
