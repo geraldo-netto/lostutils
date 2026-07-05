@@ -481,6 +481,39 @@ def test_dispatcher_state_lock_rejects_second_instance(tmp_path):
     second.close()
 
 
+def test_state_file_lock_pidfile_reclaims_stale_pid(tmp_path, monkeypatch):
+    state_path = str(tmp_path / "state.yaml")
+    lock_path = state_path + ".lock"
+    with open(lock_path, "w", encoding="utf-8") as fh:
+        fh.write("pid=999999\nstate=old\n")
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    monkeypatch.setattr(
+        link_queue.os,
+        "kill",
+        lambda pid, sig: (_ for _ in ()).throw(ProcessLookupError(pid)),
+    )
+    lock = link_queue.StateFileLock(state_path)
+
+    lock.acquire()
+    try:
+        with open(lock_path, encoding="utf-8") as fh:
+            text = fh.read()
+        assert f"pid={os.getpid()}" in text
+    finally:
+        lock.release()
+
+
+def test_state_file_lock_pidfile_rejects_live_pid(tmp_path, monkeypatch):
+    state_path = str(tmp_path / "state.yaml")
+    with open(state_path + ".lock", "w", encoding="utf-8") as fh:
+        fh.write("pid=123\nstate=old\n")
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    monkeypatch.setattr(link_queue.os, "kill", lambda pid, sig: None)
+
+    with pytest.raises(link_queue.StateFileLockError):
+        link_queue.StateFileLock(state_path).acquire()
+
+
 def test_save_state_persists_immediate_backlog(tmp_path, monkeypatch):
     # lq-rel-01: the immediate work-queue backlog is snapshotted into a third
     # "immediate" bucket so an unprocessed paste survives shutdown.

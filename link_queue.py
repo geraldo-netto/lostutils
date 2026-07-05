@@ -233,10 +233,44 @@ class StateFileLock:
         try:
             fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError as exc:
-            raise self._locked_error() from exc
+            if not self._pidfile_is_stale():
+                raise self._locked_error() from exc
+            self._unlink_lock_file()
+            try:
+                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            except FileExistsError as retry_exc:
+                raise self._locked_error() from retry_exc
         self._fd = fd
         self._owns_pidfile = True
         self._write_metadata(fd)
+
+    def _pidfile_is_stale(self) -> bool:
+        pid = self._read_pidfile_pid()
+        return pid is not None and not self._pid_is_running(pid)
+
+    def _read_pidfile_pid(self) -> "int | None":
+        try:
+            with open(self.lock_path, encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("pid="):
+                        return int(line.split("=", 1)[1].strip())
+        except (OSError, ValueError):
+            return None
+        return None
+
+    @staticmethod
+    def _pid_is_running(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return True
+        return True
 
     def _release_flock(self) -> None:
         if self._fh is None:
