@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import re
 import sys
 
@@ -66,6 +67,10 @@ def clamp_threshold(threshold):
     return threshold
 
 
+def worker_limit():
+    return max(1, os.cpu_count() or 1)
+
+
 def valid_workers(value):
     """argparse `type=` validator (dnv3-val-01): rapidfuzz cdist accepts only
     -1 (all cores) or a positive thread count; reject everything else (e.g.
@@ -77,6 +82,13 @@ def valid_workers(value):
     if iv != -1 and iv < 1:
         raise argparse.ArgumentTypeError(
             f"workers must be -1 (all cores) or a positive count, got {iv}")
+    limit = worker_limit()
+    if iv > limit:
+        print(
+            f"warning: workers {iv} exceeds available cores; clamping to {limit}",
+            file=sys.stderr,
+        )
+        return limit
     return iv
 
 

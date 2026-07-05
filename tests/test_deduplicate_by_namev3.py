@@ -339,9 +339,17 @@ def test_emit_pairs_blocking_invariant(lines, t, block_rows):
     assert len(blocked) == len(set(blocked))
 
 
-def test_valid_workers_accepts_all_cores_and_positive():
+def test_valid_workers_accepts_all_cores_and_positive(monkeypatch):
+    monkeypatch.setattr(dn.os, "cpu_count", lambda: 8)
     assert dn.valid_workers("-1") == -1
     assert dn.valid_workers("4") == 4
+
+
+def test_valid_workers_clamps_above_available_cores(monkeypatch, capsys):
+    monkeypatch.setattr(dn.os, "cpu_count", lambda: 4)
+
+    assert dn.valid_workers("99") == 4
+    assert "clamping to 4" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("bad", ["-5", "0", "-2", "x", "1.5"])
