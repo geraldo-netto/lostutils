@@ -1496,7 +1496,10 @@ class App(tk.Tk):
         self._dl_result(outcome == "ok")
 
     def _record_pending_assignment(self, ambiguous):
-        layer, kid, data, desc = self._pending
+        pending = self._pending
+        if pending is None:
+            return
+        layer, kid, data, desc = pending
         rec = {"data": data, "desc": desc}
         if ambiguous:
             rec["ambiguous"] = True
