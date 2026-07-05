@@ -2615,21 +2615,40 @@ def _get_paddle_ocr(
                    paddle_lang, device, exc)
         return None
     effective_key = (paddle_lang, effective_device)
+    resolved, redundant = _store_or_reuse_paddle_ocr(cache_key, effective_key, engine)
+    if redundant is not None:
+        # ie-mt-01: another thread won the build race (or OCR was disabled)
+        # while we constructed our own engine; close the redundant one instead
+        # of leaking hundreds of MB. Done outside the lock — close() may block.
+        _close_paddle_ocr_engine(redundant)
+    if resolved is engine:
+        version = getattr(paddleocr_module, "__version__", "unknown")
+        logger.info("Using PaddleOCR %s with language %s on %s.",
+                    version, paddle_lang, effective_device)
+    return resolved
+
+
+def _store_or_reuse_paddle_ocr(
+    cache_key: Tuple[str, str],
+    effective_key: Tuple[str, str],
+    engine: Any,
+) -> Tuple[Optional[Any], Optional[Any]]:
+    """Publish a freshly built engine, or discard it if the cache already holds
+    one for ``cache_key``. Returns ``(resolved, redundant)`` where ``resolved``
+    is the engine to use (None if OCR was disabled meanwhile) and ``redundant``
+    is the engine the caller must close (None if ``engine`` was published)."""
+    global _PADDLE_OCR
     with _PADDLE_OCR_LOCK:
         if _PADDLE_OCR_DISABLED or _PADDLE_OCR_MISSING:
-            return None
+            return None, engine
         if _PADDLE_OCR is None:
             _PADDLE_OCR = {}
-        cache_key = (paddle_lang, device)
         cached = _PADDLE_OCR.get(cache_key)
         if cached is not None:
-            return cached
+            return cached, engine
         _PADDLE_OCR[effective_key] = engine
         _PADDLE_OCR[cache_key] = engine
-    version = getattr(paddleocr_module, "__version__", "unknown")
-    logger.info("Using PaddleOCR %s with language %s on %s.",
-                version, paddle_lang, effective_device)
-    return engine
+        return engine, None
 
 
 def _run_paddle_ocr(engine: Any, image_path: Path) -> Any:
