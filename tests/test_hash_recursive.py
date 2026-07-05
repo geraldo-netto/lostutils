@@ -1574,6 +1574,18 @@ def test_main_rejects_nonpositive_block_size(tmp_path, monkeypatch, capsys):
     assert "must be >= 1" in capsys.readouterr().err
 
 
+def test_main_rejects_sample_size_not_smaller_than_block_size(
+        tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.bin").write_bytes(b"x")
+    monkeypatch.setattr(
+        hr.sys, "argv",
+        ["hr", "--block-size", "4", "--sample-size", "4", str(tmp_path)])
+    with pytest.raises(SystemExit) as exc:
+        hr.main()
+    assert exc.value.code == 2
+    assert "--sample-size must be smaller" in capsys.readouterr().err
+
+
 def test_help_documents_kernel_io_stall_limitation():
     # hr-wd-01: a hung filesystem read cannot be interrupted safely by this
     # Python worker model, so the CLI help documents the operational limit.

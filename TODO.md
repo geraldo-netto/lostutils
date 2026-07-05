@@ -30,7 +30,6 @@ rf-sec-04 | open | med | relocate_folder.py:1787 — source inode identity is as
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-val-01 | open | med | hash-recursive-ai5.py:1940 — main validates `--block-size >= 1` and `--sample-size >= 1` but not sample-size relative to block-size; stage 2 fires for size > block-size and its windows are `strict=True`, so `--sample-size` larger than the smallest stage-2 file short-reads, ticks `_tick_shrank`, discards the digest, and reports identical files as NON-duplicates (silent false negative). Reject `sample-size >= block-size` at the CLI boundary, or relax strict when the window exceeds file size. | input validation / reliability — CLI knob without a guard, silent loss of true duplicates
 
 ## data governance
 

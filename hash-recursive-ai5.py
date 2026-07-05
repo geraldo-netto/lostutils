@@ -1945,6 +1945,10 @@ def main():
         print("error: --block-size and --sample-size must be >= 1",
               file=sys.stderr)
         sys.exit(2)
+    if args.sample_size >= args.block_size:
+        print("error: --sample-size must be smaller than --block-size",
+              file=sys.stderr)
+        sys.exit(2)
     _configure_windows(args.block_size, args.sample_size)
     root = os.path.abspath(args.directory)
 
