@@ -1308,11 +1308,7 @@ class Dispatcher:
             )
         items = in_flight + pending  # in-flight retries go FIRST
         if not items:
-            if restored_immediate:
-                self._log(
-                    f"[restored] {restored_immediate} immediate item(s) from "
-                    f"previous session"
-                )
+            self._log_restored_immediate(restored_immediate)
             return
         with self._dispatch_cv:
             for it in items:
@@ -1320,11 +1316,20 @@ class Dispatcher:
             self._dispatch_cv.notify_all()
         self._refresh_queue_list()
         self._update_status()
+        self._log_restored_immediate(restored_immediate)
+        self._log_restored_items(in_flight, pending)
+
+    def _log_restored_immediate(self, restored_immediate: int) -> None:
+        """Log the immediate-pool restore count when non-zero (lq-cx-03)."""
         if restored_immediate:
             self._log(
                 f"[restored] {restored_immediate} immediate item(s) from "
                 f"previous session"
             )
+
+    def _log_restored_items(self, in_flight: list, pending: list) -> None:
+        """Log the in-flight/pending restore summary, phrased per which
+        buckets were non-empty (lq-cx-03)."""
         if in_flight and pending:
             self._log(
                 f"[restored] {len(in_flight)} in-flight + {len(pending)} "
