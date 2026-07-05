@@ -6,7 +6,18 @@ Proposed corrections / improvements. One table per review category. Format:
 
 Scan scope = root-directory `.py`/`.sh` files only (per AGENTS.md). Tables sorted by `description` (each starts with `file:line`). Scripts are standalone — dedup findings are within-file only, never cross-file module extraction.
 
-id prefixes: `bt-` bookmark-tidy.py, `dnp-` dedupl_numpy.py, `dnv3-` deduplicate-by-namev3.py, `hr-` hash-recursive-ai5.py, `ie-` import_events.py, `lq-` link_queue.py, `mkp-` minikeypad.py, `oze-` organize_by_extension.py, `rf-` relocate_folder.py, `rdv3-` remove-deduplv3.py.
+id prefix | file name
+--- | ---
+bt- | bookmark-tidy.py
+dnp- | dedupl_numpy.py
+dnv3- | deduplicate-by-namev3.py
+hr- | hash-recursive-ai5.py
+ie- | import_events.py
+lq- | link_queue.py
+mkp- | minikeypad.py
+oze- | organize_by_extension.py
+rf- | relocate_folder.py
+rdv3- | remove-deduplv3.py
 
 ## security
 
