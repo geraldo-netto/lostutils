@@ -1701,6 +1701,7 @@ class HashDumpWriter:
                 self._handle.write(_dump_digest_field(digest))
             self._handle.flush()
             self._digests[key] = digest
+            self._offsets.pop(key, None)
         finally:
             self._handle.seek(current)
 

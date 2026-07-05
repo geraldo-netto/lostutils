@@ -188,7 +188,6 @@ ie-cache-04 | open | low | import_events.py:2807 — the `llm_text` stage-cache 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-mem-01 | open | med | dedupl_numpy.py:36 — `hash_idx = line_starts[:,None] + np.arange(32)` materializes an (n_lines,32) int64 index matrix (n_lines×256 bytes, 8× the gathered uint8 data — the real peak); use `np.arange(32, dtype=np.int32)` (or `as_strided`) to quarter it. | distinct from dnp-perf-01 (byte copy) and dnp-rel-01 (bounds)
-hr-mem-01 | open | med | hash-recursive-ai5.py:1721 — `dump_pending` accumulates (digest, alias-paths) for every successfully hashed candidate inode and is only drained in the finally (:1895); with `--hashes-file` active (the default) this materializes all candidate paths in RAM, defeating the streaming design for large trees. Flush/evict incrementally. | pairs with hr-rob-02
 ie-mem-02 | open | low | import_events.py:2067 — `_image_messages` reads the whole image file and base64-encodes it in memory with no size bound before the vision call; a multi-GB image is fully materialized. Bound image size like `_read_text` bounds text. |
 ie-mem-03 | open | med | import_events.py:2433 — each cached PaddleOCR engine in `_PADDLE_OCR` holds hundreds of MB; a multilingual auto chain materializes all of them concurrently with no ceiling (peak-memory risk). Cap/evict — pairs with ie-cache-02. |
 

@@ -1851,6 +1851,19 @@ def test_main_hashes_file_written_before_finally(tmp_path, monkeypatch):
     assert digest in observed["dump"]
 
 
+def test_hash_dump_writer_evicts_offsets_after_composite_patch(tmp_path):
+    # hr-mem-01: once a stage-2 composite digest has patched the dump lines,
+    # the writer no longer needs the per-line offsets for that inode key.
+    out = tmp_path / "hashes.txt"
+    key = (1, 2)
+    with out.open("w+", buffering=1, encoding="utf-8") as fh:
+        writer = hr.HashDumpWriter(fh)
+        writer.write_head(key, "ab" * 32, ["/tmp/a.bin"])
+        assert key in writer._offsets
+        writer.patch_composite(key, ("cd" * 32) + ":" + ("ef" * 32))
+        assert key not in writer._offsets
+
+
 def test_main_hashes_close_failure_warns(tmp_path, monkeypatch, capsys):
     # hr-log-03: a flush/close error is caught so the SIGINT-handler restore
     # in the same finally still runs; the failure is warned, not raised.
