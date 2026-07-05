@@ -1873,36 +1873,82 @@ def _table_rows_from_line(line: str, order: Tuple[str, ...],
     return rows
 
 
+class _HierarchyState:
+    """Mutable scan state for `_calendar_hierarchy_lines` (ie-cx-12)."""
+
+    def __init__(self) -> None:
+        self.current: Optional[Tuple[int, int]] = None
+        self.pending_day: Optional[int] = None
+        self.out: List[str] = []
+
+
+def _hier_handle_month_year(line: str, st: _HierarchyState) -> bool:
+    month_year = _calendar_month_year(line)
+    if month_year is None:
+        return False
+    st.current, st.pending_day = month_year, None
+    return True
+
+
+def _hier_handle_heading(line: str, st: _HierarchyState) -> bool:
+    if not _is_calendar_document_heading(line):
+        return False
+    st.pending_day = None
+    return True
+
+
+def _hier_handle_skip(line: str, st: _HierarchyState) -> bool:
+    # Consume (no output) before any month is seen, and on weekday header rows.
+    return st.current is None or _is_calendar_weekday(line)
+
+
+def _hier_handle_day_numbers(line: str, st: _HierarchyState) -> bool:
+    day_numbers = _calendar_day_numbers(line)
+    if not day_numbers:
+        return False
+    st.pending_day = day_numbers[-1]
+    return True
+
+
+def _hier_handle_day_title(line: str, st: _HierarchyState) -> bool:
+    day_title = _calendar_day_title(line)
+    if day_title is None:
+        return False
+    assert st.current is not None  # _hier_handle_skip consumes current-is-None rows
+    st.pending_day = day_title[0]
+    if day_title[1]:
+        st.out.append(_calendar_event_line(*st.current, st.pending_day, day_title[1]))
+    return True
+
+
+def _hier_handle_pending_day(line: str, st: _HierarchyState) -> bool:
+    if st.pending_day is None:
+        return False
+    assert st.current is not None  # _hier_handle_skip consumes current-is-None rows
+    st.out.append(_calendar_event_line(*st.current, st.pending_day, line))
+    return True
+
+
+_HIERARCHY_HANDLERS = (
+    _hier_handle_month_year,
+    _hier_handle_heading,
+    _hier_handle_skip,
+    _hier_handle_day_numbers,
+    _hier_handle_day_title,
+    _hier_handle_pending_day,
+)
+
+
 def _calendar_hierarchy_lines(text: str) -> List[str]:
-    current: Optional[Tuple[int, int]] = None
-    pending_day: Optional[int] = None
-    out: List[str] = []
+    st = _HierarchyState()
     for raw in text.splitlines():
         line = " ".join(raw.split())
         if not line:
             continue
-        month_year = _calendar_month_year(line)
-        if month_year is not None:
-            current, pending_day = month_year, None
-            continue
-        if _is_calendar_document_heading(line):
-            pending_day = None
-            continue
-        if current is None or _is_calendar_weekday(line):
-            continue
-        day_numbers = _calendar_day_numbers(line)
-        if day_numbers:
-            pending_day = day_numbers[-1]
-            continue
-        day_title = _calendar_day_title(line)
-        if day_title is not None:
-            pending_day = day_title[0]
-            if day_title[1]:
-                out.append(_calendar_event_line(*current, pending_day, day_title[1]))
-            continue
-        if pending_day is not None:
-            out.append(_calendar_event_line(*current, pending_day, line))
-    return [line for line in out if line]
+        for handler in _HIERARCHY_HANDLERS:
+            if handler(line, st):
+                break
+    return [line for line in st.out if line]
 
 
 class _TableState:
