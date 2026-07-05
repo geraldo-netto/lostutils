@@ -1574,6 +1574,15 @@ def test_main_rejects_nonpositive_block_size(tmp_path, monkeypatch, capsys):
     assert "must be >= 1" in capsys.readouterr().err
 
 
+def test_help_documents_kernel_io_stall_limitation():
+    # hr-wd-01: a hung filesystem read cannot be interrupted safely by this
+    # Python worker model, so the CLI help documents the operational limit.
+    help_text = hr._build_arg_parser().format_help()
+    assert "Watchdog limitation" in help_text
+    assert "scandir/stat/read" in help_text
+    assert "mount-level timeouts" in help_text
+
+
 def test_main_logs_start_progress_done(tmp_path, monkeypatch, capsys):
     # hr-log-01: a start line, a progress line every 50 files, and a done
     # line all land on stderr.

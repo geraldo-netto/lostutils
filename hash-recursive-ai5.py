@@ -1790,7 +1790,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     """Construct the CLI parser (hr-cmplx-02)."""
     ap = argparse.ArgumentParser(
         description="Duplicate finder (head + tail + center + mid-samples, "
-                    "hardlink-aware, two-stage hash).")
+                    "hardlink-aware, two-stage hash).",
+        epilog=("Watchdog limitation: Python cannot safely interrupt a "
+                "thread blocked inside kernel scandir/stat/read on a hung "
+                "filesystem; use OS or mount-level timeouts for NFS, SMB, "
+                "and removable media."))
     ap.add_argument("directory")
     ap.add_argument(
         "-j", "--jobs", type=int, default=_default_jobs(),
@@ -1825,7 +1829,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
               "= 64 KiB) (hr-adapt-01)."))
     ap.add_argument(
         "--hashes-file", default=DEFAULT_HASHES_FILE, metavar="PATH",
-        help=(f"Dump '<digest> <path>' for every hashed file to this path, "
+        help=("Dump '<digest> <path>' for every hashed file to this path, "
               "appending to it (default: disabled)."))
     return ap
 
