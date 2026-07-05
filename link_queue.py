@@ -671,13 +671,12 @@ class ConfigStore(dict):
                 cfg[k] = v
 
     @staticmethod
-    def _normalize_config_schema(cfg: dict) -> None:
-        """Ensure every protocol has a complete (mode, command, shell)
-        triple, and that scalar config values have the right types.
+    def _normalize_protocols(cfg: dict) -> None:
+        """Give every protocol a complete (mode, command, shell) triple.
 
-        Drops any non-dict `protocols[<name>]` entries, but warns about each
-        one (rel-10): a corrupt config that silently loses protocols is
-        worse than one that surfaces the keys it threw away."""
+        Drops any non-dict `protocols[<name>]` entry, warning about each (rel-10):
+        a corrupt config that silently loses protocols is worse than one that
+        surfaces the keys it threw away."""
         for name, pc in list(cfg["protocols"].items()):
             if not isinstance(pc, dict):
                 print(
@@ -692,11 +691,14 @@ class ConfigStore(dict):
             pc.setdefault("command", "echo {url}")
             pc.setdefault("shell", False)
             pc["shell"] = bool(pc["shell"])
+
+    @staticmethod
+    def _coerce_config_scalars(cfg: dict) -> None:
+        """Coerce scalar config values to their expected types (lq-val-01) so a
+        hand-edited non-numeric value degrades to its default instead of
+        crashing startup; also filter token_mappings to str->str entries."""
         cfg.setdefault("default_shell", False)
         cfg["default_shell"] = bool(cfg.get("default_shell", False))
-        # lq-val-01: coerce numeric scalars so a hand-edited non-numeric value
-        # (e.g. worker_count: "abc") degrades to its default instead of crashing
-        # the startup int(self.config.get("worker_count")) and aborting __init__.
         for key, default in (("worker_count", 1),
                              ("immediate_worker_count", 0),
                              ("immediate_queue_maxsize", 0)):
@@ -711,7 +713,6 @@ class ConfigStore(dict):
                     file=sys.stderr,
                 )
                 cfg[key] = default
-        # token_mappings: keep only str-prefix -> str-flag entries.
         tm = cfg.get("token_mappings")
         if not isinstance(tm, dict):
             tm = {}
@@ -719,10 +720,12 @@ class ConfigStore(dict):
             str(k): str(v) for k, v in tm.items()
             if isinstance(k, str) and k and isinstance(v, str)
         }
-        # sec-02: warn (load time) on shell=True + bare {url} — the URL would
-        # be substituted UNQUOTED into the /bin/sh -c string, opening a
-        # shell-injection path for a crafted URL. The protocol editor already
-        # warns on save; this catches hand-edited configs and the default.
+
+    @staticmethod
+    def _warn_shell_injection(cfg: dict) -> None:
+        """Warn at load time (sec-02) on shell=True + bare {url}: the URL would be
+        substituted UNQUOTED into the /bin/sh -c string, a shell-injection path
+        for a crafted URL. Catches hand-edited configs and the shipped default."""
         for name, pc in cfg["protocols"].items():
             if pc.get("shell") and _template_has_bare_url(pc.get("command", "")):
                 print(f"[warn] protocol '{name}' uses shell=True with bare "
@@ -732,6 +735,15 @@ class ConfigStore(dict):
             print("[warn] default_command uses shell=True with bare "
                   "{url} — prefer {url_quoted} (shell-injection risk)",
                   file=sys.stderr)
+
+    @staticmethod
+    def _normalize_config_schema(cfg: dict) -> None:
+        """Ensure every protocol has a complete (mode, command, shell) triple,
+        that scalar config values have the right types, and warn on unsafe
+        shell templates (lq-cx-01: split into three staged helpers)."""
+        ConfigStore._normalize_protocols(cfg)
+        ConfigStore._coerce_config_scalars(cfg)
+        ConfigStore._warn_shell_injection(cfg)
 
     def _write_config_file(self, cfg: dict) -> None:
         # lq-sec-01: the config holds command templates and the log_file path;
