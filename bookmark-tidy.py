@@ -1378,6 +1378,9 @@ def read_all_bookmarks(paths: Sequence[Path]) -> list[Bookmark]:
         except UserError as exc:
             LOGGER.warning("%s", exc)
             continue
+        except Exception as exc:
+            LOGGER.warning("could not read bookmark file %s: %s", path, exc)
+            continue
         LOGGER.info("Read %d bookmarks from %s", len(found), path)
         bookmarks.extend(found)
     return bookmarks

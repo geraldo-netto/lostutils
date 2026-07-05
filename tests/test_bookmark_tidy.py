@@ -747,6 +747,24 @@ def test_load_immutable_file_and_read_all_bookmarks(tmp_path, caplog):
     assert "unsupported bookmark file" in caplog.text
 
 
+def test_read_all_bookmarks_skips_unexpected_parser_error(monkeypatch, tmp_path, caplog):
+    bad = tmp_path / "places.sqlite"
+    good = tmp_path / "bookmarks.html"
+    expected = [_sample_bookmark()]
+
+    def fake_read(path):
+        if path == bad:
+            raise sqlite3.OperationalError("database is locked")
+        return expected
+
+    monkeypatch.setattr(bookmark_tidy, "read_bookmark_file", fake_read)
+    caplog.set_level(logging.WARNING, logger="bookmark-tidy")
+
+    assert bookmark_tidy.read_all_bookmarks([bad, good]) == expected
+    assert "could not read bookmark file" in caplog.text
+    assert "database is locked" in caplog.text
+
+
 def test_parse_args_logging_and_cli_helpers(tmp_path, monkeypatch, capsys):
     html = tmp_path / "bookmarks.html"
     output = tmp_path / "out.json"
