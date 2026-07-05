@@ -123,3 +123,19 @@ def test_configure_stdout_forces_utf8_and_error_mode(monkeypatch):
     assert stream.encoding.lower().replace("_", "-") == "utf-8"
     assert stream.errors == "surrogateescape"
     stream.detach()
+
+
+def test_configure_stdout_wraps_binary_buffer(monkeypatch):
+    raw = io.BytesIO()
+
+    class StdoutProxy:
+        buffer = raw
+
+    monkeypatch.setattr(rd.sys, "stdout", StdoutProxy())
+
+    rd._configure_stdout_errors("surrogateescape")
+    rd.sys.stdout.write("\udcff\n")
+    rd.sys.stdout.flush()
+
+    assert raw.getvalue() == b"\xff\n"
+    rd.sys.stdout.detach()

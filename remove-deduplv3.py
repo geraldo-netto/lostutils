@@ -78,8 +78,14 @@ def _configure_stdout_errors(err_mode):
     if isinstance(sys.stdout, io.TextIOWrapper):
         try:
             sys.stdout.reconfigure(encoding="utf-8", errors=err_mode)
+            return
         except ValueError:
-            pass  # already configured, or running under unusual stdout
+            pass  # fall back to wrapping the binary buffer below
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        sys.stdout = io.TextIOWrapper(buffer, encoding="utf-8", errors=err_mode)
+        return
+    _fail("stdout does not expose a binary buffer for utf-8 output", 2)
 
 
 def _read_groups(path, encoding, err_mode):
