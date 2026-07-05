@@ -475,17 +475,17 @@ class KeyParam:
 
     def multimedia(self, name, v_rid0, v_rid2, v_rid_other):
         """Each tuple is (target_index_offset, value).  Selects by ReportID."""
-        kc = self.KEY_Char_Num
+        base = 5
         if self.ReportID == 0:
             off, val = v_rid0
         elif self.ReportID == 2:
             off, val = v_rid2
         else:
             off, val = v_rid_other
-        if not self._fits(kc + off):
+        if not self._fits(base + off):
             return False
-        self.data[kc + off] = val & 0xFF
-        self._store_char(self.KeyChar, kc - 5, name)
+        self.data[base + off] = val & 0xFF
+        self._store_char(self.KeyChar, 0, name)
         self._mul_general_char_set()
         return True
 

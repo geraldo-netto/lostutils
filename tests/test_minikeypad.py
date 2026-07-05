@@ -168,6 +168,20 @@ def test_multimedia_report_id_two_and_other():
     assert kp2.data[kp2.KEY_Char_Num] == 205   # "other" branch
 
 
+def test_multimedia_uses_fixed_report_bytes_after_keyboard_pointer_moves():
+    kp = _select(KeyParam())
+    kp.basic_key(4, "A")
+    kp.data[KeyParam.KeyType_Num] = 0
+    kp.ReportID = 2
+
+    assert kp.multimedia("Play", (0, 64), (1, 4), (0, 205)) is True
+    reports, _flash, _ = _built(kp)
+
+    assert kp.KEY_Char_Num == 7
+    assert kp.data[6] == 4
+    assert reports[1][3] == 4
+
+
 def test_multimedia_refuses_out_of_range():
     kp = _select(KeyParam())
     kp.KEY_Char_Num = len(kp.data) - 1
