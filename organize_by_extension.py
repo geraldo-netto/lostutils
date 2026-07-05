@@ -763,6 +763,8 @@ def _find_reusable_bucket(
     filename: str,
     state_cache: dict[Path, Set[str] | frozenset[str]],
     indices: list[int],
+    first_non_full_index: int = 0,
+    cursor_out: list[int] | None = None,
 ) -> BucketChoice:
     """Walk `indices` sorted, looking for an existing bucket with room and
     without a name clash on `filename` (oze-cx-01). Returns a
@@ -774,17 +776,21 @@ def _find_reusable_bucket(
     `_BUCKET_FULL` sentinel (oze-scal-02): we skip it without re-reading the
     directory and without retaining the full name set, which would otherwise
     grow unbounded on million-file runs."""
-    next_expected = 0
+    next_expected = first_non_full_index
+    first_non_full = first_non_full_index
     # oze-perf-10: `indices` is already sorted by `_scan_bucket_indices`
     # (L644-645). The redundant `sorted(...)` ran on every bucket selection;
     # iterating directly is identical in result and skips a list copy.
     for index in indices:
+        if index < first_non_full_index:
+            continue
         if index > next_expected:
             break                           # first gap: caller fills it
         bucket_path = ext_dir / bucket_name(prefix, index)
         names = state_cache.get(bucket_path)
         if names is _BUCKET_FULL:
             next_expected = index + 1
+            first_non_full = index + 1
             continue
         if names is None:
             names = bucket_file_names(bucket_path)
@@ -792,10 +798,15 @@ def _find_reusable_bucket(
         if len(names) >= BUCKET_SIZE:
             state_cache[bucket_path] = _BUCKET_FULL
             next_expected = index + 1
+            first_non_full = index + 1
             continue
         if filename not in names:
+            if cursor_out is not None:
+                cursor_out[0] = first_non_full
             return BucketChoice(bucket_path, next_expected)
         next_expected = index + 1
+    if cursor_out is not None:
+        cursor_out[0] = first_non_full
     return BucketChoice(None, next_expected)
 
 
@@ -821,12 +832,15 @@ def choose_bucket(
     filename: str,
     state_cache: dict[Path, Set[str] | frozenset[str]],
     indices: list[int],
+    first_non_full_index: int = 0,
+    cursor_out: list[int] | None = None,
 ) -> Path:
     """Choose or create the bucket for `filename`, preferring gaps and
     existing rooms. Thin orchestrator over _find_reusable_bucket +
     _allocate_new_bucket (oze-cx-01)."""
     choice = _find_reusable_bucket(
-        ext_dir, prefix, filename, state_cache, indices)
+        ext_dir, prefix, filename, state_cache, indices,
+        first_non_full_index, cursor_out)
     if choice.bucket is not None:
         return choice.bucket
     return _allocate_new_bucket(
@@ -901,6 +915,7 @@ class BucketManager:
     # ``BucketManager.indices_cache[(ext_dir, prefix)]``. Populated lazily on
     # each ``_indices_for`` call from the directory-level cache.
     indices_cache: dict[tuple[Path, str], list[int]] = field(default_factory=dict)
+    _first_non_full: dict[tuple[Path, str], int] = field(default_factory=dict)
     _reserved_names: dict[Path, set[str]] = field(default_factory=dict)
     # oze-obs-01: per-allocation counters surfaced in the end-of-run
     # debug line so the user can tune BUCKET_SIZE / spot pathological
@@ -944,8 +959,13 @@ class BucketManager:
         # `set(state_cache.keys())` snapshot copied the whole keyset per file,
         # O(files × buckets) on the hot planning path.
         pre_indices = len(indices)
+        cursor_key = (ext_dir, prefix)
+        cursor = self._first_non_full.get(cursor_key, 0)
+        cursor_out = [cursor]
         bucket_path = choose_bucket(
-            ext_dir, prefix, source.name, self.state_cache, indices)
+            ext_dir, prefix, source.name, self.state_cache, indices,
+            cursor, cursor_out)
+        self._first_non_full[cursor_key] = cursor_out[0]
         names = self.state_cache[bucket_path]
         if not isinstance(names, set):  # _BUCKET_FULL frozenset sentinel (oze-cx-05)
             raise RuntimeError(
@@ -971,6 +991,8 @@ class BucketManager:
         if bucket.is_full():
             self.state_cache[bucket_path] = _BUCKET_FULL
             self.stats["buckets_full"] += 1
+            if self._first_non_full.get(cursor_key, 0) == bucket.index:
+                self._first_non_full[cursor_key] = bucket.index + 1
             # oze-cx-06: Bucket is frozen — return a fresh instance with
             # the sentinel members instead of mutating the in-hand object.
             bucket = Bucket(
@@ -994,6 +1016,12 @@ class BucketManager:
             return
         if isinstance(names, set):
             names.discard(source.name)
+            match = BUCKET_NAME_PATTERN.match(bucket_dir.name)
+            if match is not None:
+                key = (bucket_dir.parent, match.group(1))
+                index = int(match.group(2))
+                self._first_non_full[key] = min(
+                    self._first_non_full.get(key, index), index)
             reserved = self._reserved_names.get(bucket_dir)
             if reserved is not None:
                 reserved.discard(source.name)

@@ -1005,6 +1005,42 @@ class BucketManagerTests(unittest.TestCase):
             self.assertTrue(chosen.is_full())
             self.assertIs(mgr.state_cache[bucket_path], _BUCKET_FULL)
 
+    def test_choose_skips_known_full_buckets_with_cursor(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            ext_dir = root / "txt"
+            first = ext_dir / "a00000"
+            second = ext_dir / "a00001"
+            mgr = BucketManager(root=root)
+            mgr.state_cache[first] = _BUCKET_FULL
+            mgr.state_cache[second] = set()
+            mgr.indices_cache[(ext_dir, "a")] = [0, 1]
+            src = root / "aa.txt"
+            src.write_bytes(b"x")
+
+            chosen = mgr.choose(src, ext_dir, "a")
+
+            self.assertEqual(chosen.path, second)
+            self.assertEqual(mgr._first_non_full[(ext_dir, "a")], 1)
+
+    def test_choose_keeps_cursor_on_non_full_name_clash(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            ext_dir = root / "txt"
+            first = ext_dir / "a00000"
+            second = ext_dir / "a00001"
+            mgr = BucketManager(root=root)
+            mgr.state_cache[first] = {"aa.txt"}
+            mgr.state_cache[second] = set()
+            mgr.indices_cache[(ext_dir, "a")] = [0, 1]
+            src = root / "aa.txt"
+            src.write_bytes(b"x")
+
+            chosen = mgr.choose(src, ext_dir, "a")
+
+            self.assertEqual(chosen.path, second)
+            self.assertEqual(mgr._first_non_full[(ext_dir, "a")], 0)
+
     def test_release_removes_failed_reservation(self):
         with TemporaryDirectory() as d:
             root = Path(d)

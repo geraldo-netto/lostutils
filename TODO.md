@@ -52,7 +52,6 @@ dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[h
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-scal-08 | open | low | organize_by_extension.py:781 — `_find_reusable_bucket` restarts its scan at next_expected=0 and walks every already-full bucket on EVERY choose; as K full buckets accumulate per (ext,prefix) the per-file cost is O(K) → O(K²) over the run. Cache a "first non-full index" cursor per (ext_dir,prefix) for O(1) amortized. | scalability / performance — linear rescan of full buckets on the hot planning path
 
 ## N+1 / call efficiency
 
