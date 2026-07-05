@@ -36,7 +36,6 @@ dnv3-int-01 | open | med | deduplicate-by-namev3.py:120 — `--strip-chars` defa
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-perf-01 | open | med | bookmark-tidy.py:526-530 — `_copy_lz4_match` copies each LZ4 match byte-by-byte in a Python loop (`output.append(output[-offset])`), so decompressing a large `.jsonlz4` backup runs O(n) at interpreter speed. Copy in slices/chunks. | hot path on Firefox backup import
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
 dnv3-perf-03 | open | low | deduplicate-by-namev3.py:167 — the self-collision loop scans all `n` items to test `cnts[i] > 1` though multi-count keys are typically a small fraction; iterate only keys whose line-number list length > 1. |
 dnv3-perf-02 | open | low | deduplicate-by-namev3.py:176 — the strict-upper-triangle mask is built with a per-row Python loop (`for r in range(block.shape[0]): mask[r, :r+1] = False`), up to BLOCK_ROWS iterations per block; vectorize with `np.triu`/`np.tril_indices` to keep the masking in C. | numpy vectorization on hot path

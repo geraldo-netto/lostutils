@@ -434,6 +434,14 @@ def test_lz4_match_copy_decodes_repeated_sequence():
         bookmark_tidy._copy_lz4_match(bytearray(b"a"), 2, 1)
 
 
+def test_lz4_match_copy_handles_long_overlapping_run():
+    output = bytearray(b"a")
+
+    bookmark_tidy._copy_lz4_match(output, 1, 4096)
+
+    assert output == b"a" * 4097
+
+
 def test_detect_and_read_bookmark_formats(tmp_path):
     chrome = tmp_path / "chrome.json"
     firefox = tmp_path / "firefox.json"

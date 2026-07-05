@@ -526,8 +526,12 @@ def _lz4_length(data: bytes, index: int, nibble: int) -> tuple[int, int]:
 def _copy_lz4_match(output: bytearray, offset: int, length: int) -> None:
     if offset <= 0 or offset > len(output):
         raise UserError("invalid LZ4 match offset")
-    for _ in range(length):
-        output.append(output[-offset])
+    start = len(output) - offset
+    while length > 0:
+        available = len(output) - start
+        take = min(length, available)
+        output.extend(output[start:start + take])
+        length -= take
 
 
 def _walk_firefox_json(
