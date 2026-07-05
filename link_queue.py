@@ -411,7 +411,7 @@ DEFAULT_CONFIG = {
         "f:": "-o",                 # becomes the flag + value ("-o clip.mp4") appended to the
     },                              # command. The rest of the line is the URL.
 
-    "output_folder": "/backups/disk4",  # cwd for all protocol actions; empty = script dir
+    "output_folder": "",               # cwd for all protocol actions; empty = script dir
     "default_mode": "queue",
     "default_command": "echo {url}",
     "default_shell": False,

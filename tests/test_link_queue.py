@@ -49,6 +49,10 @@ import link_queue  # noqa: E402
 from link_queue import LinkQueueApp, QueueItem  # noqa: E402
 
 
+def test_default_output_folder_is_portable():
+    assert link_queue.DEFAULT_CONFIG["output_folder"] == ""
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------

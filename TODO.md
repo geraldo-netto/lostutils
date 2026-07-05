@@ -35,7 +35,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-gov-01 | open | low | link_queue.py:261 — `DEFAULT_CONFIG["output_folder"]` ships a committed private absolute path `/backups/disk4` as the cwd for every subprocess; on any other machine it fails `_resolve_cwd` and silently inherits cwd, and it leaks the author's disk layout. Default to `""` (script dir) as the docstring already implies. | AGENTS "no private absolute paths" rule; add CI grep guard
 
 ## data integrity
 
