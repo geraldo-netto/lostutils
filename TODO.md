@@ -42,7 +42,6 @@ dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[h
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-scal-01 | open | low | deduplicate-by-namev3.py:83 — `_read_groups` materializes every hash and path into `groups`, so peak memory is O(total input); the docstring's "Streams the file; no readlines() into memory" (line 16) overstates it (line reading streams, grouping does not). Soften the docstring claim. | doc-vs-behavior; inherent to whole-file grouping
 ie-scal-01 | open | med | import_events.py:1334 — `extract_from_ics` does `Calendar.from_ical(f.read())`, reading the whole `.ics` unbounded unlike `_read_text` which caps the byte window; a large/hostile `.ics` balloons RAM. Bound the read. | only ICS path lacks a size bound
 
 ## N+1 / call efficiency

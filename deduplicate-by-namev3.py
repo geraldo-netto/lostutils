@@ -16,6 +16,9 @@ Tradeoff:
     fine; beyond that the lower triangle is wasted memory, so for large N
     we compute the matrix in row blocks (BLOCK_ROWS×N peak) and emit the
     upper-triangle pairs per block. Output is identical either way.
+  * Input lines are read incrementally, but cleaned unique strings and their
+    source line numbers are retained for comparison; peak memory still grows
+    with the number of distinct cleaned inputs.
   * The length pre-filter from v2 isn't needed here — cdist's
     score_cutoff makes its own short-circuit per cell, and the matrix
     walk in numpy is cheap.
@@ -124,12 +127,6 @@ def main():
                           f"(default {DEFAULT_WORD_TOKENS!r}; empty disables)"))
     args = ap.parse_args()
 
-    # dnv3-di-01: surrogateescape (not "replace") so distinct undecodable byte
-    # sequences stay distinguishable instead of all collapsing to U+FFFD and
-    # being reported as the same cleaned string. Round-trips losslessly to
-    # stdout below once it is reconfigured to match.
-    with open(args.file, "r", encoding="utf-8", errors="surrogateescape") as f:
-        raw_lines = f.readlines()
     configure_stdout()
 
     # dnv3-rel-02: keep the 1-based source line numbers behind each cleaned
@@ -140,13 +137,18 @@ def main():
     dropped_empty = 0
     replacements = tuple(args.strip_chars)
     word_re = compile_word_re(args.word_tokens)
-    for lineno, raw in enumerate(raw_lines, 1):
-        cleaned = cleanup(raw, replacements, word_re)
-        if not cleaned:
-            dropped_empty += 1
-            continue
-        counts[cleaned] = counts.get(cleaned, 0) + 1
-        line_nums.setdefault(cleaned, []).append(lineno)
+    # dnv3-di-01: surrogateescape (not "replace") so distinct undecodable byte
+    # sequences stay distinguishable instead of all collapsing to U+FFFD and
+    # being reported as the same cleaned string. Round-trips losslessly to
+    # stdout because configure_stdout() above matches the error handler.
+    with open(args.file, "r", encoding="utf-8", errors="surrogateescape") as f:
+        for lineno, raw in enumerate(f, 1):
+            cleaned = cleanup(raw, replacements, word_re)
+            if not cleaned:
+                dropped_empty += 1
+                continue
+            counts[cleaned] = counts.get(cleaned, 0) + 1
+            line_nums.setdefault(cleaned, []).append(lineno)
     if dropped_empty:
         print(f"dropped {dropped_empty} empty cleaned line(s)", file=sys.stderr)
 
