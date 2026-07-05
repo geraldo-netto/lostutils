@@ -3397,6 +3397,31 @@ def test_llm_file_identity_changes_with_mtime_and_size(tmp_path):
     assert import_events._llm_file_identity(str(tmp_path / "missing.gguf")) == (None,)
 
 
+def test_get_llm_keys_after_lazy_model_download(tmp_path, monkeypatch):
+    model = tmp_path / "model.gguf"
+    clip = tmp_path / "clip.gguf"
+    created = []
+    closed = []
+    _install_fake_llama(monkeypatch, created, closed)
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
+
+    def ensure(config=None):
+        if not model.exists():
+            model.write_bytes(b"downloaded-model")
+        if not clip.exists():
+            clip.write_bytes(b"downloaded-clip")
+
+    monkeypatch.setattr(import_events, "ensure_models_exist", ensure)
+
+    cfg = import_events.ModelConfig(
+        model_path=str(model), clip_path=str(clip), llm_cache_size=2)
+    first = import_events.get_llm(cfg)
+    again = import_events.get_llm(cfg)
+
+    assert first is again
+    assert created == [str(model)]
+
+
 def test_get_llm_reloads_when_model_file_swapped(tmp_path, monkeypatch):
     import time
 

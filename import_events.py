@@ -1321,10 +1321,8 @@ def _llm_file_identity(path: str) -> Tuple[Any, ...]:
     return (stat.st_mtime_ns, stat.st_size)
 
 
-def get_llm(config: Optional[ModelConfig] = None):
-    """Lazily initializes the local Qwen2.5-VL model with a bounded LRU cache."""
-    config = config or ModelConfig()
-    key = (
+def _llm_cache_key(config: ModelConfig) -> Tuple[Any, ...]:
+    return (
         config.model_path,
         config.clip_path,
         _llm_file_identity(config.model_path),
@@ -1335,8 +1333,15 @@ def get_llm(config: Optional[ModelConfig] = None):
         config.llm_mlock,
         config.llm_verbose,
     )
+
+
+def get_llm(config: Optional[ModelConfig] = None):
+    """Lazily initializes the local Qwen2.5-VL model with a bounded LRU cache."""
+    config = config or ModelConfig()
     cache_limit = max(0, config.llm_cache_size)
     with _LLM_CACHE_LOCK:
+        ensure_models_exist(config)
+        key = _llm_cache_key(config)
         if cache_limit == 0:
             cached = _LLM_CACHE.pop(key, None)
             if cached is not None:
@@ -1352,7 +1357,6 @@ def get_llm(config: Optional[ModelConfig] = None):
         from llama_cpp import Llama, llama_cpp
         from llama_cpp.llama_chat_format import Qwen25VLChatHandler
 
-        ensure_models_exist(config)
         cached, effective_gpu_layers = _load_llm_client(
             config, Llama, Qwen25VLChatHandler, llama_cpp)
         _log_llm_device(config, effective_gpu_layers)
