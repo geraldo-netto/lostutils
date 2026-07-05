@@ -3930,6 +3930,37 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             self._log(f"[config] worker count {prev} → {n}")
         self._ensure_worker_count(n)
 
+    def _worker_fragment(self, alive: int, target: int, stopping: int) -> str:
+        """Worker-count status fragment (lq-cx-07): surfaces transitional states
+        so the user sees the truth (alive vs target) instead of a count that
+        collapses the moment they bump the spinbox."""
+        if stopping > 0:
+            return f"{alive} worker(s), target {target}, {stopping} stopping"
+        if alive != target:
+            return f"{alive}/{target} worker(s)"
+        return f"{alive} worker(s)"
+
+    def _status_line(self, running: int, pending: int, cd_remaining: float,
+                     cooling: dict, worker_text: str) -> "tuple[str, str, str]":
+        """Compose the (text, state, color) status-bar triple from the live
+        counters (lq-cx-07). A live worker means ACTIVE even while some domain
+        cools down — the cooldown is only a per-domain skip."""
+        if self.pause_event.is_set():
+            return (f"Paused — {worker_text}, {pending} pending", "● PAUSED", "#c0392b")
+        if running > 0:
+            return (f"{running} working • {pending} pending • {worker_text}",
+                    "● ACTIVE", "#1e8449")
+        if cd_remaining > 0:
+            text = (
+                f"Cooling down {self._format_duration(int(cd_remaining + 0.5))} "
+                f"({len(cooling)} domain(s)) • {pending} pending"
+            )
+            return (text, "● COOLDOWN", "#e67e22")
+        if pending > 0:
+            return (f"0 working • {pending} pending • {worker_text}",
+                    "● ACTIVE", "#1e8449")
+        return (f"Idle • {worker_text}", "● IDLE", "#7f8c8d")
+
     def _update_status(self) -> None:
         # alive+stopping in one pool-lock acquisition so they agree (conc-01).
         alive, stopping = self._pool.counts()
@@ -3941,36 +3972,9 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         cooling = self._active_cooldowns(now)
         cd_remaining = max((u - now for u in cooling.values()), default=0.0)
 
-        # Worker fragment: surfaces transitional states so the user always
-        # sees the truth (alive count vs target) instead of a count that
-        # collapses the moment they bumped the spinbox.
-        if stopping > 0:
-            worker_text = f"{alive} worker(s), target {target}, {stopping} stopping"
-        elif alive != target:
-            worker_text = f"{alive}/{target} worker(s)"
-        else:
-            worker_text = f"{alive} worker(s)"
-
-        if self.pause_event.is_set():
-            text = f"Paused — {worker_text}, {pending} pending"
-            state, color = "● PAUSED", "#c0392b"
-        elif running > 0:
-            # Other domains keep flowing while some domain cools down, so a
-            # live worker means ACTIVE — the cooldown is only a per-domain skip.
-            text = f"{running} working • {pending} pending • {worker_text}"
-            state, color = "● ACTIVE", "#1e8449"
-        elif cd_remaining > 0:
-            text = (
-                f"Cooling down {self._format_duration(int(cd_remaining + 0.5))} "
-                f"({len(cooling)} domain(s)) • {pending} pending"
-            )
-            state, color = "● COOLDOWN", "#e67e22"
-        elif pending > 0:
-            text = f"0 working • {pending} pending • {worker_text}"
-            state, color = "● ACTIVE", "#1e8449"
-        else:
-            text = f"Idle • {worker_text}"
-            state, color = "● IDLE", "#7f8c8d"
+        worker_text = self._worker_fragment(alive, target, stopping)
+        text, state, color = self._status_line(
+            running, pending, cd_remaining, cooling, worker_text)
         # lq-obs-02: surface the immediate backlog when it exceeds the pool
         # size so a saturated bounded pool isn't invisible in the status bar.
         # Read qsize under _immediate_lock so a concurrent
