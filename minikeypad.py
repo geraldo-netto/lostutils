@@ -116,6 +116,7 @@ PID = 0x8890
 HID_INTERFACE = 1          # "mi_01"
 REPORT_LEN = 64            # data bytes following the report ID
 WRITE_TIMEOUT_MS = 500
+PROBE_TIMEOUT_MS = 5000
 MAX_KBD_GROUPS = 5         # firmware accepts groups 0..5 (6 keystrokes)
 WRITE_RETRIES = 2          # extra attempts after the first on a transient USBError
 WRITE_RETRY_BACKOFF_S = 0.05
@@ -807,6 +808,7 @@ class App(tk.Tk):
         # callables; only the Tk main thread ever touches widgets.
         self._ui_q = queue.SimpleQueue()
         self._io_busy = False
+        self._probe_token = 0
 
         self.kp = KeyParam()
         self.dev = KeypadDevice(log=self.log)
@@ -1283,29 +1285,56 @@ class App(tk.Tk):
                 # mkp-thread-01: still_connected() runs usb.core.find (full bus
                 # enumeration) under the device lock; run it off the Tk thread
                 # like the connect probe so a slow bus never freezes the UI.
-                self._io_busy = True
-                threading.Thread(target=self._probe_alive, daemon=True).start()
+                self._start_probe_worker(self._probe_alive, "Device liveness")
             else:
-                self._io_busy = True
-                threading.Thread(target=self._try_connect, daemon=True).start()
+                self._start_probe_worker(self._try_connect, "Connect")
         self._update_state()
         self.after(1000, self._poll_connection)
 
-    def _probe_alive(self):
+    def _start_probe_worker(self, target, label):
+        self._io_busy = True
+        self._probe_token += 1
+        token = self._probe_token
+        try:
+            threading.Thread(target=lambda: target(token), daemon=True).start()
+        except Exception as e:
+            LOG.exception("%s probe failed to start", label)
+            self.log("%s probe error: %s" % (label, e))
+            self._io_busy = False
+            self._update_state()
+            return
+        self.after(
+            PROBE_TIMEOUT_MS,
+            lambda token=token, label=label: self._probe_timeout(token, label),
+        )
+
+    def _probe_timeout(self, token, label):
+        if token != self._probe_token or not self._io_busy:
+            return
+        self._probe_token += 1
+        self._io_busy = False
+        self.log("%s probe stalled; USB call did not finish" % label)
+        self._update_state()
+
+    def _probe_alive(self, token=None):
         """Off-thread liveness check (mkp-thread-01)."""
         try:
             alive = self.dev.still_connected()
         except Exception:
             alive = False
-        self._ui_q.put(lambda: self._probe_done(alive))
+        self._ui_q.put(lambda: self._probe_done(alive, token))
 
-    def _probe_done(self, alive):
+    def _probe_done(self, alive, token=None):
+        if token is not None and token != self._probe_token:
+            return
+        if token is not None:
+            self._probe_token += 1
         self._io_busy = False
         if not alive:
             self.log("Device disconnected")
         self._update_state()
 
-    def _try_connect(self):
+    def _try_connect(self, token=None):
         """Runs off the Tk thread so the connect/version probe never freezes UI."""
         try:
             ok = self.dev.connect()
@@ -1315,9 +1344,13 @@ class App(tk.Tk):
             LOG.exception("connect worker crashed")
             self.log("Connect error: %s" % e)
             ok = False
-        self._ui_q.put(lambda: self._connect_done(ok))
+        self._ui_q.put(lambda: self._connect_done(ok, token))
 
-    def _connect_done(self, ok):
+    def _connect_done(self, ok, token=None):
+        if token is not None and token != self._probe_token:
+            return
+        if token is not None:
+            self._probe_token += 1
         self._io_busy = False
         self._update_state()
 

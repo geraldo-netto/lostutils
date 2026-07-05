@@ -1825,6 +1825,27 @@ def test_probe_done_clears_busy(app):
     assert app._io_busy is False
 
 
+def test_probe_timeout_clears_busy_and_logs(app):
+    app._io_busy = True
+    app._probe_token = 7
+
+    app._probe_timeout(7, "Connect")
+    _wait_drain(app)
+
+    assert app._io_busy is False
+    assert "probe stalled" in app.log_box.get("1.0", "end").lower()
+
+
+def test_stale_probe_done_does_not_clear_new_busy(app):
+    app._io_busy = True
+    app._probe_token = 8
+
+    app._probe_done(True, token=7)
+
+    assert app._io_busy is True
+    assert app._probe_token == 8
+
+
 def test_probe_alive_offthread_reports_disconnect(app):
     """_probe_alive posts _probe_done back via the UI queue; a vanished device
     clears busy and is reported, all without blocking the Tk thread."""
