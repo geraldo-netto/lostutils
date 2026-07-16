@@ -42,7 +42,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-integ-02 | open | med | minikeypad.py:1664 — `_write_all_done` only logs an ok/total count; on a per-key `flash`/`error` outcome it never updates `_assignments`, so a partially-committed key after "Write all" keeps a clean mapping with no `ambiguous` marker, diverging from the single-key path (`_download_done` calls `_record_pending_assignment(ambiguous=True)` on the same outcomes). Have the write-all worker report per-key outcomes and set `_assignments[(layer,kid)]["ambiguous"]` on ambiguous commits. | data integrity — two write paths keep divergent post-commit state; cross-ref mkp-rel-03/04
 
 ## performance
 

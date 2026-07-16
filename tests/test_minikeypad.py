@@ -1538,6 +1538,29 @@ def test_write_all_partial_failure(app):
     assert "failed" in app.dl_status.cget("text").lower()
 
 
+def test_write_all_marks_ambiguous_on_failed_commit(app):
+    app._io_busy = False
+    data = _one_key_assignment(app)
+    app._assignments = {(1, 1): {"data": data, "desc": "A"}}
+    reports, _flash, _ = app._reports_for(1, data)
+    # Every report ACKs; the trailing flash commit fails -> outcome "flash".
+    app.dev = FakeDev(connected=True, write_ok=True, fail_index=len(reports) + 1)
+    app._write_all()
+    _wait_drain(app)
+    assert app._assignments[(1, 1)].get("ambiguous") is True
+    assert "0/1" in app.log_box.get("1.0", "end")
+
+
+def test_write_all_reports_failure_stays_unambiguous(app):
+    app._io_busy = False
+    app.dev = FakeDev(connected=True, write_ok=False)   # first report fails
+    data = _one_key_assignment(app)
+    app._assignments = {(1, 1): {"data": data, "desc": "A"}}
+    app._write_all()
+    _wait_drain(app)
+    assert "ambiguous" not in app._assignments[(1, 1)]
+
+
 def test_write_all_skips_unbuildable(app):
     app._io_busy = False
     app.dev = FakeDev(connected=True, write_ok=True)

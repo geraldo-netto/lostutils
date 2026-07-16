@@ -1644,7 +1644,7 @@ class App(tk.Tk):
                 self.log("Write-all: %s has nothing to send" % self._key_name(kid))
                 continue
             reports, flash, _ = built
-            jobs.append((kid, reports, self._flash_buf(flash)))
+            jobs.append(((layer, kid), reports, self._flash_buf(flash)))
         self._run_write_all(jobs)
 
     def _run_write_all(self, jobs):
@@ -1653,25 +1653,34 @@ class App(tk.Tk):
         rid = self.kp.ReportID
 
         def worker():
-            ok = 0
-            for kid, reports, flash_buf in jobs:
+            results = []
+            for key, reports, flash_buf in jobs:
                 try:
                     outcome = self._send_reports(reports, flash_buf, rid)
                 except Exception as e:
                     LOG.exception("write-all worker crashed")
-                    self.log("Write-all: %s error: %s" % (self._key_name(kid), e))
+                    self.log("Write-all: %s error: %s" % (self._key_name(key[1]), e))
                     outcome = "error"
-                if outcome == "ok":
-                    ok += 1
-                else:
-                    self.log("Write-all: %s failed (%s)" % (self._key_name(kid), outcome))
-            self._ui_q.put(lambda: self._write_all_done(ok, len(jobs)))
+                if outcome != "ok":
+                    self.log("Write-all: %s failed (%s)" % (self._key_name(key[1]), outcome))
+                results.append((key, outcome))
+            self._ui_q.put(lambda: self._write_all_done(results))
 
         self._start_action_worker(worker, "Write-all")
 
-    def _write_all_done(self, ok, total):
+    def _write_all_done(self, results):
         self._io_busy = False
         self._set_actions("normal")
+        # Same post-commit semantics as _download_done: 'flash'/'error' left
+        # the device state ambiguous, 'reports' persisted nothing.
+        ambiguous = [key for key, outcome in results
+                     if outcome in ("flash", "error") and key in self._assignments]
+        for key in ambiguous:
+            self._assignments[key]["ambiguous"] = True
+        if ambiguous:
+            self._refresh_key_map()
+        ok = sum(1 for _, outcome in results if outcome == "ok")
+        total = len(results)
         self.log("Write-all: %d/%d key(s) written" % (ok, total))
         self._dl_result(ok == total and total > 0)
 
