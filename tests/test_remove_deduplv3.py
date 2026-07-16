@@ -158,6 +158,26 @@ def test_emit_remove_commands_shell_quotes_paths():
     assert "rm -f " in text
 
 
+def test_emit_remove_commands_chunks_large_group():
+    """rdv3-scal-01: a group whose removals exceed the per-command byte
+    budget is split across multiple `rm -f` lines, none over the limit."""
+    survivor = "/tmp/keep-" + "s" * 120 + ".txt"
+    paths = [survivor] + [f"/tmp/dup-{i:04d}-" + "x" * 90 + ".txt" for i in range(2000)]
+    out = []
+
+    groups, removed = rd._emit_remove_commands({"h": paths}, out.append)
+
+    assert groups == 1
+    assert removed == 2000
+    rm_lines = [ln for ln in "".join(out).splitlines() if ln.startswith("rm -f ")]
+    assert len(rm_lines) > 1
+    for ln in rm_lines:
+        assert len(ln.encode("utf-8")) <= rd.RM_ARGV_BYTE_LIMIT + len("rm -f ")
+    targets = [t for ln in rm_lines for t in ln[len("rm -f "):].split()]
+    assert len(targets) == 2000
+    assert survivor not in targets
+
+
 def test_emit_remove_commands_uses_translation_hook(monkeypatch):
     def translate(message):
         if message == rd.SAFETY_BANNER_TEMPLATE:

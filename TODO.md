@@ -58,7 +58,6 @@ rf-perf-31 | open | med | relocate_folder.py:2229 — under `--strict`, `copy_tr
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-scal-02 | open | low | import_events.py:2436 — `_prune_stage_cache` runs `_stage_cache_entries` (a full root.glob("*.json") + is_file scan) after every single `_write_stage_cache_text`, i.e. an O(entries) directory scan per cached PDF-text/OCR/LLM stage across all workers (default cap 2048). Prune probabilistically (e.g. only when a cheap counter crosses the cap) or track entry count in memory. | scalability — repeated I/O on hot path
-rdv3-scal-01 | open | low | remove-deduplv3.py:156-158 — all removals in a group are joined into one `rm -f {quoted}` line; a hash group with very many duplicates emits a single command whose argv can exceed OS ARG_MAX when piped to sh. Chunk into multiple `rm -f` lines. | scalability — large-group fan-out on the tool's core use case
 
 ## N+1 / call efficiency
 

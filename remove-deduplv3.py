@@ -52,6 +52,9 @@ SAFETY_BANNER_TEMPLATE = (
     "# WARNING: generated destructive rm -f commands.\n"
     "# Review this file before piping it to sh; this script does not delete files by itself.\n\n"
 )
+# Per-`rm` argv byte budget. Linux ARG_MAX is typically ~2 MiB but is shared
+# with the environment; 128 KiB keeps each emitted command safely below it.
+RM_ARGV_BYTE_LIMIT = 128 * 1024
 
 
 def detect_encoding(path):
@@ -136,6 +139,22 @@ def _survivor(paths):
     return max(paths, key=lambda p: (len(p) - max(p.rfind(sep) for sep in seps) - 1, p))
 
 
+def _chunked_quoted(paths, limit=RM_ARGV_BYTE_LIMIT):
+    # rdv3-scal-01: split a group's removals across several `rm -f` lines so
+    # one huge hash group can't exceed ARG_MAX when the output is piped to sh.
+    chunk, size = [], 0
+    for p in paths:
+        q = shlex.quote(p)
+        cost = len(q.encode("utf-8", "surrogateescape")) + 1  # +1 separator
+        if chunk and size + cost > limit:
+            yield " ".join(chunk)
+            chunk, size = [], 0
+        chunk.append(q)
+        size += cost
+    if chunk:
+        yield " ".join(chunk)
+
+
 def _emit_remove_commands(groups, out):
     out(_(SAFETY_BANNER_TEMPLATE))
     groups_with_dups = 0
@@ -153,9 +172,10 @@ def _emit_remove_commands(groups, out):
             continue
         groups_with_dups += 1
         files_to_remove += len(to_remove)
-        quoted = " ".join(shlex.quote(p) for p in to_remove)
         out(_("# duplicates: {hash}\n# saving: {path}\n").format(hash=h, path=keep))
-        out(f"rm -f {quoted}\n\n")
+        for quoted in _chunked_quoted(to_remove):
+            out(f"rm -f {quoted}\n")
+        out("\n")
     return groups_with_dups, files_to_remove
 
 
