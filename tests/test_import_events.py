@@ -2187,6 +2187,24 @@ def test_process_folder_skips_symlink_to_outside_file(tmp_path):
     assert events == []
 
 
+def test_scan_files_recursive_prunes_symlinked_dirs(tmp_path):
+    scan = tmp_path / "scan"
+    sub = scan / "sub"
+    sub.mkdir(parents=True)
+    (scan / "a.txt").write_text("A", encoding="utf-8")
+    (sub / "b.txt").write_text("B", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("S", encoding="utf-8")
+    (scan / "loop").symlink_to(scan, target_is_directory=True)
+    (scan / "side").symlink_to(outside, target_is_directory=True)
+
+    files = list(import_events._scan_files(scan, recursive=True, deterministic_order=True))
+
+    # The cycle terminates and symlinked dirs are not descended.
+    assert [f.name for f in files] == ["a.txt", "b.txt"]
+
+
 def test_process_folder_recursive(tmp_path):
     sub = tmp_path / "nested"
     sub.mkdir()

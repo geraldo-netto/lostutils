@@ -3394,8 +3394,21 @@ def extract_from_pdf(
 # --------------------------------------------------------------------------- #
 # Folder scan
 # --------------------------------------------------------------------------- #
+def _walk_files_no_follow(path: Path) -> Iterable[Path]:
+    """Yields files under `path` without descending symlinked directories, so
+    a symlink cycle cannot drive unbounded traversal (ie-robust-11)."""
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        base = Path(dirpath)
+        for name in dirnames:
+            candidate = base / name
+            if candidate.is_symlink():
+                logger.warning("Skipping symlink %s", candidate)
+        for name in filenames:
+            yield base / name
+
+
 def _scan_files(path: Path, recursive: bool, deterministic_order: bool = False) -> Iterable[Path]:
-    files = path.rglob("*") if recursive else path.iterdir()
+    files = _walk_files_no_follow(path) if recursive else path.iterdir()
     iterable = sorted(files) if deterministic_order else files
     for file in iterable:
         if file.is_symlink():
