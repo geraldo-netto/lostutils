@@ -4038,6 +4038,50 @@ def test_copy_and_verify_cleans_target_on_keyboardinterrupt(tmp_path, monkeypatc
     assert not plan.target.exists(), "partial target not cleaned on Ctrl+C in verify"
 
 
+# --- rf-perf-31: strict refuses BEFORE copying -------------------------------
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo (POSIX)")
+def test_strict_refuses_before_any_copy(tmp_path, monkeypatch):
+    src = tmp_path / "src"; src.mkdir()
+    (src / "real.txt").write_text("data")
+    os.mkfifo(src / "pipe")
+    plan = rf.Plan(source=src, target=tmp_path / "dst", strict=True)
+    copy_calls = []
+    monkeypatch.setattr(
+        rf, "copy_tree",
+        lambda *a, **k: copy_calls.append(a) or [])
+    with pytest.raises(RuntimeError, match="strict mode: refusing"):
+        rf._copy_and_verify(plan)
+    assert copy_calls == [], "copy started despite strict pre-walk refusal"
+    assert not plan.target.exists(), "dst content created on strict refusal"
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo (POSIX)")
+def test_strict_prewalk_refusal_message_names_kind(tmp_path):
+    src = tmp_path / "src"; src.mkdir()
+    os.mkfifo(src / "pipe")
+    cache: dict = {}
+    with pytest.raises(RuntimeError, match=r"1 special file\(s\).*fifo"):
+        rf._refuse_specials_before_copy(src, cache)
+    assert src / "pipe" in cache
+
+
+def test_strict_prewalk_noop_on_clean_tree(tmp_path):
+    src = tmp_path / "src"; src.mkdir()
+    (src / "a.txt").write_text("x")
+    (src / "sub").mkdir()
+    (src / "sub" / "link").symlink_to(src / "a.txt")
+    rf._refuse_specials_before_copy(src, {})  # no raise
+
+
+def test_strict_clean_tree_still_migrates_copy(tmp_path):
+    src = tmp_path / "src"; src.mkdir()
+    (src / "a.txt").write_text("payload")
+    plan = rf.Plan(source=src, target=tmp_path / "dst", strict=True)
+    rf._copy_and_verify(plan)
+    assert (plan.target / "a.txt").read_text() == "payload"
+
+
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo (POSIX)")
 def test_verify_ownership_skips_special_files(tmp_path):
     """rf-rel-02: a tree with a skipped special file (FIFO) must not fail

@@ -2302,8 +2302,33 @@ def _device_mount_point(path: Path) -> "str | None":
         return None
 
 
+def _refuse_specials_before_copy(src: Path,
+                                 mode_cache: dict[Path, int]) -> None:
+    """rf-perf-31: under --strict any special file means the migration is
+    refused, so discovering one AFTER `shutil.copytree` wastes a full
+    copy + rmtree on large trees. Pre-walk with lstat (same
+    classification as `_make_ignore_specials`) and refuse first, via
+    `_report_skipped` so the strict message contract is unchanged.
+    Modes are cached for the kind summary (rf-perf-03)."""
+    specials: list[Path] = []
+    for path, _dir_names, names in os.walk(src, followlinks=False):
+        base = Path(path)
+        for name in names:
+            full = base / name
+            try:
+                mode = os.lstat(full).st_mode
+            except OSError:
+                continue
+            if _is_special_file(mode):
+                mode_cache[full] = mode
+                specials.append(full)
+    _report_skipped(specials, strict=True, mode_cache=mode_cache)
+
+
 def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | None = None) -> None:
     mode_cache: dict[Path, int] = {}
+    if plan.strict:
+        _refuse_specials_before_copy(plan.source, mode_cache)
     skipped = copy_tree(plan.source, plan.target, mode_cache=mode_cache,
                         jobs=plan.jobs, check_space=plan.check_space)
     if on_state is not None:
