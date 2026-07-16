@@ -17,10 +17,12 @@ import import_events
 def _reset_paddle_runtime_state():
     import_events.reset_paddle_ocr_state()
     import_events._TESSERACT_PATH_CACHE.clear()
+    import_events._STAGE_CACHE_COUNTS.clear()
     import_events.reset_stage_file_hash_cache()
     yield
     import_events.reset_paddle_ocr_state()
     import_events._TESSERACT_PATH_CACHE.clear()
+    import_events._STAGE_CACHE_COUNTS.clear()
     import_events.reset_stage_file_hash_cache()
 
 
@@ -2004,6 +2006,27 @@ def test_stage_cache_prunes_to_configured_entry_cap(tmp_path):
 
     entries = list((tmp_path / "cache").glob("*.json"))
     assert len(entries) == 2
+
+
+def test_prune_stage_cache_scans_directory_only_on_cap_crossing(tmp_path, monkeypatch):
+    source = tmp_path / "source.pdf"
+    source.write_text("input", encoding="utf-8")
+    cfg = import_events.ModelConfig(
+        stage_cache="on",
+        stage_cache_dir=str(tmp_path / "cache"),
+        stage_cache_max_entries=100,
+    )
+    scans = []
+    real_entries = import_events._stage_cache_entries
+    monkeypatch.setattr(import_events, "_stage_cache_entries",
+                        lambda root: scans.append(root) or real_entries(root))
+
+    for index in range(5):
+        import_events._write_stage_cache_text(
+            cfg, source, f"stage-{index}", {"index": index}, f"text {index}")
+
+    # One lazy seed scan; later writes only bump the in-memory counter.
+    assert len(scans) == 1
 
 
 def test_reset_stage_cache_entries_deletes_json_only(tmp_path):

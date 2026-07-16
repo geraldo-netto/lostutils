@@ -54,7 +54,6 @@ rf-perf-31 | open | med | relocate_folder.py:2229 — under `--strict`, `copy_tr
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-scal-02 | open | low | import_events.py:2436 — `_prune_stage_cache` runs `_stage_cache_entries` (a full root.glob("*.json") + is_file scan) after every single `_write_stage_cache_text`, i.e. an O(entries) directory scan per cached PDF-text/OCR/LLM stage across all workers (default cap 2048). Prune probabilistically (e.g. only when a cheap counter crosses the cap) or track entry count in memory. | scalability — repeated I/O on hot path
 
 ## N+1 / call efficiency
 

@@ -2437,28 +2437,51 @@ def _stage_cache_lru_key(path: Path) -> tuple[int, str]:
     return mtime_ns, path.name
 
 
+_STAGE_CACHE_COUNT_LOCK = threading.Lock()
+_STAGE_CACHE_COUNTS: Dict[str, int] = {}
+
+
+def _stage_cache_count_after_write(root: Path) -> int:
+    """Approximate entry count for `root`: seeded by one directory scan, then
+    advanced per write. Other processes (or overwrites of an existing key)
+    drift the estimate, but it only decides *when* to re-scan — every cap
+    crossing re-seeds it from a real scan."""
+    key = str(root)
+    with _STAGE_CACHE_COUNT_LOCK:
+        count = _STAGE_CACHE_COUNTS.get(key)
+        count = len(_stage_cache_entries(root)) if count is None else count + 1
+        _STAGE_CACHE_COUNTS[key] = count
+        return count
+
+
 def _prune_stage_cache(config: ModelConfig) -> None:
     max_entries = max(1, config.stage_cache_max_entries)
-    entries = _stage_cache_entries(_stage_cache_root(config))
-    if len(entries) <= max_entries:
+    root = _stage_cache_root(config)
+    if _stage_cache_count_after_write(root) <= max_entries:
         return
+    entries = _stage_cache_entries(root)
     entries.sort(key=_stage_cache_lru_key, reverse=True)
     for stale in entries[max_entries:]:
         try:
             stale.unlink()
         except OSError:
             pass
+    with _STAGE_CACHE_COUNT_LOCK:
+        _STAGE_CACHE_COUNTS[str(root)] = min(len(entries), max_entries)
 
 
 def reset_stage_cache_entries(config: Optional[ModelConfig] = None) -> int:
     runtime_config = config or ModelConfig()
+    root = _stage_cache_root(runtime_config)
     removed = 0
-    for entry in _stage_cache_entries(_stage_cache_root(runtime_config)):
+    for entry in _stage_cache_entries(root):
         try:
             entry.unlink()
         except OSError:
             continue
         removed += 1
+    with _STAGE_CACHE_COUNT_LOCK:
+        _STAGE_CACHE_COUNTS.pop(str(root), None)
     return removed
 
 
