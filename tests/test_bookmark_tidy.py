@@ -552,6 +552,32 @@ def test_read_bookmark_file_parses_json_once(monkeypatch, tmp_path):
     assert len(calls) == 1
 
 
+def test_read_bookmark_file_reads_netscape_once(monkeypatch, tmp_path):
+    path = tmp_path / "bookmarks.html"
+    path.write_text(_netscape_html(), encoding="utf-8")
+    monkeypatch.setattr(
+        bookmark_tidy,
+        "read_netscape_bookmarks",
+        lambda _path: pytest.fail("netscape file re-read after sniff"),
+    )
+
+    assert bookmark_tidy.read_bookmark_file(path)[0].title == "Alpha"
+
+
+def test_read_bookmark_file_parses_json_larger_than_sniff_window(tmp_path):
+    path = tmp_path / "chrome.json"
+    padding = "x" * (bookmark_tidy.FORMAT_SNIFF_CHARS * 2)
+    path.write_text(
+        '{"roots":{"bookmark_bar":{"children":[{"type":"url","url":"https://example.test/a","name":"A"}]}},'
+        f'"pad":"{padding}"}}',
+        encoding="utf-8",
+    )
+
+    assert bookmark_tidy.detect_bookmark_format(path) == "chromium"
+    bookmarks = bookmark_tidy.read_bookmark_file(path)
+    assert [item.url for item in bookmarks] == ["https://example.test/a"]
+
+
 def test_expand_inputs_and_discovery_helpers(tmp_path, monkeypatch):
     folder = tmp_path / "inputs"
     nested = folder / "nested"

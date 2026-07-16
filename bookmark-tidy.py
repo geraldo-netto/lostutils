@@ -33,6 +33,7 @@ LLAMA_CPP_PYTHON_REQUIREMENT = "llama-cpp-python==0.3.32"
 LLAMA_INSTALL_TIMEOUT_SECONDS = 300
 LLAMA_INFERENCE_TIMEOUT_SECONDS = 120
 LLM_CONSECUTIVE_FAILURE_LIMIT = 3
+FORMAT_SNIFF_CHARS = 4096
 MOZLZ4_MAGIC = b"mozLz40\x00"
 TRACKING_PARAM_NAMES = frozenset(
     {
@@ -313,8 +314,12 @@ class NetscapeBookmarkParser(HTMLParser):
 
 
 def read_netscape_bookmarks(path: Path) -> list[Bookmark]:
-    parser = NetscapeBookmarkParser(str(path))
-    parser.feed(path.read_text(encoding="utf-8", errors="replace"))
+    return netscape_html_to_bookmarks(path.read_text(encoding="utf-8", errors="replace"), str(path))
+
+
+def netscape_html_to_bookmarks(text: str, source: str) -> list[Bookmark]:
+    parser = NetscapeBookmarkParser(source)
+    parser.feed(text)
     return parser.bookmarks
 
 
@@ -617,19 +622,24 @@ def _detect_bookmark_format_with_data(path: Path) -> tuple[str, Any | None]:
         return "firefox-jsonlz4", None
     if path.name == "places.sqlite" or path.suffix.casefold() in {".sqlite", ".sqlite3"}:
         return "firefox-sqlite", None
-    sample = path.read_text(encoding="utf-8", errors="replace")[:4096]
-    stripped = sample.lstrip()
-    if stripped.startswith("<"):
-        return "netscape", None
-    if stripped.startswith("{"):
-        data = _load_json_bookmark(path)
-        return _json_bookmark_format(data, path), data
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        sample = handle.read(FORMAT_SNIFF_CHARS)
+        stripped = sample.lstrip()
+        if stripped.startswith("<"):
+            return "netscape", sample + handle.read()
+        if stripped.startswith("{"):
+            data = _parse_json_bookmark_text(sample + handle.read(), path)
+            return _json_bookmark_format(data, path), data
     raise UserError(f"unsupported bookmark file: {path}")
 
 
 def _load_json_bookmark(path: Path) -> Any:
+    return _parse_json_bookmark_text(path.read_text(encoding="utf-8", errors="replace"), path)
+
+
+def _parse_json_bookmark_text(text: str, path: Path) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         raise UserError(f"invalid JSON bookmark file {path}: {exc}") from exc
 
@@ -660,6 +670,8 @@ def read_bookmark_file(path: Path) -> list[Bookmark]:
         return read_firefox_json_bookmarks(path)
     if fmt == "firefox-jsonlz4":
         return read_firefox_jsonlz4_bookmarks(path)
+    if isinstance(data, str):
+        return netscape_html_to_bookmarks(data, str(path))
     return read_netscape_bookmarks(path)
 
 
