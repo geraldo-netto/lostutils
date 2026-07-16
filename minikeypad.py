@@ -1531,7 +1531,12 @@ class App(tk.Tk):
         try:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, indent=2, ensure_ascii=False)
+                # mkp-robust-21: without fsync a crash after the rename can
+                # atomically replace a good profile with a truncated one.
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, path)
+            self._fsync_dir(os.path.dirname(path) or ".")
         except BaseException:
             # mkp-robust-20: a failed/interrupted write must not leave an
             # orphaned <path>.tmp behind.
@@ -1540,6 +1545,20 @@ class App(tk.Tk):
             except OSError:
                 pass
             raise
+
+    @staticmethod
+    def _fsync_dir(dirpath):
+        """Best-effort: persist the rename (unsupported on some OS/filesystems)."""
+        try:
+            fd = os.open(dirpath, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _profile_assignment(layer, kid, rec):

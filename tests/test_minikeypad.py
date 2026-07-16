@@ -1918,6 +1918,22 @@ def test_load_dialog_handles_malformed_profile_typeerror(app, tmp_path, monkeypa
     assert any("Load failed" in m for m in logs)
 
 
+def test_save_profile_fsyncs_before_rename(app, tmp_path, monkeypatch):
+    """mkp-robust-21: the temp handle is fsynced before os.replace."""
+    calls = []
+    real_replace = minikeypad.os.replace
+    monkeypatch.setattr(minikeypad.os, "fsync", lambda _fd: calls.append("fsync"))
+    monkeypatch.setattr(
+        minikeypad.os, "replace",
+        lambda src, dst: (calls.append("replace"), real_replace(src, dst)))
+    app._assignments = {(1, 1): {"data": bytes([1]) + bytes(64), "desc": "A"}}
+
+    app._save_profile(str(tmp_path / "p.json"))
+
+    assert "fsync" in calls and "replace" in calls
+    assert calls.index("fsync") < calls.index("replace")
+
+
 def test_save_profile_cleans_tmp_on_write_failure(app, tmp_path, monkeypatch):
     """mkp-robust-20: a json.dump failure must not orphan the <path>.tmp file."""
     app._assignments = {(1, 1): {"data": bytes(range(65)), "desc": "A"}}
