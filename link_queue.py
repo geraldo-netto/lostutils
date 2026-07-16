@@ -3125,6 +3125,8 @@ class _SettingsTabs:
              app.cooldown_var,     0, 86400, 6, app._on_cooldown_changed),
             ("Max per domain (0 = no cap):",
              app.max_per_domain_var, 0, 32, 4, app._on_max_per_domain_changed),
+            ("Command timeout (s, 0 = off):",
+             app.command_timeout_var, 0, 86400, 6, app._on_command_timeout_changed),
         ]:
             ttk.Label(parent, text=label).grid(
                 row=row, column=0, sticky="w", padx=4, pady=4)
@@ -3562,6 +3564,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             value=str(self.config.get("failure_sleep_seconds", 300)))
         self.max_per_domain_var = tk.StringVar(
             value=str(self.config.get("max_per_domain", 0)))
+        self.command_timeout_var = tk.StringVar(
+            value=str(self.config.get("command_timeout_seconds", 0)))
         self.output_folder_var = tk.StringVar(
             value=str(self.config.get("output_folder", "")))
         self.log_verbosity_var = tk.StringVar(
@@ -4203,6 +4207,20 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             lambda v: ("[config] per-domain worker cap removed" if v == 0
                        else f"[config] per-domain worker cap set to {v}"),
             after=wake_workers)
+
+    def _get_command_timeout(self) -> int:
+        return self._get_int_setting(
+            self.command_timeout_var, "command_timeout_seconds", 0, clamp_min=0)
+
+    def _on_command_timeout_changed(self) -> None:
+        # Workers read the live config per item (_command_timeout_seconds),
+        # so persisting the key is the whole wiring.
+        self._apply_int_setting(
+            self.command_timeout_var, self._get_command_timeout,
+            "command_timeout_seconds", 0,
+            lambda v: ("[config] command timeout disabled" if v == 0
+                       else f"[config] command timeout set to "
+                            f"{self._format_duration(v)}"))
 
     def _apply_path_setting(self, var, key, on_msg, off_msg) -> None:
         """Shared body for the path settings handlers (dup-04 / dup-07):

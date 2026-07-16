@@ -1413,6 +1413,20 @@ def test_sleep_cooldown_maxdomain_handlers(app):
     assert app.config["max_per_domain"] == 0
 
 
+def test_command_timeout_handler(app):
+    # lq-cfg-01: the hung-download safety cap is editable from the settings
+    # UI, persists to config, and 0 keeps the documented "off" meaning.
+    app.command_timeout_var.set("120"); app._on_command_timeout_changed()
+    assert app.config["command_timeout_seconds"] == 120
+    assert app.dispatcher._command_timeout_seconds() == 120
+    app.command_timeout_var.set("0"); app._on_command_timeout_changed()
+    assert app.config["command_timeout_seconds"] == 0
+    app.command_timeout_var.set("-5"); app._on_command_timeout_changed()
+    assert app.config["command_timeout_seconds"] == 0   # clamped, not negative
+    app.command_timeout_var.set("xx")
+    assert app._get_command_timeout() == int(app.config["command_timeout_seconds"])
+
+
 def test_getters_fallback_on_bad_input(app):
     app.sleep_var.set("xx")
     assert app._get_sleep() == int(app.config["sleep_between_items"])
