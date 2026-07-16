@@ -30,6 +30,8 @@ rf-sec-04 | open | med | relocate_folder.py:1787 — source inode identity is as
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+lq-input-20 | open | low | link_queue.py:772 — `_warn_shell_injection` calls `_template_has_bare_url(pc.get("command",""))` (and default_command at :776) during `_normalize_config_schema`, but `_coerce_config_scalars` (:738-764) never coerces `command`/`default_command` to `str`; a hand-edited config with `shell: true` and a non-string template (e.g. `command: 8080` or `command: yes` → int/bool) makes `_PLACEHOLDER_RE.finditer(template or "")` raise an unhandled `TypeError` in `ConfigStore._load` (not wrapped), aborting the whole app at startup. Coerce templates to `str` in `_normalize_protocols`/`_coerce_config_scalars` (or guard `_template_has_bare_url` to treat non-str as ""). | STRIDE Tampering → DoS on the config data-flow boundary; OWASP ASVS input-validation-before-use
+mkp-input-02 | open | low | minikeypad.py:1576 — `_load_profile` validates `layer`/`key_id`/buffer-length/version but never checks that the buffer's key byte (`data[KeyParam.KeySet_KeyNum]` = `data[0]`) matches the profile's `key_id`; `_reports_for`/`build_download_reports` program the device from `data[0]` while the session map and `_refresh_key_map` colour the key by `key_id`, so a corrupt/hand-edited profile can program a different physical key (or the LED, id 176) than the UI shows. Reject an entry when `data[0] != key_id`. | input validation — untrusted file bytes drive the device report without cross-check
 
 ## data governance
 
@@ -40,22 +42,29 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+mkp-integ-02 | open | med | minikeypad.py:1664 — `_write_all_done` only logs an ok/total count; on a per-key `flash`/`error` outcome it never updates `_assignments`, so a partially-committed key after "Write all" keeps a clean mapping with no `ambiguous` marker, diverging from the single-key path (`_download_done` calls `_record_pending_assignment(ambiguous=True)` on the same outcomes). Have the write-all worker report per-key outcomes and set `_assignments[(layer,kid)]["ambiguous"]` on ambiguous commits. | data integrity — two write paths keep divergent post-commit state; cross-ref mkp-rel-03/04
 
 ## performance
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-perf-01 | open | low | bookmark-tidy.py:619 — `_detect_bookmark_format_with_data` does `path.read_text(...)[:4096]`, materializing the entire file just to sample 4KB, then the JSON path re-reads via `_load_json_bookmark` (:631) and the netscape path re-reads via `read_netscape_bookmarks` (:316), so every input file is read fully twice. Use a bounded `open().read(4096)` for the sniff and reuse the already-read text. | performance / memory — double I/O + full materialization on hot path
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
+rf-perf-30 | open | med | relocate_folder.py:1546 — `_sha256` constructs a fresh `_OperationStallWatchdog` (spawning a background thread) inside the retry loop for every file hashed, and `_verify_content` calls it twice per file (src+dst); on a tree of many small files this is millions of thread create/join cycles whose overhead can dominate the hash itself, and it is redundant with the outer `verify_copy` watchdog (1244) already touched per completed future. Reuse one shared watchdog or gate the per-file watchdog on file size. | multithreading/perf — thread-per-file churn on the hot verify path
+rf-perf-31 | open | med | relocate_folder.py:2229 — under `--strict`, `copy_tree` performs the ENTIRE recursive copy first, then `_report_skipped` (2234) raises at 2290 when any special file was skipped, so a multi-TB migration containing a single socket/FIFO copies the whole tree and immediately `rmtree`s it. The special-file set is discoverable by a cheap pre-walk (the code already lstat-walks in `_src_size_totals`); scan-and-refuse before copying. | efficiency/UX — wasted full copy+delete on refuse path
 
 ## scalability
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ie-scal-02 | open | low | import_events.py:2436 — `_prune_stage_cache` runs `_stage_cache_entries` (a full root.glob("*.json") + is_file scan) after every single `_write_stage_cache_text`, i.e. an O(entries) directory scan per cached PDF-text/OCR/LLM stage across all workers (default cap 2048). Prune probabilistically (e.g. only when a cheap counter crosses the cap) or track entry count in memory. | scalability — repeated I/O on hot path
+rdv3-scal-01 | open | low | remove-deduplv3.py:156-158 — all removals in a group are joined into one `rm -f {quoted}` line; a hash group with very many duplicates emits a single command whose argv can exceed OS ARG_MAX when piped to sh. Chunk into multiple `rm -f` lines. | scalability — large-group fan-out on the tool's core use case
 
 ## N+1 / call efficiency
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+rf-n1-30 | open | med | relocate_folder.py:1479 — `_verify_file` issues 3 syscalls per destination file: `dst_file.is_symlink()` (lstat) + `not dst_file.is_file()` (stat) at 1479, then `_verify_size` re-`lstat`s at 1490. rf-perf-01 collapsed the *source* side to a single lstat but the dst counterpart was never given the same treatment; on a large tree that is 2 redundant stat round-trips/file. Do one `dst_file.lstat()`, classify from `st_mode`, and pass the size through. | N+1 / call efficiency — asymmetric with optimized src side; same pattern in `_verify_dir`:1407, `_verify_symlink`:1460
 
 ## concurrency
 
@@ -71,24 +80,32 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ie-dist-01 | open | med | import_events.py:3717 — `_output_lock` creates `<output>.lock` with O_CREAT|O_EXCL and writes pid, but a hard kill (SIGKILL) skips the finally-unlink and the written pid is never read back; the next run raises FileExistsError forever until manual removal. On FileExistsError read the pid and reclaim the lock when that process is dead. | distributed systems — idempotent re-run / stale-lock recovery
 
 ## dependability
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-depend-02 | open | low | bookmark-tidy.py:1014 — `LlamaCategorizer.__init__` calls `Llama(...)` from `_categorizer_from_args` (:1515) inside `_run`, but model-load failures on a corrupt/incompatible GGUF raise exceptions (e.g. `ValueError`) outside `main`'s caught set (`UserError, OSError, sqlite3.Error, RuntimeError`, :1555), surfacing a raw traceback. Wrap the model-load in `UserError`. | dependability — optional subsystem failure must degrade to a clean error
+bt-depend-01 | open | med | bookmark-tidy.py:965-972 — `_assign_categories` catches every categorizer exception per batch and falls back, but has no circuit breaker: if the model fails or times out on every batch it still pays the full `LLAMA_INFERENCE_TIMEOUT_SECONDS` (120s) per batch across all N batches, amplifying wall-time instead of failing fast. Abort remaining batches to fallback after K consecutive failures. | dependability — fallback chains must stop before amplifying damage
 dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no BrokenPipeError guard, so piping into `head` raises a BrokenPipeError traceback on close. Wrap the write/flush in a BrokenPipeError handler or restore SIGPIPE to default. | common CLI pipe pattern
 
 ## code complexity
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+hr-cx-06 | open | med | hash-recursive-ai5.py:2024 — `main` spans ~185 lines and defines five nested closures (`_mark_walk_done`, `_disable_hash_dump`, `_on_hashed`, `_on_composite`, `_on_stage_progress`) mixing CLI parsing, dump-file setup, callback wiring, pipeline invocation and summary, exceeding the AGENTS.md cognitive-complexity ceiling (≤10). Extract `_setup_hash_dump` and a `_build_dump_callbacks(...)` helper so main stays thin orchestration. | code complexity — cognitive complexity ≤10 (AGENTS.md); mirrors prior hr-cx-01..05 extractions
+rf-cx-30 | open | med | relocate_folder.py:2032 — `execute` nests three levels of `try`/`finally` (outer status `finally`, `os.close(src_fd)` `finally`, inner cleanup `except`) around ~6 conditional early-returns (already_migrated / empty-target / orphan / dry-run / states), pushing cognitive complexity above the repo's ≤10 rule. Extract the guard/skip preamble and the copy-swap-cleanup core into helpers so each stays flat. | code complexity — AGENTS.md "complexity ≤ 10" rule
 
 ## code duplication
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-dup-02 | open | med | bookmark-tidy.py:1199-1207,1277-1285 — `_ensure_chrome_folder` and `_ensure_firefox_folder` are byte-identical except for calling `_child_chrome_folder` vs `_child_firefox_folder`; collapse to one helper parametrized by the child-finder callable. | within-file code duplication
 bt-dup-01 | open | med | bookmark-tidy.py:1442-1449 — `_run` duplicates the full body of `tidy_bookmarks` (deduplicate → guard → `_assign_categories`); collapse `_run` onto `tidy_bookmarks` to keep one code path. | within-file dup
+ie-dup-01 | open | low | import_events.py:2231 — the prompt preamble f"{USER_PROMPT}\n\n{_language_instruction(language)}\n\n{_event_policy_instruction(config)}" is hand-assembled identically in `_text_messages` (2230-2237) and `_image_messages_from_bytes` (2256-2258); a change to the ordering/spacing must be edited in two places. Extract a `_prompt_preamble(language, config)` helper. | code duplication (within-file)
 mkp-dup-05 | open | low | minikeypad.py:1199 — five function-button handlers (`_basic_key` :1199, `_shift_and` :1238, `_multimedia` :1245, `_mouse` :1253, `_unicode_char` :1213) repeat the identical shape `if not self._need_key(): return / if not <mutator>(...): self._dropped(label) / self._refresh_display()`. Add a `_apply_mutation(fn, label)` wrapper. | code duplication — repeated guard+dropped+refresh envelope
+mkp-dup-06 | open | low | minikeypad.py:1349 — `_connect_done` and `_probe_done` (:1327) repeat the identical token-guard + token-bump + `_io_busy=False` + `_update_state()` envelope. Extract a shared `_probe_settled(token)` helper both call. | within-file duplication (DRY/SOLID)
 mkp-dup-04 | open | low | minikeypad.py:1360 — `_dl_result` (:1360) and `_dl_note` (:1366) each hand-roll the transient status flash `self.after(2500, lambda: self.dl_status.configure(...))` with divergent reset (one resets bg, one only text). Factor a `_flash_status(text, fg, bg)` so both clear identically. | code duplication — divergent copies risk inconsistent reset
 mkp-dup-01 | open | med | minikeypad.py:1368 — `_download` (1368-1375) and `_write_all` (1551-1558) duplicate the write-guard prelude (`if self._io_busy: _dl_note("Busy, try again"); if not self.dev.connected: log + _dl_result(False)`). Extract a shared `_precheck_write()` returning ok/reason. | code duplication / SOLID SRP — one guard, one place
 mkp-dup-02 | open | med | minikeypad.py:1417 — `_run_download` (1417-1433) and `_run_write_all` (1572-1592) duplicate the I/O-worker scaffolding (`_io_busy=True`, `_set_actions("disabled")`, `rid=self.kp.ReportID`, `worker()` with try/except+`LOG.exception`, spawn daemon thread, marshal `*_done` via `_ui_q`). Extract `_spawn_io_worker(fn, done)`. | code duplication / composition — collapse two near-identical thread launchers
@@ -99,6 +116,14 @@ mkp-dup-03 | open | low | minikeypad.py:419 — `shift_and` re-inlines the body 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-arch-01 | open | low | dedupl_numpy.py:16 — single `main()` fuses arg parsing, mmap I/O, vectorized grouping, and stdout emission with no seam; the grouping logic can't be unit-tested without a file + subprocess (feeds dnp-test-01). Extract a pure `group_duplicates(data) -> (paths, counts)` helper. | architecture / decoupling / SOLID — no testability boundary; SRP
+mkp-arch-01 | open | high | minikeypad.py:800 — `App` is a god object (~40 methods) mixing Tk widget construction, connection polling, worker-thread orchestration, device version probing, profile JSON persistence, and per-page business dispatch; the persistence and connection-monitor concerns are independently testable collaborators (`ProfileStore`, `ConnectionMonitor`) buried in the widget class. Extract those two seams into small collaborators the `App` composes. | architecture/composition — god-object, single-responsibility; standalone-file rule still allows in-file class split
+oze-arch-04 | open | low | organize_by_extension.py:835 — `_find_reusable_bucket` returns bucket/next_index via the BucketChoice NamedTuple yet smuggles the updated first_non_full cursor out through a mutable 1-element list out-param (cursor_out, written at L873/877 and read in BucketManager.choose L1032-1036), a third return channel the NamedTuple was created to remove. Fold first_non_full into BucketChoice and delete cursor_out for one clean return. | composition/API smell — mutable out-param; xref choose_bucket:909
+
+## decoupling
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+hr-dec-05 | open | med | hash-recursive-ai5.py:1880 — `_configure_windows` mutates module globals CAP/SAMPLE/HEAD_TAIL_THRESHOLD that `hash_head:679` and `ThirdsStrategy.windows:714` read at hash time; unlike alias/error state (deliberately moved off globals into RunConfig, :129), window sizes stay process-global, so two in-process embedders or back-to-back tests using different `--block-size` clobber each other and hashing is non-reentrant. Carry block/sample sizes on RunConfig and thread them through the window builders. | decoupling — RunConfig isolation seam (hr-arch-05) left incomplete; reentrancy
 
 ## reliability/correctness
 
@@ -108,8 +133,12 @@ dnp-rel-02 | open | med | dedupl_numpy.py:13 — PATH_OFFSET=26 is hardcoded ("p
 dnp-rel-03 | open | med | dedupl_numpy.py:21-24 — mmap is used as the np.frombuffer source after the file handle closes at with-exit and is never closed (leak); an empty file also makes mmap raise. Keep the file open (or copy), close mm, and guard zero-length files. | resource
 dnp-rel-04 | open | low | dedupl_numpy.py:25 — a file whose last line lacks a trailing newline drops that final record (no 0x0A, so line_starts/n_lines never include it); confirmed 0/1 on a 2-duplicate file. Append a virtual line start at EOF when data[-1] != 0x0A. | opposite of the line-36 overrun case
 dnp-rel-01 | open | high | dedupl_numpy.py:36 — hash_idx = line_starts[:,None] + arange(32) assumes every line is ≥32+PATH_OFFSET bytes with the hash exactly 32 chars at offset 0; a short/blank/final line reads across the newline or past buffer end, corrupting grouping. Validate line length / derive hash width. | array-bounds
-mkp-rel-03 | open | low | minikeypad.py:477 — `KeyParam.multimedia` ignores `KEY_Char_Num` capacity while other key/mouse mutators refuse full buffers, so `test_multimedia_refuses_out_of_range` currently returns True for a full buffer instead of False. | failing test: `rtk pytest tests/test_minikeypad.py` reports `test_multimedia_refuses_out_of_range`
+dnp-rel-05 | open | low | dedupl_numpy.py:52 — path slice `data[line_starts[i]+PATH_OFFSET : nl[i]]` ends at the `\n` position, so on CRLF input the preceding `\r` is included in every extracted path; strip a trailing 0x0D (e.g. end at `nl[i] - (data[nl[i]-1]==0x0D)`). | reliability/platform — CRLF portability; sibling scripts rstrip("\r\n"), this one does not
+ie-rel-12 | open | low | import_events.py:1661 — `_calendar_document_year` returns the first 19xx/20xx match in the whole document and `_map_date_units` backfills that single year onto every table row lacking one; a calendar spanning a year boundary (Dec→Jan) mis-dates the later rows. Carry the year from the nearest preceding month/year heading rather than one document-wide constant. | reliability/correctness — heuristic scope limitation
+ie-rel-11 | open | med | import_events.py:3843 — `build_ics` emits VEVENTs with only summary/dtstart/dtend/location; no UID or DTSTAMP is ever added (grep-confirmed: line 2442 is ICS *input*, build_ics output has none). RFC 5545 requires both, so re-importing the same file into Google/Apple Calendar creates duplicate events instead of updating. Add a deterministic UID (e.g. sha256 of title+start+source) and a DTSTAMP per event. | reliability/interop — RFC 5545 §3.6.1 mandatory props
+lq-rel-20 | open | med | link_queue.py:538 — `_PendingQueue.append` dedupes purely on `it.url`, and `_duplicate_status` (:1773) checks URL only, so re-pasting the same URL with different mapped flags (`extra`, e.g. `f:a.mp4` then `f:b.mp4`) silently skips the second entry as a "duplicate", dropping its distinct `-o` target. Key the pending-dedupe on (url, extra) or warn when an incoming item's `extra` differs from the retained one instead of dropping silently. | data-integrity / reliability — silent loss of a legitimately-distinct work item
 mkp-rel-04 | open | low | minikeypad.py:1247 — `_multimedia` does not log a dropped click when `KeyParam.multimedia` accepts despite `KEY_Char_Num` being past the buffer end, so `test_handlers_log_dropped_clicks_when_buffer_full` sees only 3 ignored messages instead of 4. | failing test: `rtk pytest tests/test_minikeypad.py` reports `test_handlers_log_dropped_clicks_when_buffer_full`; likely same root cause as mkp-rel-03
+mkp-rel-03 | open | low | minikeypad.py:477 — `KeyParam.multimedia` ignores `KEY_Char_Num` capacity while other key/mouse mutators refuse full buffers, so `test_multimedia_refuses_out_of_range` currently returns True for a full buffer instead of False. | failing test: `rtk pytest tests/test_minikeypad.py` reports `test_multimedia_refuses_out_of_range`
 oze-rel-01 | open | med | organize_by_extension.py:438 — `resolve_real_extension` runs `_weak_header_should_keep_declared` AFTER the `.pdf`-payload check, so a declared `.pdf` carrying pure MP3 (2-byte `\xff\xfb` sync header, no `%PDF-` marker) is kept as `pdf` instead of falling through to the detected `mp3`; `_weak_header_should_keep_declared('pdf','mp3')` returns True. A real PDF's header is the 5-byte `%PDF-`, never a legitimately-weak 2-byte match, so the weak-header keep should not apply once a declared `.pdf` fails `_file_contains_pdf`. Fails test_pdf_mislabel_without_payload_uses_detected (pre-existing, fails on baseline). | reliability/correctness + test coverage — oze-pdf-01 intent overridden by the weak-header rule
 
 ## robustness / recovery
@@ -118,8 +147,12 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-robust-02 | open | low | dedupl_numpy.py:21 — `open()` has no error handling, so a missing/unreadable hash-file exits with a raw `FileNotFoundError`/`OSError` traceback instead of the clean `error:` + nonzero exit that remove-deduplv3.py uses. | graceful failure contract
 dnp-robust-01 | open | low | dedupl_numpy.py:22 — `mmap.mmap(f.fileno(), 0, ...)` on a zero-byte input raises `ValueError: cannot mmap an empty file` (uncaught traceback); guard `os.fstat(f.fileno()).st_size == 0` and return cleanly. | interrupted/empty-input recovery
+dnv3-rob-03 | open | low | deduplicate-by-namev3.py:137-143 — `configure_stdout()` silently no-ops when `reconfigure` raises ValueError (`except ValueError: pass`) or stdout is not a TextIOWrapper, so the surrogateescape encoder is never applied and a later `sys.stdout.write` of surrogate-escaped bytes raises UnicodeEncodeError; fall back to wrapping the binary buffer or fail loudly. | robustness / silent-failure audit — breaks documented lossless round-trip
 dnv3-rob-01 | open | med | deduplicate-by-namev3.py:178 — `open(path, ...)` in `_load_cleaned_lines` is unguarded; a missing/unreadable/directory path raises FileNotFoundError/PermissionError/IsADirectoryError as a traceback rather than a clean CLI error + nonzero exit. Wrap the open (or main) in try/except that prints to stderr and exits 1. | robustness/recovery + product engineering — actionable runtime failure
 dnv3-rob-02 | open | low | deduplicate-by-namev3.py:215-263 — the streaming `sys.stdout.write` loop has no BrokenPipeError handling; piping into `head`/`less` and quitting early emits an "Exception ignored … BrokenPipeError" traceback at shutdown. Catch BrokenPipeError around the write loop (redirect fd / exit quietly). | robustness + platform — POSIX SIGPIPE/pipe semantics
+ie-robust-11 | open | med | import_events.py:3368 — `_scan_files` skips symlink *files* but recursive `path.rglob("*")` still descends into symlinked *directories*; on Python 3.9–3.12 (the file's stated floor) pathlib glob follows directory symlinks, so a symlink cycle drives unbounded traversal/recursion. Walk with `os.walk(followlinks=False)` or prune dirs whose `is_symlink()` is true. | robustness/recovery; STRIDE Denial-of-service
+mkp-robust-21 | open | low | minikeypad.py:1524 — `_save_profile` does write-temp-then-`os.replace` but never `fh.flush()`+`os.fsync(fh.fileno())` (nor fsyncs the directory) before the rename, so a crash/power-loss can atomically replace a good profile with a truncated or zero-length one. Fsync the temp handle before `os.replace`. | robustness — atomic-write durability gap (write-temp-then-rename needs fsync)
+rdv3-rob-01 | open | med | remove-deduplv3.py:57-63,100 — `detect_encoding` opens the file and consumes the first 4 bytes, then `_read_groups` re-opens it; for a non-seekable input (named pipe/FIFO/process substitution) those header bytes are lost and the first record is corrupted, and for regular files it is a redundant double-open/TOCTOU. Read the head from the same handle or pass the peeked bytes forward. | robustness — non-seekable byte-loss + TOCTOU
 
 ## state machine integrity
 
@@ -130,7 +163,9 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+dnp-test-02 | open | med | dedupl_numpy.py:1-62 — no `tests/test_dedupl_numpy.py` exists (grep of tests/ returns zero references); the entire module — np.unique grouping, path extraction, summary, no-newline/CRLF/short-line handling — is uncovered, not just the bounds fixture. Add a focused test module. | test coverage — ≥80% CI gate; distinct from dnp-test-01 (whole-module zero coverage)
 dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves the array-bounds path (dnp-rel-01) untested; add fixtures with short lines, single line, and md5-vs-sha256 widths to lock behavior. | coverage
+hr-test-01 | open | low | hash-recursive-ai5.py:1802 — `HashDumpWriter.write_overflow` (production-wired via `_finalize_hash_dump:2008`, emits the `+N more (alias-cap)` markers into the dump) has zero test coverage — grep of tests/ finds no reference — leaving the ingest-elision dump path unverified. Add a focused test that caps aliases, runs with `--hashes-file`, and asserts the overflow marker lines. | test coverage — critical I/O path uncovered (AGENTS.md ≥80% gate); cross-ref hr-obs-10
 
 ## test / fuzz coverage
 
@@ -141,23 +176,35 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-_clean — `ruff check *.py` reports no issues across all root files (rescan 2026-07-05)._
+_clean — `uvx ruff check *.py` reports no issues across all root files (rescan 2026-07-16)._
 
 ## pylance / pyright (type check)
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ie-type-01 | open | low | import_events.py:1433 — pyright reportArgumentType: `Calendar.from_ical(...)` is passed `bytes` but the icalendar stub declares parameter `st: str`; runtime accepts bytes, so decode explicitly (or normalize to str) rather than `# type: ignore`. | `uvx pyright *.py` rescan 2026-07-16; the only non-environmental diagnostic
+
+_Remaining pyright diagnostics (rescan 2026-07-16) are `reportMissingImports`/`reportMissingModuleSource` for optional third-party deps absent in the scan env (llama_cpp, blake3, rapidfuzz, paddleocr, paddle, charset_normalizer, pypdf, fitz, icalendar/yaml stubs) — all behind guarded imports; environmental, not code findings._
 
 ## observability
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-obs-01 | open | low | dedupl_numpy.py:58 — the `equal files: X / N` summary is `print()`ed to stdout, intermixed with the machine-readable duplicate-path list written to `sys.stdout.buffer` (lines 55-57); route the summary to stderr (as remove-deduplv3.py does) so stdout stays a clean path stream. | three-pillars logs; stdout hygiene
+hr-obs-11 | open | med | hash-recursive-ai5.py:1315 — when a stage-1 head digest is None but recovered from a readable hardlink sibling via `_retry_head_alias` (1315-1316), the original None was already tallied into `stage1_errors` by `_collect_batch:867` and is never decremented, so the summary's `hash_errors` (1964-1969) over-reports real failures by the count of successfully-recovered inodes (identical defect for stage-2 tail retries at 1362-1363); decrement the stage error count (or track a `recovered` counter subtracted alongside vanished/shrank) when a retry yields a non-None digest. | observability — three-pillars metric accuracy / silent mis-metric; cross-ref summary :1955
+ie-obs-01 | open | med | import_events.py:3188 — `_safe_pdf_stage` catches every Exception, logs a WARNING, and returns the fallback without calling `_record_extraction_failure`; a PDF whose pdf_text, render, and OCR stages all fail therefore yields "0 events" and process exit 0, masking total failure as clean success. Increment `_extraction_failures` (or re-raise into the extract_from_file handler) so the run exits non-zero. | observability; silent-failure audit — diverges from the `_extraction_failures` contract at :851/:4069
+lq-obs-20 | open | low | link_queue.py:1452 — `_process_link` discards the `bool` returned by `_dispatch_immediate` (which returns False and drops the item when the bounded immediate queue is full), so under backpressure the item is lost yet the Add-All summary at :3927 still counts it as an accepted "immediate". Return a distinct outcome (e.g. "dropped") when `_dispatch_immediate` is False and tally it. | silent-failure audit (three pillars: logs vs. metrics disagree); cross-ref lq-rel-10 at :1351-1360
+lq-obs-21 | open | low | link_queue.py:1580 — the immediate consumer's `finally` clears its in-flight slot but never calls `_note_immediate_depth()`/`_update_status()`, so as the immediate backlog drains the "N immediate waiting" status fragment (`_update_status` :4076) and the `_immediate_depth_warned` edge latch (:1734) stay stale until the next `_dispatch_immediate`; when queue workers are idle nothing else repaints. Nudge `_note_immediate_depth()` (or `_update_status`) after each item in the consumer's finally. | three-pillars/health — stale operator-visible state with no refresh trigger
+oze-obs-11 | open | med | organize_by_extension.py:504 — `is_bucketed_file` (L606) calls `resolve_real_extension` for every scanned file, so an already-correctly-placed misnamed file (e.g. pdf/p00000/mypdf.doc) re-emits the WARNING "header mismatch ... bucketing under pdf/" on every run even though nothing will move. Add a quiet/no-log mode to `resolve_real_extension` for the membership check (or suppress the warning when the resolved ext already equals current placement) so scans don't spam false move warnings. | observability silent-failure/noise audit — misleading log on a read-only path; xref :606,:684
 
 ## watchdog
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-watch-01 | open | med | bookmark-tidy.py:1045-1059 — `_call_with_timeout` starts a daemon worker (`threading.Thread(..., daemon=True)`) and on `queue.Empty` raises a timeout, but the underlying llama.cpp inference keeps running uncancelled in the abandoned thread, leaking CPU/GPU until process exit; repeated batch timeouts stack orphaned threads. Add real abort semantics or process-level isolation so a stalled inference is actually stopped. | watchdog — automatic abort/recovery on stall
+lq-watch-20 | open | med | link_queue.py:434 — the only per-item liveness guard is `command_timeout_seconds`, which ships default 0 (off), and even when enabled it is a total wall-clock cap (`_stream_and_wait` :2269 / `_arm_command_timeout` :2052) with no progress-stall detection; out of the box a single hung yt-dlp/aria2c that stops producing output pins a worker forever with no abort. Add a no-output-for-N-seconds stall watchdog on the streamed pipe independent of total wall-time, and/or ship a sane non-zero default. | watchdog — heartbeat / progress-stall detection + automatic abort
+mkp-watch-02 | open | med | minikeypad.py:1311 — `_probe_timeout` declares the probe "stalled", bumps the token and clears `_io_busy`, but never aborts the still-running daemon worker; a genuinely hung libusb call leaves that thread blocked on the device `_lock` while `_poll_connection` re-arms every 1s and spawns fresh probe workers that also block on `_lock` — unbounded thread pileup with no cap or recovery. Track the in-flight worker/token and refuse to spawn a new probe until the prior one finishes, and surface a persistent "unresponsive" state. | watchdog — timeout without abort/recovery semantics; multithreading
+oze-watch-01 | open | high | organize_by_extension.py:2002 — `_drain_futures` (and `_ScanStallMonitor._maybe_warn`:448) only LOG a stall every wait_timeout; a genuinely hung worker (an os.link/copy on a wedged NFS/SMB mount that never returns) blocks the entire run indefinitely with periodic warnings and no abort. Add a max-stall deadline that abandons/fails the stuck move (or aborts the run non-zero) so liveness detection has recovery teeth, not just detection. | watchdog — stall detected but no automatic abort/recovery semantics
 
 ## time & scheduling correctness
 
@@ -175,6 +222,7 @@ lq-plat-10 | open | med | link_queue.py:2603 — `LogSink._open_locked` passes `
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ie-cache-01 | open | low | import_events.py:2772 — `_resolve_tesseract_path` caches only successful resolutions (`if resolved is not None`), so when Tesseract is absent every auto/both-engine image re-runs shutil.which under `_TESSERACT_PATH_LOCK` per file. Cache the None result too (still resettable via `reset_tesseract_path_cache`). | caching strategy — negative-lookup memoization / repeated I/O
 
 ## memory and cpu management
 
@@ -185,6 +233,12 @@ ie-mem-02 | open | low | import_events.py:2227 — `_image_messages` reads the w
 ie-mem-03 | open | med | import_events.py:2581 — each cached PaddleOCR engine in `_PADDLE_OCR` holds hundreds of MB; a multilingual auto chain materializes all of them concurrently with no ceiling (peak-memory risk). Cap/evict — pairs with ie-cache-02. |
 oze-mem-01 | open | med | organize_by_extension.py:958 — `BucketManager._reserved_names` accumulates one entry per moved filename (`.setdefault(bucket_path, set()).add(source.name)`) and is pruned ONLY on `release()` (the skip path); successfully-moved files are never removed, so it grows O(files) for the whole run — defeating oze-scal-02's `_BUCKET_FULL` frozenset memory bound. Drop a bucket's reserved-name set once it collapses to `_BUCKET_FULL` (release() can rebuild from disk), or clear per-source on successful drain. | memory / caching strategy — cache with no success-path invalidation
 
+## data structure
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+bt-ds-01 | open | med | bookmark-tidy.py:1211,1289 — `_child_chrome_folder`/`_child_firefox_folder` linearly scan `parent["children"]` to find an existing folder, invoked per path component per bookmark by `_ensure_*_folder`, making export O(bookmarks x siblings) — quadratic when many bookmarks share many sibling folders. Maintain a name→node index per folder node. | data structure / N+1 — per-item re-scan where a map belongs
+
 ## adaptability
 
 id | status | effort | description | notes
@@ -192,6 +246,7 @@ id | status | effort | description | notes
 dnp-adapt-01 | open | med | dedupl_numpy.py:36 — hash width is hardcoded as `np.arange(32)` + `.view("S32")`, silently assuming 32-char MD5 hex; a SHA-1/SHA-256 hash file is mis-grouped with no error. Derive the width from the first line or expose it as a constant/flag. | magic-number / hardcoded assumption
 dnv3-adapt-01 | open | low | deduplicate-by-namev3.py:196 — output rows hardcode a literal `;` in the f-strings (also :263) instead of the `OUTPUT_DELIMITER` constant (:41) used to derive REPLACEMENTS/cleanup stripping; changing the constant would strip the new delimiter during cleanup but keep emitting `;`, desyncing input-cleaning from output format. Use `OUTPUT_DELIMITER` in both f-strings. | adaptability / code duplication — single source of truth for the delimiter
 mkp-adapt-01 | open | low | minikeypad.py:1146,1296,1364,1370 — timing knobs are hardcoded inline magic numbers (drain interval 120, connection-poll 1000, status-clear 2500 ×2, window geometry 1440x880/1024x768 at 802-803); hoist to module-level named constants like `WRITE_TIMEOUT_MS`. | magic-number
+oze-adapt-01 | open | low | organize_by_extension.py:1244 — `_resolve_source_collision` hard-codes `range(8)` for its stacked-blocker retry budget while the sibling reservation cap is the named constant `_COLLISION_RETRY_CAP` (L1318). Promote the 8 to a named module constant so the retry depth is discoverable and tunable without editing loop code. | adaptability — magic number; xref _COLLISION_RETRY_CAP
 rf-adapt-01 | open | low | relocate_folder.py:743 — `_DISK_SPACE_HEADROOM` (1.05) and `_SHA256_RETRY_ATTEMPTS` (line 1368, =2) are hardcoded constants with no env/CLI override, unlike the env-tunable `RELOCATE_STALE_PID_WARN_AT`; expose them via env accessors so operators can tune headroom/retries without a code edit. | magic-number
 
 ## configuration discoverability
@@ -206,14 +261,21 @@ rf-cfg-01 | open | low | relocate_folder.py:2120 — `main` hardcodes `logging.b
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+lq-api-20 | open | low | link_queue.py:1443 — `_process_link`'s docstring declares it returns "'queue', 'immediate', 'default', or 'duplicate'", but it also returns "rejected" (:1447, from `_resolve_protocol`'s hard shell+bare-{url} reject), which callers rely on (`_on_add` counts["rejected"] at :3936). Update the docstring to list the full return set so the error surface is an accurate contract. | API contract & compatibility — full error surface must be declared
 oze-api-01 | open | med | organize_by_extension.py:2236,2265 — `BUCKET_SIZE` is a mutable module global reassigned by `main()` via `global`; `organize()` exposes no `bucket_size` param, so library callers can't set it and the mutation is process-global and never restored (leaks across successive `organize()`/test calls in one process). Thread `bucket_size` through `organize()`/`BucketManager`. | config discoverability: --bucket-size has no per-call accessor
+rdv3-api-01 | open | low | remove-deduplv3.py:70,121-127,94 — documented exit-code contract (epilog "2 input file error, 3 decode error") is mislabeled: an invalid `--encoding` argument exits 3 ("decode error") though it is an argument error, and a missing stdout binary buffer exits 2 ("input file error") though it is an output error. Align codes/labels or add an argument-error code. | API contract & compatibility — error-surface taxonomy
 
 ## CLI / option integrity
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-cli-01 | open | low | bookmark-tidy.py:1451,1459-1465,1474 — `--output-format`/`--format`, all seven `--keep-*`/`--preserve-url-host-case` flags, and `--fallback-category` are registered with no `help=` text, so `--help` lists them without any description of what they do. Add help strings for each. | CLI / option integrity + product engineering — discoverable, self-documenting options
 dnp-cli-01 | open | low | dedupl_numpy.py:18 — usage text is printed to stdout (should be stderr) on the error path, and the script hand-rolls arg handling with no `--help`; migrate to argparse for a consistent CLI surface. | error output on wrong stream
+hr-cli-02 | open | low | hash-recursive-ai5.py:1902 — `--quiet` help claims it only "Suppress[es] the end-of-run summary", but it also silences start/done markers and every progress line (`_log_line(..., quiet)` at 1705 driving 1862/2098/2154/2183) and run warnings (1938), while stall warnings (1752, hardcoded `False`) ignore `--quiet` entirely. Reword the help to state the real scope and either gate stall warnings on quiet or document the deliberate exception. | CLI/option integrity — help-vs-behavior drift; Laws of UX: Jakob's Law (consistent flag semantics)
 ie-cli-01 | open | low | import_events.py:3802 — `--timezone` is not validated at parse time; an invalid IANA name only raises inside `_apply_default_tz` per ICS file, surfacing as per-file failures instead of one upfront error. Validate with `ZoneInfo` in an argparse `type`. |
+ie-cli-02 | open | low | import_events.py:3969 — the `--pdf-ocr-mode` help clause "never skips OCR and uses vision for unreadable PDFs" reads as "never skips OCR" (i.e. always OCRs), the opposite of the actual behavior where mode "never" makes `_should_pdf_ocr` return False. Reword to "never: skip OCR entirely, using vision only for unreadable PDFs". | CLI/option integrity — docs-vs-behavior (Laws of UX — clarity/consistency)
+lq-cli-20 | open | low | link_queue.py:5319 — `main()` never parses `sys.argv`; `link_queue.py --help`, `--version`, or any flag is silently ignored and launches the Tk GUI instead, giving no way to discover config paths/knobs from the shell. Add a minimal argparse front door (at least `--help`/`--version`, optionally `--config`/`--state`) before constructing the app. | CLI / option integrity — unhandled flags are silently ignored (misleading interface)
+oze-cli-01 | open | low | organize_by_extension.py:2348 — `parser.set_defaults(sniff=True, prune_empty=False)` is a no-op: `--no-sniff` (store_false, dest=sniff) already defaults sniff to True and `--prune-empty-dirs` (store_true, dest=prune_empty) already defaults prune_empty to False. Delete the redundant line. | CLI/option integrity — dead argparse config
 
 ## dependency
 
@@ -226,6 +288,9 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-doc-01 | open | med | hash-recursive-ai5.py:13 — module docstring ("Stage 2 hash — for groups with size > 8 MiB") plus hash_tail_and_samples/ThirdsStrategy docstrings (692, 704, 707, 722) claim stage 2 runs only when size > 2*CAP (8 MiB); the actual gate in `_split_stage1_buckets:1369` is size > HEAD_TAIL_THRESHOLD (= CAP = 4 MiB). Docs understate when stage 2 fires by 2x. Correct every reference to "size > CAP". | documentation — docs-vs-behavior drift on the headline algorithm
 lq-doc-01 | open | low | link_queue.py:20 — module docstring says legacy `~/.link_queue_config.json` is migrated on first run, but `LEGACY_CONFIG_FILE_NAME="link_queue_config.json"` resolves via `_resolve_state_path` to the XDG/script dir, never `~/.link_queue_config.json`; correct the docstring to the actual location. | docs-vs-behavior drift
+mkp-doc-02 | open | low | minikeypad.py:1285 — the `_poll_connection` comment states `still_connected()` "runs usb.core.find (full bus enumeration)", but `still_connected` (:220) only calls `self.dev.get_active_configuration()` on the existing handle with no bus scan (asserted by tests/test_minikeypad.py:686). Correct the comment to state the per-device config query can still block on libusb, hence off-thread. | documentation — comment drift vs code/tests
+oze-doc-01 | open | low | organize_by_extension.py:200 — the EXTENSION_ALIASES comment claims the alias exists "so a real JPEG named .jpeg isn't moved to a separate jpg/ bucket," but `resolve_real_extension` (L479-481) returns the unchanged declared extension, so a real `.jpeg` buckets under `jpeg/` separate from `jpg/` (verified: tests/fuzz/fuzz_organize_by_extension.py:205 asserts resolve_real_extension('photo.jpeg')=='jpeg'). Rewrite the comment to state aliases only feed the declared-vs-detected compatibility check, not bucket unification. | documentation — comment-vs-behavior drift; xref resolve_real_extension:479-481
+rf-doc-30 | open | low | relocate_folder.py:865 — `_check_disk_space` docstring ("Uses `_src_total_bytes`") and `copy_tree` docstring (800, 805) still describe the byte total as coming from `_src_total_bytes`, but the live path computes it via `_src_size_totals(src)` (823, 876); `_src_total_bytes` is itself dead (rf-unused-10). Update the docstrings to name `_src_size_totals` so they don't reference a helper marked for deletion. | documentation — docs-vs-code drift, cross-ref rf-unused-10
 
 ## UI / UX
 
@@ -251,13 +316,9 @@ id | status | effort | description | notes
 dnp-i18n-01 | open | low | dedupl_numpy.py:18 — user-facing strings ("Usage:", "equal files:") hardcoded, not routed through a catalog. Acceptable for a dev CLI; flagged for category completeness. | i18n — no translation seam; low value for a single-locale dev tool
 dnv3-i18n-01 | open | low | deduplicate-by-namev3.py:58 — user-facing diagnostics ("warning: threshold…", "dropped … empty cleaned line(s)") are hardcoded English with no catalog; route through a message layer if localization is in scope. |
 mkp-i18n-01 | open | low | minikeypad.py — all user-facing strings (labels, logs, status) are hardcoded English with no translation catalog; applicable only if localization is a goal. | marginal for single-file util
+rdv3-i18n-01 | open | med | remove-deduplv3.py:37 — `_ = gettext.gettext` routes every user string, but no domain is ever bound (no `bindtextdomain`/`textdomain`/`gettext.translation(...).install`), so `_()` always returns the source English text — translation is impossible without a code edit. Bind a domain+localedir or document the plumbing as intentionally inert. | i18n — hook present but no catalog ever consulted
 
 ## release & deploy engineering
-
-id | status | effort | description | notes
---- | --- | --- | --- | ---
-
-## data structure
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
@@ -267,7 +328,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-unused-01 | open | low | dedupl_numpy.py:43 — `uniq` unpacked from `np.unique` is never used (only `inverse`/`counts` are); bind to `_`. Ruff/pyright don't flag tuple-unpack unused, so it survives lint. |
-hr-leg-01 | open | low | hash-recursive-ai5.py:705 — `_make_head_batch`/`_make_tail_batch` and the `_head_batch`/`_tail_batch` module shims (745-746) have no production caller (pipeline uses `_make_head_candidate_batch`/`_make_tail_stage2_batch`); only their own legacy-shim tests at test_hash_recursive.py:1903/1912 exercise them. Decide delete vs keep. | legacy/deprecation — test-only constituency
 ie-unused-01 | open | low | import_events.py:2131 — `_decode_event_payload` has no production caller (parse_llm_events uses `_decode_event_payload_or_none`); only tests call it. Delete and point tests at the real function. | grep-proven test-only
 ie-unused-02 | open | low | import_events.py:2817 — `_ocr_image_bytes` has no production caller (OCR paths use `_ocr_image_path`/`_ocr_image_path_once`); only tests call it. Delete or wire. | grep-proven test-only
 ie-unused-03 | open | low | import_events.py:3157 — `_pdf_to_images` has no production caller (extract_from_pdf renders via `_render_pdf_image_paths`); several tests monkeypatch it expecting to gate PDF OCR, so those guards never fire and give false coverage (e.g. test_extract_from_pdf_auto_skips_ocr_when_text_is_usable). Delete and fix the tests to patch `_render_pdf_image_paths`. | dead + misleading tests
@@ -277,6 +337,7 @@ rf-unused-11 | open | low | relocate_folder.py:1030 — `_VERIFY_WORKERS` and `_
 rf-wire-01 | open | med | relocate_folder.py:1921 — `_copy_and_verify` calls `copy_tree` with no `progress_cb`, and no CLI flag feeds one, so the entire `tracking_copy2` progress-accounting path (lines 677-700, the `_src_size_totals` apparent-byte walk that feeds it) is unreachable outside tests. Either wire a `--progress` flag through `Plan`/`execute` or drop the dead machinery. | wiring gap — shipped-but-unwired
 rf-unused-10 | open | low | relocate_folder.py:797 — `_src_total_bytes` has no live caller (grep-proven; only docstring + test references); `_src_size_totals` superseded it and callers use its `[0]`/`[1]` directly. Delete `_src_total_bytes` (and update the test that pins it). | dead helper — delete
 rf-unused-12 | open | low | relocate_folder.py:865 — `_OWNERSHIP_INFLIGHT` is assigned but never read by live code (only the dead `_VERIFY_INFLIGHT` alias + a docstring); the live inflight bound comes from `_inflight_cap(workers)`. Delete it. | dead const — delete
+rdv3-unused-01 | open | low | remove-deduplv3.py:152-153 — `if not to_remove: continue` is dead: after `dict.fromkeys` dedup (147) and the `len(paths) < 2` guard (148), paths holds ≥2 distinct strings and `keep` is exactly one of them, so `to_remove` is always non-empty. Delete the branch. | unused/dead-code — logic-proven unreachable; recommend delete
 
 ## unused functions/methods
 
@@ -287,8 +348,17 @@ bt-unused-01 | open | low | bookmark-tidy.py:597 — `detect_bookmark_format` (:
 bt-unf-02 | open | low | bookmark-tidy.py:901 — `tidy_bookmarks` is called only from tests; `_run` reimplements the same dedup+categorize logic inline, so the real entry point never uses it. Wire `_run` to call it or delete. | test-only symbol (see bt-dup-01)
 hr-unf-01 | open | low | hash-recursive-ai5.py:170 — `threaded_walk` has no production caller (main uses `iter_threaded_walk`); grep shows only tests/ invoke it. Keep as documented API or delete with its tests. | grep-proven test-only, same class as hr-leg-01
 ie-unused-06 | open | low | import_events.py:565 — `_ocr_language_chain` has no production caller (production uses `_ocr_language_chain_with_source`); only tests (test_import_events.py:1018/1024) call it. Delete and point tests at `_ocr_language_chain_with_source`, or wire. | unused functions/methods — grep-proven test-only wrapper
+ie-unused-07 | open | low | import_events.py:581 — `_language_for_text` is called by no production code (every extractor uses `_language_for_text_with_source` at 545/582/3124/3148/3155/3300/3348/3357); only tests reference it (test_import_events.py:965/982/1005). Record delete, or have tests assert via the `_with_source` variant. | unused functions/methods — grep-proven test-only, parallels the recorded _language_for_ocr chain
 ie-unused-05 | open | low | import_events.py:590 — `_language_for_ocr` and its sole helper `_language_for_ocr_with_source` (:585) have no production caller (production calls `_ocr_language_chain_with_source` directly); only tests (test_import_events.py:1006/1012) reach it. Delete the pair and point tests at the live chain builder, or wire. | unused functions/methods — grep-proven test-only chain
 oze-unf-02 | open | low | organize_by_extension.py:2229 — `parse_args()` has no production caller (main calls `build_parser().parse_args()` directly at :2238); only tests import it. Keep as documented API or inline. | grep-proven test-only
+
+## legacy / deprecation
+
+id | status | effort | description | notes
+--- | --- | --- | --- | ---
+hr-leg-01 | open | low | hash-recursive-ai5.py:705 — `_make_head_batch`/`_make_tail_batch` and the `_head_batch`/`_tail_batch` module shims (745-746) have no production caller (pipeline uses `_make_head_candidate_batch`/`_make_tail_stage2_batch`); only their own legacy-shim tests at test_hash_recursive.py:1903/1912 exercise them. Decide delete vs keep. | legacy/deprecation — test-only constituency
+rf-leg-30 | open | low | relocate_folder.py:234 — `_safe`/`_required` back-compat aliases (lines 234-235) have no production caller: all live code uses the verb-named `_swallow_or_warn`/`_raise_or_fail` (e.g. 382, 386, 1655), and the standalone-script repo rule forbids intra-repo imports so no in-repo "external caller" the comment cites can exist; only tests reference them (test at :2900 merely asserts identity). Delete both aliases and the two identity-assert tests, or record as intentionally-kept in notes. | legacy/deprecation — constituency grep-proven gone (grep of relocate_folder.py + tests/)
+rf-leg-31 | open | low | relocate_folder.py:730 — `shutil.rmtree(path, onerror=_record)` uses the `onerror` parameter, deprecated since Python 3.12 in favor of `onexc` (raises DeprecationWarning now, slated for removal). `_record` already tolerates both excinfo shapes (line 726 tuple check), so switch to `onexc=` with a version guard (`sys.version_info >= (3, 12)`) or fall back to `onerror` on older runtimes. | legacy/deprecation + platform — CPython 3.12 shutil.rmtree onexc migration
 
 ## Audit picks deliberately rejected
 
