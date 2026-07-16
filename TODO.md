@@ -112,7 +112,6 @@ mkp-dup-03 | open | low | minikeypad.py:419 — `shift_and` re-inlines the body 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-arch-01 | open | low | dedupl_numpy.py:16 — single `main()` fuses arg parsing, mmap I/O, vectorized grouping, and stdout emission with no seam; the grouping logic can't be unit-tested without a file + subprocess (feeds dnp-test-01). Extract a pure `group_duplicates(data) -> (paths, counts)` helper. | architecture / decoupling / SOLID — no testability boundary; SRP
-mkp-arch-01 | open | high | minikeypad.py:800 — `App` is a god object (~40 methods) mixing Tk widget construction, connection polling, worker-thread orchestration, device version probing, profile JSON persistence, and per-page business dispatch; the persistence and connection-monitor concerns are independently testable collaborators (`ProfileStore`, `ConnectionMonitor`) buried in the widget class. Extract those two seams into small collaborators the `App` composes. | architecture/composition — god-object, single-responsibility; standalone-file rule still allows in-file class split
 
 ## decoupling
 

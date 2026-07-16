@@ -802,6 +802,216 @@ def _available_layouts():
 
 
 # --------------------------------------------------------------------------- #
+#  Collaborators (Tk-free, independently testable)
+# --------------------------------------------------------------------------- #
+class ProfileStore:
+    """Session assignment map + JSON profile persistence.
+
+    The device is write-only, so this map is the only record of what was
+    written: (layer, key_id) -> {"data": bytes, "desc": str[, "ambiguous"]}.
+    """
+
+    def __init__(self):
+        self.assignments = {}
+
+    def save(self, path):
+        """Write the map to `path` as JSON (atomic temp+rename, fsynced)."""
+        payload = {"version": PROFILE_VERSION, "assignments": [
+            self._assignment_payload(layer, kid, rec)
+            for (layer, kid), rec in self.assignments.items()]}
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, ensure_ascii=False)
+                # mkp-robust-21: without fsync a crash after the rename can
+                # atomically replace a good profile with a truncated one.
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+            self._fsync_dir(os.path.dirname(path) or ".")
+        except BaseException:
+            # mkp-robust-20: a failed/interrupted write must not leave an
+            # orphaned <path>.tmp behind.
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _fsync_dir(dirpath):
+        """Best-effort: persist the rename (unsupported on some OS/filesystems)."""
+        try:
+            fd = os.open(dirpath, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _assignment_payload(layer, kid, rec):
+        item = {
+            "layer": layer,
+            "key_id": kid,
+            "desc": rec["desc"],
+            "data": rec["data"].hex(),
+        }
+        if rec.get("ambiguous"):
+            item["ambiguous"] = True
+        return item
+
+    def load(self, path):
+        """Replace the map from a JSON profile. Returns the count."""
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+        # mkp-rel-02: a top-level JSON array/scalar has no .get(), which would
+        # raise AttributeError — not in _load_dialog's caught set — and crash
+        # the handler. Reject a non-object payload as a ValueError so it
+        # surfaces as "Load failed" like every other malformed profile.
+        if not isinstance(payload, dict):
+            raise ValueError("profile must be a JSON object")
+        # mkp-rob-01: fail closed on an unknown/future format instead of
+        # silently loading mismatched fields and pushing wrong bytes to the
+        # device. _load_dialog surfaces the ValueError as "Load failed".
+        version = payload.get("version")
+        if version != PROFILE_VERSION:
+            raise ValueError(
+                "unsupported profile version %r (expected %d)"
+                % (version, PROFILE_VERSION))
+        size = len(KeyParam().data)
+        loaded = {}
+        for item in payload.get("assignments", []):
+            key, rec = self._validated_entry(item, size)
+            loaded[key] = rec
+        self.assignments = loaded
+        return len(loaded)
+
+    @staticmethod
+    def _validated_entry(item, size):
+        data = bytes.fromhex(item["data"])
+        if len(data) != size:
+            raise ValueError("bad assignment buffer length")
+        layer, kid = int(item["layer"]), int(item["key_id"])
+        # mkp-input-01: reject out-of-range entries instead of storing an
+        # assignment the UI can never display yet _write_all still replays
+        # to the device.
+        if layer not in VALID_LAYERS or kid not in VALID_KEY_IDS:
+            raise ValueError(
+                "assignment out of range: layer=%r key_id=%r" % (layer, kid))
+        # mkp-input-02: the device is programmed from the buffer's own key
+        # byte (data[0]) while the UI colours by key_id; a mismatched entry
+        # would silently program a different physical key (or the LED).
+        if data[KeyParam.KeySet_KeyNum] != kid:
+            raise ValueError(
+                "assignment key byte %d does not match key_id %d"
+                % (data[KeyParam.KeySet_KeyNum], kid))
+        rec = {"data": data, "desc": str(item.get("desc", ""))}
+        if item.get("ambiguous"):
+            rec["ambiguous"] = True
+        return (layer, kid), rec
+
+
+class ConnectionMonitor:
+    """Off-thread connect/liveness probing with stall detection.
+
+    Owns the shared device-I/O mutex (`io_busy`) and the probe token that
+    lets a stalled probe be abandoned without a late result clobbering fresh
+    state. All UI work goes through the injected callbacks; `dev` is a
+    callable because the owner may swap the device instance at runtime.
+    """
+
+    def __init__(self, dev, log, schedule, post, on_state, on_connected):
+        self._dev = dev            # () -> current KeypadDevice
+        self._log = log
+        self._schedule = schedule  # (delay_ms, fn): run fn on the UI thread later
+        self._post = post          # (fn): marshal fn onto the UI thread
+        self._on_state = on_state
+        self._on_connected = on_connected
+        self.io_busy = False
+        self.token = 0
+
+    def poll(self):
+        if not self.io_busy:
+            if self._dev().connected:
+                # mkp-thread-01: still_connected() queries the device config
+                # under the device lock; run it off the Tk thread like the
+                # connect probe so a slow bus never freezes the UI.
+                self._start_probe_worker(self.probe_alive, "Device liveness")
+            else:
+                self._start_probe_worker(self.try_connect, "Connect")
+        self._on_state()
+        self._schedule(CONNECTION_POLL_MS, self.poll)
+
+    def _start_probe_worker(self, target, label):
+        self.io_busy = True
+        self.token += 1
+        token = self.token
+        try:
+            threading.Thread(target=lambda: target(token), daemon=True).start()
+        except Exception as e:
+            LOG.exception("%s probe failed to start", label)
+            self._log("%s probe error: %s" % (label, e))
+            self.io_busy = False
+            self._on_state()
+            return
+        self._schedule(
+            PROBE_TIMEOUT_MS,
+            lambda token=token, label=label: self.probe_timeout(token, label),
+        )
+
+    def probe_timeout(self, token, label):
+        if token != self.token or not self.io_busy:
+            return
+        self.token += 1
+        self.io_busy = False
+        self._log("%s probe stalled; USB call did not finish" % label)
+        self._on_state()
+
+    def probe_alive(self, token=None):
+        """Off-thread liveness check (mkp-thread-01)."""
+        try:
+            alive = self._dev().still_connected()
+        except Exception:
+            alive = False
+        self._post(lambda: self.probe_done(alive, token))
+
+    def probe_done(self, alive, token=None):
+        if token is not None and token != self.token:
+            return
+        if token is not None:
+            self.token += 1
+        self.io_busy = False
+        if not alive:
+            self._log("Device disconnected")
+        self._on_state()
+
+    def try_connect(self, token=None):
+        """Runs off the Tk thread so the connect/version probe never freezes UI."""
+        try:
+            ok = self._dev().connect()
+            if ok:
+                self._on_connected()
+        except Exception as e:                 # never strand io_busy True
+            LOG.exception("connect worker crashed")
+            self._log("Connect error: %s" % e)
+            ok = False
+        self._post(lambda: self.connect_done(ok, token))
+
+    def connect_done(self, ok, token=None):
+        del ok                                 # logged by the device layer
+        if token is not None and token != self.token:
+            return
+        if token is not None:
+            self.token += 1
+        self.io_busy = False
+        self._on_state()
+
+
+# --------------------------------------------------------------------------- #
 #  Application
 # --------------------------------------------------------------------------- #
 class App(tk.Tk):
@@ -814,18 +1024,18 @@ class App(tk.Tk):
         # Cross-thread UI marshalling: background device threads enqueue
         # callables; only the Tk main thread ever touches widgets.
         self._ui_q = queue.SimpleQueue()
-        self._io_busy = False
-        self._probe_token = 0
 
         self.kp = KeyParam()
         self.dev = KeypadDevice(log=self.log)
+        self._monitor = ConnectionMonitor(
+            dev=lambda: self.dev, log=self.log, schedule=self.after,
+            post=self._ui_q.put, on_state=self._update_state,
+            on_connected=self._version_check)
+        self._profiles = ProfileStore()
         self._phys_buttons = {}     # key_id -> Button
         self._phys_base = {}        # key_id -> base button label
         self._selected_id = None
         self._destroyed = False
-        # Session map of what has been written (the device is write-only and
-        # cannot be read back): (layer, key_id) -> {"data": bytes, "desc": str}.
-        self._assignments = {}
         self._pending = None        # candidate assignment awaiting write ACK
         self._action_buttons = []   # disabled while a write is in flight
         # Only offer the extended scripts when the OS Unicode-entry method is
@@ -839,6 +1049,33 @@ class App(tk.Tk):
         if not self._uni_available:
             self.log("No OS Unicode input method (IBus / macOS Hex Input) "
                      "detected; extended-script layouts disabled (US only).")
+
+    # ---- collaborator state under the historical names --------------------
+    # The write paths and the tests address the shared I/O mutex, probe token,
+    # and session map through App; the collaborators own them.
+    @property
+    def _io_busy(self):
+        return self._monitor.io_busy
+
+    @_io_busy.setter
+    def _io_busy(self, value):
+        self._monitor.io_busy = value
+
+    @property
+    def _probe_token(self):
+        return self._monitor.token
+
+    @_probe_token.setter
+    def _probe_token(self, value):
+        self._monitor.token = value
+
+    @property
+    def _assignments(self):
+        return self._profiles.assignments
+
+    @_assignments.setter
+    def _assignments(self, value):
+        self._profiles.assignments = value
 
     # ---- UI construction --------------------------------------------------
     def _build_ui(self):
@@ -1285,81 +1522,24 @@ class App(tk.Tk):
         self.fun_text.delete(0, "end")
         self.fun_text.insert(0, self.kp.fun_text())
 
-    # ---- connection polling ----------------------------------------------
+    # ---- connection polling (delegates to ConnectionMonitor) --------------
     def _poll_connection(self):
-        if not self._io_busy:
-            if self.dev.connected:
-                # mkp-thread-01: still_connected() runs usb.core.find (full bus
-                # enumeration) under the device lock; run it off the Tk thread
-                # like the connect probe so a slow bus never freezes the UI.
-                self._start_probe_worker(self._probe_alive, "Device liveness")
-            else:
-                self._start_probe_worker(self._try_connect, "Connect")
-        self._update_state()
-        self.after(CONNECTION_POLL_MS, self._poll_connection)
-
-    def _start_probe_worker(self, target, label):
-        self._io_busy = True
-        self._probe_token += 1
-        token = self._probe_token
-        try:
-            threading.Thread(target=lambda: target(token), daemon=True).start()
-        except Exception as e:
-            LOG.exception("%s probe failed to start", label)
-            self.log("%s probe error: %s" % (label, e))
-            self._io_busy = False
-            self._update_state()
-            return
-        self.after(
-            PROBE_TIMEOUT_MS,
-            lambda token=token, label=label: self._probe_timeout(token, label),
-        )
+        self._monitor.poll()
 
     def _probe_timeout(self, token, label):
-        if token != self._probe_token or not self._io_busy:
-            return
-        self._probe_token += 1
-        self._io_busy = False
-        self.log("%s probe stalled; USB call did not finish" % label)
-        self._update_state()
+        self._monitor.probe_timeout(token, label)
 
     def _probe_alive(self, token=None):
-        """Off-thread liveness check (mkp-thread-01)."""
-        try:
-            alive = self.dev.still_connected()
-        except Exception:
-            alive = False
-        self._ui_q.put(lambda: self._probe_done(alive, token))
+        self._monitor.probe_alive(token)
 
     def _probe_done(self, alive, token=None):
-        if token is not None and token != self._probe_token:
-            return
-        if token is not None:
-            self._probe_token += 1
-        self._io_busy = False
-        if not alive:
-            self.log("Device disconnected")
-        self._update_state()
+        self._monitor.probe_done(alive, token)
 
     def _try_connect(self, token=None):
-        """Runs off the Tk thread so the connect/version probe never freezes UI."""
-        try:
-            ok = self.dev.connect()
-            if ok:
-                self._version_check()
-        except Exception as e:                 # never strand _io_busy True
-            LOG.exception("connect worker crashed")
-            self.log("Connect error: %s" % e)
-            ok = False
-        self._ui_q.put(lambda: self._connect_done(ok, token))
+        self._monitor.try_connect(token)
 
     def _connect_done(self, ok, token=None):
-        if token is not None and token != self._probe_token:
-            return
-        if token is not None:
-            self._probe_token += 1
-        self._io_busy = False
-        self._update_state()
+        self._monitor.connect_done(ok, token)
 
     def _update_state(self):
         if self.dev.connected:
@@ -1523,100 +1703,12 @@ class App(tk.Tk):
         return special.get(kid, "id%d" % kid)
 
     def _save_profile(self, path):
-        """Write the session map to `path` as JSON (atomic temp+rename)."""
-        payload = {"version": PROFILE_VERSION, "assignments": [
-            self._profile_assignment(layer, kid, rec)
-            for (layer, kid), rec in self._assignments.items()]}
-        tmp = path + ".tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, indent=2, ensure_ascii=False)
-                # mkp-robust-21: without fsync a crash after the rename can
-                # atomically replace a good profile with a truncated one.
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)
-            self._fsync_dir(os.path.dirname(path) or ".")
-        except BaseException:
-            # mkp-robust-20: a failed/interrupted write must not leave an
-            # orphaned <path>.tmp behind.
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-
-    @staticmethod
-    def _fsync_dir(dirpath):
-        """Best-effort: persist the rename (unsupported on some OS/filesystems)."""
-        try:
-            fd = os.open(dirpath, os.O_RDONLY)
-        except OSError:
-            return
-        try:
-            os.fsync(fd)
-        except OSError:
-            pass
-        finally:
-            os.close(fd)
-
-    @staticmethod
-    def _profile_assignment(layer, kid, rec):
-        item = {
-            "layer": layer,
-            "key_id": kid,
-            "desc": rec["desc"],
-            "data": rec["data"].hex(),
-        }
-        if rec.get("ambiguous"):
-            item["ambiguous"] = True
-        return item
+        self._profiles.save(path)
 
     def _load_profile(self, path):
-        """Replace the session map from a JSON profile. Returns the count."""
-        with open(path, encoding="utf-8") as fh:
-            payload = json.load(fh)
-        # mkp-rel-02: a top-level JSON array/scalar has no .get(), which would
-        # raise AttributeError — not in _load_dialog's caught set — and crash
-        # the handler. Reject a non-object payload as a ValueError so it
-        # surfaces as "Load failed" like every other malformed profile.
-        if not isinstance(payload, dict):
-            raise ValueError("profile must be a JSON object")
-        # mkp-rob-01: fail closed on an unknown/future format instead of
-        # silently loading mismatched fields and pushing wrong bytes to the
-        # device. _load_dialog surfaces the ValueError as "Load failed".
-        version = payload.get("version")
-        if version != PROFILE_VERSION:
-            raise ValueError(
-                "unsupported profile version %r (expected %d)"
-                % (version, PROFILE_VERSION))
-        size = len(KeyParam().data)
-        loaded = {}
-        for item in payload.get("assignments", []):
-            data = bytes.fromhex(item["data"])
-            if len(data) != size:
-                raise ValueError("bad assignment buffer length")
-            layer, kid = int(item["layer"]), int(item["key_id"])
-            # mkp-input-01: reject out-of-range entries instead of storing an
-            # assignment the UI can never display yet _write_all still replays
-            # to the device.
-            if layer not in VALID_LAYERS or kid not in VALID_KEY_IDS:
-                raise ValueError(
-                    "assignment out of range: layer=%r key_id=%r" % (layer, kid))
-            # mkp-input-02: the device is programmed from the buffer's own key
-            # byte (data[0]) while the UI colours by key_id; a mismatched entry
-            # would silently program a different physical key (or the LED).
-            if data[KeyParam.KeySet_KeyNum] != kid:
-                raise ValueError(
-                    "assignment key byte %d does not match key_id %d"
-                    % (data[KeyParam.KeySet_KeyNum], kid))
-            loaded[(layer, kid)] = {
-                "data": data, "desc": str(item.get("desc", ""))}
-            if item.get("ambiguous"):
-                loaded[(layer, kid)]["ambiguous"] = True
-        self._assignments = loaded
+        count = self._profiles.load(path)
         self._refresh_key_map()
-        return len(loaded)
+        return count
 
     def _save_dialog(self):
         path = filedialog.asksaveasfilename(  # pragma: no cover - dialog glue
