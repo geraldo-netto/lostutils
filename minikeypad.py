@@ -120,6 +120,11 @@ PROBE_TIMEOUT_MS = 5000
 MAX_KBD_GROUPS = 5         # firmware accepts groups 0..5 (6 keystrokes)
 WRITE_RETRIES = 2          # extra attempts after the first on a transient USBError
 WRITE_RETRY_BACKOFF_S = 0.05
+UI_DRAIN_INTERVAL_MS = 120
+CONNECTION_POLL_MS = 1000
+STATUS_CLEAR_MS = 2500
+WINDOW_GEOMETRY = "1440x880"
+WINDOW_MIN_SIZE = (1024, 768)
 
 # Colours mirroring the original WinForms app.
 COL_KEY_IDLE = "#98fb98"   # 152,251,152  pale green
@@ -803,8 +808,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("MINI-KeyBoard configurator")
-        self.geometry("1440x880")
-        self.minsize(1024, 768)
+        self.geometry(WINDOW_GEOMETRY)
+        self.minsize(*WINDOW_MIN_SIZE)
 
         # Cross-thread UI marshalling: background device threads enqueue
         # callables; only the Tk main thread ever touches widgets.
@@ -1145,7 +1150,7 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         finally:
-            self.after(120, self._drain_ui)
+            self.after(UI_DRAIN_INTERVAL_MS, self._drain_ui)
 
     def _run_ui_callback(self, callback):
         try:
@@ -1291,7 +1296,7 @@ class App(tk.Tk):
             else:
                 self._start_probe_worker(self._try_connect, "Connect")
         self._update_state()
-        self.after(1000, self._poll_connection)
+        self.after(CONNECTION_POLL_MS, self._poll_connection)
 
     def _start_probe_worker(self, target, label):
         self._io_busy = True
@@ -1392,13 +1397,14 @@ class App(tk.Tk):
         else:
             self.dl_status.configure(text="Write failed", fg="white", bg=COL_DISCONNECTED)
             self.log("Write failed")
-        self.after(2500, lambda: self.dl_status.configure(text="", bg=self.cget("bg")))
+        self.after(STATUS_CLEAR_MS,
+                   lambda: self.dl_status.configure(text="", bg=self.cget("bg")))
 
     def _dl_note(self, msg):
         """Neutral, visible feedback for the 'nothing to send' paths."""
         self.dl_status.configure(text=msg, fg="black", bg=self.cget("bg"))
         self.log(msg)
-        self.after(2500, lambda: self.dl_status.configure(text=""))
+        self.after(STATUS_CLEAR_MS, lambda: self.dl_status.configure(text=""))
 
     def _download(self):
         if self._io_busy:
