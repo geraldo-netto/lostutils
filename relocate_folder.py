@@ -2107,6 +2107,75 @@ def recover(source: Path, *, force: bool = False) -> str:
 
 # --- orchestration ----------------------------------------------------------
 
+def _execute_preamble(plan: Plan,
+                      advance: Callable[[MigrationState], None]) -> str | None:
+    """Guard/skip checks that run before any filesystem mutation
+    (rf-cx-30). Returns a terminal status line for the skip / dry-run
+    outcomes, or None when the migration should proceed."""
+    if already_migrated(plan.source, plan.target):
+        advance(MigrationState.ALREADY_MIGRATED)
+        _warn_stranded_backup(plan.source)
+        return f"skipped: {plan.source} already symlinks to {plan.target}"
+    if _symlink_points_at_empty_target(plan.source, plan.target):
+        # rf-rel-01: the symlink is correct but the target was later
+        # emptied. validate_source would crash with "already a symlink";
+        # treat it as a legitimately-migrated dir and skip instead.
+        advance(MigrationState.ALREADY_MIGRATED)
+        _warn_stranded_backup(plan.source)
+        return (f"skipped: {plan.source} already symlinks to {plan.target} "
+                f"(already migrated, empty target)")
+    orphan = _orphaned_backup(plan.source)
+    if orphan is not None:
+        # rf-rel-01: a killed swap left the dir at the backup name with the
+        # source gone. Warn (never auto-mutate) and point at --recover
+        # before validate_source raises a bare FileNotFoundError.
+        _warn_orphaned_backup(orphan, plan.source)
+    validate_source(plan.source)
+    if not plan.force:
+        _check_no_open_files(plan.source)
+    # rf-rel-21: _check_cross_device is read-only (warn/raise), so keep it
+    # for dry-run, but return BEFORE ensure_dest_root — which mkdirs/chowns
+    # the destination — so --dry-run never mutates the filesystem.
+    _check_cross_device(plan)
+    if plan.dry_run:
+        advance(MigrationState.DRY_RUN)
+        return f"dry-run: would migrate {plan.source} -> {plan.target}"
+    return None
+
+
+def _execute_migration(plan: Plan,
+                       advance: Callable[[MigrationState], None]) -> str:
+    """Copy-verify-swap core of :func:`execute` (rf-cx-30)."""
+    # rf-sec-01: open the source (O_NOFOLLOW|O_DIRECTORY) and hold the fd
+    # across the copy so the inode can't be swapped for a symlink/other dir;
+    # identity is re-checked just before copying. Opened AFTER the open-files
+    # check (our own held fd would otherwise trip it) and after the dry-run
+    # return (dry-run reads nothing).
+    src_fd, src_id = _source_identity_fd(plan.source)
+    try:
+        created_dirs = ensure_dest_root(plan.target.parent, plan.source)
+        try:
+            # rf-sec-01: confirm the source path still names the inode we
+            # opened before reading from it by path.
+            _assert_source_identity(plan.source, src_id)
+            # rf-ddd-02: _copy_and_verify advances to COPIED between copy and
+            # verify so a verify-failed run logs an honest intermediate state.
+            _copy_and_verify(plan, on_state=advance)
+            advance(MigrationState.VERIFIED)
+            atomic_swap(plan.source, plan.target)
+            advance(MigrationState.SWAPPED)
+            return f"ok: {plan.source} -> {plan.target}"
+        except BaseException:
+            # rf-state-01: every post-ensure_dest_root failure path (verify
+            # or swap failure) must unwind the dest dirs we created —
+            # _copy_and_verify only cleans the leaf target, not the
+            # ancestors mkdir'd here.
+            _cleanup_created_dirs(created_dirs)
+            raise
+    finally:
+        os.close(src_fd)
+
+
 def execute(plan: Plan) -> str:
     """Run the migration described by `plan` and return a single-line status.
 
@@ -2121,62 +2190,10 @@ def execute(plan: Plan) -> str:
         state = new_state
 
     try:
-        if already_migrated(plan.source, plan.target):
-            _advance(MigrationState.ALREADY_MIGRATED)
-            _warn_stranded_backup(plan.source)
-            return f"skipped: {plan.source} already symlinks to {plan.target}"
-        if _symlink_points_at_empty_target(plan.source, plan.target):
-            # rf-rel-01: the symlink is correct but the target was later
-            # emptied. validate_source would crash with "already a symlink";
-            # treat it as a legitimately-migrated dir and skip instead.
-            _advance(MigrationState.ALREADY_MIGRATED)
-            _warn_stranded_backup(plan.source)
-            return (f"skipped: {plan.source} already symlinks to {plan.target} "
-                    f"(already migrated, empty target)")
-        orphan = _orphaned_backup(plan.source)
-        if orphan is not None:
-            # rf-rel-01: a killed swap left the dir at the backup name with the
-            # source gone. Warn (never auto-mutate) and point at --recover
-            # before validate_source raises a bare FileNotFoundError.
-            _warn_orphaned_backup(orphan, plan.source)
-        validate_source(plan.source)
-        if not plan.force:
-            _check_no_open_files(plan.source)
-        # rf-rel-21: _check_cross_device is read-only (warn/raise), so keep it
-        # for dry-run, but return BEFORE ensure_dest_root — which mkdirs/chowns
-        # the destination — so --dry-run never mutates the filesystem.
-        _check_cross_device(plan)
-        if plan.dry_run:
-            _advance(MigrationState.DRY_RUN)
-            return f"dry-run: would migrate {plan.source} -> {plan.target}"
-        # rf-sec-01: open the source (O_NOFOLLOW|O_DIRECTORY) and hold the fd
-        # across the copy so the inode can't be swapped for a symlink/other dir;
-        # identity is re-checked just before copying. Opened AFTER the open-files
-        # check (our own held fd would otherwise trip it) and after the dry-run
-        # return (dry-run reads nothing).
-        src_fd, src_id = _source_identity_fd(plan.source)
-        try:
-            created_dirs = ensure_dest_root(plan.target.parent, plan.source)
-            try:
-                # rf-sec-01: confirm the source path still names the inode we
-                # opened before reading from it by path.
-                _assert_source_identity(plan.source, src_id)
-                # rf-ddd-02: _copy_and_verify advances to COPIED between copy and
-                # verify so a verify-failed run logs an honest intermediate state.
-                _copy_and_verify(plan, on_state=_advance)
-                _advance(MigrationState.VERIFIED)
-                atomic_swap(plan.source, plan.target)
-                _advance(MigrationState.SWAPPED)
-                return f"ok: {plan.source} -> {plan.target}"
-            except BaseException:
-                # rf-state-01: every post-ensure_dest_root failure path (verify
-                # or swap failure) must unwind the dest dirs we created —
-                # _copy_and_verify only cleans the leaf target, not the
-                # ancestors mkdir'd here.
-                _cleanup_created_dirs(created_dirs)
-                raise
-        finally:
-            os.close(src_fd)
+        status = _execute_preamble(plan, _advance)
+        if status is not None:
+            return status
+        return _execute_migration(plan, _advance)
     finally:
         # rf-obs-04: promote the terminal state to INFO so operators
         # running at the default verbosity see the canonical lifecycle

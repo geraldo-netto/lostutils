@@ -84,7 +84,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-cx-30 | open | med | relocate_folder.py:2032 — `execute` nests three levels of `try`/`finally` (outer status `finally`, `os.close(src_fd)` `finally`, inner cleanup `except`) around ~6 conditional early-returns (already_migrated / empty-target / orphan / dry-run / states), pushing cognitive complexity above the repo's ≤10 rule. Extract the guard/skip preamble and the copy-swap-cleanup core into helpers so each stays flat. | code complexity — AGENTS.md "complexity ≤ 10" rule
 
 ## code duplication
 

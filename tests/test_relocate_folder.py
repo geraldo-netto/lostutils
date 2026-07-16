@@ -4038,6 +4038,26 @@ def test_copy_and_verify_cleans_target_on_keyboardinterrupt(tmp_path, monkeypatc
     assert not plan.target.exists(), "partial target not cleaned on Ctrl+C in verify"
 
 
+# --- rf-cx-30: execute split into preamble + migration core ------------------
+
+def test_execute_preamble_returns_none_to_proceed(tmp_path):
+    src = tmp_path / "src"; src.mkdir()
+    plan = rf.Plan(source=src, target=tmp_path / "dst", force=True)
+    states = []
+    assert rf._execute_preamble(plan, states.append) is None
+    assert states == []
+
+
+def test_execute_preamble_dry_run_status(tmp_path):
+    src = tmp_path / "src"; src.mkdir()
+    plan = rf.Plan(source=src, target=tmp_path / "dst",
+                   dry_run=True, force=True)
+    states = []
+    status = rf._execute_preamble(plan, states.append)
+    assert status is not None and status.startswith("dry-run:")
+    assert states == [rf.MigrationState.DRY_RUN]
+
+
 # --- rf-perf-31: strict refuses BEFORE copying -------------------------------
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo (POSIX)")
