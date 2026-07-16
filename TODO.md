@@ -47,7 +47,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
-rf-perf-30 | open | med | relocate_folder.py:1546 — `_sha256` constructs a fresh `_OperationStallWatchdog` (spawning a background thread) inside the retry loop for every file hashed, and `_verify_content` calls it twice per file (src+dst); on a tree of many small files this is millions of thread create/join cycles whose overhead can dominate the hash itself, and it is redundant with the outer `verify_copy` watchdog (1244) already touched per completed future. Reuse one shared watchdog or gate the per-file watchdog on file size. | multithreading/perf — thread-per-file churn on the hot verify path
 rf-perf-31 | open | med | relocate_folder.py:2229 — under `--strict`, `copy_tree` performs the ENTIRE recursive copy first, then `_report_skipped` (2234) raises at 2290 when any special file was skipped, so a multi-TB migration containing a single socket/FIFO copies the whole tree and immediately `rmtree`s it. The special-file set is discoverable by a cheap pre-walk (the code already lstat-walks in `_src_size_totals`); scan-and-refuse before copying. | efficiency/UX — wasted full copy+delete on refuse path
 
 ## scalability

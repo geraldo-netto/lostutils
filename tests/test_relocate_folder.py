@@ -2113,10 +2113,43 @@ def test_sha256_uses_stall_watchdog(tmp_path, monkeypatch):
             self.touches.append(operation or self.operation)
 
     monkeypatch.setattr(rf, "_OperationStallWatchdog", FakeWatchdog)
+    # rf-perf-30: force the size gate open so the tiny fixture counts as big.
+    monkeypatch.setattr(rf, "_SHA256_WATCHDOG_MIN_BYTES", 0)
     src = tmp_path / "data"
     src.write_text("x")
     rf._sha256(src)
-    assert any(w.operation == f"sha256 {src}" and w.touches for w in created)
+    assert any(w.operation == f"sha256 {src}" for w in created)
+
+
+def test_sha256_skips_watchdog_for_small_files(tmp_path, monkeypatch):
+    # rf-perf-30: below the size gate no watchdog thread is spawned.
+    created = []
+
+    class FakeWatchdog:
+        def __init__(self, operation, *args, **kwargs):
+            created.append(operation)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc_info):
+            return None
+
+    monkeypatch.setattr(rf, "_OperationStallWatchdog", FakeWatchdog)
+    src = tmp_path / "data"
+    src.write_text("x")
+    assert rf._sha256(src) == rf.hashlib.sha256(b"x").hexdigest()
+    assert created == []
+
+
+def test_sha256_watchdog_gate_boundary(tmp_path, monkeypatch):
+    monkeypatch.setattr(rf, "_SHA256_WATCHDOG_MIN_BYTES", 3)
+    small = tmp_path / "small"; small.write_text("ab")
+    big = tmp_path / "big"; big.write_text("abc")
+    assert isinstance(rf._sha256_watchdog(big), rf._OperationStallWatchdog)
+    assert not isinstance(rf._sha256_watchdog(small), rf._OperationStallWatchdog)
+    assert not isinstance(
+        rf._sha256_watchdog(tmp_path / "missing"), rf._OperationStallWatchdog)
 
 
 def test_find_open_file_holders_uses_preflight_watchdog(tmp_path, monkeypatch):

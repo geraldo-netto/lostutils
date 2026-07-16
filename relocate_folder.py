@@ -43,7 +43,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import contextvars
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1578,15 +1578,16 @@ def _sha256(path: Path) -> str:
     ``_HashTruncatedError`` / ``_HashVanishedError`` cases ONLY. Any
     other exception escapes immediately so a hashlib backend failure
     (or any future error shape) doesn't masquerade as a transient and
-    burn a retry on a non-retryable condition."""
+    burn a retry on a non-retryable condition.
+
+    rf-perf-30: the per-file stall watchdog is gated on file size — see
+    :func:`_sha256_watchdog`."""
     last_exc: BaseException | None = None
     attempts = _sha256_retry_attempts()
     for attempt in range(attempts):
         try:
-            with _OperationStallWatchdog(f"sha256 {path}") as watchdog:
-                digest = _hash_once_strict(path)
-                watchdog.touch()
-                return digest
+            with _sha256_watchdog(path):
+                return _hash_once_strict(path)
         except (_HashTruncatedError, _HashVanishedError) as exc:
             last_exc = exc
             continue
@@ -1603,6 +1604,27 @@ def _sha256(path: Path) -> str:
 
 
 _SHA256_RETRY_ATTEMPTS = 2
+
+# rf-perf-30: below this size a healthy hash finishes in well under the
+# _STALL_WARN_SECONDS window even on slow media, so a dedicated watchdog
+# thread per file (created inside the retry loop, twice per file for
+# src+dst) is pure overhead on many-small-file trees. A genuine I/O stall
+# on a small file is still surfaced by the outer verify_copy watchdog,
+# which only loses the per-file label. One lstat to read the size is far
+# cheaper than a thread create/join cycle.
+_SHA256_WATCHDOG_MIN_BYTES = 256 * 1024 * 1024
+
+
+def _sha256_watchdog(path: Path):
+    """Per-file stall watchdog for :func:`_sha256`, or a no-op context
+    when `path` is too small for a >60s healthy hash (rf-perf-30)."""
+    try:
+        size = os.lstat(path).st_size
+    except OSError:
+        size = 0
+    if size < _SHA256_WATCHDOG_MIN_BYTES:
+        return nullcontext(None)
+    return _OperationStallWatchdog(f"sha256 {path}")
 
 
 def _sha256_retry_attempts() -> int:
