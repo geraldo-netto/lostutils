@@ -2169,6 +2169,39 @@ def test_normalize_warns_on_shell_url(capsys):
     assert "protocol 'ok'" not in err
 
 
+@pytest.mark.parametrize("bad", [8080, True, None, 3.5])
+def test_normalize_non_string_command_falls_back(bad, capsys):
+    # lq-input-20: an int/bool/null command template must not crash
+    # normalization (TypeError in _template_has_bare_url) nor silently
+    # become a runnable str(value); it falls back to the default.
+    cfg = {
+        "protocols": {"p": {"mode": "queue", "shell": True, "command": bad}},
+        "default_shell": True,
+        "default_command": bad,
+    }
+    link_queue.ConfigStore._normalize_config_schema(cfg)
+    assert cfg["protocols"]["p"]["command"] == "echo {url}"
+    assert cfg["default_command"] == "echo {url}"
+    err = capsys.readouterr().err
+    assert err.count("is not a string") == 2
+
+
+def test_config_store_load_non_string_command(tmp_path, monkeypatch):
+    # lq-input-20: full ConfigStore load path with a hand-edited YAML where
+    # `command: 8080` (int) and `default_command: yes` (bool) must not
+    # abort startup.
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(
+        "protocols:\n  http:\n    shell: true\n    command: 8080\n"
+        "default_shell: true\ndefault_command: yes\n"
+    )
+    monkeypatch.setattr(link_queue, "CONFIG_FILE", str(cfg_path))
+    monkeypatch.setattr(link_queue, "LEGACY_CONFIG_FILE", str(tmp_path / "none.json"))
+    store = link_queue.ConfigStore(str(cfg_path), str(tmp_path / "none.json"))
+    assert store["protocols"]["http"]["command"] == "echo {url}"
+    assert store["default_command"] == "echo {url}"
+
+
 def test_run_item_shell_url_rejected_each_call(app):
     # sec-04: bare {url} is rejected at runtime — each call is refused
     # (no one-shot dedup), so the operator sees the same error for

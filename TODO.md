@@ -30,7 +30,6 @@ rf-sec-04 | open | med | relocate_folder.py:1787 — source inode identity is as
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-input-20 | open | low | link_queue.py:772 — `_warn_shell_injection` calls `_template_has_bare_url(pc.get("command",""))` (and default_command at :776) during `_normalize_config_schema`, but `_coerce_config_scalars` (:738-764) never coerces `command`/`default_command` to `str`; a hand-edited config with `shell: true` and a non-string template (e.g. `command: 8080` or `command: yes` → int/bool) makes `_PLACEHOLDER_RE.finditer(template or "")` raise an unhandled `TypeError` in `ConfigStore._load` (not wrapped), aborting the whole app at startup. Coerce templates to `str` in `_normalize_protocols`/`_coerce_config_scalars` (or guard `_template_has_bare_url` to treat non-str as ""). | STRIDE Tampering → DoS on the config data-flow boundary; OWASP ASVS input-validation-before-use
 
 ## data governance
 

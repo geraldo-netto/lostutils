@@ -731,6 +731,16 @@ class ConfigStore(dict):
                 continue
             pc.setdefault("mode", "queue")
             pc.setdefault("command", "echo {url}")
+            if not isinstance(pc["command"], str):
+                # lq-input-20: a YAML int/bool/null template would raise
+                # TypeError in _template_has_bare_url and must not become a
+                # runnable str(value); treat it like a missing key.
+                print(
+                    f"[warn] config: protocol {name!r} command="
+                    f"{pc['command']!r} is not a string; using default",
+                    file=sys.stderr,
+                )
+                pc["command"] = "echo {url}"
             pc.setdefault("shell", False)
             pc["shell"] = bool(pc["shell"])
 
@@ -741,6 +751,14 @@ class ConfigStore(dict):
         crashing startup; also filter token_mappings to str->str entries."""
         cfg.setdefault("default_shell", False)
         cfg["default_shell"] = bool(cfg.get("default_shell", False))
+        if not isinstance(cfg.get("default_command", ""), str):
+            # lq-input-20: same fallback as per-protocol commands.
+            print(
+                f"[warn] config: default_command={cfg['default_command']!r} "
+                f"is not a string; using default",
+                file=sys.stderr,
+            )
+            cfg["default_command"] = "echo {url}"
         for key, default in (("worker_count", 1),
                              ("immediate_worker_count", 0),
                              ("immediate_queue_maxsize", 0)):
