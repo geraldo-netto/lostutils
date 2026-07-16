@@ -487,13 +487,17 @@ def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
     # Do a 3rd check ONLY for `.pdf`: scan the payload for the %PDF- marker and,
     # if present, route to pdf/. Otherwise fall through to the detected content
     # type so a genuinely-mislabelled file still lands by its real bytes.
-    if declared_canon == "pdf" and _file_contains_pdf(path):
-        logger.info(
-            "embedded PDF found in %s (header is %s) — bucketing under pdf/",
-            path, detected,
-        )
-        return "pdf"
-    if _weak_header_should_keep_declared(declared, detected):
+    # oze-rel-01: the weak-header keep must not apply to a declared `.pdf`
+    # that failed the payload scan — a real PDF header is the 5-byte %PDF-,
+    # never a legitimately-weak 2-byte match, so fall through to detected.
+    if declared_canon == "pdf":
+        if _file_contains_pdf(path):
+            logger.info(
+                "embedded PDF found in %s (header is %s) — bucketing under pdf/",
+                path, detected,
+            )
+            return "pdf"
+    elif _weak_header_should_keep_declared(declared, detected):
         logger.info(
             "weak header match on %s: declared .%s but header is %s — keeping declared extension",
             path, declared, detected,
