@@ -871,6 +871,21 @@ def test_exports_and_write_output(tmp_path):
     assert json.loads(chrome_path.read_text(encoding="utf-8"))["root"] == "placesRoot"
 
 
+def test_exports_share_folder_nodes_across_bookmarks():
+    bookmarks = [
+        _sample_bookmark(f"https://example.test/{i}", f"B{i}", ("Shared", "Deep"))
+        for i in range(3)
+    ]
+
+    chrome_bar = bookmark_tidy.export_chrome_bookmarks(bookmarks)["roots"]["bookmark_bar"]
+    firefox_bar = bookmark_tidy.export_firefox_bookmarks(bookmarks)["children"][0]
+
+    assert [child["name"] for child in chrome_bar["children"]] == ["Shared"]
+    assert len(chrome_bar["children"][0]["children"][0]["children"]) == 3
+    assert [child["title"] for child in firefox_bar["children"]] == ["Shared"]
+    assert len(firefox_bar["children"][0]["children"][0]["children"]) == 3
+
+
 def test_firefox_folder_export_reuses_existing_folder_node():
     ids = bookmark_tidy._IdFactory()
     parent = {"children": [bookmark_tidy._firefox_folder_node(ids, "Existing")]}

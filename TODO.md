@@ -223,7 +223,6 @@ oze-mem-01 | open | med | organize_by_extension.py:958 — `BucketManager._reser
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-ds-01 | open | med | bookmark-tidy.py:1211,1289 — `_child_chrome_folder`/`_child_firefox_folder` linearly scan `parent["children"]` to find an existing folder, invoked per path component per bookmark by `_ensure_*_folder`, making export O(bookmarks x siblings) — quadratic when many bookmarks share many sibling folders. Maintain a name→node index per folder node. | data structure / N+1 — per-item re-scan where a map belongs
 
 ## adaptability
 

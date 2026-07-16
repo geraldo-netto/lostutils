@@ -1179,16 +1179,37 @@ def _add_category_result(
     result[index] = _category_path(raw_category, DEFAULT_FALLBACK_CATEGORY)
 
 
+FolderIndex = dict[int, dict[Any, dict[str, Any]]]
+
+
 def export_chrome_bookmarks(bookmarks: Sequence[Bookmark]) -> dict[str, Any]:
     ids = _IdFactory()
+    index: FolderIndex = {}
     roots = {
         key: _chrome_folder_node(ids, name)
         for key, name in CHROME_ROOT_NAMES.items()
     }
     for bookmark in bookmarks:
         root, folder_path = _chrome_output_location(bookmark)
-        _add_chrome_bookmark(roots[root], folder_path, bookmark, ids)
+        _add_chrome_bookmark(roots[root], folder_path, bookmark, ids, index)
     return {"checksum": "", "roots": roots, "version": 1}
+
+
+def _folder_map(
+    parent: dict[str, Any],
+    index: FolderIndex,
+    type_key: str,
+    type_value: Any,
+    name_key: str,
+) -> dict[Any, dict[str, Any]]:
+    folders = index.get(id(parent))
+    if folders is None:
+        folders = {}
+        for child in parent["children"]:
+            if child.get(type_key) == type_value:
+                folders.setdefault(child.get(name_key), child)
+        index[id(parent)] = folders
+    return folders
 
 
 def _chrome_output_location(bookmark: Bookmark) -> tuple[str, tuple[str, ...]]:
@@ -1216,8 +1237,9 @@ def _add_chrome_bookmark(
     folder_path: Sequence[str],
     bookmark: Bookmark,
     ids: "_IdFactory",
+    index: FolderIndex,
 ) -> None:
-    folder = _ensure_chrome_folder(root, folder_path, ids)
+    folder = _ensure_chrome_folder(root, folder_path, ids, index)
     folder["children"].append(
         {
             "date_added": _unix_to_chrome_time(bookmark.add_date),
@@ -1234,30 +1256,38 @@ def _ensure_chrome_folder(
     root: dict[str, Any],
     folder_path: Sequence[str],
     ids: "_IdFactory",
+    index: FolderIndex,
 ) -> dict[str, Any]:
     current = root
     for name in folder_path:
-        current = _child_chrome_folder(current, name, ids)
+        current = _child_chrome_folder(current, name, ids, index)
     return current
 
 
-def _child_chrome_folder(parent: dict[str, Any], name: str, ids: "_IdFactory") -> dict[str, Any]:
-    for child in parent["children"]:
-        if child.get("type") == "folder" and child.get("name") == name:
-            return child
-    child = _chrome_folder_node(ids, name)
-    parent["children"].append(child)
+def _child_chrome_folder(
+    parent: dict[str, Any],
+    name: str,
+    ids: "_IdFactory",
+    index: FolderIndex | None = None,
+) -> dict[str, Any]:
+    folders = _folder_map(parent, {} if index is None else index, "type", "folder", "name")
+    child = folders.get(name)
+    if child is None:
+        child = _chrome_folder_node(ids, name)
+        parent["children"].append(child)
+        folders[name] = child
     return child
 
 
 def export_firefox_bookmarks(bookmarks: Sequence[Bookmark]) -> dict[str, Any]:
     ids = _IdFactory()
+    index: FolderIndex = {}
     root = _firefox_root_node(ids)
     folder_nodes = {key: _firefox_named_root(ids, key) for key in FIREFOX_ROOT_GUIDS}
     root["children"] = list(folder_nodes.values())
     for bookmark in bookmarks:
         target = folder_nodes.get(bookmark.root, folder_nodes["other"])
-        _add_firefox_bookmark(target, bookmark.folder_path, bookmark, ids)
+        _add_firefox_bookmark(target, bookmark.folder_path, bookmark, ids, index)
     return root
 
 
@@ -1303,8 +1333,9 @@ def _add_firefox_bookmark(
     folder_path: Sequence[str],
     bookmark: Bookmark,
     ids: "_IdFactory",
+    index: FolderIndex,
 ) -> None:
-    folder = _ensure_firefox_folder(root, folder_path, ids)
+    folder = _ensure_firefox_folder(root, folder_path, ids, index)
     folder["children"].append(_firefox_bookmark_node(bookmark, ids))
 
 
@@ -1312,19 +1343,26 @@ def _ensure_firefox_folder(
     root: dict[str, Any],
     folder_path: Sequence[str],
     ids: "_IdFactory",
+    index: FolderIndex,
 ) -> dict[str, Any]:
     current = root
     for name in folder_path:
-        current = _child_firefox_folder(current, name, ids)
+        current = _child_firefox_folder(current, name, ids, index)
     return current
 
 
-def _child_firefox_folder(parent: dict[str, Any], name: str, ids: "_IdFactory") -> dict[str, Any]:
-    for child in parent["children"]:
-        if child.get("typeCode") == 2 and child.get("title") == name:
-            return child
-    child = _firefox_folder_node(ids, name)
-    parent["children"].append(child)
+def _child_firefox_folder(
+    parent: dict[str, Any],
+    name: str,
+    ids: "_IdFactory",
+    index: FolderIndex | None = None,
+) -> dict[str, Any]:
+    folders = _folder_map(parent, {} if index is None else index, "typeCode", 2, "title")
+    child = folders.get(name)
+    if child is None:
+        child = _firefox_folder_node(ids, name)
+        parent["children"].append(child)
+        folders[name] = child
     return child
 
 
