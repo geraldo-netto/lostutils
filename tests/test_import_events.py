@@ -1691,7 +1691,19 @@ def test_resolve_tesseract_path_caches_shutil_lookup(monkeypatch):
     assert calls == ["tesseract"]
 
 
-def test_resolve_tesseract_path_does_not_cache_missing_lookup(monkeypatch):
+def test_resolve_tesseract_path_caches_missing_lookup(monkeypatch):
+    calls = []
+    monkeypatch.setattr(import_events.shutil, "which",
+                        lambda name: calls.append(name) or None)
+    cfg = import_events.ModelConfig()
+
+    assert import_events._resolve_tesseract_path(cfg) is None
+    assert import_events._resolve_tesseract_path(cfg) is None
+
+    assert calls == ["tesseract"]
+
+
+def test_reset_tesseract_path_cache_clears_negative_lookup(monkeypatch):
     results = [None, "/usr/bin/tesseract"]
 
     def fake_which(name):
@@ -1702,6 +1714,7 @@ def test_resolve_tesseract_path_does_not_cache_missing_lookup(monkeypatch):
     cfg = import_events.ModelConfig()
 
     assert import_events._resolve_tesseract_path(cfg) is None
+    import_events.reset_tesseract_path_cache()
     assert import_events._resolve_tesseract_path(cfg) == "/usr/bin/tesseract"
     assert results == []
 

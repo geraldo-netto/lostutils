@@ -2772,9 +2772,11 @@ def _resolve_tesseract_path(config: ModelConfig) -> Optional[str]:
     with _TESSERACT_PATH_LOCK:
         if requested in _TESSERACT_PATH_CACHE:
             return _TESSERACT_PATH_CACHE[requested]
+        # Dict membership distinguishes "not looked up" from a cached
+        # negative lookup; None results are memoized too so an absent
+        # Tesseract is probed once, not per image.
         resolved = _resolve_tesseract_executable(requested)
-        if resolved is not None:
-            _TESSERACT_PATH_CACHE[requested] = resolved
+        _TESSERACT_PATH_CACHE[requested] = resolved
     if resolved:
         logger.info("Using Tesseract executable: %s", _display_path(resolved))
     else:

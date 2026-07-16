@@ -206,7 +206,6 @@ lq-plat-10 | open | med | link_queue.py:2603 — `LogSink._open_locked` passes `
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cache-01 | open | low | import_events.py:2772 — `_resolve_tesseract_path` caches only successful resolutions (`if resolved is not None`), so when Tesseract is absent every auto/both-engine image re-runs shutil.which under `_TESSERACT_PATH_LOCK` per file. Cache the None result too (still resettable via `reset_tesseract_path_cache`). | caching strategy — negative-lookup memoization / repeated I/O
 
 ## memory and cpu management
 
