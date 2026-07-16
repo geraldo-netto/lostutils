@@ -1448,19 +1448,21 @@ def test_key_name_mapping():
 
 
 def test_save_and_load_profile_round_trip(app, tmp_path):
-    app._assignments = {(1, 1): {"data": bytes(range(65)), "desc": "A"},
-                        (2, 5): {"data": bytes(65), "desc": "Vol +"}}
+    key1 = bytes([1]) + bytes(range(1, 65))
+    app._assignments = {(1, 1): {"data": key1, "desc": "A"},
+                        (2, 5): {"data": bytes([5]) + bytes(64), "desc": "Vol +"}}
     path = str(tmp_path / "p.json")
     app._save_profile(path)
     app._assignments = {}
     assert app._load_profile(path) == 2
     assert app._assignments[(1, 1)]["desc"] == "A"
-    assert app._assignments[(1, 1)]["data"] == bytes(range(65))
+    assert app._assignments[(1, 1)]["data"] == key1
 
 
 def test_save_and_load_profile_preserves_ambiguous_flag(app, tmp_path):
     app._assignments = {
-        (1, 1): {"data": bytes(range(65)), "desc": "A", "ambiguous": True}
+        (1, 1): {"data": bytes([1]) + bytes(range(1, 65)), "desc": "A",
+                 "ambiguous": True}
     }
     path = str(tmp_path / "p.json")
 
@@ -1833,12 +1835,26 @@ def test_load_profile_rejects_out_of_range_key_id(app, tmp_path):
 def test_load_profile_accepts_led_and_knob_ids(app, tmp_path):
     """In-range ids (LED 176, knob 18) still load (mkp-input-01 no false-reject)."""
     import json as _json
-    data_hex = bytes(len(minikeypad.KeyParam().data)).hex()
+    size = len(minikeypad.KeyParam().data)
     good = tmp_path / "good.json"
     good.write_text(_json.dumps({"version": 1, "assignments": [
-        {"layer": 3, "key_id": 176, "desc": "led", "data": data_hex},
-        {"layer": 2, "key_id": 18, "desc": "knob", "data": data_hex}]}))
+        {"layer": 3, "key_id": 176, "desc": "led",
+         "data": (bytes([176]) + bytes(size - 1)).hex()},
+        {"layer": 2, "key_id": 18, "desc": "knob",
+         "data": (bytes([18]) + bytes(size - 1)).hex()}]}))
     assert app._load_profile(str(good)) == 2
+
+
+def test_load_profile_rejects_key_byte_mismatch(app, tmp_path):
+    """Buffer key byte data[0] must match the entry's key_id (mkp-input-02)."""
+    import json as _json
+    buf = bytearray(len(minikeypad.KeyParam().data))
+    buf[0] = 2                                   # buffer targets KEY2
+    bad = tmp_path / "mismatch.json"
+    bad.write_text(_json.dumps({"version": 1, "assignments": [
+        {"layer": 1, "key_id": 1, "desc": "x", "data": bytes(buf).hex()}]}))
+    with pytest.raises(ValueError):
+        app._load_profile(str(bad))
 
 
 def test_probe_done_clears_busy(app):

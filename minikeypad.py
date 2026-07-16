@@ -1584,6 +1584,13 @@ class App(tk.Tk):
             if layer not in VALID_LAYERS or kid not in VALID_KEY_IDS:
                 raise ValueError(
                     "assignment out of range: layer=%r key_id=%r" % (layer, kid))
+            # mkp-input-02: the device is programmed from the buffer's own key
+            # byte (data[0]) while the UI colours by key_id; a mismatched entry
+            # would silently program a different physical key (or the LED).
+            if data[KeyParam.KeySet_KeyNum] != kid:
+                raise ValueError(
+                    "assignment key byte %d does not match key_id %d"
+                    % (data[KeyParam.KeySet_KeyNum], kid))
             loaded[(layer, kid)] = {
                 "data": data, "desc": str(item.get("desc", ""))}
             if item.get("ambiguous"):
