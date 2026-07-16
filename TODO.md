@@ -59,7 +59,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-n1-30 | open | med | relocate_folder.py:1479 — `_verify_file` issues 3 syscalls per destination file: `dst_file.is_symlink()` (lstat) + `not dst_file.is_file()` (stat) at 1479, then `_verify_size` re-`lstat`s at 1490. rf-perf-01 collapsed the *source* side to a single lstat but the dst counterpart was never given the same treatment; on a large tree that is 2 redundant stat round-trips/file. Do one `dst_file.lstat()`, classify from `st_mode`, and pass the size through. | N+1 / call efficiency — asymmetric with optimized src side; same pattern in `_verify_dir`:1407, `_verify_symlink`:1460
 
 ## concurrency
 

@@ -1419,7 +1419,14 @@ def _verify_unreadable_src(src_path: Path, rel: Path, exc: OSError) -> None:
 
 
 def _verify_dir(src_dir: Path, dst_dir: Path, rel: Path) -> None:
-    if src_dir.is_symlink() or not dst_dir.is_dir() or dst_dir.is_symlink():
+    # rf-n1-30: one dst lstat classified via st_mode replaces the previous
+    # is_dir() + is_symlink() pair (S_ISDIR on lstat is false for symlinks,
+    # so a symlink-to-dir dst still fails).
+    try:
+        dst_mode = dst_dir.lstat().st_mode
+    except OSError:
+        dst_mode = 0
+    if src_dir.is_symlink() or not stat.S_ISDIR(dst_mode):
         # rf-obs-02: include absolute src path so log lines are actionable
         # without having to mentally join `rel` to the migration root.
         raise RuntimeError(f"missing directory in copy: {rel} (src={src_dir})")
@@ -1474,10 +1481,13 @@ def _walk_entries(root: Path) -> Iterable[Path]:
 def _verify_symlink(src_link: Path, dst_link: Path, rel: Path) -> None:
     if not dst_link.is_symlink():
         raise RuntimeError(f"missing symlink in copy: {rel} (src={src_link})")
-    if os.readlink(src_link) != os.readlink(dst_link):
+    # rf-n1-30: read each side once and reuse in the error message.
+    src_target = os.readlink(src_link)
+    dst_target = os.readlink(dst_link)
+    if src_target != dst_target:
         raise RuntimeError(
             f"symlink target mismatch for {rel} (src={src_link}): "
-            f"{os.readlink(src_link)!r} != {os.readlink(dst_link)!r}")
+            f"{src_target!r} != {dst_target!r}")
 
 
 def _verify_file(src_file: Path, dst_file: Path, rel: Path, checksum: bool,
@@ -1490,19 +1500,32 @@ def _verify_file(src_file: Path, dst_file: Path, rel: Path, checksum: bool,
 
     rf-perf-01: `src_size` may be supplied by the caller (it already lstat'd
     `src_file` to classify it) so `_verify_size` doesn't re-stat the source.
-    Direct callers that omit it fall back to a fresh lstat."""
-    if dst_file.is_symlink() or not dst_file.is_file():
+    Direct callers that omit it fall back to a fresh lstat.
+
+    rf-n1-30: dst is lstat'd ONCE and classified from `st_mode` (S_ISREG on
+    lstat is false for symlinks), then its size is passed through to
+    `_verify_size` — replacing the previous is_symlink() + is_file() +
+    re-lstat trio (3 stat round-trips per file on large trees)."""
+    try:
+        dst_st = dst_file.lstat()
+    except OSError:
+        raise RuntimeError(
+            f"missing file in copy: {rel} (src={src_file})") from None
+    if not stat.S_ISREG(dst_st.st_mode):
         raise RuntimeError(f"missing file in copy: {rel} (src={src_file})")
-    _verify_size(src_file, dst_file, rel, src_size=src_size)
+    _verify_size(src_file, dst_file, rel,
+                 src_size=src_size, dst_size=dst_st.st_size)
     if checksum:
         _verify_content(src_file, dst_file, rel)
 
 
 def _verify_size(src_file: Path, dst_file: Path, rel: Path,
-                 *, src_size: int | None = None) -> None:
+                 *, src_size: int | None = None,
+                 dst_size: int | None = None) -> None:
     if src_size is None:
         src_size = src_file.lstat().st_size
-    dst_size = dst_file.lstat().st_size
+    if dst_size is None:
+        dst_size = dst_file.lstat().st_size
     if src_size != dst_size:
         raise RuntimeError(
             f"size mismatch for {rel} (src={src_file}): {src_size} != {dst_size}"

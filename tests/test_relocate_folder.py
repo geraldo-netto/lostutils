@@ -1303,6 +1303,44 @@ def test_verify_dir_passes_and_raises(tmp_path):
         rf._verify_dir(s, d, Path("d"))
 
 
+# --- rf-n1-30: single-lstat dst classification -------------------------------
+
+def test_verify_dir_rejects_symlink_dst(tmp_path):
+    s = tmp_path / "s"; s.mkdir()
+    real = tmp_path / "real"; real.mkdir()
+    d = tmp_path / "d"; d.symlink_to(real)
+    with pytest.raises(RuntimeError, match="missing directory"):
+        rf._verify_dir(s, d, Path("d"))
+
+
+def test_verify_file_missing_dst(tmp_path):
+    a = tmp_path / "a"; a.write_text("abc")
+    with pytest.raises(RuntimeError, match="missing file in copy"):
+        rf._verify_file(a, tmp_path / "gone", Path("a"), checksum=False)
+
+
+def test_verify_file_rejects_symlink_dst(tmp_path):
+    a = tmp_path / "a"; a.write_text("abc")
+    b = tmp_path / "b"; b.symlink_to(a)
+    with pytest.raises(RuntimeError, match="missing file in copy"):
+        rf._verify_file(a, b, Path("a"), checksum=False)
+
+
+def test_verify_size_uses_passed_dst_size_without_lstatting_dst(tmp_path):
+    a = tmp_path / "a"; a.write_text("abc")
+    missing = tmp_path / "gone"
+    rf._verify_size(a, missing, Path("a"), src_size=3, dst_size=3)
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        rf._verify_size(a, missing, Path("a"), src_size=3, dst_size=99)
+
+
+def test_verify_file_size_mismatch_via_passed_stat(tmp_path):
+    a = tmp_path / "a"; a.write_text("abc")
+    b = tmp_path / "b"; b.write_text("abcdef")
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        rf._verify_file(a, b, Path("a"), checksum=False)
+
+
 # --- rf-perf-02: parallel verify pool ---------------------------------------
 
 def test_verify_copy_parallel_detects_corruption(tmp_path):
