@@ -83,7 +83,6 @@ ie-dist-01 | open | med | import_events.py:3717 — `_output_lock` creates `<out
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-depend-01 | open | med | bookmark-tidy.py:965-972 — `_assign_categories` catches every categorizer exception per batch and falls back, but has no circuit breaker: if the model fails or times out on every batch it still pays the full `LLAMA_INFERENCE_TIMEOUT_SECONDS` (120s) per batch across all N batches, amplifying wall-time instead of failing fast. Abort remaining batches to fallback after K consecutive failures. | dependability — fallback chains must stop before amplifying damage
 dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no BrokenPipeError guard, so piping into `head` raises a BrokenPipeError traceback on close. Wrap the write/flush in a BrokenPipeError handler or restore SIGPIPE to default. | common CLI pipe pattern
 
 ## code complexity

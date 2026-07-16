@@ -633,6 +633,43 @@ def test_tidy_bookmarks_falls_back_when_categorizer_fails(caplog):
     assert "LLM categorization failed" in caplog.text
 
 
+def test_assign_categories_stops_after_consecutive_failures(caplog):
+    limit = bookmark_tidy.LLM_CONSECUTIVE_FAILURE_LIMIT
+    calls = []
+
+    def always_failing(batch):
+        calls.append(len(batch))
+        raise bookmark_tidy.UserError("LLM inference timed out")
+
+    caplog.set_level(logging.WARNING, logger="bookmark-tidy")
+    bookmarks = [_sample_bookmark(f"https://example.test/{i}", f"B{i}") for i in range(limit + 2)]
+
+    result = bookmark_tidy._assign_categories(bookmarks, always_failing, "Fallback", batch_size=1)
+
+    assert len(calls) == limit
+    assert len(result) == limit + 2
+    assert all(item.folder_path == ("Fallback",) for item in result)
+    assert "aborted after" in caplog.text
+
+
+def test_assign_categories_failure_streak_resets_on_success():
+    limit = bookmark_tidy.LLM_CONSECUTIVE_FAILURE_LIMIT
+    calls = []
+
+    def flaky(batch):
+        calls.append(len(batch))
+        if len(calls) % 2:
+            raise bookmark_tidy.UserError("transient")
+        return {0: ["Ok"]}
+
+    bookmarks = [_sample_bookmark(f"https://example.test/{i}", f"B{i}") for i in range(2 * limit)]
+
+    result = bookmark_tidy._assign_categories(bookmarks, flaky, "Fallback", batch_size=1)
+
+    assert len(calls) == 2 * limit
+    assert [item.folder_path for item in result] == [("Fallback",), ("Ok",)] * limit
+
+
 def test_category_response_parsing_and_errors():
     assert bookmark_tidy.parse_category_response(
         'prefix {"items":[{"id":0,"category":"Dev/Docs"},{"id":9,"category":"Nope"}]} suffix',

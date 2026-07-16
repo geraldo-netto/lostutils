@@ -32,6 +32,7 @@ DEFAULT_LLM_MAX_TOKENS = 1024
 LLAMA_CPP_PYTHON_REQUIREMENT = "llama-cpp-python==0.3.32"
 LLAMA_INSTALL_TIMEOUT_SECONDS = 300
 LLAMA_INFERENCE_TIMEOUT_SECONDS = 120
+LLM_CONSECUTIVE_FAILURE_LIMIT = 3
 MOZLZ4_MAGIC = b"mozLz40\x00"
 TRACKING_PARAM_NAMES = frozenset(
     {
@@ -962,15 +963,30 @@ def _assign_categories(
     if not bookmarks:
         return []
     result: list[Bookmark] = []
+    failures = 0
     for batch in _chunks(bookmarks, max(1, batch_size)):
         categories: Mapping[int, Sequence[str] | str] = {}
-        if categorizer is not None:
-            try:
-                categories = categorizer(batch)
-            except Exception as exc:
-                LOGGER.warning("LLM categorization failed for %d bookmark(s); using fallback category: %s", len(batch), exc)
+        if categorizer is not None and failures < LLM_CONSECUTIVE_FAILURE_LIMIT:
+            categories, failed = _categorize_batch(categorizer, batch)
+            failures = failures + 1 if failed else 0
+            if failures == LLM_CONSECUTIVE_FAILURE_LIMIT:
+                LOGGER.warning(
+                    "LLM categorization aborted after %d consecutive batch failures; remaining bookmarks use the fallback category",
+                    LLM_CONSECUTIVE_FAILURE_LIMIT,
+                )
         result.extend(_apply_category_batch(batch, categories, fallback))
     return result
+
+
+def _categorize_batch(
+    categorizer: CategoryProvider,
+    batch: Sequence[Bookmark],
+) -> tuple[Mapping[int, Sequence[str] | str], bool]:
+    try:
+        return categorizer(batch), False
+    except Exception as exc:
+        LOGGER.warning("LLM categorization failed for %d bookmark(s); using fallback category: %s", len(batch), exc)
+        return {}, True
 
 
 def _chunks(items: Sequence[Bookmark], size: int) -> Iterable[Sequence[Bookmark]]:
