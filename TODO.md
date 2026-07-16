@@ -93,7 +93,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cx-06 | open | med | hash-recursive-ai5.py:2024 — `main` spans ~185 lines and defines five nested closures (`_mark_walk_done`, `_disable_hash_dump`, `_on_hashed`, `_on_composite`, `_on_stage_progress`) mixing CLI parsing, dump-file setup, callback wiring, pipeline invocation and summary, exceeding the AGENTS.md cognitive-complexity ceiling (≤10). Extract `_setup_hash_dump` and a `_build_dump_callbacks(...)` helper so main stays thin orchestration. | code complexity — cognitive complexity ≤10 (AGENTS.md); mirrors prior hr-cx-01..05 extractions
 rf-cx-30 | open | med | relocate_folder.py:2032 — `execute` nests three levels of `try`/`finally` (outer status `finally`, `os.close(src_fd)` `finally`, inner cleanup `except`) around ~6 conditional early-returns (already_migrated / empty-target / orphan / dry-run / states), pushing cognitive complexity above the repo's ≤10 rule. Extract the guard/skip preamble and the copy-swap-cleanup core into helpers so each stays flat. | code complexity — AGENTS.md "complexity ≤ 10" rule
 
 ## code duplication

@@ -2051,6 +2051,89 @@ def _finalize_hash_dump(hashes_state, dump_overflow, hashes_file,
     )
 
 
+def _setup_hash_dump(hashes_file, hashes_state):
+    """Open the hashes dump and stash its writer in ``hashes_state``
+    (hr-cx-06 extraction from :func:`main`).
+
+    hr-log-04: the dump is opened BEFORE the walk so it always exists even
+    on a Ctrl-C during the walk. Returns the dump's ``(st_dev, st_ino)`` so
+    the walk can exclude the file from its own scan, or None when dumping
+    is disabled or the open failed (a warning is logged; the run itself
+    proceeds without a dump)."""
+    if hashes_file is None:
+        return None
+    try:
+        writer = HashDumpWriter(_open_hash_dump(hashes_file))
+        hashes_state["writer"] = writer
+        dump_stat = os.fstat(writer.fileno())
+        return (dump_stat.st_dev, dump_stat.st_ino)
+    except OSError as exc:
+        _log_line(f"WARNING: cannot write {hashes_file}: {exc}", False)
+        return None
+
+
+def _disable_hash_dump(hashes_state, hashes_file, exc) -> None:
+    """Stop dumping after a write failure: warn once, close the writer and
+    clear it from ``hashes_state`` so later dump callbacks become no-ops."""
+    writer = hashes_state["writer"]
+    hashes_state["writer"] = None
+    _log_line(f"WARNING: writing {hashes_file} failed: {exc}", False)
+    if writer is not None:
+        try:
+            writer.close()
+        except OSError:
+            pass
+
+
+def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet):
+    """Wire the pipeline callbacks that feed the hashes dump and the live
+    hashing progress log (hr-cx-06 extraction from :func:`main`).
+
+    Returns ``(on_hashed, on_composite, on_stage_progress)`` closures over
+    ``hashes_state`` — a one-key dict so :func:`_disable_hash_dump` and
+    :func:`_finalize_hash_dump` observe the same writer slot as main."""
+    progress_state: dict = {}
+
+    def on_hashed(done, total, head, key, aliases):
+        # hr-log-02: record every hashed file for the dump. Live progress is
+        # emitted by `on_stage_progress` as each hash batch completes.
+        stall_monitor.touch("hash")
+        writer = hashes_state["writer"]
+        if head is not None and writer is not None:
+            try:
+                writer.write_head(key, head, aliases.get(key, ()))
+            except OSError as exc:
+                _disable_hash_dump(hashes_state, hashes_file, exc)
+
+    def on_composite(key, composite):
+        # hr-obs-02: upgrade the stage-1 head digest to the composite
+        # head:tail once stage 2 has resolved the tail for this key.
+        writer = hashes_state["writer"]
+        if writer is not None:
+            try:
+                writer.patch_composite(key, composite)
+            except OSError as exc:
+                _disable_hash_dump(hashes_state, hashes_file, exc)
+
+    def on_stage_progress(stage, done, total):
+        stall_monitor.touch(stage)
+        state = progress_state.setdefault(
+            stage, {"started": time.monotonic(), "last": 0})
+        if done != total and done - state["last"] < LOG_EVERY_N_FILES:
+            return
+        state["last"] = done
+        elapsed = time.monotonic() - state["started"]
+        pct = (done * 100) // total if total else 100
+        _log_line(
+            f"hashing {stage} {pct}% ({done}/{total}) "
+            f"elapsed={_fmt_elapsed(elapsed)} "
+            f"rate={_fmt_rate(done, elapsed)}/s",
+            quiet,
+        )
+
+    return on_hashed, on_composite, on_stage_progress
+
+
 def main():
     _configure_stdio_encoding()
     args = _build_arg_parser().parse_args()
@@ -2109,20 +2192,10 @@ def main():
 
     try:
         stall_monitor.start("scan")
-        # hr-log-04: open the hashes dump BEFORE the walk so it always exists
-        # even on a Ctrl-C during the walk. hr-rob-02: write each stage-1 head
-        # line immediately, then patch the fixed-width digest field if stage 2
-        # upgrades it to a composite head:tail digest.
-        skip_ino = None
-        if args.hashes_file is not None:
-            try:
-                writer = HashDumpWriter(_open_hash_dump(args.hashes_file))
-                hashes_state["writer"] = writer
-                dump_stat = os.fstat(writer.fileno())
-                skip_ino = (dump_stat.st_dev, dump_stat.st_ino)
-            except OSError as exc:
-                _log_line(
-                    f"WARNING: cannot write {args.hashes_file}: {exc}", False)
+        # hr-rob-02: each stage-1 head line is written immediately, then the
+        # fixed-width digest field is patched if stage 2 upgrades it to a
+        # composite head:tail digest.
+        skip_ino = _setup_hash_dump(args.hashes_file, hashes_state)
         # hr-obs-02 + hr-scal-05: stream the walk so we never materialise
         # the full `files` list. `on_walk_done` snaps the walk/hash
         # boundary so the per-stage durations remain meaningful.
@@ -2137,58 +2210,12 @@ def main():
             stall_monitor.touch("hash")
             walk_boundary[0] = time.perf_counter()
 
-        def _disable_hash_dump(exc):
-            writer = hashes_state["writer"]
-            hashes_state["writer"] = None
-            _log_line(f"WARNING: writing {args.hashes_file} failed: {exc}", False)
-            if writer is not None:
-                try:
-                    writer.close()
-                except OSError:
-                    pass
-
         # hr-scal-02: stream groups straight to stdout so the result set
         # never buffers in memory. Pipeline-internal `final_groups` stays
         # empty because the callback consumes every group inline.
         on_group, totals = emit_groups_streaming(sys.stdout.write, config=config)
-        progress_state: dict = {}
-
-        def _on_hashed(done, total, head, key, aliases):
-            # hr-log-02: record every hashed file for the dump. Live progress is
-            # emitted by `_on_stage_progress` as each hash batch completes.
-            stall_monitor.touch("hash")
-            writer = hashes_state["writer"]
-            if head is not None and writer is not None:
-                try:
-                    writer.write_head(key, head, aliases.get(key, ()))
-                except OSError as exc:
-                    _disable_hash_dump(exc)
-
-        def _on_composite(key, composite):
-            # hr-obs-02: upgrade the stage-1 head digest to the composite
-            # head:tail once stage 2 has resolved the tail for this key.
-            writer = hashes_state["writer"]
-            if writer is not None:
-                try:
-                    writer.patch_composite(key, composite)
-                except OSError as exc:
-                    _disable_hash_dump(exc)
-
-        def _on_stage_progress(stage, done, total):
-            stall_monitor.touch(stage)
-            state = progress_state.setdefault(
-                stage, {"started": time.monotonic(), "last": 0})
-            if done != total and done - state["last"] < LOG_EVERY_N_FILES:
-                return
-            state["last"] = done
-            elapsed = time.monotonic() - state["started"]
-            pct = (done * 100) // total if total else 100
-            _log_line(
-                f"hashing {stage} {pct}% ({done}/{total}) "
-                f"elapsed={_fmt_elapsed(elapsed)} "
-                f"rate={_fmt_rate(done, elapsed)}/s",
-                args.quiet,
-            )
+        on_hashed, on_composite, on_stage_progress = _build_dump_callbacks(
+            hashes_state, args.hashes_file, stall_monitor, args.quiet)
 
         # hr-log-01: wrap the walk so a progress line prints every N files;
         # find_duplicate_groups still consumes the stream exactly once.
@@ -2200,8 +2227,8 @@ def main():
             ),
             args.jobs,
             on_group=on_group, config=config, on_walk_done=_mark_walk_done,
-            cancel_event=cancel_event, on_hashed=_on_hashed,
-            on_stage_progress=_on_stage_progress, on_composite=_on_composite,
+            cancel_event=cancel_event, on_hashed=on_hashed,
+            on_stage_progress=on_stage_progress, on_composite=on_composite,
         )
         if result.overflow:
             dump_overflow.update(result.overflow)

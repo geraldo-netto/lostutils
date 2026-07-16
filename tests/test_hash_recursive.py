@@ -2107,6 +2107,26 @@ def test_main_hashes_file_open_failure_warns(tmp_path, monkeypatch, capsys):
     assert not bad.exists()
 
 
+def test_setup_hash_dump_returns_skip_ino_and_sets_writer(tmp_path, capsys):
+    # hr-cx-06: the extracted dump-setup seam opens the writer, stashes it
+    # in hashes_state and returns the dump's inode identity for the walk.
+    dump = tmp_path / "hashes.txt"
+    state: dict = {"writer": None}
+    skip_ino = hr._setup_hash_dump(str(dump), state)
+    try:
+        st_ = os.stat(dump)
+        assert skip_ino == (st_.st_dev, st_.st_ino)
+        assert state["writer"] is not None
+    finally:
+        state["writer"].close()
+    assert hr._setup_hash_dump(None, {"writer": None}) is None
+    bad = tmp_path / "missing-dir" / "hashes.txt"
+    state_bad: dict = {"writer": None}
+    assert hr._setup_hash_dump(str(bad), state_bad) is None
+    assert state_bad["writer"] is None
+    assert "cannot write" in capsys.readouterr().err
+
+
 def test_read_window_chunks_match_single_read(tmp_path, monkeypatch):
     # hr-mem-01: reading a window in many small sub-chunks must yield the
     # same digest as one read of the whole window.
