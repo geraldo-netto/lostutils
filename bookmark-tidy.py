@@ -1011,12 +1011,18 @@ class LlamaCategorizer:
         max_tokens: int,
     ) -> None:
         Llama = _import_llama(auto_install)
-        self._llm = Llama(
-            model_path=str(model_path),
-            n_ctx=context,
-            n_gpu_layers=gpu_layers,
-            verbose=False,
-        )
+        try:
+            self._llm = Llama(
+                model_path=str(model_path),
+                n_ctx=context,
+                n_gpu_layers=gpu_layers,
+                verbose=False,
+            )
+        except Exception as exc:
+            raise UserError(
+                f"could not load model {model_path}: {exc}; "
+                "verify the file is a valid GGUF model compatible with llama-cpp-python"
+            ) from exc
         self._max_tokens = max_tokens
 
     def __call__(self, bookmarks: Sequence[Bookmark]) -> Mapping[int, Sequence[str] | str]:

@@ -83,7 +83,6 @@ ie-dist-01 | open | med | import_events.py:3717 — `_output_lock` creates `<out
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-depend-02 | open | low | bookmark-tidy.py:1014 — `LlamaCategorizer.__init__` calls `Llama(...)` from `_categorizer_from_args` (:1515) inside `_run`, but model-load failures on a corrupt/incompatible GGUF raise exceptions (e.g. `ValueError`) outside `main`'s caught set (`UserError, OSError, sqlite3.Error, RuntimeError`, :1555), surfacing a raw traceback. Wrap the model-load in `UserError`. | dependability — optional subsystem failure must degrade to a clean error
 bt-depend-01 | open | med | bookmark-tidy.py:965-972 — `_assign_categories` catches every categorizer exception per batch and falls back, but has no circuit breaker: if the model fails or times out on every batch it still pays the full `LLAMA_INFERENCE_TIMEOUT_SECONDS` (120s) per batch across all N batches, amplifying wall-time instead of failing fast. Abort remaining batches to fallback after K consecutive failures. | dependability — fallback chains must stop before amplifying damage
 dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no BrokenPipeError guard, so piping into `head` raises a BrokenPipeError traceback on close. Wrap the write/flush in a BrokenPipeError handler or restore SIGPIPE to default. | common CLI pipe pattern
 

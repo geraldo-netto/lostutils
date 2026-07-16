@@ -672,6 +672,17 @@ def test_llama_categorizer_chat_and_text_paths(monkeypatch, tmp_path):
     assert FakeLlamaText.kwargs["n_gpu_layers"] == 1
 
 
+def test_llama_categorizer_wraps_model_load_failure(monkeypatch, tmp_path):
+    class BrokenLlama:
+        def __init__(self, **kwargs):
+            raise ValueError("bad magic")
+
+    _install_fake_llama(monkeypatch, BrokenLlama)
+
+    with pytest.raises(bookmark_tidy.UserError, match="could not load model .*bad magic"):
+        bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
+
+
 def test_llama_categorizer_inference_timeout(monkeypatch, tmp_path):
     _install_fake_llama(monkeypatch, HangingLlama)
     monkeypatch.setattr(bookmark_tidy, "LLAMA_INFERENCE_TIMEOUT_SECONDS", 0.01)
