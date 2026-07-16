@@ -1557,6 +1557,37 @@ def test_parse_args_strict_cross_device_flag():
     assert plan.strict_cross_device is True
 
 
+# --- rf-cfg-01: verbosity flag ----------------------------------------------
+
+def test_log_level_default_is_info():
+    import logging
+    ns = rf.parse_namespace(["/x", "/y"])
+    assert rf._log_level(ns) == logging.INFO
+
+
+def test_log_level_verbose_short_flag():
+    import logging
+    ns = rf.parse_namespace(["-v", "/x", "/y"])
+    assert rf._log_level(ns) == logging.DEBUG
+
+
+def test_log_level_verbose_long_flag():
+    import logging
+    ns = rf.parse_namespace(["--verbose", "/x", "/y"])
+    assert rf._log_level(ns) == logging.DEBUG
+
+
+def test_log_level_quiet_flag():
+    import logging
+    ns = rf.parse_namespace(["--quiet", "/x", "/y"])
+    assert rf._log_level(ns) == logging.WARNING
+
+
+def test_verbose_and_quiet_are_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit):
+        rf.parse_namespace(["-v", "--quiet", "/x", "/y"])
+
+
 # --- rf-ddd-01: MigrationState enum ----------------------------------------
 
 def test_migration_state_values():

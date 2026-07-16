@@ -229,7 +229,6 @@ dnv3-adapt-01 | open | low | deduplicate-by-namev3.py:196 — output rows hardco
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-cfg-01 | open | low | link_queue.py:336 — `command_timeout_seconds` (the hung-download safety cap) plus `immediate_worker_count`, `immediate_queue_maxsize`, `queue_render_limit`, `seq_of_sweep_gap` have no UI surface; `_SettingsTabs._build_dispatcher` exposes only sleep/workers/cooldown/max-per-domain/output-folder. Surface `command_timeout_seconds` at least. | safety-relevant timeout is hand-edit-YAML-only
-rf-cfg-01 | open | low | relocate_folder.py:2120 — `main` hardcodes `logging.basicConfig(level=INFO)` with no `--verbose`/`--quiet`/`-v` flag or env knob; a root migration tool gives operators no way to raise to DEBUG or mute INFO. Add a verbosity flag mapping to log level. | every other runtime knob is tunable
 
 ## API contract & compatibility
 

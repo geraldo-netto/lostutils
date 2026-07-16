@@ -2410,6 +2410,11 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="rf-perf-02: skip the pre-copy disk-space walk (saves "
                         "a full tree lstat on very large trees; an ENOSPC "
                         "mid-copy is still handled with cleanup)")
+    verbosity = p.add_mutually_exclusive_group()
+    verbosity.add_argument("-v", "--verbose", action="store_true",
+                           help="rf-cfg-01: DEBUG-level logging")
+    verbosity.add_argument("--quiet", action="store_true",
+                           help="rf-cfg-01: WARNING-level logging (mute INFO)")
     return p
 
 
@@ -2442,9 +2447,18 @@ def _format_shutil_error(err: shutil.Error, max_lines: int = 10) -> str:
     return "\n".join(head)
 
 
+def _log_level(ns: argparse.Namespace) -> int:
+    """Map the rf-cfg-01 verbosity flags to a logging level."""
+    if getattr(ns, "verbose", False):
+        return logging.DEBUG
+    if getattr(ns, "quiet", False):
+        return logging.WARNING
+    return logging.INFO
+
+
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     ns = parse_namespace(argv)
+    logging.basicConfig(level=_log_level(ns), format="%(levelname)s %(message)s")
     if getattr(ns, "recover", False):
         return _run_recover(ns)
     if ns.dest_root is None:
