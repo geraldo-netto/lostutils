@@ -2601,7 +2601,38 @@ def test_build_ics_emits_importable_calendar():
     assert "BEGIN:VCALENDAR" in ics
     assert "SUMMARY:Expo" in ics
     assert "LOCATION:Hall A" in ics
+    assert "UID:" in ics
+    assert "DTSTAMP" in ics
     assert "Bad" not in ics  # unparseable start is skipped
+
+
+def test_build_ics_emits_deterministic_uid_and_dtstamp():
+    pytest.importorskip("icalendar")
+    events = [{"title": "Expo", "start": "2026-06-22T10:00", "end": "2026-06-22T18:00",
+               "location": "Hall A", "source": "p.pdf", "type": "PDF"}]
+
+    first = import_events.build_ics(events)
+    second = import_events.build_ics(events)
+
+    assert first == second
+    ics = first.decode("utf-8").replace("\r\n ", "")  # unfold RFC 5545 lines
+    assert "@import-events.lostutils" in ics
+    assert "DTSTAMP:20260622T100000Z" in ics
+
+
+def test_build_ics_uid_distinguishes_differing_events():
+    pytest.importorskip("icalendar")
+    base = {"end": "", "location": "", "source": "s", "type": "x"}
+    events = [
+        {"title": "Expo", "start": "2026-06-22T10:00", **base},
+        {"title": "Expo", "start": "2026-06-23T10:00", **base},
+    ]
+
+    ics = import_events.build_ics(events).decode("utf-8").replace("\r\n ", "")
+
+    uids = [line for line in ics.splitlines() if line.startswith("UID:")]
+    assert len(uids) == 2
+    assert uids[0] != uids[1]
 
 
 def test_match_end_to_start_keeps_date_end_as_date():

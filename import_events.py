@@ -28,7 +28,7 @@ from collections import OrderedDict
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import List, Dict, Any, Optional, Callable, Tuple, MutableMapping, Iterable, cast
 from pathlib import Path
 
@@ -3901,6 +3901,25 @@ def _end_precedes_start(start: Any, end: Any) -> bool:
     return False
 
 
+def _event_uid(event: Dict[str, Any]) -> str:
+    """Deterministic RFC 5545 UID so re-importing the same file updates
+    events instead of duplicating them (ie-rel-11)."""
+    payload = "\n".join(
+        str(event.get(field) or "") for field in ("title", "start", "end", "location"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{digest}@import-events.lostutils"
+
+
+def _event_dtstamp(start: Any) -> datetime:
+    """DTSTAMP derived from the event start rather than wall-clock time, so
+    identical inputs produce byte-identical ICS output (ie-rel-11)."""
+    if not isinstance(start, datetime):
+        return datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+    if _is_aware_datetime(start):
+        return start.astimezone(timezone.utc)
+    return start.replace(tzinfo=timezone.utc)
+
+
 def build_ics(events: List[Dict[str, Any]]) -> bytes:
     """Builds an importable iCalendar document from extracted events."""
     from icalendar import Calendar, Event as IcsEvent
@@ -3915,6 +3934,8 @@ def build_ics(events: List[Dict[str, Any]]) -> bytes:
                            e.get("start"), e.get("title"))
             continue
         ie = IcsEvent()
+        ie.add("uid", _event_uid(e))
+        ie.add("dtstamp", _event_dtstamp(start))
         ie.add("summary", e.get("title", "No Title"))
         ie.add("dtstart", start)
         end = _parse_iso(e.get("end", "")) if e.get("end") else None
