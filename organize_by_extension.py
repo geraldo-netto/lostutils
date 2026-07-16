@@ -1239,7 +1239,7 @@ def _resolve_source_collision(source: Path, destination: Path) -> Path:
     # in parallel; if the rename races and loses (FileNotFoundError or
     # ENOENT), the blocker is already gone — re-probe and either move on
     # or pick up the next blocker up the chain.
-    for _ in range(8):
+    for _ in range(_STACKED_BLOCKER_RETRY_CAP):
         blocker = _find_destination_blocker(destination)
         if blocker is None:
             return source
@@ -1276,7 +1276,7 @@ def _resolve_source_collision(source: Path, destination: Path) -> Path:
             blocker, destination, candidate,
         )
         continue
-    # Gave up after 8 retries (extremely unlikely on real workloads).
+    # Retry budget exhausted (extremely unlikely on real workloads).
     logger.warning(
         "name collision retries exhausted for %s -> %s; falling through",
         source, destination,
@@ -1314,6 +1314,11 @@ def _find_destination_blocker(destination: Path) -> "Path | None":
 
 
 _COLLISION_RETRY_CAP = 1000
+
+# oze-adapt-01: retry budget for `_resolve_source_collision`'s stacked-blocker
+# loop — each pass clears at most one non-dir ancestor, so this bounds the
+# blocker-chain depth handled before giving up.
+_STACKED_BLOCKER_RETRY_CAP = 8
 
 # oze-rel-01: errnos meaning "this filesystem does not support hardlinks"
 # (FAT/exFAT, many SMB/NFS mounts). On any of these the os.link reservation
