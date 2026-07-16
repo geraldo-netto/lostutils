@@ -818,11 +818,13 @@ class BucketChoice(NamedTuple):
     ``bucket`` is the reusable bucket directory if one was found, else None.
     ``next_index`` is the lowest bucket index the caller should allocate when
     ``bucket`` is None — either the gap slot or one past the last index.
-    Implemented as a NamedTuple so legacy ``chosen, nxt = ...`` unpacking
-    keeps working.
+    ``first_non_full`` is the updated first-non-full cursor the caller should
+    persist for the next call (oze-arch-04: previously smuggled out through a
+    mutable ``cursor_out`` list parameter).
     """
     bucket: Path | None
     next_index: int
+    first_non_full: int
 
 
 def _find_reusable_bucket(
@@ -832,13 +834,13 @@ def _find_reusable_bucket(
     state_cache: dict[Path, Set[str] | frozenset[str]],
     indices: list[int],
     first_non_full_index: int = 0,
-    cursor_out: list[int] | None = None,
 ) -> BucketChoice:
     """Walk `indices` sorted, looking for an existing bucket with room and
     without a name clash on `filename` (oze-cx-01). Returns a
     :class:`BucketChoice` (oze-cx-02): ``bucket`` is the reusable bucket if
     any (else None); ``next_index`` is the lowest index to allocate when no
-    reusable bucket is found. Populates `state_cache` lazily.
+    reusable bucket is found; ``first_non_full`` is the advanced cursor.
+    Populates `state_cache` lazily.
 
     Once a bucket is full, its entry in `state_cache` is collapsed to the
     `_BUCKET_FULL` sentinel (oze-scal-02): we skip it without re-reading the
@@ -869,13 +871,9 @@ def _find_reusable_bucket(
             first_non_full = index + 1
             continue
         if filename not in names:
-            if cursor_out is not None:
-                cursor_out[0] = first_non_full
-            return BucketChoice(bucket_path, next_expected)
+            return BucketChoice(bucket_path, next_expected, first_non_full)
         next_expected = index + 1
-    if cursor_out is not None:
-        cursor_out[0] = first_non_full
-    return BucketChoice(None, next_expected)
+    return BucketChoice(None, next_expected, first_non_full)
 
 
 def _allocate_new_bucket(
@@ -901,18 +899,20 @@ def choose_bucket(
     state_cache: dict[Path, Set[str] | frozenset[str]],
     indices: list[int],
     first_non_full_index: int = 0,
-    cursor_out: list[int] | None = None,
-) -> Path:
+) -> tuple[Path, int]:
     """Choose or create the bucket for `filename`, preferring gaps and
-    existing rooms. Thin orchestrator over _find_reusable_bucket +
-    _allocate_new_bucket (oze-cx-01)."""
+    existing rooms. Returns ``(bucket_path, first_non_full)`` where the
+    second element is the advanced cursor to persist (oze-arch-04). Thin
+    orchestrator over _find_reusable_bucket + _allocate_new_bucket
+    (oze-cx-01)."""
     choice = _find_reusable_bucket(
         ext_dir, prefix, filename, state_cache, indices,
-        first_non_full_index, cursor_out)
+        first_non_full_index)
     if choice.bucket is not None:
-        return choice.bucket
-    return _allocate_new_bucket(
+        return choice.bucket, choice.first_non_full
+    bucket = _allocate_new_bucket(
         ext_dir, prefix, choice.next_index, state_cache, indices)
+    return bucket, choice.first_non_full
 
 
 @dataclass(frozen=True)
@@ -1029,11 +1029,9 @@ class BucketManager:
         pre_indices = len(indices)
         cursor_key = (ext_dir, prefix)
         cursor = self._first_non_full.get(cursor_key, 0)
-        cursor_out = [cursor]
-        bucket_path = choose_bucket(
-            ext_dir, prefix, source.name, self.state_cache, indices,
-            cursor, cursor_out)
-        self._first_non_full[cursor_key] = cursor_out[0]
+        bucket_path, new_cursor = choose_bucket(
+            ext_dir, prefix, source.name, self.state_cache, indices, cursor)
+        self._first_non_full[cursor_key] = new_cursor
         names = self.state_cache[bucket_path]
         if not isinstance(names, set):  # _BUCKET_FULL frozenset sentinel (oze-cx-05)
             raise RuntimeError(

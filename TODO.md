@@ -115,7 +115,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-arch-01 | open | low | dedupl_numpy.py:16 — single `main()` fuses arg parsing, mmap I/O, vectorized grouping, and stdout emission with no seam; the grouping logic can't be unit-tested without a file + subprocess (feeds dnp-test-01). Extract a pure `group_duplicates(data) -> (paths, counts)` helper. | architecture / decoupling / SOLID — no testability boundary; SRP
 mkp-arch-01 | open | high | minikeypad.py:800 — `App` is a god object (~40 methods) mixing Tk widget construction, connection polling, worker-thread orchestration, device version probing, profile JSON persistence, and per-page business dispatch; the persistence and connection-monitor concerns are independently testable collaborators (`ProfileStore`, `ConnectionMonitor`) buried in the widget class. Extract those two seams into small collaborators the `App` composes. | architecture/composition — god-object, single-responsibility; standalone-file rule still allows in-file class split
-oze-arch-04 | open | low | organize_by_extension.py:835 — `_find_reusable_bucket` returns bucket/next_index via the BucketChoice NamedTuple yet smuggles the updated first_non_full cursor out through a mutable 1-element list out-param (cursor_out, written at L873/877 and read in BucketManager.choose L1032-1036), a third return channel the NamedTuple was created to remove. Fold first_non_full into BucketChoice and delete cursor_out for one clean return. | composition/API smell — mutable out-param; xref choose_bucket:909
 
 ## decoupling
 

@@ -528,7 +528,8 @@ class OrganizeByExtensionTest(unittest.TestCase):
             ext_dir = Path(temp_dir_name)
             full = ext_dir / bucket_name("a", 0)
             state_cache = {full: {f"f{i}.txt" for i in range(BUCKET_SIZE)}}
-            chosen = choose_bucket(ext_dir, "a", "new.txt", state_cache, [0, 2])
+            chosen, _ = choose_bucket(ext_dir, "a", "new.txt", state_cache,
+                                      [0, 2])
             self.assertEqual(chosen, ext_dir / bucket_name("a", 1))
 
     def test_move_file_reraises_non_exdev_oserror(self):
@@ -641,7 +642,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
             bucket0.mkdir()
             (bucket0 / "old.txt").write_text("x")
             state_cache: dict = {}
-            chosen = choose_bucket(ext_dir, "a", "new.txt", state_cache, [0])
+            chosen, _ = choose_bucket(ext_dir, "a", "new.txt", state_cache, [0])
             self.assertEqual(chosen, bucket0)
             self.assertEqual(state_cache[bucket0], {"old.txt"})
 
@@ -819,10 +820,11 @@ class PerfScanTests(unittest.TestCase):
             ext_dir = Path(d)
             full_set = {f"f{i}.txt" for i in range(BUCKET_SIZE)}
             state_cache = {ext_dir / bucket_name("a", 0): full_set}
-            chosen, nxt = _find_reusable_bucket(
+            chosen, nxt, cursor = _find_reusable_bucket(
                 ext_dir, "a", "new.txt", state_cache, [0, 2])
             self.assertIsNone(chosen)        # gap at 1 -> caller allocates
             self.assertEqual(nxt, 1)
+            self.assertEqual(cursor, 1)      # full bucket 0 advances cursor
             # Sentinel installed on the full bucket entry.
             self.assertIs(state_cache[ext_dir / bucket_name("a", 0)],
                           _BUCKET_FULL)
@@ -834,12 +836,13 @@ class PerfScanTests(unittest.TestCase):
             ext_dir = Path(d)
             full = ext_dir / bucket_name("a", 0)
             state_cache: dict = {full: _BUCKET_FULL}
-            chosen, nxt = _find_reusable_bucket(
+            chosen, nxt, cursor = _find_reusable_bucket(
                 ext_dir, "a", "x.txt", state_cache, [0, 1])
             # Index 0 is sentinel -> next_expected becomes 1; index 1 doesn't
             # exist on disk so bucket_file_names returns {} -> available.
             self.assertEqual(chosen, ext_dir / bucket_name("a", 1))
             self.assertEqual(nxt, 1)
+            self.assertEqual(cursor, 1)
 
     def test_link_with_transient_retry_succeeds_on_second_attempt(self):
         # oze-conc-02: transient EMFILE retries once and succeeds.
@@ -939,9 +942,11 @@ class PerfScanTests(unittest.TestCase):
                 choose_bucket as real_choose, _BUCKET_FULL as full_sentinel,
             )
 
-            def spy_choose(ext_dir, prefix, fname, state_cache, indices):
+            def spy_choose(ext_dir, prefix, fname, state_cache, indices,
+                           *args):
                 captured["state_cache"] = state_cache
-                return real_choose(ext_dir, prefix, fname, state_cache, indices)
+                return real_choose(ext_dir, prefix, fname, state_cache,
+                                   indices, *args)
 
             with patch("organize_by_extension.choose_bucket",
                        side_effect=spy_choose):
@@ -962,14 +967,17 @@ class BucketChoiceTests(unittest.TestCase):
             self.assertIsInstance(choice, BucketChoice)
             self.assertIsNone(choice.bucket)
             self.assertEqual(choice.next_index, 0)
+            self.assertEqual(choice.first_non_full, 0)
 
-    def test_legacy_unpacking_still_works(self):
+    def test_tuple_unpacking_still_works(self):
         with TemporaryDirectory() as d:
             ext_dir = Path(d) / "txt"
             ext_dir.mkdir()
-            chosen, nxt = _find_reusable_bucket(ext_dir, "a", "x.txt", {}, [])
+            chosen, nxt, cursor = _find_reusable_bucket(
+                ext_dir, "a", "x.txt", {}, [])
             self.assertIsNone(chosen)
             self.assertEqual(nxt, 0)
+            self.assertEqual(cursor, 0)
 
 
 class BucketManagerTests(unittest.TestCase):
@@ -2314,7 +2322,7 @@ class BucketManagerChooseDefensiveBranches(unittest.TestCase):
             bad_path = ext_dir / "a00000"
             manager.state_cache[bad_path] = _oze._BUCKET_FULL
             with patch.object(_oze, "choose_bucket",
-                              lambda *a, **k: bad_path):
+                              lambda *a, **k: (bad_path, 0)):
                 src = tmp / "thing.txt"; src.write_text("x")
                 with self.assertRaisesRegex(
                     RuntimeError, "choose_bucket returned full bucket"
@@ -2329,7 +2337,7 @@ class BucketManagerChooseDefensiveBranches(unittest.TestCase):
             bogus_path = ext_dir / "not-a-bucket-name"
             manager.state_cache[bogus_path] = set()
             with patch.object(_oze, "choose_bucket",
-                              lambda *a, **k: bogus_path):
+                              lambda *a, **k: (bogus_path, 0)):
                 src = tmp / "thing.txt"; src.write_text("x")
                 with self.assertRaisesRegex(
                     RuntimeError, "non-conforming path"
