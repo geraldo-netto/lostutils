@@ -1667,6 +1667,18 @@ def _calendar_document_year(text: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
+def _calendar_heading_year(line: str) -> Optional[int]:
+    """Year carried by a month/year heading (e.g. "January 2026") or a titled
+    calendar heading; None for non-heading lines (ie-rel-12)."""
+    month_year = _calendar_month_year(line)
+    if month_year is not None:
+        return month_year[0]
+    if _is_calendar_document_heading(line):
+        match = _CALENDAR_YEAR_RE.search(line)
+        return int(match.group(1)) if match else None
+    return None
+
+
 def _is_calendar_document_heading(line: str) -> bool:
     tokens = set(_calendar_token(line).split())
     return bool(_CALENDAR_YEAR_RE.search(line) and tokens & _CALENDAR_HEADING_WORDS)
@@ -2062,12 +2074,19 @@ _TABLE_HANDLERS = (
 
 
 def _calendar_table_lines(text: str) -> List[str]:
+    # Document-wide first year is only the fallback for rows before any
+    # heading (or documents without one); rows after a heading use the
+    # nearest preceding heading's year, so Dec->Jan boundary calendars
+    # date correctly (ie-rel-12).
     year = _calendar_document_year(text)
     st = _TableState()
     for raw in text.splitlines():
         line = " ".join(raw.split())
         if not line:
             continue
+        heading_year = _calendar_heading_year(line)
+        if heading_year is not None:
+            year = heading_year
         for handler in _TABLE_HANDLERS:
             if handler(line, st, year):
                 break

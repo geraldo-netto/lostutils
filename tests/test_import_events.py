@@ -738,6 +738,36 @@ def test_calendar_table_lines_handles_multilingual_headers_and_time_units():
     ]
 
 
+def test_calendar_table_lines_carries_year_from_nearest_heading():
+    text = """
+    Activities Calendar 2025
+    December 2025
+    DIA/MES ATIVIDADES
+    15/12 Winter gala
+    January 2026
+    10/01 New year meetup
+    """
+
+    lines = import_events._calendar_table_lines(text)
+
+    assert lines == [
+        "2025-12-15 - Winter gala",
+        "2026-01-10 - New year meetup",
+    ]
+
+
+def test_calendar_table_lines_falls_back_to_document_year_without_heading():
+    text = """
+    DIA/MES ATIVIDADES
+    19/06 Cena social
+    programa previsto para 2026
+    """
+
+    lines = import_events._calendar_table_lines(text)
+
+    assert lines == ["2026-06-19 - Cena social"]
+
+
 def test_calendar_table_lines_ignore_malformed_date_candidates():
     text = """
     Calendario 2026
