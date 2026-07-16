@@ -122,7 +122,6 @@ oze-arch-04 | open | low | organize_by_extension.py:835 — `_find_reusable_buck
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-dec-05 | open | med | hash-recursive-ai5.py:1880 — `_configure_windows` mutates module globals CAP/SAMPLE/HEAD_TAIL_THRESHOLD that `hash_head:679` and `ThirdsStrategy.windows:714` read at hash time; unlike alias/error state (deliberately moved off globals into RunConfig, :129), window sizes stay process-global, so two in-process embedders or back-to-back tests using different `--block-size` clobber each other and hashing is non-reentrant. Carry block/sample sizes on RunConfig and thread them through the window builders. | decoupling — RunConfig isolation seam (hr-arch-05) left incomplete; reentrancy
 
 ## reliability/correctness
 

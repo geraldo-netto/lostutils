@@ -139,6 +139,12 @@ class RunConfig:
     __slots__ = (
         "alias_cap",
         "hash_error_verbose_cap",
+        # hr-dec-05: hash-window sizes ride the config instead of the CAP /
+        # SAMPLE module globals, so two in-process runs (or back-to-back
+        # tests) with different --block-size never clobber each other and
+        # hashing stays reentrant.
+        "block_size",
+        "sample_size",
         "alias_cap_hits",
         "hash_error_logged",
         "hash_error_suppressed",
@@ -169,12 +175,17 @@ class RunConfig:
         self,
         alias_cap: int = DEFAULT_ALIAS_CAP,
         hash_error_verbose_cap: int = DEFAULT_HASH_ERROR_VERBOSE_CAP,
+        block_size: "int | None" = None,
+        sample_size: "int | None" = None,
     ) -> None:
         # hr-cmplx-01: `alias_cap <= 0` means "no cap", stored as None so
         # a legitimate positive cap (including exactly 2**31) is honored
         # verbatim instead of colliding with a magic sentinel.
         self.alias_cap = alias_cap if alias_cap > 0 else None
         self.hash_error_verbose_cap = max(0, hash_error_verbose_cap)
+        # hr-dec-05: None keeps the historical CAP / SAMPLE defaults.
+        self.block_size = CAP if block_size is None else block_size
+        self.sample_size = SAMPLE if sample_size is None else sample_size
         self.alias_cap_hits = 0
         self.hash_error_logged = 0
         self.hash_error_suppressed = 0
@@ -189,6 +200,13 @@ class RunConfig:
         the check is a single ``is not None`` — no magic value, and a
         legitimate cap of any positive size (including 2**31) is honored."""
         return self.alias_cap is not None
+
+    @property
+    def head_tail_threshold(self) -> int:
+        """At-or-below this size the stage-1 head IS the whole file
+        (hr-dec-05); tracks ``block_size`` exactly as the module-level
+        HEAD_TAIL_THRESHOLD tracks CAP (hr-rel-03)."""
+        return self.block_size
 
 
 class RootError(Exception):
@@ -673,10 +691,15 @@ def _hash_file_windows(path, windows, config=None):
 
 
 def hash_head(path, config=None):
-    """Stage 1: BLAKE3 of the first CAP bytes (or whole file if smaller).
+    """Stage 1: BLAKE3 of the first block-size bytes (or whole file if
+    smaller).
 
-    `config` is optional for back-compat with legacy callers (tests)."""
-    return _hash_file_windows(path, [FileWindow(0, CAP, os.SEEK_SET)], config)
+    `config` is optional for back-compat with legacy callers (tests);
+    without one the module-level CAP default applies. With one, the window
+    size comes from ``config.block_size`` (hr-dec-05) so hashing never
+    depends on process-global state."""
+    cap = config.block_size if config is not None else CAP
+    return _hash_file_windows(path, [FileWindow(0, cap, os.SEEK_SET)], config)
 
 
 class SamplingStrategy:
@@ -709,27 +732,38 @@ class ThirdsStrategy(SamplingStrategy):
     Offsets are clamped so no window can read past EOF (hr-rel-06): given
     the stage-2 gate of `size > 2*CAP`, every window's end-point already
     fits, but the clamps keep the function safe if a future caller relaxes
-    the gate, if `SAMPLE` grows, or for the center block on small files."""
+    the gate, if `SAMPLE` grows, or for the center block on small files.
+
+    hr-dec-05: explicit `cap` / `sample` sizes make the strategy
+    independent of the CAP / SAMPLE module globals; `None` (default)
+    keeps reading them for back-compat."""
+
+    def __init__(self, cap: "int | None" = None,
+                 sample: "int | None" = None) -> None:
+        self._cap = cap
+        self._sample = sample
 
     def windows(self, size: int) -> "list[FileWindow]":
+        cap = CAP if self._cap is None else self._cap
+        sample = SAMPLE if self._sample is None else self._sample
         a = size // 3
         b = 2 * size // 3
-        last_sample_start = max(0, size - SAMPLE)
+        last_sample_start = max(0, size - sample)
         a = min(a, last_sample_start)
         b = min(b, last_sample_start)
-        # Center 4 MiB block: start at the file midpoint minus half a CAP so
-        # the window is centered, clamped so a CAP-wide read never runs past
-        # EOF (covers small files if the size > 2*CAP gate is ever relaxed).
-        last_cap_start = max(0, size - CAP)
-        mid = min(max(0, size // 2 - CAP // 2), last_cap_start)
-        # All stage-2 windows are gated by `size > 2*CAP`, so they MUST
+        # Center block: start at the file midpoint minus half a cap so
+        # the window is centered, clamped so a cap-wide read never runs past
+        # EOF (covers small files if the size > 2*cap gate is ever relaxed).
+        last_cap_start = max(0, size - cap)
+        mid = min(max(0, size // 2 - cap // 2), last_cap_start)
+        # All stage-2 windows are gated by `size > 2*cap`, so they MUST
         # yield their full length. strict=True triggers hr-rel-09 short-read
         # detection.
         return [
-            FileWindow(-CAP, CAP, os.SEEK_END, strict=True),    # tail 4 MiB
-            FileWindow(mid, CAP, os.SEEK_SET, strict=True),     # center 4 MiB
-            FileWindow(a, SAMPLE, os.SEEK_SET, strict=True),
-            FileWindow(b, SAMPLE, os.SEEK_SET, strict=True),
+            FileWindow(-cap, cap, os.SEEK_END, strict=True),    # tail block
+            FileWindow(mid, cap, os.SEEK_SET, strict=True),     # center block
+            FileWindow(a, sample, os.SEEK_SET, strict=True),
+            FileWindow(b, sample, os.SEEK_SET, strict=True),
         ]
 
 
@@ -746,8 +780,14 @@ def hash_tail_and_samples(path, size, strategy=None, config=None):
     custom :class:`SamplingStrategy` to override the window layout.
 
     `config` (hr-arch-05) is forwarded to :func:`_hash_file_windows` so
-    per-file errors are bounded by the active :class:`RunConfig`."""
-    sampler = strategy if strategy is not None else _DEFAULT_SAMPLING
+    per-file errors are bounded by the active :class:`RunConfig`; its
+    block / sample sizes also shape the default window layout (hr-dec-05)."""
+    if strategy is not None:
+        sampler = strategy
+    elif config is not None:
+        sampler = ThirdsStrategy(config.block_size, config.sample_size)
+    else:
+        sampler = _DEFAULT_SAMPLING
     return _hash_file_windows(path, sampler.windows(size), config)
 
 
@@ -1287,7 +1327,9 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
     ``on_progress`` as batches complete."""
     if not candidates:
         return defaultdict(list), {"stage1": 0, "stage1_errors": 0}
-    stage1_bytes = _capped_byte_total(min(size, CAP) for size, _key in candidates)
+    cap = config.block_size if config is not None else CAP
+    stage1_bytes = _capped_byte_total(
+        min(size, cap) for size, _key in candidates)
     run_kwargs = {"cancel_event": cancel_event}
     if on_progress is not None:
         run_kwargs["on_progress"] = on_progress
@@ -1343,9 +1385,11 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     reconciliation, so it has been removed."""
     if not stage2_items:
         return {}, {"stage2": 0, "stage2_errors": 0}
-    # Stage 2 reads up to tail CAP + center CAP + two SAMPLE windows.
+    # Stage 2 reads up to tail block + center block + two sample windows.
+    cap = config.block_size if config is not None else CAP
+    sample = config.sample_size if config is not None else SAMPLE
     stage2_bytes = _capped_byte_total(
-        min(s, 2 * CAP + 2 * SAMPLE) for s, _p, _h, _k in stage2_items)
+        min(s, 2 * cap + 2 * sample) for s, _p, _h, _k in stage2_items)
     run_kwargs = {"cancel_event": cancel_event}
     if on_progress is not None:
         run_kwargs["on_progress"] = on_progress
@@ -1392,11 +1436,12 @@ def _prepare_candidates(aliases, inode_size, overflow):
     return candidates, rep
 
 
-def _split_stage1_buckets(by_head, rep, accept_group):
+def _split_stage1_buckets(by_head, rep, accept_group, config):
     """Triage stage-1 ``(size, head)`` buckets (hr-cx-01).
 
     Buckets with a single member can't be duplicates and are dropped.
-    Buckets whose size means the head IS the whole file are confirmed
+    Buckets whose size means the head IS the whole file — at or below
+    ``config.head_tail_threshold`` (hr-dec-05) — are confirmed
     immediately via ``accept_group`` (hr-cx-03 composite key). The rest
     become ``(size, path, head, key)`` stage-2 items — self-describing so
     the follow-up join needs no side lookup (hr-cx-02). Returns the
@@ -1405,7 +1450,7 @@ def _split_stage1_buckets(by_head, rep, accept_group):
     for (size, head), keys in by_head.items():
         if len(keys) < 2:
             continue
-        if size <= HEAD_TAIL_THRESHOLD:
+        if size <= config.head_tail_threshold:
             accept_group((head, None), keys)
         else:
             for key in keys:
@@ -1535,7 +1580,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         candidates, rep, jobs, config, cancel_event, aliases=aliases,
         on_hashed=on_hashed,
         on_progress=_stage_progress_cb(on_stage_progress, "stage1"))
-    stage2_items = _split_stage1_buckets(by_head, rep, _accept_group)
+    stage2_items = _split_stage1_buckets(by_head, rep, _accept_group, config)
 
     # ---- Stage 2: tail + center + middle samples for size+head collisions ----
     regrouped, stage2_info = _stage2_hash(
@@ -1868,21 +1913,6 @@ def _progress_walk(
         yield entry
 
 
-def _configure_windows(block_size: int, sample_size: int) -> None:
-    """Override the hash window sizes from the CLI (hr-adapt-01).
-
-    CAP (head / tail / center block) and SAMPLE (mid-file point samples)
-    are read as module globals at hash time, so reassigning them here
-    before the pipeline runs is sufficient — the shared
-    :data:`_DEFAULT_SAMPLING` instance reads the new values too, no rebuild
-    needed. HEAD_TAIL_THRESHOLD tracks CAP so the 'head IS the whole file'
-    gate stays consistent with the chosen block size."""
-    global CAP, SAMPLE, HEAD_TAIL_THRESHOLD
-    CAP = block_size
-    SAMPLE = sample_size
-    HEAD_TAIL_THRESHOLD = CAP
-
-
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Construct the CLI parser (hr-cmplx-02)."""
     ap = argparse.ArgumentParser(
@@ -2032,8 +2062,9 @@ def main():
     # hr-rel-21 / hr-cli-01: clamp jobs at the CLI boundary before either
     # the walk or hash pool can allocate threads.
     args.jobs = _clamp_jobs(args.jobs)
-    # hr-adapt-01: validate then apply the window-size overrides before the
-    # pipeline reads CAP/SAMPLE.
+    # hr-adapt-01: validate the window-size overrides at the CLI boundary;
+    # they ride RunConfig into the pipeline (hr-dec-05), never the module
+    # globals.
     if args.block_size < 1 or args.sample_size < 1:
         print("error: --block-size and --sample-size must be >= 1",
               file=sys.stderr)
@@ -2042,7 +2073,6 @@ def main():
         print("error: --sample-size must be smaller than --block-size",
               file=sys.stderr)
         sys.exit(2)
-    _configure_windows(args.block_size, args.sample_size)
     root = os.path.abspath(args.directory)
 
     # hr-rel-17: translate typed RootError to a CLI exit code here, at
@@ -2058,6 +2088,8 @@ def main():
     config = RunConfig(
         alias_cap=args.alias_cap,
         hash_error_verbose_cap=args.hash_error_verbose_cap,
+        block_size=args.block_size,
+        sample_size=args.sample_size,
     )
 
     # hr-conc-05: cooperative cancel on Ctrl-C — the walker checks the

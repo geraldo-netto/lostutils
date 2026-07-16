@@ -1593,33 +1593,57 @@ def test_prepare_candidates_drops_non_candidate_overflow():
     assert (1, 3) not in overflow      # pruned in place
 
 
-def test_configure_windows_overrides_globals():
-    # hr-adapt-01: the helper reassigns CAP/SAMPLE/HEAD_TAIL_THRESHOLD.
-    orig = (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD)
-    try:
-        hr._configure_windows(2048, 128)
-        assert hr.CAP == 2048
-        assert hr.SAMPLE == 128
-        assert hr.HEAD_TAIL_THRESHOLD == 2048   # tracks CAP
-    finally:
-        hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD = orig
+def test_run_config_window_sizes_default_and_override():
+    # hr-dec-05: window sizes ride RunConfig; defaults track CAP/SAMPLE.
+    default = hr.RunConfig()
+    assert default.block_size == hr.CAP
+    assert default.sample_size == hr.SAMPLE
+    assert default.head_tail_threshold == hr.CAP
+    custom = hr.RunConfig(block_size=2048, sample_size=128)
+    assert custom.block_size == 2048
+    assert custom.sample_size == 128
+    assert custom.head_tail_threshold == 2048   # tracks block_size
+    # constructing a custom config never touches the module defaults
+    assert (hr.CAP, hr.SAMPLE) == (default.block_size, default.sample_size)
+
+
+def test_hash_head_uses_config_block_size(tmp_path):
+    # hr-dec-05: the stage-1 window comes from config.block_size, so two
+    # configs with different sizes coexist in one process (reentrancy).
+    import blake3
+    payload = b"AAAABBBBCCCC"
+    f = tmp_path / "f.bin"
+    f.write_bytes(payload)
+    small = hr.RunConfig(block_size=4, sample_size=2)
+    assert hr.hash_head(str(f), config=small) == \
+        blake3.blake3(payload[:4]).hexdigest()
+    # a config-less caller in the same process still hashes the full head
+    assert hr.hash_head(str(f)) == blake3.blake3(payload).hexdigest()
+
+
+def test_thirds_strategy_honors_explicit_sizes():
+    # hr-dec-05: explicit cap/sample make the layout global-independent.
+    windows = hr.ThirdsStrategy(cap=4, sample=2).windows(16)
+    assert [w.length for w in windows] == [4, 4, 2, 2]
+    for w in windows:
+        offset = w.offset + 16 if w.whence == hr.os.SEEK_END else w.offset
+        assert 0 <= offset and offset + w.length <= 16
 
 
 def test_main_block_size_override_runs(tmp_path, monkeypatch, capsys):
-    # hr-adapt-01: a custom --block-size flows through main without error
-    # and is applied to the module globals.
+    # hr-adapt-01 / hr-dec-05: a custom --block-size flows through main via
+    # RunConfig and leaves the module globals untouched (reentrancy).
     orig = (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD)
     (tmp_path / "a.bin").write_bytes(b"hello world")
     (tmp_path / "b.bin").write_bytes(b"hello world")
     monkeypatch.setattr(
         hr.sys, "argv",
         ["hr", "--block-size", "4", "--sample-size", "2", str(tmp_path)])
-    try:
-        hr.main()
-        assert hr.CAP == 4 and hr.SAMPLE == 2
-    finally:
-        hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD = orig
-    _assert_timestamped(capsys.readouterr().err)
+    hr.main()
+    assert (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD) == orig
+    captured = capsys.readouterr()
+    assert "a.bin" in captured.out and "b.bin" in captured.out
+    _assert_timestamped(captured.err)
 
 
 def test_main_rejects_nonpositive_block_size(tmp_path, monkeypatch, capsys):
@@ -2506,25 +2530,22 @@ def test_find_duplicate_groups_stage_boundary(tmp_path, size, expected_stage2):
 
 def test_find_duplicate_groups_reports_stage2_progress(tmp_path):
     # hr-log-05: stage 2 exposes live progress through the pipeline callback.
-    orig = (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD)
-    try:
-        hr._configure_windows(4, 2)
-        body = b"0123456789"
-        a = tmp_path / "a.bin"; a.write_bytes(body)
-        b = tmp_path / "b.bin"; b.write_bytes(body)
-        files = []
-        for path in (a, b):
-            st_ = path.stat()
-            files.append((str(path), st_.st_size, st_.st_dev, st_.st_ino))
-        progress = []
+    # hr-dec-05: the small windows ride RunConfig — no global fiddling.
+    config = hr.RunConfig(block_size=4, sample_size=2)
+    body = b"0123456789"
+    a = tmp_path / "a.bin"; a.write_bytes(body)
+    b = tmp_path / "b.bin"; b.write_bytes(body)
+    files = []
+    for path in (a, b):
+        st_ = path.stat()
+        files.append((str(path), st_.st_size, st_.st_dev, st_.st_ino))
+    progress = []
 
-        def on_progress(stage, done, total):
-            progress.append((stage, done, total))
+    def on_progress(stage, done, total):
+        progress.append((stage, done, total))
 
-        result = hr.find_duplicate_groups(
-            files, jobs=1, on_stage_progress=on_progress)
-    finally:
-        hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD = orig
+    result = hr.find_duplicate_groups(
+        files, jobs=1, config=config, on_stage_progress=on_progress)
 
     assert result.info["stage2"] == 2
     assert any(stage == "stage2" and done == 2 and total == 2
