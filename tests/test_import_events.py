@@ -2500,7 +2500,7 @@ def test_extract_from_ics_bounds_raw_read(tmp_path, monkeypatch, caplog):
         events = import_events.extract_from_ics(ics)
 
     assert events == []
-    assert seen["raw"] == b"12345678"
+    assert seen["raw"] == "12345678"
     assert "Truncating large.ics to 8 bytes" in caplog.text
 
 

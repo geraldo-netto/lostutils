@@ -168,8 +168,6 @@ _clean — `uvx ruff check *.py` reports no issues across all root files (rescan
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-type-01 | open | low | import_events.py:1433 — pyright reportArgumentType: `Calendar.from_ical(...)` is passed `bytes` but the icalendar stub declares parameter `st: str`; runtime accepts bytes, so decode explicitly (or normalize to str) rather than `# type: ignore`. | `uvx pyright *.py` rescan 2026-07-16; the only non-environmental diagnostic
-
 _Remaining pyright diagnostics (rescan 2026-07-16) are `reportMissingImports`/`reportMissingModuleSource` for optional third-party deps absent in the scan env (llama_cpp, blake3, rapidfuzz, paddleocr, paddle, charset_normalizer, pypdf, fitz, icalendar/yaml stubs) — all behind guarded imports; environmental, not code findings._
 
 ## observability

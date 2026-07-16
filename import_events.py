@@ -1423,14 +1423,18 @@ def extract_from_ics(file_path: Path, default_tz: Optional[str] = None) -> List[
 
     events: List[Dict[str, Any]] = []
     with open(file_path, "rb") as f:
-        # Pass raw bytes; icalendar sniffs the encoding itself, so latin-1 /
-        # other non-UTF-8 ICS files are not silently dropped on a decode error.
         raw = f.read(MAX_ICS_BYTES + 1)
         if len(raw) > MAX_ICS_BYTES:
             logger.warning("Truncating %s to %d bytes for ICS extraction.",
                            file_path.name, MAX_ICS_BYTES)
             raw = raw[:MAX_ICS_BYTES]
-        gcal = Calendar.from_ical(raw)
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            # Mirror icalendar's own bytes fallback so latin-1 / other
+            # non-UTF-8 ICS files are not silently dropped on a decode error.
+            text = raw.decode("iso-8859-1")
+        gcal = Calendar.from_ical(text)
         for component in gcal.walk():
             if component.name != "VEVENT":
                 continue
