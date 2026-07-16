@@ -760,14 +760,15 @@ def test_pending_queue_ops():
     pq.append(a)
     pq.append(b)
     pq.append(c)
-    assert len(pq) == 3 and a in pq and "http://a.com/1" in pq.urls
-    assert list(pq.by_domain["a.com"].keys()) == ["http://a.com/1", "http://a.com/3"]
+    assert len(pq) == 3 and a in pq and ("http://a.com/1", ()) in pq.urls
+    assert list(pq.by_domain["a.com"].keys()) == [("http://a.com/1", ()),
+                                                  ("http://a.com/3", ())]
     # dedupe: re-appending an existing url doesn't grow the queue
     pq.append(a)
     assert len(pq) == 3
     # lq-perf-01: iid index resolves a tree iid back to its item in O(1).
     iid_a = link_queue._queue_iid_for_url("http://a.com/1")
-    assert pq.iids[iid_a] == "http://a.com/1"
+    assert pq.iids[iid_a] == ("http://a.com/1", ())
     assert pq.item_for_iid(iid_a) is a
     assert pq.item_for_iid("p:nope") is None
     pq.remove(b)                          # O(1) removal by url
@@ -776,7 +777,7 @@ def test_pending_queue_ops():
     assert pq[0] is a and pq[-1] is c     # int index
     assert pq[:1] == [a]                  # slice -> list
     pq[:] = [b]                           # whole-queue slice assign
-    assert list(pq) == [b] and pq.urls == {"http://b.com/2": b}
+    assert list(pq) == [b] and pq.urls == {("http://b.com/2", ()): b}
     # slice-assign rebuilt the iid index too.
     assert pq.item_for_iid(link_queue._queue_iid_for_url("http://b.com/2")) is b
     assert iid_a not in pq.iids
@@ -903,7 +904,7 @@ def test_dedupe_uses_url_index(app):
     assert app._process_link("http://dup/x") == "queue"
     # second add hits the O(1) url-index pending check
     assert app._process_link("http://dup/x") == "duplicate"
-    assert "http://dup/x" in app.queue_items.urls
+    assert ("http://dup/x", ()) in app.queue_items.urls
 
 
 def test_log_file_sink_roundtrip(app, tmp_path):
@@ -2149,6 +2150,37 @@ def test_state_roundtrip_extra(app):
     app._save_state()
     _, pending = app._load_state_items()
     assert pending[0].extra == (("-o", "a b.mp4"),)
+
+
+def test_same_url_different_extra_not_duplicate(app):
+    # lq-rel-20: the same URL re-added with a different mapped `extra`
+    # (e.g. a different f: output name) is a distinct work item, not a
+    # duplicate; the exact-same (url, extra) pair still dedupes.
+    app.pause_event.set()
+    assert app._process_link("http://dup/e", (("-o", "a.mp4"),)) == "queue"
+    assert app._process_link("http://dup/e", (("-o", "b.mp4"),)) == "queue"
+    assert app._process_link("http://dup/e", (("-o", "b.mp4"),)) == "duplicate"
+    extras = sorted(it.extra for it in app.queue_items if it.url == "http://dup/e")
+    assert extras == [(("-o", "a.mp4"),), (("-o", "b.mp4"),)]
+
+
+def test_pending_queue_same_url_distinct_extra_rows(app):
+    # lq-rel-20: two pending items sharing a URL get distinct tree iids and
+    # remove independently; state round-trips both.
+    stop_bg_workers(app)
+    a = QueueItem("http://rt/x", "http", "echo {url}", False, (("-o", "a.mp4"),))
+    b = QueueItem("http://rt/x", "http", "echo {url}", False, (("-o", "b.mp4"),))
+    with app._dispatch_cv:
+        app.queue_items[:] = [a, b]
+    assert len(app.queue_items) == 2
+    assert link_queue._queue_iid_for_item(a) != link_queue._queue_iid_for_item(b)
+    app._save_state()
+    _, pending = app._load_state_items()
+    assert sorted(it.extra for it in pending) == [(("-o", "a.mp4"),),
+                                                  (("-o", "b.mp4"),)]
+    with app._dispatch_cv:
+        app.queue_items.remove(a)
+    assert list(app.queue_items) == [b]
 
 
 def test_normalize_warns_on_shell_url(capsys):

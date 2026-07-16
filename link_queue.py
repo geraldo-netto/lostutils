@@ -388,6 +388,22 @@ def _queue_iid_for_url(url: str) -> str:
     return f"p:{h.hexdigest()}"
 
 
+def _pending_key(it) -> "tuple[str, tuple]":
+    """Identity of a pending QueueItem: (url, extra). Two pastes of the same
+    URL with different mapped flags (e.g. f:a.mp4 vs f:b.mp4) are distinct
+    work items (lq-rel-20); identical (url, extra) pairs still dedupe."""
+    return (it.url, it.extra)
+
+
+def _queue_iid_for_item(it) -> str:
+    """Treeview iid for a pending QueueItem. Extra-less items keep the plain
+    URL hash; items with mapped flags mix `extra` into the hashed text so two
+    rows for the same URL get distinct iids (lq-rel-20)."""
+    if not it.extra:
+        return _queue_iid_for_url(it.url)
+    return _queue_iid_for_url(f"{it.url}\x00{it.extra!r}")
+
+
 def _template_has_bare_url(template: str) -> bool:
     """True iff `template` contains a `{url}` placeholder (not `{url_quoted}`),
     used by sec-02 checks to flag shell-injection-prone configurations."""
@@ -473,19 +489,22 @@ DEFAULT_CONFIG = {
 
 
 class _PendingQueue:
-    """Ordered collection of pending QueueItems, keyed internally by URL so
-    the dispatcher's hot paths are all O(1)/O(#domains) (perf-01/02/03):
+    """Ordered collection of pending QueueItems, keyed internally by
+    `_pending_key` (url, extra) so the dispatcher's hot paths are all
+    O(1)/O(#domains) (perf-01/02/03):
 
-      * ``urls``      dict url -> item: O(1) duplicate check, O(1) removal
+      * ``urls``      dict key -> item: O(1) duplicate check, O(1) removal
                       (perf-02/perf-03), no per-claim list scan.
-      * ``by_domain`` domain -> ordered {url: item}: the claim picker iterates
+      * ``by_domain`` domain -> ordered {key: item}: the claim picker iterates
                       DOMAINS (few) and reads each domain's FIFO head in O(1)
                       (perf-01 / scal-01).
-      * ``seq_of``    url -> monotonic insertion seq: global-FIFO tie-break
+      * ``seq_of``    key -> monotonic insertion seq: global-FIFO tie-break
                       between domains with equal active-worker counts.
 
-    URLs are unique among pending items (the dispatcher dedupes on enqueue),
-    which is what lets the URL key double as identity. This is a composition
+    (url, extra) pairs are unique among pending items (the dispatcher dedupes
+    on enqueue), which is what lets `_pending_key` double as identity — the
+    same URL re-added with different mapped flags is a distinct work item
+    (lq-rel-20). This is a composition
     (not a list subclass), so there are no un-synced list mutators to leak
     through (rel-04); the small list-like surface the call sites use is
     implemented explicitly below.
@@ -508,10 +527,11 @@ class _PendingQueue:
     def __init__(self, iterable=(), *, domain_fn):
         self._domain_fn = domain_fn
         self._next_seq = 0
-        self.urls: dict = {}          # url -> item (insertion-ordered = FIFO)
-        self.by_domain: dict = {}     # domain -> {url: item} (FIFO within)
-        self.seq_of: dict = {}        # url -> insertion seq
-        # lq-perf-01: iid -> url index so a Delete / right-click resolves only
+        # Every dict below is keyed by _pending_key(it) == (url, extra).
+        self.urls: dict = {}          # key -> item (insertion-ordered = FIFO)
+        self.by_domain: dict = {}     # domain -> {key: item} (FIFO within)
+        self.seq_of: dict = {}        # key -> insertion seq
+        # lq-perf-01: iid -> key index so a Delete / right-click resolves only
         # the (few) selected tree iids instead of rebuilding a whole-queue
         # {iid: item} map under the lock on every interaction.
         self.iids: dict = {}
@@ -521,8 +541,8 @@ class _PendingQueue:
 
     def item_for_iid(self, iid):
         """Return the QueueItem for a Tk tree iid, or None. O(1)."""
-        url = self.iids.get(iid)
-        return self.urls.get(url) if url is not None else None
+        key = self.iids.get(iid)
+        return self.urls.get(key) if key is not None else None
 
     # -- mutators -----------------------------------------------------------
     def _invalidate_order_cache(self) -> None:
@@ -534,29 +554,29 @@ class _PendingQueue:
         return self._ordered_values
 
     def append(self, it) -> None:
-        url = it.url
-        if url in self.urls:          # dedupe is the caller's contract; keep
-            self.urls[url] = it       # first position/seq, refresh payload
+        key = _pending_key(it)
+        if key in self.urls:          # dedupe is the caller's contract; keep
+            self.urls[key] = it       # first position/seq, refresh payload
             self._invalidate_order_cache()
             return
-        self.urls[url] = it
-        self.by_domain.setdefault(self._domain_fn(it), {})[url] = it
-        self.seq_of[url] = self._next_seq
-        self.iids[_queue_iid_for_url(url)] = url
+        self.urls[key] = it
+        self.by_domain.setdefault(self._domain_fn(it), {})[key] = it
+        self.seq_of[key] = self._next_seq
+        self.iids[_queue_iid_for_item(it)] = key
         self._next_seq += 1
         self._invalidate_order_cache()
 
     def remove(self, it) -> None:
-        url = it.url
-        if url not in self.urls:
+        key = _pending_key(it)
+        if key not in self.urls:
             raise ValueError("item not in pending queue")
-        del self.urls[url]
-        self.seq_of.pop(url, None)
-        self.iids.pop(_queue_iid_for_url(url), None)
+        del self.urls[key]
+        self.seq_of.pop(key, None)
+        self.iids.pop(_queue_iid_for_item(it), None)
         d = self._domain_fn(it)
         bucket = self.by_domain.get(d)
         if bucket is not None:
-            bucket.pop(url, None)
+            bucket.pop(key, None)
             if not bucket:
                 del self.by_domain[d]
         self._invalidate_order_cache()
@@ -586,7 +606,7 @@ class _PendingQueue:
         return bool(self.urls)
 
     def __contains__(self, it) -> bool:
-        return getattr(it, "url", it) in self.urls
+        return _pending_key(it) in self.urls
 
     def __getitem__(self, key):
         values = self._values_by_index()
@@ -1767,10 +1787,11 @@ class Dispatcher:
             self._update_status()
 
     def _enqueue_or_skip_duplicate(self, item: QueueItem, outcome: str) -> str:
-        """Append the item to queue_items unless the URL is already pending
-        or in flight. Returns 'duplicate' on skip, otherwise `outcome`."""
+        """Append the item to queue_items unless its (url, extra) identity is
+        already pending or in flight. Returns 'duplicate' on skip, otherwise
+        `outcome`."""
         with self._dispatch_cv:
-            where = self._duplicate_status(item.url)
+            where = self._duplicate_status(item)
             if where is not None:
                 self._log(f"[duplicate] skipping {item.url} (already {where})")
                 return "duplicate"
@@ -1783,15 +1804,17 @@ class Dispatcher:
         self._persist_after_enqueue()
         return outcome
 
-    def _duplicate_status(self, url: str) -> "str | None":
-        """Return 'pending', 'running', or None for the given URL.
+    def _duplicate_status(self, item: "QueueItem") -> "str | None":
+        """Return 'pending', 'running', or None for the item's (url, extra)
+        identity (lq-rel-20: a differing `extra` is a distinct work item).
         Caller MUST hold self._dispatch_cv (== queue_lock)."""
-        # O(1) pending check via the queue's url index (perf-02). The running
+        # O(1) pending check via the queue's key index (perf-02). The running
         # check stays a scan, but current_items is bounded by the worker count.
-        if url in getattr(self.queue_items, "urls", ()):
+        key = _pending_key(item)
+        if key in getattr(self.queue_items, "urls", ()):
             return "pending"
         if any(
-            it is not None and it.url == url
+            it is not None and _pending_key(it) == key
             for it in self.current_items.values()
         ):
             return "running"
@@ -2499,7 +2522,7 @@ class Dispatcher:
             if cap > 0 and active >= cap:
                 continue
             head = next(iter(bucket.values()))   # FIFO head of this domain
-            seq = seq_of.get(head.url, 0)
+            seq = seq_of.get(_pending_key(head), 0)
             if self._is_better_candidate(active, seq, best_active, best_seq):
                 best, best_active, best_seq = head, active, seq
         return best, empty_domains
@@ -4255,17 +4278,17 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         sel = self.queue_tree.selection()
         if not sel:
             return
-        # Map the selection back to QueueItem URLs via the queue's iid index
+        # Map the selection back to pending keys via the queue's iid index
         # (lq-perf-01): only the few selected iids are resolved, not a fresh
-        # whole-queue {iid: url} map built under the lock on every Delete. iids
-        # are a `p:<blake2b>` hash of the URL (rel-12); in-flight rows
-        # ("r:<idx>") aren't in the index and are dropped. Removing by URL (not
-        # row position) is immune to a worker mutating the queue between paint
-        # and click (rel-01).
+        # whole-queue {iid: key} map built under the lock on every Delete. iids
+        # are a `p:<blake2b>` hash of the item identity (rel-12); in-flight
+        # rows ("r:<idx>") aren't in the index and are dropped. Removing by
+        # (url, extra) key (not row position) is immune to a worker mutating
+        # the queue between paint and click (rel-01).
         with self.queue_lock:
             iids = self.queue_items.iids
-            urls = [iids[iid] for iid in sel if iid in iids]
-        removed = self._remove_pending_urls(urls)
+            keys = [iids[iid] for iid in sel if iid in iids]
+        removed = self._remove_pending_urls(keys)
 
         self._refresh_queue_list()
         for it in removed:
@@ -4276,15 +4299,15 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             # UI thread, stalling the GUI on every Delete.
             self._request_save_state()
 
-    def _remove_pending_urls(self, urls: "list[str]") -> "list[QueueItem]":
-        """Remove pending items whose URL is in `urls`, atomically under the
-        dispatch cv. Returns the items actually removed (may be fewer than
-        requested if a worker already claimed one in the interim)."""
-        want = set(urls)
+    def _remove_pending_urls(self, keys: "list[tuple]") -> "list[QueueItem]":
+        """Remove pending items whose (url, extra) key is in `keys`, atomically
+        under the dispatch cv. Returns the items actually removed (may be fewer
+        than requested if a worker already claimed one in the interim)."""
+        want = set(keys)
         if not want:
             return []
         with self._dispatch_cv:
-            removed = [it for it in self.queue_items if it.url in want]
+            removed = [it for it in self.queue_items if _pending_key(it) in want]
             # rel-03: remove each target individually so survivors keep their
             # original insertion seq / global-FIFO ordering. A slice-assign
             # would clear() and re-append every survivor, re-basing the seq.
@@ -4385,7 +4408,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         can't make the Treeview the bottleneck (scal-02). `shown` is already
         limited by the caller so the whole queue isn't copied (perf-05).
 
-        The pending-row iid is derived by hashing the URL (rel-12) — Tk's
+        The pending-row iid is derived by hashing the item identity (rel-12,
+        lq-rel-20: `extra` is mixed in so same-URL rows stay distinct) — Tk's
         Treeview reserves a few characters in iids (``{`` ``}`` whitespace),
         and a URL like ``https://example.com/path?q={x}`` would silently
         break ``tree.exists(iid)``. A short blake2b hash is collision-safe at
@@ -4394,7 +4418,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             (f"r:{idx}", f"▶#{idx}", item, ("running",), "")
             for idx, item in running]
         for i, item in enumerate(shown, start=1):
-            rows.append((_queue_iid_for_url(item.url), str(i), item, (), ""))
+            rows.append((_queue_iid_for_item(item), str(i), item, (), ""))
         if limit > 0 and total > limit:
             extra = total - limit
             rows.append(("more", "",
