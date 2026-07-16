@@ -483,7 +483,9 @@ class KeyParam:
             off, val = v_rid2
         else:
             off, val = v_rid_other
-        if not self._fits(base + off):
+        # The multimedia slot spans 2 bytes from the write pointer; refuse a
+        # full buffer like the other mutators do (mouse checks kc + 4).
+        if not (self._fits(base + off) and self._fits(self.KEY_Char_Num + 1)):
             return False
         self.data[base + off] = val & 0xFF
         self._store_char(self.KeyChar, 0, name)
