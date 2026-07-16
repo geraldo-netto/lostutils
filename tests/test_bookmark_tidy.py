@@ -970,6 +970,36 @@ def test_parse_args_help_documents_llm_tuning_flags(capsys):
     assert "prompt batch size" in out
 
 
+@pytest.mark.parametrize("flag", ["--llm-context", "--llm-max-tokens", "--llm-batch-size"])
+@pytest.mark.parametrize("value", ["0", "-1", "-5"])
+def test_parse_args_rejects_non_positive_llm_values(capsys, flag, value):
+    with pytest.raises(SystemExit) as exc:
+        bookmark_tidy.parse_args([flag, value])
+
+    assert exc.value.code == 2
+    assert "must be a positive integer" in capsys.readouterr().err
+
+
+def test_parse_args_gpu_layers_allows_llama_cpp_sentinels(capsys):
+    assert bookmark_tidy.parse_args(["--llm-gpu-layers", "0"]).llm_gpu_layers == 0
+    assert bookmark_tidy.parse_args(["--llm-gpu-layers", "-1"]).llm_gpu_layers == -1
+    assert bookmark_tidy.parse_args(["--llm-gpu-layers", "8"]).llm_gpu_layers == 8
+    with pytest.raises(SystemExit) as exc:
+        bookmark_tidy.parse_args(["--llm-gpu-layers", "-2"])
+    assert exc.value.code == 2
+    assert "must be >= -1" in capsys.readouterr().err
+
+
+def test_parse_args_accepts_positive_llm_values():
+    args = bookmark_tidy.parse_args(
+        ["--llm-context", "2048", "--llm-max-tokens", "256", "--llm-batch-size", "10"]
+    )
+
+    assert args.llm_context == 2048
+    assert args.llm_max_tokens == 256
+    assert args.llm_batch_size == 10
+
+
 def test_categorizer_from_args_rejects_missing_model(tmp_path):
     args = bookmark_tidy.parse_args(["--model", str(tmp_path / "missing.gguf")])
 
