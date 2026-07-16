@@ -3105,6 +3105,54 @@ def test_check_no_open_files_warns_at_threshold(monkeypatch, tmp_path, caplog):
     assert any("5 process" in rec.message for rec in caplog.records)
 
 
+# --- rf-adapt-01: env-tunable headroom / hash retries ------------------------
+
+def test_disk_space_headroom_default(monkeypatch):
+    monkeypatch.delenv("RELOCATE_DISK_SPACE_HEADROOM", raising=False)
+    assert rf._disk_space_headroom() == rf._DISK_SPACE_HEADROOM
+
+
+def test_disk_space_headroom_env_override(monkeypatch):
+    monkeypatch.setenv("RELOCATE_DISK_SPACE_HEADROOM", "1.5")
+    assert rf._disk_space_headroom() == 1.5
+
+
+def test_disk_space_headroom_invalid_value_falls_back(monkeypatch):
+    monkeypatch.setenv("RELOCATE_DISK_SPACE_HEADROOM", "not-a-float")
+    assert rf._disk_space_headroom() == rf._DISK_SPACE_HEADROOM
+
+
+def test_disk_space_headroom_clamps_below_one(monkeypatch):
+    monkeypatch.setenv("RELOCATE_DISK_SPACE_HEADROOM", "0.5")
+    assert rf._disk_space_headroom() == 1.0
+
+
+def test_sha256_retry_attempts_default(monkeypatch):
+    monkeypatch.delenv("RELOCATE_SHA256_RETRY_ATTEMPTS", raising=False)
+    assert rf._sha256_retry_attempts() == rf._SHA256_RETRY_ATTEMPTS
+
+
+def test_sha256_retry_attempts_env_override(monkeypatch):
+    monkeypatch.setenv("RELOCATE_SHA256_RETRY_ATTEMPTS", "5")
+    assert rf._sha256_retry_attempts() == 5
+
+
+def test_sha256_retry_attempts_invalid_value_falls_back(monkeypatch):
+    monkeypatch.setenv("RELOCATE_SHA256_RETRY_ATTEMPTS", "not-an-int")
+    assert rf._sha256_retry_attempts() == rf._SHA256_RETRY_ATTEMPTS
+
+
+def test_sha256_retry_attempts_clamps_below_one(monkeypatch):
+    monkeypatch.setenv("RELOCATE_SHA256_RETRY_ATTEMPTS", "0")
+    assert rf._sha256_retry_attempts() == 1
+
+
+def test_check_disk_space_uses_env_headroom(monkeypatch, tmp_path):
+    monkeypatch.setenv("RELOCATE_DISK_SPACE_HEADROOM", "1000000000000")
+    with pytest.raises(RuntimeError, match="insufficient space"):
+        rf._check_disk_space(tmp_path, tmp_path / "dst", total_bytes=1024)
+
+
 # --- rf-rel-05: dead TMPLINK_SUFFIX constant removed ------------------------
 
 def test_tmplink_suffix_constant_removed():

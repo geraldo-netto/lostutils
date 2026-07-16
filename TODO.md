@@ -223,7 +223,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-adapt-01 | open | med | dedupl_numpy.py:36 — hash width is hardcoded as `np.arange(32)` + `.view("S32")`, silently assuming 32-char MD5 hex; a SHA-1/SHA-256 hash file is mis-grouped with no error. Derive the width from the first line or expose it as a constant/flag. | magic-number / hardcoded assumption
 dnv3-adapt-01 | open | low | deduplicate-by-namev3.py:196 — output rows hardcode a literal `;` in the f-strings (also :263) instead of the `OUTPUT_DELIMITER` constant (:41) used to derive REPLACEMENTS/cleanup stripping; changing the constant would strip the new delimiter during cleanup but keep emitting `;`, desyncing input-cleaning from output format. Use `OUTPUT_DELIMITER` in both f-strings. | adaptability / code duplication — single source of truth for the delimiter
-rf-adapt-01 | open | low | relocate_folder.py:743 — `_DISK_SPACE_HEADROOM` (1.05) and `_SHA256_RETRY_ATTEMPTS` (line 1368, =2) are hardcoded constants with no env/CLI override, unlike the env-tunable `RELOCATE_STALE_PID_WARN_AT`; expose them via env accessors so operators can tune headroom/retries without a code edit. | magic-number
 
 ## configuration discoverability
 

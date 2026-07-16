@@ -856,6 +856,21 @@ def copy_tree(src: Path, dst: Path, *,
 _DISK_SPACE_HEADROOM = 1.05
 
 
+def _disk_space_headroom() -> float:
+    """Return the disk-space headroom factor (rf-adapt-01).
+
+    Read from ``RELOCATE_DISK_SPACE_HEADROOM`` (env var). Default
+    ``_DISK_SPACE_HEADROOM``. Values below 1.0 would demand LESS space
+    than the payload itself, so they clamp to 1.0; invalid values fall
+    back to the default."""
+    raw = os.environ.get("RELOCATE_DISK_SPACE_HEADROOM", str(_DISK_SPACE_HEADROOM))
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DISK_SPACE_HEADROOM
+    return max(1.0, value)
+
+
 def _check_disk_space(src: Path, dst: Path, *, total_bytes: int | None = None) -> None:
     """Pre-flight check that the destination filesystem has room for `src`
     (rf-rel-07). An ENOSPC mid-copy already triggers a cleanup, but the
@@ -881,7 +896,7 @@ def _check_disk_space(src: Path, dst: Path, *, total_bytes: int | None = None) -
         free = shutil.disk_usage(probe).free
     except OSError:
         return  # can't check; let the copy try
-    required = int(needed * _DISK_SPACE_HEADROOM)
+    required = int(needed * _disk_space_headroom())
     if free < required:
         raise RuntimeError(
             f"insufficient space on destination filesystem at {probe}: "
@@ -1535,13 +1550,15 @@ def _sha256(path: Path) -> str:
 
     rf-rel-17 / rf-rel-19: a single transient truncation no longer
     aborts the whole verify pool. ``_hash_once_strict`` is retried up
-    to ``_SHA256_RETRY_ATTEMPTS`` times for the typed
+    to ``_sha256_retry_attempts()`` times (env-tunable via
+    ``RELOCATE_SHA256_RETRY_ATTEMPTS``, rf-adapt-01) for the typed
     ``_HashTruncatedError`` / ``_HashVanishedError`` cases ONLY. Any
     other exception escapes immediately so a hashlib backend failure
     (or any future error shape) doesn't masquerade as a transient and
     burn a retry on a non-retryable condition."""
     last_exc: BaseException | None = None
-    for attempt in range(_SHA256_RETRY_ATTEMPTS):
+    attempts = _sha256_retry_attempts()
+    for attempt in range(attempts):
         try:
             with _OperationStallWatchdog(f"sha256 {path}") as watchdog:
                 digest = _hash_once_strict(path)
@@ -1551,18 +1568,34 @@ def _sha256(path: Path) -> str:
             last_exc = exc
             continue
     # rf-rel-20: was `assert last_exc is not None` — stripped under `python -O`,
-    # so a misconfigured _SHA256_RETRY_ATTEMPTS=0 silently returned None and
+    # so a misconfigured attempt count of 0 silently returned None and
     # downstream digest compares blew up far from the cause. A real `raise`
     # survives optimization and names the misconfiguration.
     if last_exc is None:
         raise RuntimeError(
             f"_sha256({path}): no attempts ran; "
-            f"_SHA256_RETRY_ATTEMPTS={_SHA256_RETRY_ATTEMPTS}"
+            f"retry attempts={attempts}"
         )
     raise last_exc
 
 
 _SHA256_RETRY_ATTEMPTS = 2
+
+
+def _sha256_retry_attempts() -> int:
+    """Return the hash retry-attempt count (rf-adapt-01).
+
+    Read from ``RELOCATE_SHA256_RETRY_ATTEMPTS`` (env var). Default
+    ``_SHA256_RETRY_ATTEMPTS``. Clamped to at least 1 so a zero or
+    negative value can't disable hashing outright (rf-rel-20); invalid
+    values fall back to the default."""
+    raw = os.environ.get(
+        "RELOCATE_SHA256_RETRY_ATTEMPTS", str(_SHA256_RETRY_ATTEMPTS))
+    try:
+        value = int(raw)
+    except ValueError:
+        return _SHA256_RETRY_ATTEMPTS
+    return max(1, value)
 
 
 def _hash_once_strict(path: Path) -> str:
