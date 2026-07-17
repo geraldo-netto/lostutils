@@ -1101,3 +1101,18 @@ def test_run_without_inputs_reports_error(monkeypatch):
 
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy._run(bookmark_tidy.parse_args([]))
+
+
+def test_detect_json_format_reads_and_classifies_file(tmp_path):
+    source = tmp_path / "bookmarks.json"
+    source.write_text('{"roots": {}}', encoding="utf-8")
+
+    assert bookmark_tidy._detect_json_format(source) == "chromium"
+
+
+def test_call_with_timeout_propagates_worker_failure():
+    def fail():
+        raise RuntimeError("worker failed")
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        bookmark_tidy._call_with_timeout(fail, 1, "test worker")

@@ -147,7 +147,6 @@ hr-test-01 | open | low | hash-recursive-ai5.py:1802 — `HashDumpWriter.write_o
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-coverage-test-01 | open | high | bookmark-tidy.py:647 through remove-deduplv3.py:201 — coverage.py 7.15.2 reports 74 root functions/methods below 80% statement coverage, including `dedupl_numpy.main` at 0% and optional-backend, recovery, lock, watchdog, and cleanup paths. Add focused regression/property tests until every reported function reaches ≥80%. | test / fuzz coverage — baseline command: `coverage run --branch -m pytest`; global line coverage is already 95.24%, but aggregate coverage hides weak individual functions
 
 ## ruff (lint)
 

@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 
+import builtins
+import io
 import json
 import os
+import queue
 import threading
+import types
 from collections import OrderedDict
 from pathlib import Path
 from datetime import date, datetime, timezone
@@ -4879,3 +4883,347 @@ def test_run_file_workers_returns_partials_on_unrecoverable_stall(tmp_path, monk
     finally:
         wedge.set()
     assert [e["source"] for e in events] == ["event-1.txt"]  # event-0 abandoned
+
+
+def test_memory_helpers_cover_unreadable_and_physical_paths(tmp_path, monkeypatch):
+    assert import_events._cgroup_memory_limit_bytes([tmp_path / "missing"]) is None
+
+    values = {"SC_PHYS_PAGES": 4, "SC_PAGE_SIZE": 1024}
+    monkeypatch.setattr(import_events.os, "sysconf", values.__getitem__)
+    assert import_events._physical_memory_bytes() == 4096
+
+    monkeypatch.setattr(
+        import_events.os,
+        "sysconf",
+        lambda _name: (_ for _ in ()).throw(OSError("unsupported")),
+    )
+    assert import_events._physical_memory_bytes() is None
+    assert import_events._format_bytes(2048) == "2.0 KiB"
+
+
+def test_llm_lock_estimate_missing_file_returns_none(tmp_path):
+    config = import_events.ModelConfig(
+        model_path=str(tmp_path / "missing.gguf"),
+        clip_path=str(tmp_path / "projector.gguf"),
+    )
+
+    assert import_events._llm_lock_estimate_bytes(config) is None
+
+
+def test_language_and_date_edge_helpers():
+    assert import_events._normalize_language("   ") == import_events.DEFAULT_LANGUAGE
+    assert import_events._parse_ocr_languages(None) == import_events.DEFAULT_OCR_LANGUAGES
+    assert import_events.normalize_event_date(123) == "123"
+    assert import_events._calendar_event_line(2026, 2, 30, "Impossible") == ""
+    assert import_events._split_time_explicit("09:30 Launch", False) == ("T09:30", "Launch")
+
+
+def test_close_paddle_engine_surfaces_close_failure(caplog):
+    class Engine:
+        def close(self):
+            raise RuntimeError("close failed")
+
+    import_events._close_paddle_ocr_engine(Engine())
+
+    assert "close failed" in caplog.text
+
+
+def test_process_fd_helpers_cover_dup_and_restore_failures(monkeypatch):
+    closed = []
+
+    class OsProxy:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def dup(fd):
+            return fd + 10
+
+        @staticmethod
+        def dup2(*_args):
+            raise OSError("dup2 failed")
+
+        @staticmethod
+        def close(fd):
+            closed.append(fd)
+
+    monkeypatch.setattr(import_events, "_flush_standard_streams", lambda: None)
+    monkeypatch.setattr(import_events, "os", OsProxy())
+
+    assert import_events._redirect_process_fds(99) == (None, None)
+    import_events._restore_process_fds((11, None))
+
+    assert closed == [11, 12, 11]
+
+
+def test_flush_standard_streams_ignores_stream_failures(monkeypatch):
+    class Stream:
+        def flush(self):
+            raise OSError("flush failed")
+
+    monkeypatch.setattr(import_events.sys, "stdout", Stream())
+    monkeypatch.setattr(import_events.sys, "stderr", Stream())
+
+    import_events._flush_standard_streams()
+
+
+def test_sniff_text_encoding_optional_backend_fallbacks(monkeypatch):
+    real_import = builtins.__import__
+    chardet = types.SimpleNamespace(detect=lambda _raw: {"encoding": "latin-1"})
+
+    def import_chardet(name, *args, **kwargs):
+        if name == "charset_normalizer":
+            raise ImportError(name)
+        if name == "chardet":
+            return chardet
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_chardet)
+    assert import_events._sniff_text_encoding(b"\xff") == "latin-1"
+
+    def import_no_detector(name, *args, **kwargs):
+        if name in {"charset_normalizer", "chardet"}:
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_no_detector)
+    assert import_events._sniff_text_encoding(b"\xff") is None
+
+
+def test_stage_cache_error_and_override_paths(tmp_path, monkeypatch):
+    missing = tmp_path / "missing"
+    assert import_events._file_sha256(missing) is None
+    assert import_events._file_sha256_cache_key(missing) is None
+
+    config = import_events.ModelConfig(stage_cache_dir=str(tmp_path / "cache"))
+    assert import_events._stage_cache_root(config) == tmp_path / "cache"
+    default_root = tmp_path / "default-cache"
+    monkeypatch.setattr(import_events, "_default_cache_dir", lambda: default_root)
+    assert import_events._stage_cache_root(import_events.ModelConfig()) == (
+        default_root / "stage-cache"
+    )
+
+    class BadRoot:
+        def glob(self, _pattern):
+            raise OSError("scan failed")
+
+    assert import_events._stage_cache_entries(BadRoot()) == []
+
+    monkeypatch.setattr(
+        import_events.os,
+        "utime",
+        lambda *_args: (_ for _ in ()).throw(OSError("touch failed")),
+    )
+    import_events._touch_stage_cache_entry(tmp_path / "entry.json")
+
+    class BadEntry:
+        name = "entry.json"
+
+        def stat(self):
+            raise OSError("stat failed")
+
+    assert import_events._stage_cache_lru_key(BadEntry()) == (0, "entry.json")
+
+
+def test_paddle_backend_fallback_helpers(monkeypatch):
+    class Device:
+        def is_compiled_with_cuda(self):
+            raise RuntimeError("cuda unavailable")
+
+        def is_compiled_with_rocm(self):
+            raise RuntimeError("rocm unavailable")
+
+    paddle = types.SimpleNamespace(device=Device())
+    assert import_events._paddle_gpu_available(paddle) is False
+    assert import_events._paddle_constructor_kwargs("en", None) == [
+        {"use_textline_orientation": True, "lang": "en"},
+        {"use_angle_cls": True, "lang": "en"},
+        {"lang": "en"},
+    ]
+
+    outcomes = iter(
+        [
+            (None, RuntimeError("gpu failed")),
+            (None, RuntimeError("cpu failed")),
+            ("engine", None),
+        ]
+    )
+    monkeypatch.setattr(
+        import_events,
+        "_build_paddle_ocr_with_kwargs",
+        lambda *_args: next(outcomes),
+    )
+    assert import_events._build_paddle_ocr(object(), "en", "gpu:0") == (
+        "engine",
+        "cpu",
+    )
+
+    monkeypatch.setattr(
+        import_events,
+        "_build_paddle_ocr_with_kwargs",
+        lambda *_args: (None, RuntimeError("no constructor")),
+    )
+    with pytest.raises(RuntimeError, match="no constructor"):
+        import_events._build_paddle_ocr(object(), "en", "cpu")
+
+
+def test_store_paddle_engine_rejects_publish_after_disable():
+    import_events._PADDLE_OCR_DISABLED = True
+    engine = object()
+
+    assert import_events._store_or_reuse_paddle_ocr(
+        ("en", "gpu:0"),
+        ("en", "gpu:0"),
+        engine,
+    ) == (None, [engine])
+
+
+def test_display_path_outside_home_and_stall_callback_failure(caplog):
+    assert import_events._display_path("/tmp/outside-home") == "/tmp/outside-home"
+
+    def fail(*_args):
+        raise RuntimeError("callback failed")
+
+    import_events._run_llm_stall_callback(fail, "model", 2.0, 1.0)
+    assert "callback failed" in caplog.text
+
+
+def test_display_path_returns_input_when_resolution_fails(monkeypatch):
+    class BadPath:
+        def __init__(self, _path):
+            pass
+
+        def expanduser(self):
+            return self
+
+        def resolve(self):
+            raise OSError("cannot resolve")
+
+    monkeypatch.setattr(import_events, "Path", BadPath)
+
+    assert import_events._display_path("unresolvable") == "unresolvable"
+
+
+def test_llm_stall_callback_none_and_nested_restore():
+    with import_events._llm_stall_callback(None):
+        assert import_events._current_llm_stall_callback() is None
+
+    first = lambda *_args: None
+    second = lambda *_args: None
+    with import_events._llm_stall_callback(first):
+        with import_events._llm_stall_callback(second):
+            assert import_events._current_llm_stall_callback() is second
+        assert import_events._current_llm_stall_callback() is first
+    assert import_events._current_llm_stall_callback() is None
+
+
+def test_pdf_helpers_cover_invalid_geometry_and_ocr_pipeline(tmp_path, monkeypatch):
+    page = types.SimpleNamespace(rect=types.SimpleNamespace(width="bad", height=10))
+    assert import_events._pdf_page_pixel_count(page, 72) is None
+
+    source = tmp_path / "calendar.pdf"
+    source.write_bytes(b"%PDF")
+    image = tmp_path / "page.png"
+    image.write_bytes(b"png")
+    config = import_events.ModelConfig()
+    monkeypatch.setattr(
+        import_events,
+        "_render_pdf_image_paths",
+        lambda *_args: [image],
+    )
+    monkeypatch.setattr(
+        import_events,
+        "_timed_stage",
+        lambda _config, _subject, _stage, work: work(),
+    )
+    monkeypatch.setattr(
+        import_events,
+        "_pdf_ocr_text_from_paths",
+        lambda paths, *_args: "text" if paths == [image] else "",
+    )
+
+    assert import_events._pdf_ocr_from_file(source, config, "en", ("en",)) == "text"
+
+
+def test_feed_file_queue_surfaces_generator_failure():
+    work_queue = queue.Queue()
+    done_queue = queue.Queue()
+    stop = threading.Event()
+
+    def files():
+        yield Path("first.txt")
+        raise RuntimeError("scan failed")
+
+    import_events._feed_file_queue(files(), work_queue, done_queue, stop, workers=1)
+
+    marker = done_queue.get_nowait()
+    assert marker[0:2] == (None, 1)
+    assert isinstance(marker[2], RuntimeError)
+    assert stop.is_set()
+
+
+def test_process_folder_rejects_non_directory(tmp_path):
+    assert import_events.process_folder(str(tmp_path / "missing")) == []
+
+
+def test_atomic_write_closes_descriptor_after_fdopen_failure(tmp_path, monkeypatch):
+    output = tmp_path / "events.json"
+
+    class OsProxy:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def fdopen(*_args, **_kwargs):
+            raise OSError("fdopen failed")
+
+    monkeypatch.setattr(import_events, "os", OsProxy())
+
+    with pytest.raises(OSError, match="fdopen failed"):
+        import_events._atomic_write_bytes(output, b"payload")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_fsync_parent_returns_when_directory_open_fails(tmp_path, monkeypatch):
+    class OsProxy:
+        O_RDONLY = os.O_RDONLY
+        O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+        @staticmethod
+        def open(*_args):
+            raise OSError("open failed")
+
+    monkeypatch.setattr(import_events, "os", OsProxy())
+
+    import_events._fsync_parent_dir(tmp_path / "events.json")
+
+
+def test_end_precedes_start_covers_date_datetime_combinations():
+    assert import_events._end_precedes_start(
+        datetime(2026, 2, 2),
+        date(2026, 2, 1),
+    )
+    assert import_events._end_precedes_start(
+        date(2026, 2, 2),
+        datetime(2026, 2, 1),
+    )
+    assert not import_events._end_precedes_start("2026-02-02", "2026-02-01")
+
+
+def test_enable_fault_tracebacks_surfaces_dup_failure(monkeypatch, caplog):
+    class OsProxy:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def dup(_fd):
+            raise OSError("dup failed")
+
+    monkeypatch.setattr(import_events, "_FAULT_TRACEBACKS_ENABLED", False)
+    monkeypatch.setattr(import_events, "os", OsProxy())
+
+    import_events._enable_fault_tracebacks()
+
+    assert not import_events._FAULT_TRACEBACKS_ENABLED
+    assert "dup failed" in caplog.text

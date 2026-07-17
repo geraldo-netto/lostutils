@@ -3369,3 +3369,77 @@ def test_main_dump_marks_aliases_elided_by_cap(tmp_path, monkeypatch):
     text = out.read_text()
     assert "more (alias-cap)" in text
     assert "+2 more (alias-cap)" in text   # inode A had 3 aliases, 1 shown
+
+
+def test_progress_stall_monitor_worker_checks_until_stopped(monkeypatch):
+    monitor = hr._ProgressStallMonitor(1)
+    waits = iter([False, True])
+    checked = []
+    monitor._stop = mock.Mock(wait=lambda _interval: next(waits))
+    monkeypatch.setattr(monitor, "_maybe_warn", lambda: checked.append(True))
+
+    monitor._run()
+
+    assert checked == [True]
+
+
+def test_configure_stdio_encoding_ignores_reconfigure_failure(monkeypatch):
+    class Stream(io.TextIOWrapper):
+        def __init__(self, fail):
+            super().__init__(io.BytesIO())
+            self.fail = fail
+            self.calls = []
+
+        def reconfigure(self, **kwargs):
+            self.calls.append(kwargs)
+            if self.fail:
+                raise ValueError("cannot reconfigure")
+
+    stdout = Stream(False)
+    stderr = Stream(True)
+    monkeypatch.setattr(hr.sys, "stdout", stdout)
+    monkeypatch.setattr(hr.sys, "stderr", stderr)
+
+    hr._configure_stdio_encoding()
+
+    assert stdout.calls == [{"encoding": "utf-8", "errors": "surrogateescape"}]
+    assert stderr.calls == [{"encoding": "utf-8", "errors": "surrogateescape"}]
+
+
+def test_disable_hash_dump_clears_writer_when_close_fails(monkeypatch):
+    class Writer:
+        def close(self):
+            raise OSError("close failed")
+
+    state = {"writer": Writer()}
+    logged = []
+    monkeypatch.setattr(hr, "_log_line", lambda message, quiet: logged.append((message, quiet)))
+
+    hr._disable_hash_dump(state, "hashes.txt", OSError("write failed"))
+
+    assert state["writer"] is None
+    assert "write failed" in logged[0][0]
+
+
+def test_composite_dump_failure_disables_writer(monkeypatch):
+    class Writer:
+        closed = False
+
+        def patch_composite(self, _key, _composite):
+            raise OSError("patch failed")
+
+        def close(self):
+            self.closed = True
+
+    writer = Writer()
+    state = {"writer": writer}
+    monitor = mock.Mock()
+    monkeypatch.setattr(hr, "_log_line", lambda *_args: None)
+    _on_hashed, on_composite, _on_progress = hr._build_dump_callbacks(
+        state, "hashes.txt", monitor, False
+    )
+
+    on_composite(("dev", 1), "digest")
+
+    assert state["writer"] is None
+    assert writer.closed

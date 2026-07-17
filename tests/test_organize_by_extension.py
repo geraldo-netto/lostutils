@@ -4247,3 +4247,43 @@ def test_file_contains_pdf_absent(tmp_path):
     f = tmp_path / "n.bin"
     f.write_bytes(b"no marker here at all")
     assert _oze._file_contains_pdf(f) is False
+
+
+def test_scan_stall_monitor_worker_checks_until_stopped():
+    monitor = _oze._ScanStallMonitor(warning_after=1)
+    checked = []
+
+    class Stop:
+        calls = 0
+
+        def wait(self, _interval):
+            self.calls += 1
+            return self.calls > 1
+
+    monitor._stop = Stop()
+    monitor._maybe_warn = lambda: checked.append(True)
+
+    monitor._run()
+
+    assert checked == [True]
+
+
+def test_symlink_escape_warning_caches_resolution_failure():
+    class BadPath:
+        def resolve(self):
+            raise OSError("broken link")
+
+    link = BadPath()
+    cache = {}
+
+    _oze._warn_if_symlink_escapes_root(link, Path("/root"), cache)
+
+    assert cache[link] is None
+
+
+def test_content_and_reservation_helpers_fail_closed_on_missing_paths(tmp_path):
+    missing = tmp_path / "missing"
+    target = tmp_path / "target"
+
+    assert not _oze._same_file_content(missing, target)
+    assert not _oze._is_stranded_reservation(missing, target)

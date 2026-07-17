@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 import tkinter as tk
@@ -4290,3 +4291,196 @@ def test_shutdown_sets_stop_event_before_presave(app, monkeypatch):
     monkeypatch.setattr(app, "_safe_save_state_on_shutdown", spy)
     app._shutdown(timeout=0.1)
     assert observed.get("first_stop_set") is True
+
+
+def test_user_config_dir_falls_back_when_creation_fails(monkeypatch):
+    class OsProxy:
+        environ = {"XDG_CONFIG_HOME": "/unwritable"}
+        path = os.path
+
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def makedirs(*_args, **_kwargs):
+            raise OSError("read only")
+
+    monkeypatch.setattr(link_queue, "os", OsProxy())
+
+    assert link_queue._user_config_dir() == link_queue._script_dir()
+
+
+def test_sweep_temp_siblings_ignores_unreadable_directory(monkeypatch):
+    class OsProxy:
+        path = os.path
+
+        @staticmethod
+        def listdir(_directory):
+            raise OSError("unreadable")
+
+    monkeypatch.setattr(link_queue, "os", OsProxy())
+
+    link_queue._sweep_temp_siblings("/unreadable/state.yaml")
+
+
+def test_pidfile_helpers_cover_invalid_and_missing_process(tmp_path, monkeypatch):
+    lock = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+    Path(lock.lock_path).write_text("pid=not-a-number\n", encoding="utf-8")
+    assert lock._read_pidfile_pid() is None
+    assert not lock._pid_is_running(0)
+
+    class OsProxy:
+        @staticmethod
+        def kill(_pid, _signal):
+            raise ProcessLookupError
+
+    monkeypatch.setattr(link_queue, "os", OsProxy())
+    assert not lock._pid_is_running(12345)
+
+    class ErrorOsProxy:
+        outcome = PermissionError()
+
+        def kill(self, _pid, _signal):
+            raise self.outcome
+
+    error_os = ErrorOsProxy()
+    monkeypatch.setattr(link_queue, "os", error_os)
+    assert lock._pid_is_running(12345)
+    error_os.outcome = OSError()
+    assert lock._pid_is_running(12345)
+
+
+def test_unlink_lock_file_ignores_unlink_failure(tmp_path, monkeypatch):
+    lock = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+
+    class OsProxy:
+        @staticmethod
+        def unlink(_path):
+            raise OSError("busy")
+
+    monkeypatch.setattr(link_queue, "os", OsProxy())
+
+    lock._unlink_lock_file()
+
+
+def test_read_state_dict_surfaces_parser_failure(headless_dispatcher, monkeypatch, capsys):
+    with open(headless_dispatcher.state_path, "w", encoding="utf-8") as stream:
+        stream.write("state")
+    monkeypatch.setattr(
+        link_queue,
+        "_yaml_load",
+        lambda _stream: (_ for _ in ()).throw(ValueError("bad yaml")),
+    )
+
+    assert headless_dispatcher._read_state_dict() is None
+    assert "bad yaml" in capsys.readouterr().err
+
+
+def test_extract_protocol_handles_parser_failure(monkeypatch):
+    monkeypatch.setattr(
+        link_queue,
+        "urlparse",
+        lambda _url: (_ for _ in ()).throw(ValueError("bad URL")),
+    )
+
+    assert LinkQueueApp._extract_protocol("https://example.test") == ""
+
+
+def test_command_timeout_terminates_then_kills_process_group(
+    headless_dispatcher,
+    monkeypatch,
+):
+    callbacks = []
+    signals = []
+
+    class Timer:
+        daemon = False
+
+        def __init__(self, _delay, callback):
+            callbacks.append(callback)
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    class OsProxy:
+        def __getattr__(self, name):
+            return getattr(os, name)
+
+        @staticmethod
+        def killpg(pid, sent_signal):
+            signals.append((pid, sent_signal))
+
+    class Proc:
+        pid = 123
+
+        def __init__(self):
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        @staticmethod
+        def wait(timeout):
+            raise link_queue.subprocess.TimeoutExpired("command", timeout)
+
+    proc = Proc()
+    monkeypatch.setattr(link_queue.threading, "Timer", Timer)
+    monkeypatch.setattr(link_queue, "os", OsProxy())
+
+    timer = headless_dispatcher._arm_command_timeout(proc, "job", "url", 1)
+    assert timer is not None
+    callbacks[0]()
+
+    assert signals == [
+        (proc.pid, link_queue.signal.SIGTERM),
+        (proc.pid, link_queue.signal.SIGKILL),
+    ]
+
+
+def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monkeypatch):
+    class Proc:
+        stdout = ()
+
+        @staticmethod
+        def wait(timeout):
+            raise link_queue.subprocess.TimeoutExpired("command", timeout)
+
+    monkeypatch.setattr(headless_dispatcher, "_arm_command_timeout", lambda *_args: None)
+    monkeypatch.setattr(headless_dispatcher, "_stream_subprocess_output", lambda *_args: None)
+    logs = []
+    monkeypatch.setattr(headless_dispatcher, "_log", logs.append)
+
+    assert not headless_dispatcher._stream_and_wait(
+        Proc(),
+        "job",
+        "https://example.test",
+        1,
+        "summary",
+    )
+    assert "unresponsive" in logs[0]
+
+
+def test_main_reports_state_lock_error(monkeypatch, capsys):
+    class Root:
+        def destroy(self):
+            raise tk.TclError("already destroyed")
+
+    monkeypatch.setattr(link_queue.tk, "Tk", Root)
+    monkeypatch.setattr(
+        link_queue,
+        "LinkQueueApp",
+        lambda _root: (_ for _ in ()).throw(link_queue.StateFileLockError("locked")),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_queue.main()
+
+    assert exc.value.code == 1
+    assert "locked" in capsys.readouterr().err

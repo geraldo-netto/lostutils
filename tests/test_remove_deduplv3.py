@@ -311,3 +311,57 @@ def test_configure_stdout_wraps_binary_buffer(monkeypatch):
 
     assert raw.getvalue() == b"\xff\n"
     rd.sys.stdout.detach()
+
+
+def test_configure_stdout_falls_back_after_reconfigure_failure(monkeypatch):
+    class RefusingStream(io.TextIOWrapper):
+        def reconfigure(self, **_kwargs):
+            raise ValueError("cannot reconfigure")
+
+    stream = RefusingStream(io.BytesIO())
+    monkeypatch.setattr(rd.sys, "stdout", stream)
+
+    rd._configure_stdout_errors("surrogateescape")
+
+    assert rd.sys.stdout is not stream
+    assert rd.sys.stdout.errors == "surrogateescape"
+    rd.sys.stdout.detach()
+
+
+def test_silence_stdout_handles_open_and_cleanup_failures(monkeypatch):
+    class OpenFailure:
+        devnull = "/dev/null"
+        O_WRONLY = 1
+
+        @staticmethod
+        def open(*_args):
+            raise OSError("open failed")
+
+    monkeypatch.setattr(rd, "os", OpenFailure())
+    rd._silence_stdout_after_broken_pipe()
+
+    class CleanupFailure:
+        devnull = "/dev/null"
+        O_WRONLY = 1
+
+        @staticmethod
+        def open(*_args):
+            return 99
+
+        @staticmethod
+        def dup2(*_args):
+            raise OSError("dup failed")
+
+        @staticmethod
+        def close(*_args):
+            raise OSError("close failed")
+
+    monkeypatch.setattr(rd, "os", CleanupFailure())
+    monkeypatch.setattr(rd.sys, "stdout", object())
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("replace failed")),
+    )
+
+    rd._silence_stdout_after_broken_pipe()

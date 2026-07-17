@@ -502,3 +502,14 @@ def test_main_cleanup_flags_override_defaults(monkeypatch, tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "a ;a;1" in out
+
+
+def test_configure_stdout_ignores_reconfigure_value_error(monkeypatch):
+    class RefusingStream(io.TextIOWrapper):
+        def reconfigure(self, **_kwargs):
+            raise ValueError("already detached")
+
+    stream = RefusingStream(io.BytesIO())
+    monkeypatch.setattr(dn.sys, "stdout", stream)
+
+    dn.configure_stdout()

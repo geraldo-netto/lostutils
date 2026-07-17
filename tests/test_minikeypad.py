@@ -8,6 +8,7 @@ none is available.
 """
 
 import logging
+import os
 import random
 import sys
 import time
@@ -1946,3 +1947,85 @@ def test_save_profile_cleans_tmp_on_write_failure(app, tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         app._save_profile(path)
     assert not (tmp_path / "p.json.tmp").exists(), "orphaned .tmp left behind"
+
+
+def test_profile_fsync_dir_ignores_open_and_fsync_failures(tmp_path, monkeypatch):
+    class OsProxy:
+        O_RDONLY = os.O_RDONLY
+        fail_open = True
+
+        def open(self, path, flags):
+            if self.fail_open:
+                raise OSError("open failed")
+            return os.open(path, flags)
+
+        @staticmethod
+        def fsync(_fd):
+            raise OSError("fsync unsupported")
+
+        close = staticmethod(os.close)
+
+    proxy = OsProxy()
+    monkeypatch.setattr(minikeypad, "os", proxy)
+
+    minikeypad.ProfileStore._fsync_dir(str(tmp_path))
+    proxy.fail_open = False
+    minikeypad.ProfileStore._fsync_dir(str(tmp_path))
+
+
+def test_connection_monitor_surfaces_probe_thread_start_failure(monkeypatch):
+    logs = []
+    states = []
+    scheduled = []
+    monitor = minikeypad.ConnectionMonitor(
+        lambda: types.SimpleNamespace(connected=False),
+        logs.append,
+        lambda delay, callback: scheduled.append((delay, callback)),
+        lambda callback: callback(),
+        lambda: states.append(True),
+        lambda: None,
+    )
+
+    class Thread:
+        def __init__(self, **_kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread failed")
+
+    monkeypatch.setattr(minikeypad, "threading", types.SimpleNamespace(Thread=Thread))
+
+    monitor._start_probe_worker(lambda _token: None, "Connect")
+
+    assert not monitor.io_busy
+    assert "thread failed" in logs[0]
+    assert states == [True]
+    assert scheduled == []
+
+
+def test_connection_monitor_probe_alive_handles_device_failure():
+    callbacks = []
+    monitor = minikeypad.ConnectionMonitor(
+        lambda: types.SimpleNamespace(
+            still_connected=lambda: (_ for _ in ()).throw(OSError("gone"))
+        ),
+        lambda _message: None,
+        lambda _delay, _callback: None,
+        callbacks.append,
+        lambda: None,
+        lambda: None,
+    )
+
+    monitor.probe_alive(3)
+    callbacks[0]()
+
+    assert not monitor.io_busy
+
+
+def test_trim_log_lines_ignores_invalid_widget_index():
+    app = object.__new__(minikeypad.App)
+    app.log_box = types.SimpleNamespace(
+        index=lambda _position: (_ for _ in ()).throw(ValueError("bad index"))
+    )
+
+    app._trim_log_lines()

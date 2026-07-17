@@ -4277,3 +4277,205 @@ def test_copy_and_verify_logs_cleanup_failure(tmp_path, monkeypatch, caplog):
             rf._copy_and_verify(plan)
     assert any("could not remove" in r.message for r in caplog.records)
     assert any("may still exist" in r.message for r in caplog.records)
+
+
+def test_operation_stall_watchdog_worker_checks_until_stopped(monkeypatch):
+    watchdog = rf._OperationStallWatchdog("copy", warning_after=1)
+    waits = iter([False, True])
+    checked = []
+    watchdog._stop = mock.Mock(wait=lambda _interval: next(waits))
+    monkeypatch.setattr(watchdog, "_maybe_warn", lambda: checked.append(True))
+
+    watchdog._run()
+
+    assert checked == [True]
+
+
+def test_source_identity_fd_closes_descriptor_on_fstat_failure(monkeypatch):
+    closed = []
+
+    class OsProxy:
+        O_RDONLY = os.O_RDONLY
+        O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+        O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+        @staticmethod
+        def open(_source, _flags):
+            return 99
+
+        @staticmethod
+        def fstat(_fd):
+            raise OSError("fstat failed")
+
+        @staticmethod
+        def close(fd):
+            closed.append(fd)
+
+    monkeypatch.setattr(rf, "os", OsProxy())
+
+    with pytest.raises(OSError, match="fstat failed"):
+        rf._source_identity_fd(Path("/source"))
+
+    assert closed == [99]
+
+
+def test_cleanup_created_dirs_stops_after_first_failure(tmp_path, monkeypatch):
+    calls = []
+
+    class OsProxy:
+        @staticmethod
+        def rmdir(path):
+            calls.append(path)
+            raise OSError("not empty")
+
+    monkeypatch.setattr(rf, "os", OsProxy())
+    paths = [tmp_path / "outer", tmp_path / "inner"]
+
+    rf._cleanup_created_dirs(paths)
+
+    assert calls == [paths[1]]
+
+
+def test_warn_if_not_traversable_ignores_source_stat_failure():
+    class MissingSource:
+        @staticmethod
+        def stat():
+            raise OSError("missing")
+
+    rf._warn_if_not_traversable(Path("/destination"), MissingSource())
+
+
+def test_warn_if_not_traversable_ignores_traversal_check_failure(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    destination = tmp_path / "destination"
+    monkeypatch.setattr(
+        rf,
+        "_can_traverse",
+        lambda *_args: (_ for _ in ()).throw(OSError("stat failed")),
+    )
+
+    rf._warn_if_not_traversable(destination, source)
+
+
+def test_record_copy_progress_ignores_callback_failure(tmp_path):
+    target = tmp_path / "copied.bin"
+    target.write_bytes(b"data")
+    done = [0]
+
+    rf._record_copy_progress(
+        target,
+        True,
+        done,
+        4,
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("callback failed")),
+    )
+
+    assert done == [4]
+
+    rf._record_copy_progress(
+        tmp_path / "missing.bin",
+        True,
+        done,
+        4,
+        lambda *_args: None,
+    )
+    assert done == [4]
+
+
+def test_replicate_ownership_surfaces_pair_walk_failure(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(
+        rf,
+        "_pair_walk",
+        lambda *_args: (_ for _ in ()).throw(OSError("walk failed")),
+    )
+
+    rf._replicate_ownership(tmp_path / "source", tmp_path / "target", jobs=1)
+
+    assert "walk failed" in caplog.text
+
+
+def test_write_staging_pid_surfaces_marker_failure(caplog):
+    class Marker:
+        @staticmethod
+        def write_text(*_args, **_kwargs):
+            raise OSError("marker failed")
+
+        def __str__(self):
+            return "marker"
+
+    class Staging:
+        @staticmethod
+        def __truediv__(_name):
+            return Marker()
+
+    rf._write_staging_pid(Staging())
+
+    assert "marker failed" in caplog.text
+
+
+def test_pid_alive_covers_invalid_and_os_error_results(monkeypatch):
+    class OsProxy:
+        outcome = None
+
+        def kill(self, _pid, _signal):
+            if self.outcome is not None:
+                raise self.outcome
+
+    proxy = OsProxy()
+    monkeypatch.setattr(rf, "os", proxy)
+
+    assert not rf._pid_alive(0)
+    proxy.outcome = ProcessLookupError()
+    assert not rf._pid_alive(10)
+    proxy.outcome = PermissionError()
+    assert rf._pid_alive(10)
+    proxy.outcome = OSError()
+    assert not rf._pid_alive(10)
+    proxy.outcome = None
+    assert rf._pid_alive(10)
+
+
+def test_staging_pid_from_name_rejects_unrelated_name():
+    assert rf._staging_pid_from_name(Path("ordinary-directory")) is None
+
+
+def test_sweep_orphaned_staging_dirs_surfaces_scan_failure(caplog):
+    class Parent:
+        @staticmethod
+        def iterdir():
+            raise OSError("scan failed")
+
+        def __str__(self):
+            return "parent"
+
+    assert rf._sweep_orphaned_staging_dirs(Parent()) == 0
+    assert "scan failed" in caplog.text
+
+
+def test_rename_noreplace_falls_back_when_libc_has_no_symbol(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.write_text("data", encoding="utf-8")
+    renamed = []
+
+    class OsProxy:
+        @staticmethod
+        def rename(src, dst):
+            renamed.append((src, dst))
+
+    monkeypatch.setattr(rf, "os", OsProxy())
+    monkeypatch.setattr(
+        "ctypes.CDLL",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("no libc")),
+    )
+
+    rf._rename_noreplace(source, target)
+
+    assert renamed == [(source, target)]
