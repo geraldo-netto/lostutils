@@ -163,3 +163,19 @@ Language handling:
 Useful runtime knobs include `--llm-context`, `--max-content-chars`, `--llm-max-tokens`, `--llm-gpu-layers`, `--llm-main-gpu`, `--mlock`, `--ocr-engine`, `--ocr-languages`, `--ocr-language-score`, `--ocr-timeout`, `--tesseract-psm`, `--tesseract-path`, `--pdf-ocr-mode`, `--pdf-vision-pages`, `--pdf-vision-dpi`, `--stage-cache`, `--workers`, `--deterministic-order`, and `--summary-only`.
 
 When `--max-content-chars` is omitted, the text budget is computed from the selected LLM context size. The default `--llm-context 0` lets llama.cpp use the model-native context window. The default `--llm-gpu-layers 0` uses CPU; pass a positive layer count or `-1` to opt into llama.cpp GPU offload. `--mlock` is opt-in and is skipped automatically when the model plus projector files would exceed 70% of the memory limit visible to the process.
+
+## Tests and CI
+
+GitHub Actions runs Ruff and Pyright against root scripts, then executes unit, regression, integration, and Hypothesis fuzz tests on Python 3.12. CI requires at least 80% global branch coverage and at least 80% statement coverage for every measured function or method.
+
+Run the same gates locally:
+
+```bash
+python3 -m pip install -r requirements-ci.txt
+ruff check *.py
+pyright --pythonpath "$(command -v python3)" *.py
+coverage run -m pytest -q
+coverage report
+coverage json
+python3 tests/check_function_coverage.py coverage.json --minimum 80
+```

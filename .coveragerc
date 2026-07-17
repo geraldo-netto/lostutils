@@ -1,0 +1,17 @@
+[run]
+branch = True
+concurrency = thread
+relative_files = True
+source = .
+omit =
+    tests/*
+
+[report]
+fail_under = 80
+precision = 2
+show_missing = True
+skip_empty = True
+
+[json]
+output = coverage.json
+pretty_print = True
