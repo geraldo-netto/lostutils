@@ -41,7 +41,7 @@ jobs:
         run: pyright --pythonpath "$(command -v python)" *.py
 
       - name: Run unit, regression, integration, and fuzz tests
-        run: coverage run -m pytest -q
+        run: xvfb-run -a coverage run -m pytest -q
 
       - name: Enforce coverage gates
         run: |
