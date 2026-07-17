@@ -289,6 +289,7 @@ rdv3-i18n-01 | open | med | remove-deduplv3.py:37 — `_ = gettext.gettext` rout
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ci-release-01 | open | med | .github/workflows/ci.yml:missing — repository has no CI workflow, reproducible test dependency set, or automated per-function coverage gate, so pushes can merge with collection failures or uncovered functions. Add a pinned GitHub Actions workflow running lint, type checks, unit/integration/fuzz tests, and an ≥80% per-function/method coverage check. | release & deploy engineering — fail-closed CI gate must exercise real root scripts
 
 ## unused code
 
