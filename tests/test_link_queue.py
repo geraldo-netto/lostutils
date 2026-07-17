@@ -4443,6 +4443,20 @@ def test_command_timeout_terminates_then_kills_process_group(
         (proc.pid, link_queue.signal.SIGKILL),
     ]
 
+    class NoKillPgProxy:
+        def __getattr__(self, name):
+            if name == "killpg":
+                raise AttributeError(name)
+            return getattr(os, name)
+
+    fallback_proc = Proc()
+    monkeypatch.setattr(link_queue, "os", NoKillPgProxy())
+    headless_dispatcher._arm_command_timeout(fallback_proc, "job", "url", 1)
+    callbacks[1]()
+
+    assert fallback_proc.terminated
+    assert fallback_proc.killed
+
 
 def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monkeypatch):
     class Proc:
