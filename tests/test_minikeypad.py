@@ -928,8 +928,14 @@ def _drain(app):
 
 
 def _wait_drain(app, timeout=2.0):
-    end = time.time() + timeout
-    while time.time() < end and app._ui_q.empty():
+    end = time.monotonic() + timeout
+    saw_callback = False
+    while time.monotonic() < end:
+        if not app._ui_q.empty():
+            saw_callback = True
+            _drain(app)
+        if saw_callback and not app._io_busy and app._ui_q.empty():
+            return
         time.sleep(0.005)
     _drain(app)
 
