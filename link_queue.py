@@ -2992,7 +2992,8 @@ class LogSink:
             # current user reads back the captured URL list.
             fd = os.open(
                 path,
-                os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW,
+                os.O_WRONLY | os.O_APPEND | os.O_CREAT
+                | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
             )
             self._fh = os.fdopen(fd, "a", encoding="utf-8")

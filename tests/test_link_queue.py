@@ -3991,6 +3991,20 @@ def test_logsink_write_failure_warns_once(tmp_path, capsys):
     assert "disk full" in err
 
 
+def test_logsink_opens_when_platform_has_no_nofollow(
+        tmp_path, monkeypatch):
+    log_path = tmp_path / "portable.log"
+    monkeypatch.delattr(link_queue.os, "O_NOFOLLOW", raising=False)
+    sink = link_queue.LogSink(lambda: str(log_path))
+    try:
+        sink.write("portable\n")
+        sink.stop()
+    finally:
+        sink.stop()
+
+    assert log_path.read_text(encoding="utf-8") == "portable\n"
+
+
 # --- lq-decoup-04: live config drives the sweep threshold ---------------
 
 def test_pick_next_item_skips_seq_of_sweep_under_threshold(app):
