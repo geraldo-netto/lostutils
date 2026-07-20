@@ -1902,8 +1902,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
               f"(default: min(cpu_count, {DEFAULT_MAX_JOBS}); override for "
               "fast SSDs or slower disks; high values are clamped to "
               f"{_max_jobs()})."))
-    ap.add_argument("-q", "--quiet", action="store_true",
-                    help="Suppress the end-of-run summary on stderr.")
+    ap.add_argument(
+        "-q", "--quiet", action="store_true",
+        help=("Suppress routine start/progress/done logs, run warnings, and "
+              "the end summary; hash errors, dump output, and filesystem "
+              "stall diagnostics remain visible."))
     ap.add_argument("--alias-cap", type=int, default=DEFAULT_ALIAS_CAP,
                     help=("Max paths printed per inode group "
                           f"(default: {DEFAULT_ALIAS_CAP}, <= 0 = no cap). "

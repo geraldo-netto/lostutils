@@ -1678,6 +1678,13 @@ def test_help_documents_kernel_io_stall_limitation():
     assert "mount-level timeouts" in help_text
 
 
+def test_quiet_help_documents_suppressed_and_visible_output():
+    help_text = " ".join(hr._build_arg_parser().format_help().split())
+    assert "routine start/progress/done logs" in help_text
+    assert "hash errors, dump output" in help_text
+    assert "stall diagnostics remain visible" in help_text
+
+
 def test_progress_stall_monitor_warns_once_until_progress(monkeypatch):
     now = [0.0]
     lines = []
