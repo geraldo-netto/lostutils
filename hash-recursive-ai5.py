@@ -814,30 +814,11 @@ def _readable_rep(paths):
     return paths[0]
 
 
-def _make_head_batch(config):
-    """Build a head-batch closure that binds `config` for error logging
-    (hr-arch-05). The closure shape ``paths -> [(path, digest), ...]``
-    is what :func:`_run_stage` expects."""
-    def _head_batch(paths):
-        return [(p, hash_head(p, config)) for p in paths]
-    return _head_batch
-
-
 def _make_head_candidate_batch(rep, config):
     """Build a stage-1 batch closure keyed by inode, not path (hr-scal-07)."""
     def _head_batch(items):
         return [(key, hash_head(rep[key], config)) for _size, key in items]
     return _head_batch
-
-
-def _make_tail_batch(config):
-    """Build a tail-batch closure that binds `config` for error logging
-    (hr-arch-05). Closure shape: ``[(size, path), ...] -> [(path,
-    digest), ...]``."""
-    def _tail_batch(items):
-        return [(p, hash_tail_and_samples(p, s, config=config))
-                for s, p in items]
-    return _tail_batch
 
 
 def _make_tail_stage2_batch(config):
@@ -848,14 +829,6 @@ def _make_tail_stage2_batch(config):
             for item in items
         ]
     return _tail_batch
-
-
-# Back-compat shims for callers (tests, embedders) that import these
-# bare-name helpers. The pipeline itself uses the `_make_*_batch`
-# closure factories above so each run can bind its own RunConfig.
-# `config=None` reproduces the legacy unbound-config behaviour (hr-dup-01).
-_head_batch = _make_head_batch(None)
-_tail_batch = _make_tail_batch(None)
 
 
 def _iter_batches(items, batch_size):

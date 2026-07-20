@@ -2188,26 +2188,6 @@ def test_log_hash_error_above_cap_suppresses(capsys):
     assert cfg.hash_error_suppressed == 3
 
 
-# --- back-compat legacy batch shims ---------------------------------------
-
-def test_head_batch_legacy_shim(tmp_path):
-    f = tmp_path / "a.bin"; f.write_bytes(b"hello")
-    out = hr._head_batch([str(f)])
-    assert len(out) == 1
-    p, d = out[0]
-    assert p == str(f)
-    assert isinstance(d, str) and len(d) == 64
-
-
-def test_tail_batch_legacy_shim(tmp_path):
-    f = tmp_path / "a.bin"; f.write_bytes(b"z" * (3 * hr.CAP))
-    out = hr._tail_batch([(3 * hr.CAP, str(f))])
-    assert len(out) == 1
-    p, d = out[0]
-    assert p == str(f)
-    assert isinstance(d, str) and len(d) == 64
-
-
 # --- hr-conc-05: SIGINT handler body --------------------------------------
 
 def test_install_sigint_cancel_sets_event_and_restores_default():

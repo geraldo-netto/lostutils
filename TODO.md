@@ -311,7 +311,6 @@ oze-unf-02 | open | low | organize_by_extension.py:2229 — `parse_args()` has n
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-leg-01 | open | low | hash-recursive-ai5.py:705 — `_make_head_batch`/`_make_tail_batch` and the `_head_batch`/`_tail_batch` module shims (745-746) have no production caller (pipeline uses `_make_head_candidate_batch`/`_make_tail_stage2_batch`); only their own legacy-shim tests at test_hash_recursive.py:1903/1912 exercise them. Decide delete vs keep. | legacy/deprecation — test-only constituency
 
 ## Audit picks deliberately rejected
 
