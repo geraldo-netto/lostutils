@@ -1400,11 +1400,17 @@ class App(tk.Tk):
             base = self._phys_base[kid]
             rec = self._assignments.get((layer, kid))
             if rec:
-                btn.configure(text="%s\n%s" % (base, rec["desc"][:8]), bg=COL_KEY_MAPPED)
+                btn.configure(
+                    text="%s\n%s" % (base, rec["desc"][:8]),
+                    bg=COL_KEY_MAPPED,
+                    relief="ridge",
+                )
             else:
-                btn.configure(text=base, bg=COL_KEY_IDLE)
+                btn.configure(text=base, bg=COL_KEY_IDLE, relief="raised")
         if self._selected_id is not None:
-            self._phys_buttons[self._selected_id].configure(bg=COL_KEY_SEL)
+            self._phys_buttons[self._selected_id].configure(
+                bg=COL_KEY_SEL, relief="sunken"
+            )
 
     def _select_key(self, key_id):
         if not self.kp.select_physical_key(key_id):

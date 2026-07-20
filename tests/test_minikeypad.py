@@ -1444,8 +1444,15 @@ def test_refresh_key_map_marks_mapped_and_idle(app):
     app._refresh_key_map()
     mapped = app._phys_buttons[2]
     assert mapped.cget("bg") == minikeypad.COL_KEY_MAPPED
+    assert mapped.cget("relief") == "ridge"
     assert "Xtra-lon" in mapped.cget("text")          # desc truncated to 8
     assert app._phys_buttons[3].cget("bg") == minikeypad.COL_KEY_IDLE
+    assert app._phys_buttons[3].cget("relief") == "raised"
+
+    app._selected_id = 2
+    app._refresh_key_map()
+    assert mapped.cget("bg") == minikeypad.COL_KEY_SEL
+    assert mapped.cget("relief") == "sunken"
 
 
 def test_key_name_mapping():

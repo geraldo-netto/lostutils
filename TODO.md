@@ -264,7 +264,6 @@ dnv3-ux-01 | open | low | deduplicate-by-namev3.py:188-196 — `_emit_self_colli
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-a11y-01 | open | low | minikeypad.py:1165 — the selected physical key is distinguished only by red background (`COL_KEY_SEL`) and mapped keys only by blue background (`COL_KEY_MAPPED`); color-only cues fail for color-blind users. Add a relief/border or text marker. | Laws of UX / WCAG use-of-color
 
 ## product engineering
 
