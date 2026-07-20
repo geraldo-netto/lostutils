@@ -57,6 +57,7 @@ ROOT_MAX_LENGTH = 4096
 HEADER_SNIFF_BYTES = 32
 SCAN_STALL_WARN_SECONDS = 60.0
 MOVE_STALL_WARN_SECONDS = 60.0
+MOVE_MAX_STALL_SECONDS = 300.0
 # oze-rel-05/oze-rel-08: refuse to treat out-of-range bucket indices as the
 # floor for new allocations. Matches the regex contract exactly: 5 digits → 0..99999.
 BUCKET_INDEX_MAX = 99_999
@@ -2014,18 +2015,30 @@ def _drain_futures(
     head_cache: dict[Path, HeadBytes],
     manager: BucketManager | None = None,
     wait_timeout: float = MOVE_STALL_WARN_SECONDS,
+    max_stall_seconds: float = MOVE_MAX_STALL_SECONDS,
+    now_fn: Callable[[], float] = time.monotonic,
 ) -> None:
     """Block until at least one future completes, then log results and prune
     the head_cache for finished sources (oze-conc-03 / oze-scal-05)."""
+    stalled_since = now_fn()
     while True:
         done, _ = wait(
             futures, timeout=wait_timeout, return_when=FIRST_COMPLETED)
         if done:
             break
+        elapsed = now_fn() - stalled_since
+        if elapsed >= max_stall_seconds:
+            for future in futures:
+                future.cancel()
+            raise RuntimeError(
+                "move stage aborted after "
+                f"{elapsed:.0f}s with no completed worker "
+                f"({len(futures)} in flight)"
+            )
         logger.warning(
             "move stage stalled: no completed worker for %.0fs "
             "(%d in flight)",
-            wait_timeout, len(futures),
+            elapsed, len(futures),
         )
     for fut in done:
         source = futures.pop(fut)

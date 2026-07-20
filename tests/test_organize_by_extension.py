@@ -3172,6 +3172,30 @@ class SourceCollisionResolution(unittest.TestCase):
             self.assertIn("move stage stalled", "\n".join(cm.output))
             self.assertEqual(stats.processed, 1)
 
+    def test_drain_futures_aborts_after_max_stall(self):
+        from concurrent.futures import Future
+        src = Path("/slow/source.bin")
+        fut: Future = Future()
+        now = [0.0]
+
+        def never_done(futures_arg, timeout, return_when):
+            now[0] += 0.6
+            return set(), set(futures_arg)
+
+        with patch.object(_oze, "wait", side_effect=never_done):
+            with self.assertRaisesRegex(RuntimeError, "move stage aborted"):
+                _oze._drain_futures(
+                    {fut: src},
+                    _oze._RunStats(),
+                    preview=False,
+                    head_cache={},
+                    wait_timeout=0.01,
+                    max_stall_seconds=1.0,
+                    now_fn=lambda: now[0],
+                )
+
+        self.assertTrue(fut.cancelled())
+
     def test_run_moves_cancels_pending_futures_on_unexpected_error(self):
         shutdown_calls = []
 

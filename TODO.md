@@ -162,7 +162,6 @@ lq-obs-21 | open | low | link_queue.py:1580 — the immediate consumer's `finall
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-watch-20 | open | med | link_queue.py:434 — the only per-item liveness guard is `command_timeout_seconds`, which ships default 0 (off), and even when enabled it is a total wall-clock cap (`_stream_and_wait` :2269 / `_arm_command_timeout` :2052) with no progress-stall detection; out of the box a single hung yt-dlp/aria2c that stops producing output pins a worker forever with no abort. Add a no-output-for-N-seconds stall watchdog on the streamed pipe independent of total wall-time, and/or ship a sane non-zero default. | watchdog — heartbeat / progress-stall detection + automatic abort
-oze-watch-01 | open | high | organize_by_extension.py:2002 — `_drain_futures` (and `_ScanStallMonitor._maybe_warn`:448) only LOG a stall every wait_timeout; a genuinely hung worker (an os.link/copy on a wedged NFS/SMB mount that never returns) blocks the entire run indefinitely with periodic warnings and no abort. Add a max-stall deadline that abandons/fails the stuck move (or aborts the run non-zero) so liveness detection has recovery teeth, not just detection. | watchdog — stall detected but no automatic abort/recovery semantics
 
 ## time & scheduling correctness
 
