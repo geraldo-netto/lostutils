@@ -976,15 +976,20 @@ class ConnectionMonitor:
             alive = False
         self._post(lambda: self.probe_done(alive, token))
 
-    def probe_done(self, alive, token=None):
+    def _probe_settled(self, token):
         if token is not None and token != self.token:
-            return
+            return False
         if token is not None:
             self.token += 1
         self.io_busy = False
+        self._on_state()
+        return True
+
+    def probe_done(self, alive, token=None):
+        if not self._probe_settled(token):
+            return
         if not alive:
             self._log("Device disconnected")
-        self._on_state()
 
     def try_connect(self, token=None):
         """Runs off the Tk thread so the connect/version probe never freezes UI."""
@@ -1000,12 +1005,7 @@ class ConnectionMonitor:
 
     def connect_done(self, ok, token=None):
         del ok                                 # logged by the device layer
-        if token is not None and token != self.token:
-            return
-        if token is not None:
-            self.token += 1
-        self.io_busy = False
-        self._on_state()
+        self._probe_settled(token)
 
 
 # --------------------------------------------------------------------------- #
