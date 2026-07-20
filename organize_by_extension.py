@@ -456,7 +456,12 @@ def _weak_header_should_keep_declared(declared: str, detected: str) -> bool:
     return declared != "no_extension" and detected in WEAK_HEADER_LABELS
 
 
-def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
+def resolve_real_extension(
+    path: Path,
+    ctx: SniffContext | None = None,
+    *,
+    log_mismatch: bool = True,
+) -> str:
     """Return the bucket extension for ``path`` (oze-dup-02).
 
     Header detection wins for strong mismatches (oze-perf-06): ``mypdf.doc`` →
@@ -505,10 +510,12 @@ def resolve_real_extension(path: Path, ctx: SniffContext | None = None) -> str:
         return declared
     # oze-perf-06: real mismatch — header authoritative. Warn so the user
     # notices misnamed / mistyped files.
-    logger.warning(
-        "header mismatch on %s: declared .%s but header is %s — bucketing under %s/",
-        path, declared, detected, detected,
-    )
+    if log_mismatch:
+        logger.warning(
+            "header mismatch on %s: declared .%s but header is %s — "
+            "bucketing under %s/",
+            path, declared, detected, detected,
+        )
     return detected
 
 
@@ -607,7 +614,9 @@ def is_bucketed_file(
     # with a .doc suffix would slip through a structural-only check. The sniff
     # head_cache (oze-perf-04) keeps the cost to one read per file across the
     # whole run anyway.
-    return ext_dir == resolve_real_extension(path, ctx=ctx)
+    return ext_dir == resolve_real_extension(
+        path, ctx=ctx, log_mismatch=False
+    )
 
 
 def _scan_regular_path(

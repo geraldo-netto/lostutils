@@ -1582,6 +1582,18 @@ class HeaderAlwaysWinsTests(unittest.TestCase):
             self.assertEqual(ext, "pdf")
             self.assertTrue(any("header mismatch" in m for m in cm.output))
 
+    def test_bucket_membership_check_suppresses_mismatch_warning(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            f = root / "pdf" / "p00000" / "mypdf.doc"
+            f.parent.mkdir(parents=True)
+            f.write_bytes(b"%PDF-1.4\n")
+
+            with patch("organize_by_extension.logger.warning") as warning:
+                self.assertTrue(is_bucketed_file(root, f))
+
+            warning.assert_not_called()
+
     def test_family_compat_does_not_warn(self):
         with TemporaryDirectory() as d:
             f = Path(d) / "sheet.docx"
