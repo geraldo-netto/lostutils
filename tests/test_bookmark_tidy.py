@@ -1047,6 +1047,29 @@ def test_main_logs_duplicate_summary(tmp_path, monkeypatch, caplog):
     assert "Merged/removed 1 duplicate bookmark(s)." in caplog.text
 
 
+def test_run_uses_tidy_path_for_all_immutable_bookmarks(tmp_path, monkeypatch):
+    output = tmp_path / "out.json"
+    args = bookmark_tidy.parse_args(
+        ["input.html", "--immutable-root", "Work", "-o", str(output)]
+    )
+    monkeypatch.setattr(
+        bookmark_tidy, "_input_paths_from_args", lambda _args: [tmp_path / "input.html"]
+    )
+    monkeypatch.setattr(
+        bookmark_tidy,
+        "read_all_bookmarks",
+        lambda _paths: [
+            bookmark_tidy.Bookmark(
+                "https://example.test", "Example", ("Work",)
+            )
+        ],
+    )
+
+    assert bookmark_tidy._run(args) == 0
+    written = json.loads(output.read_text(encoding="utf-8"))
+    assert written["roots"]["bookmark_bar"]["children"][0]["name"] == "Work"
+
+
 def test_parse_args_help_documents_llm_tuning_flags(capsys):
     with pytest.raises(SystemExit) as exc:
         bookmark_tidy.parse_args(["--help"])

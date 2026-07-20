@@ -1610,17 +1610,22 @@ def _run(args: argparse.Namespace) -> int:
         raise UserError("no bookmarks found in supported input files")
     immutable = list(args.immutable_root) + load_immutable_file(args.immutable_file)
     options = _normalization_from_args(args)
-    immutable_bookmarks, mutable_bookmarks = deduplicate_bookmarks(bookmarks, _immutable_names(immutable), options)
-    duplicate_count = len(bookmarks) - len(immutable_bookmarks) - len(mutable_bookmarks)
-    if duplicate_count:
-        LOGGER.warning("Merged/removed %d duplicate bookmark(s).", duplicate_count)
-    categorizer = _categorizer_from_args(args, mutable_bookmarks)
-    organized = immutable_bookmarks + _assign_categories(
-        mutable_bookmarks,
+    categorizer = (
+        _categorizer_from_args(args, bookmarks)
+        if args.model is not None
+        else None
+    )
+    organized = tidy_bookmarks(
+        bookmarks,
+        immutable,
+        options,
         categorizer,
         args.fallback_category,
         args.llm_batch_size,
     )
+    duplicate_count = len(bookmarks) - len(organized)
+    if duplicate_count:
+        LOGGER.warning("Merged/removed %d duplicate bookmark(s).", duplicate_count)
     output = Path(args.output).expanduser() if args.output else default_output_path(args.output_format)
     write_output(organized, output, args.output_format, args.force)
     LOGGER.warning("Wrote %d bookmarks to %s", len(organized), output)
