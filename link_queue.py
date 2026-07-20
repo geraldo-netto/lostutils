@@ -18,7 +18,8 @@ Command templates support the following placeholders:
 
 Config is persisted as YAML to $XDG_CONFIG_HOME/link_queue/link_queue_config.yaml
 (or ~/.config/link_queue/link_queue_config.yaml). A legacy
-~/.link_queue_config.json is migrated to YAML once on first run.
+link_queue_config.json in that directory, or beside the script as a fallback,
+is migrated to YAML once on first run.
 """
 
 from __future__ import annotations
