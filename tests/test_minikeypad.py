@@ -1196,6 +1196,26 @@ def test_download_busy(app):
     assert "busy" in app.dl_status.cget("text").lower()
 
 
+@pytest.mark.parametrize(
+    "show",
+    [lambda app: app._dl_result(False), lambda app: app._dl_note("Busy")],
+)
+def test_status_flashes_clear_to_the_same_neutral_state(app, monkeypatch, show):
+    scheduled = []
+    monkeypatch.setattr(
+        app, "after", lambda delay, callback: scheduled.append((delay, callback))
+    )
+
+    show(app)
+    delay, clear = scheduled[-1]
+    clear()
+
+    assert delay == minikeypad.STATUS_CLEAR_MS
+    assert app.dl_status.cget("text") == ""
+    assert app.dl_status.cget("fg") == "black"
+    assert app.dl_status.cget("bg") == app.cget("bg")
+
+
 def test_download_nothing_assigned(app):
     app._io_busy = False
     app.dev = FakeDev(connected=True)

@@ -1567,21 +1567,27 @@ class App(tk.Tk):
         buf[1] = 0xA1 if flash == "led" else 0xAA
         return buf
 
+    def _flash_status(self, text, fg, bg):
+        self.dl_status.configure(text=text, fg=fg, bg=bg)
+        self.after(
+            STATUS_CLEAR_MS,
+            lambda: self.dl_status.configure(
+                text="", fg="black", bg=self.cget("bg")
+            ),
+        )
+
     def _dl_result(self, ok):
         if ok:
-            self.dl_status.configure(text="Write success", fg="white", bg=COL_CONNECTED)
-            self.log("Write success")
+            text, bg = "Write success", COL_CONNECTED
         else:
-            self.dl_status.configure(text="Write failed", fg="white", bg=COL_DISCONNECTED)
-            self.log("Write failed")
-        self.after(STATUS_CLEAR_MS,
-                   lambda: self.dl_status.configure(text="", bg=self.cget("bg")))
+            text, bg = "Write failed", COL_DISCONNECTED
+        self._flash_status(text, "white", bg)
+        self.log(text)
 
     def _dl_note(self, msg):
         """Neutral, visible feedback for the 'nothing to send' paths."""
-        self.dl_status.configure(text=msg, fg="black", bg=self.cget("bg"))
+        self._flash_status(msg, "black", self.cget("bg"))
         self.log(msg)
-        self.after(STATUS_CLEAR_MS, lambda: self.dl_status.configure(text=""))
 
     def _download(self):
         if self._io_busy:
