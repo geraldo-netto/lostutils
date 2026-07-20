@@ -421,10 +421,7 @@ class KeyParam:
         self.data[kc - 1] |= 2                          # Shift
         self.data[kc] = keycode & 0xFF
         self._store_char(self.KeyChar, kc - 5, label)
-        # ShiftGeneral_Char_Set2
-        self.data[self.KeyType_Num] |= 1
-        self.KEY_Char_Num += 2
-        self.data[self.KeyGroupCharNum] += 1
+        self._general_char_set()
         self.FunKEY_Char_Num += 1
         return True
 

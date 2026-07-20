@@ -129,6 +129,7 @@ def test_shift_and_packs_shift_bit_and_code():
     assert kp.shift_and(30, "!") is True
     assert kp.data[4] & 2                  # shift bit on the modifier byte
     assert kp.data[5] == 30
+    assert kp.data[kp.KeyGroupCharNum] == 1
 
 
 def test_shift_and_advances_when_slot_used():
