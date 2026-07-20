@@ -10,7 +10,7 @@ Pipeline:
   3. Size pre-filter — inodes whose size is unique can't have duplicates.
   4. Stage 1 hash — BLAKE3 of the first 4 MiB of each surviving inode.
      Group by (size, head_digest).
-  5. Stage 2 hash — for groups with size > 8 MiB and ≥2 members, also
+  5. Stage 2 hash — for groups with size > CAP (4 MiB) and ≥2 members, also
      hash the last 4 MiB, a contiguous 4 MiB block at the file's center,
      plus two 64 KiB samples at size/3 and 2*size/3. Files that match on
      all windows are reported as duplicates; the rest fall out (head
@@ -730,7 +730,7 @@ class ThirdsStrategy(SamplingStrategy):
     files that differ only somewhere in their middle are now caught.
 
     Offsets are clamped so no window can read past EOF (hr-rel-06): given
-    the stage-2 gate of `size > 2*CAP`, every window's end-point already
+    the stage-2 gate of `size > CAP`, every window's end-point already
     fits, but the clamps keep the function safe if a future caller relaxes
     the gate, if `SAMPLE` grows, or for the center block on small files.
 
@@ -753,10 +753,10 @@ class ThirdsStrategy(SamplingStrategy):
         b = min(b, last_sample_start)
         # Center block: start at the file midpoint minus half a cap so
         # the window is centered, clamped so a cap-wide read never runs past
-        # EOF (covers small files if the size > 2*cap gate is ever relaxed).
+        # EOF (covers small files if the size > cap gate is ever relaxed).
         last_cap_start = max(0, size - cap)
         mid = min(max(0, size // 2 - cap // 2), last_cap_start)
-        # All stage-2 windows are gated by `size > 2*cap`, so they MUST
+        # All stage-2 windows are gated by `size > cap`, so they MUST
         # yield their full length. strict=True triggers hr-rel-09 short-read
         # detection.
         return [
@@ -771,7 +771,7 @@ _DEFAULT_SAMPLING: SamplingStrategy = ThirdsStrategy()
 
 
 def hash_tail_and_samples(path, size, strategy=None, config=None):
-    """Stage 2 (only when size > 2*CAP): BLAKE3 of the last CAP bytes, a
+    """Stage 2 (only when size > CAP): BLAKE3 of the last CAP bytes, a
     center CAP block at the file midpoint, plus two SAMPLE-byte windows
     around size/3 and 2*size/3 (hr-rel-05). Catches files that share a
     container header but differ anywhere in the body.
@@ -1098,7 +1098,7 @@ def _ingest(it, aliases, inode_size, alias_cap, overflow) -> None:
         # for the same (dev, ino) should report the same size, but a stat
         # race (file written between the two scandir hits) can disagree.
         # Last-writer-wins silently let the inode inherit whichever size
-        # the walk happened to see last, which then drives the CAP / 2*CAP
+        # the walk happened to see last, which then drives the CAP
         # stage gating and the stage-2 sample offsets. Pinning the first
         # observed size makes the choice deterministic regardless of walk
         # ordering.

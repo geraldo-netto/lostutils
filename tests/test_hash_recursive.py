@@ -160,7 +160,7 @@ def test_find_duplicate_groups_stage1_and_stage2():
         # small identical pair -> confirmed at stage 1 (head is whole file)
         _write(root / "s1.bin", b"hello-small")
         _write(root / "s2.bin", b"hello-small")
-        # large identical pair (> 2*CAP) -> goes through stage 2
+        # large identical pair (> CAP) -> goes through stage 2
         big = b"A" * (2 * hr.CAP + 4096)
         _write(root / "big1.bin", big)
         _write(root / "big2.bin", big)
@@ -211,7 +211,7 @@ def test_center_block_catches_middle_only_difference(tmp_path):
     # both 64 KiB thirds-samples, differing ONLY at the file midpoint, must
     # NOT be grouped — they would have collided under the head+tail+samples-
     # only design that this block was added to fix.
-    size = 3 * hr.CAP                       # 12 MiB > 8 MiB stage-2 gate
+    size = 3 * hr.CAP                       # 12 MiB > 4 MiB stage-2 gate
     base = bytearray(b"A" * size)
     a = bytes(base)
     mid = size // 2                         # 1.5*CAP — inside the center block
@@ -749,7 +749,7 @@ def test_hash_tail_and_samples_clamps_windows(tmp_path):
     orig = hr._hash_file_windows
     try:
         hr._hash_file_windows = fake_hash    # type: ignore[assignment]
-        hr.hash_tail_and_samples("/dummy", 3 * hr.CAP)   # > 2*CAP
+        hr.hash_tail_and_samples("/dummy", 3 * hr.CAP)   # > CAP
         for window in captured["windows"]:
             offset, length, whence = window[0], window[1], window[2]
             if whence == hr.os.SEEK_SET:
@@ -760,7 +760,7 @@ def test_hash_tail_and_samples_clamps_windows(tmp_path):
 
 
 def test_hash_tail_and_samples_tiny_size_does_not_overflow():
-    # Defensive: even if a future caller drops the size > 2*CAP gate, no
+    # Defensive: even if a future caller drops the size > CAP gate, no
     # window may read past EOF.
     captured = {}
 
