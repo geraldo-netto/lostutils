@@ -4,13 +4,12 @@
 import argparse
 import json
 import logging
+import multiprocessing
 import os
-import queue
 import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -32,6 +31,8 @@ DEFAULT_LLM_MAX_TOKENS = 1024
 LLAMA_CPP_PYTHON_REQUIREMENT = "llama-cpp-python==0.3.32"
 LLAMA_INSTALL_TIMEOUT_SECONDS = 300
 LLAMA_INFERENCE_TIMEOUT_SECONDS = 120
+LLAMA_MODEL_LOAD_TIMEOUT_SECONDS = 300
+LLAMA_PROCESS_STOP_SECONDS = 1
 LLM_CONSECUTIVE_FAILURE_LIMIT = 3
 FORMAT_SNIFF_CHARS = 4096
 MOZLZ4_MAGIC = b"mozLz40\x00"
@@ -1029,6 +1030,54 @@ def _category_path(value: Sequence[str] | str | None, fallback: str) -> tuple[st
     return clean or (_clean_folder_part(fallback),)
 
 
+def _complete_llama(llm: Any, prompt: str, max_tokens: int) -> str:
+    if hasattr(llm, "create_chat_completion"):
+        response = llm.create_chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=max_tokens,
+        )
+        return str(response["choices"][0]["message"]["content"])
+    response = llm(prompt, temperature=0, max_tokens=max_tokens)
+    return str(response["choices"][0]["text"])
+
+
+def _llama_process_worker(
+    connection: Any,
+    model_path: str,
+    auto_install: bool,
+    context: int,
+    gpu_layers: int,
+    max_tokens: int,
+) -> None:
+    try:
+        Llama = _import_llama(auto_install)
+        llm = Llama(
+            model_path=model_path,
+            n_ctx=context,
+            n_gpu_layers=gpu_layers,
+            verbose=False,
+        )
+        connection.send(("ready", ""))
+        while True:
+            command, value = connection.recv()
+            if command == "close":
+                break
+            try:
+                connection.send(("ok", _complete_llama(llm, value, max_tokens)))
+            except Exception as exc:
+                connection.send(("error", str(exc)))
+    except EOFError:
+        pass
+    except Exception as exc:
+        try:
+            connection.send(("startup_error", str(exc)))
+        except (BrokenPipeError, EOFError, OSError):
+            pass
+    finally:
+        connection.close()
+
+
 class LlamaCategorizer:
     def __init__(
         self,
@@ -1038,62 +1087,96 @@ class LlamaCategorizer:
         gpu_layers: int,
         max_tokens: int,
     ) -> None:
-        Llama = _import_llama(auto_install)
+        context_name = "spawn" if os.name == "nt" else "fork"
+        process_context = multiprocessing.get_context(context_name)
+        parent, child = process_context.Pipe()
+        self._connection = parent
+        self._process = process_context.Process(
+            target=_llama_process_worker,
+            args=(
+                child,
+                str(model_path),
+                auto_install,
+                context,
+                gpu_layers,
+                max_tokens,
+            ),
+            daemon=True,
+        )
         try:
-            self._llm = Llama(
-                model_path=str(model_path),
-                n_ctx=context,
-                n_gpu_layers=gpu_layers,
-                verbose=False,
-            )
+            self._process.start()
+            child.close()
         except Exception as exc:
+            parent.close()
+            child.close()
             raise UserError(
-                f"could not load model {model_path}: {exc}; "
-                "verify the file is a valid GGUF model compatible with llama-cpp-python"
+                f"could not start llama.cpp worker for {model_path}: {exc}"
             ) from exc
-        self._max_tokens = max_tokens
+        if not parent.poll(LLAMA_MODEL_LOAD_TIMEOUT_SECONDS):
+            self._abort()
+            raise UserError(
+                f"could not load model {model_path}: timed out after "
+                f"{LLAMA_MODEL_LOAD_TIMEOUT_SECONDS:g}s"
+            )
+        try:
+            status, message = parent.recv()
+        except (EOFError, OSError) as exc:
+            self._abort()
+            raise UserError(
+                f"could not load model {model_path}: worker exited"
+            ) from exc
+        if status != "ready":
+            self._abort()
+            raise UserError(
+                f"could not load model {model_path}: {message}; "
+                "verify the file is a valid GGUF model compatible with "
+                "llama-cpp-python"
+            )
 
     def __call__(self, bookmarks: Sequence[Bookmark]) -> Mapping[int, Sequence[str] | str]:
         prompt = _category_prompt(bookmarks)
         return parse_category_response(self._complete(prompt), len(bookmarks))
 
     def _complete(self, prompt: str) -> str:
-        return _call_with_timeout(
-            lambda: self._complete_sync(prompt),
-            LLAMA_INFERENCE_TIMEOUT_SECONDS,
-            "LLM inference",
-        )
-
-    def _complete_sync(self, prompt: str) -> str:
-        if hasattr(self._llm, "create_chat_completion"):
-            response = self._llm.create_chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                max_tokens=self._max_tokens,
-            )
-            return str(response["choices"][0]["message"]["content"])
-        response = self._llm(prompt, temperature=0, max_tokens=self._max_tokens)
-        return str(response["choices"][0]["text"])
-
-
-def _call_with_timeout(call, timeout_seconds: float, label: str):
-    done: queue.Queue = queue.Queue(maxsize=1)
-
-    def worker() -> None:
         try:
-            done.put((True, call()))
-        except Exception as exc:
-            done.put((False, exc))
+            self._connection.send(("complete", prompt))
+        except (BrokenPipeError, EOFError, OSError) as exc:
+            raise UserError("LLM inference worker is unavailable") from exc
+        if not self._connection.poll(LLAMA_INFERENCE_TIMEOUT_SECONDS):
+            self._abort()
+            raise UserError(
+                "LLM inference timed out after "
+                f"{LLAMA_INFERENCE_TIMEOUT_SECONDS:g}s"
+            )
+        try:
+            status, value = self._connection.recv()
+        except (EOFError, OSError) as exc:
+            self._abort()
+            raise UserError("LLM inference worker exited unexpectedly") from exc
+        if status == "ok":
+            return str(value)
+        raise UserError(f"LLM inference failed: {value}")
 
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
-    try:
-        ok, value = done.get(timeout=timeout_seconds)
-    except queue.Empty as exc:
-        raise UserError(f"{label} timed out after {timeout_seconds:g}s") from exc
-    if ok:
-        return value
-    raise value
+    def _abort(self) -> None:
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(LLAMA_PROCESS_STOP_SECONDS)
+            if self._process.is_alive():
+                self._process.kill()
+                self._process.join()
+        self._connection.close()
+
+    def close(self) -> None:
+        if self._process.is_alive():
+            try:
+                self._connection.send(("close", ""))
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            self._process.join(LLAMA_PROCESS_STOP_SECONDS)
+        if self._process.is_alive():
+            self._abort()
+        else:
+            self._connection.close()
 
 
 def _import_llama(auto_install: bool) -> Any:
@@ -1637,14 +1720,19 @@ def _run(args: argparse.Namespace) -> int:
         if args.model is not None
         else None
     )
-    organized = tidy_bookmarks(
-        bookmarks,
-        immutable,
-        options,
-        categorizer,
-        args.fallback_category,
-        args.llm_batch_size,
-    )
+    try:
+        organized = tidy_bookmarks(
+            bookmarks,
+            immutable,
+            options,
+            categorizer,
+            args.fallback_category,
+            args.llm_batch_size,
+        )
+    finally:
+        close = getattr(categorizer, "close", None)
+        if callable(close):
+            close()
     duplicate_count = len(bookmarks) - len(organized)
     if duplicate_count:
         LOGGER.warning("Merged/removed %d duplicate bookmark(s).", duplicate_count)

@@ -88,8 +88,42 @@ class HangingLlama:
 
     def create_chat_completion(self, **kwargs):
         assert "messages" in kwargs
-        bookmark_tidy.threading.Event().wait(0.2)
+        bookmark_tidy.time.sleep(0.2)
         return {"choices": [{"message": {"content": '{"items":[]}'}}]}
+
+
+class BrokenInferenceLlama:
+    def __init__(self, **kwargs):
+        pass
+
+    def create_chat_completion(self, **kwargs):
+        raise RuntimeError("worker failed")
+
+
+class FakeLlamaConnection:
+    def __init__(self, received=(), *, poll_result=True, send_error=None, recv_error=None):
+        self.received = list(received)
+        self.poll_result = poll_result
+        self.send_error = send_error
+        self.recv_error = recv_error
+        self.sent = []
+        self.closed = False
+
+    def send(self, value):
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append(value)
+
+    def poll(self, _timeout):
+        return self.poll_result
+
+    def recv(self):
+        if self.recv_error is not None:
+            raise self.recv_error
+        return self.received.pop(0)
+
+    def close(self):
+        self.closed = True
 
 
 def _install_fake_llama(monkeypatch, llama_cls):
@@ -726,13 +760,47 @@ def test_llama_categorizer_chat_and_text_paths(monkeypatch, tmp_path):
     chat = bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
 
     assert chat([_sample_bookmark()]) == {0: ("AI", "Docs")}
-    assert FakeLlamaChat.kwargs["model_path"].endswith("model.gguf")
+    chat.close()
 
     _install_fake_llama(monkeypatch, FakeLlamaText)
     text = bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 1, 64)
 
     assert text([_sample_bookmark()]) == {0: ("Reference", "Docs")}
-    assert FakeLlamaText.kwargs["n_gpu_layers"] == 1
+    text.close()
+
+
+def test_complete_llama_supports_chat_and_text_models():
+    assert "AI" in bookmark_tidy._complete_llama(FakeLlamaChat(), "prompt", 64)
+    assert "Reference" in bookmark_tidy._complete_llama(FakeLlamaText(), "Categorize", 64)
+
+
+@pytest.mark.parametrize(
+    ("llama_cls", "expected_status"),
+    [(FakeLlamaChat, "ok"), (BrokenInferenceLlama, "error")],
+)
+def test_llama_process_worker_reports_completion(monkeypatch, llama_cls, expected_status):
+    connection = FakeLlamaConnection([("complete", "prompt"), ("close", "")])
+    monkeypatch.setattr(bookmark_tidy, "_import_llama", lambda _auto_install: llama_cls)
+
+    bookmark_tidy._llama_process_worker(connection, "model.gguf", False, 128, 2, 64)
+
+    assert connection.sent[0] == ("ready", "")
+    assert connection.sent[1][0] == expected_status
+    assert connection.closed
+
+
+def test_llama_process_worker_reports_startup_failure(monkeypatch):
+    connection = FakeLlamaConnection()
+
+    def fail_import(_auto_install):
+        raise RuntimeError("missing runtime")
+
+    monkeypatch.setattr(bookmark_tidy, "_import_llama", fail_import)
+
+    bookmark_tidy._llama_process_worker(connection, "model.gguf", False, 128, 0, 64)
+
+    assert connection.sent == [("startup_error", "missing runtime")]
+    assert connection.closed
 
 
 def test_llama_categorizer_wraps_model_load_failure(monkeypatch, tmp_path):
@@ -746,6 +814,43 @@ def test_llama_categorizer_wraps_model_load_failure(monkeypatch, tmp_path):
         bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
 
 
+def test_llama_categorizer_wraps_worker_start_failure(monkeypatch, tmp_path):
+    parent = FakeLlamaConnection()
+    child = FakeLlamaConnection()
+    process = types.SimpleNamespace(start=lambda: (_ for _ in ()).throw(OSError("no process")))
+    context = types.SimpleNamespace(
+        Pipe=lambda: (parent, child),
+        Process=lambda **_kwargs: process,
+    )
+    monkeypatch.setattr(bookmark_tidy.multiprocessing, "get_context", lambda _name: context)
+
+    with pytest.raises(bookmark_tidy.UserError, match="could not start .*no process"):
+        bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
+
+    assert parent.closed
+    assert child.closed
+
+
+def test_llama_categorizer_wraps_model_load_timeout(monkeypatch, tmp_path):
+    parent = FakeLlamaConnection(poll_result=False)
+    child = FakeLlamaConnection()
+    process = types.SimpleNamespace(
+        start=lambda: None,
+        is_alive=lambda: False,
+    )
+    context = types.SimpleNamespace(
+        Pipe=lambda: (parent, child),
+        Process=lambda **_kwargs: process,
+    )
+    monkeypatch.setattr(bookmark_tidy.multiprocessing, "get_context", lambda _name: context)
+
+    with pytest.raises(bookmark_tidy.UserError, match="timed out"):
+        bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
+
+    assert parent.closed
+    assert child.closed
+
+
 def test_llama_categorizer_inference_timeout(monkeypatch, tmp_path):
     _install_fake_llama(monkeypatch, HangingLlama)
     monkeypatch.setattr(bookmark_tidy, "LLAMA_INFERENCE_TIMEOUT_SECONDS", 0.01)
@@ -753,6 +858,84 @@ def test_llama_categorizer_inference_timeout(monkeypatch, tmp_path):
 
     with pytest.raises(bookmark_tidy.UserError, match="LLM inference timed out"):
         chat._complete("prompt")
+    assert not chat._process.is_alive()
+
+
+def test_llama_categorizer_surfaces_worker_failure(monkeypatch, tmp_path):
+    _install_fake_llama(monkeypatch, BrokenInferenceLlama)
+    chat = bookmark_tidy.LlamaCategorizer(
+        tmp_path / "model.gguf", False, 128, 0, 64
+    )
+
+    with pytest.raises(bookmark_tidy.UserError, match="worker failed"):
+        chat._complete("prompt")
+
+    chat.close()
+
+
+@pytest.mark.parametrize(
+    ("connection", "message"),
+    [
+        (FakeLlamaConnection(send_error=BrokenPipeError()), "unavailable"),
+        (FakeLlamaConnection(recv_error=EOFError()), "exited unexpectedly"),
+    ],
+)
+def test_llama_categorizer_wraps_connection_failures(connection, message):
+    chat = object.__new__(bookmark_tidy.LlamaCategorizer)
+    chat._connection = connection
+    chat._process = types.SimpleNamespace(is_alive=lambda: False)
+
+    with pytest.raises(bookmark_tidy.UserError, match=message):
+        chat._complete("prompt")
+
+
+def test_llama_categorizer_abort_kills_stubborn_process():
+    alive = iter([True, True])
+    calls = []
+    process = types.SimpleNamespace(
+        is_alive=lambda: next(alive),
+        terminate=lambda: calls.append("terminate"),
+        kill=lambda: calls.append("kill"),
+        join=lambda *args: calls.append(("join", args)),
+    )
+    connection = FakeLlamaConnection()
+    chat = object.__new__(bookmark_tidy.LlamaCategorizer)
+    chat._process = process
+    chat._connection = connection
+
+    chat._abort()
+
+    assert calls == [
+        "terminate",
+        ("join", (bookmark_tidy.LLAMA_PROCESS_STOP_SECONDS,)),
+        "kill",
+        ("join", ()),
+    ]
+    assert connection.closed
+
+
+def test_llama_categorizer_close_aborts_unresponsive_process():
+    class StalledProcess:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, *_args):
+            pass
+
+        def terminate(self):
+            self.alive = False
+
+    connection = FakeLlamaConnection(send_error=BrokenPipeError())
+    chat = object.__new__(bookmark_tidy.LlamaCategorizer)
+    chat._process = StalledProcess()
+    chat._connection = connection
+
+    chat.close()
+
+    assert connection.closed
+    assert not chat._process.is_alive()
 
 
 def test_import_llama_missing_and_auto_install(monkeypatch):
@@ -1140,11 +1323,3 @@ def test_detect_json_format_reads_and_classifies_file(tmp_path):
     source.write_text('{"roots": {}}', encoding="utf-8")
 
     assert bookmark_tidy._detect_json_format(source) == "chromium"
-
-
-def test_call_with_timeout_propagates_worker_failure():
-    def fail():
-        raise RuntimeError("worker failed")
-
-    with pytest.raises(RuntimeError, match="worker failed"):
-        bookmark_tidy._call_with_timeout(fail, 1, "test worker")
