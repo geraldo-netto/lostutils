@@ -1439,12 +1439,17 @@ class App(tk.Tk):
         """A mutator refused the click (buffer full); tell the user."""
         self.log("Key buffer full; '%s' ignored." % label)
 
-    def _basic_key(self, code, label):
+    def _apply_mutation(self, mutate, label):
         if not self._need_key():
-            return
-        if not self.kp.basic_key(code, label):
+            return False
+        changed = mutate()
+        if not changed:
             self._dropped(label)
         self._refresh_display()
+        return changed
+
+    def _basic_key(self, code, label):
+        self._apply_mutation(lambda: self.kp.basic_key(code, label), label)
 
     def _script_key(self, glyph, scancode):
         """Extended-script keycap: scancode, or Unicode macro when toggled on."""
@@ -1454,17 +1459,16 @@ class App(tk.Tk):
             self._basic_key(scancode, glyph)
 
     def _unicode_char(self, glyph):
-        if not self._need_key():
-            return
         platform = _unicode_platform()
         if platform is None:
-            self.log("Unicode mode not supported on this OS (%s)." % sys.platform)
+            if self._need_key():
+                self.log(
+                    "Unicode mode not supported on this OS (%s)." % sys.platform
+                )
             return
-        if not self.kp.unicode_macro(ord(glyph), platform):
-            self._dropped(glyph)
-        else:
+        if self._apply_mutation(
+                lambda: self.kp.unicode_macro(ord(glyph), platform), glyph):
             self.log("Unicode %s -> U+%04X macro (%s)" % (glyph, ord(glyph), platform))
-        self._refresh_display()
 
     def _basic_mod(self, bit, name):
         if not self._need_key():
@@ -1479,27 +1483,17 @@ class App(tk.Tk):
         self._refresh_display()
 
     def _shift_and(self, code, label):
-        if not self._need_key():
-            return
-        if not self.kp.shift_and(code, label):
-            self._dropped(label)
-        self._refresh_display()
+        self._apply_mutation(lambda: self.kp.shift_and(code, label), label)
 
     def _multimedia(self, item):
-        if not self._need_key():
-            return
         name, r0, r2, ro = item
-        if not self.kp.multimedia(name, r0, r2, ro):
-            self._dropped(name)
-        self._refresh_display()
+        self._apply_mutation(
+            lambda: self.kp.multimedia(name, r0, r2, ro), name
+        )
 
     def _mouse(self, item):
-        if not self._need_key():
-            return
         name, vals = item
-        if not self.kp.mouse(name, *vals):
-            self._dropped(name)
-        self._refresh_display()
+        self._apply_mutation(lambda: self.kp.mouse(name, *vals), name)
 
     def _led(self, item):
         name, mode = item
