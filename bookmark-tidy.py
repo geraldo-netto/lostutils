@@ -1528,7 +1528,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inputs", nargs="*", help="Bookmark files or folders. If omitted, browser profiles are discovered.")
     parser.add_argument("-o", "--output", help="Output file path. Defaults to bookmarks_tidy_output.json/html.")
-    parser.add_argument("--output-format", "--format", choices=("chrome", "firefox", "netscape"), default="chrome")
+    parser.add_argument(
+        "--output-format", "--format",
+        choices=("chrome", "firefox", "netscape"),
+        default="chrome",
+        help="Bookmark export format (default: chrome).",
+    )
     parser.add_argument("--model", type=Path, help="Local GGUF model path loaded through llama-cpp-python.")
     parser.add_argument("--auto-install-llama", action="store_true", help="Install llama-cpp-python with pip if missing.")
     parser.add_argument("--immutable-root", action="append", default=[], help="Top-level folder/category name to copy untouched.")
@@ -1536,13 +1541,25 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--discover-browsers", action="store_true", help="Add default Chrome, Edge, and Firefox profiles to inputs.")
     parser.add_argument("--no-recursive", dest="recursive", action="store_false", default=True, help="Do not scan input folders recursively.")
     parser.add_argument("--force", action="store_true", help="Overwrite an existing output file.")
-    parser.add_argument("--keep-fragments", dest="strip_fragment", action="store_false", default=True)
-    parser.add_argument("--keep-http-https-distinct", dest="collapse_http_https", action="store_false", default=True)
-    parser.add_argument("--keep-trailing-slash", dest="strip_trailing_slash", action="store_false", default=True)
-    parser.add_argument("--keep-default-port", dest="strip_default_port", action="store_false", default=True)
-    parser.add_argument("--keep-www", dest="strip_www", action="store_false", default=True)
-    parser.add_argument("--keep-tracking-params", dest="strip_tracking_params", action="store_false", default=True)
-    parser.add_argument("--preserve-url-host-case", dest="lowercase_host", action="store_false", default=True)
+    parser.add_argument("--keep-fragments", dest="strip_fragment", action="store_false",
+                        default=True, help="Keep URL fragments when matching duplicates.")
+    parser.add_argument("--keep-http-https-distinct", dest="collapse_http_https",
+                        action="store_false", default=True,
+                        help="Treat HTTP and HTTPS URLs as distinct.")
+    parser.add_argument("--keep-trailing-slash", dest="strip_trailing_slash",
+                        action="store_false", default=True,
+                        help="Keep trailing URL path slashes.")
+    parser.add_argument("--keep-default-port", dest="strip_default_port",
+                        action="store_false", default=True,
+                        help="Keep explicit default ports such as :80 and :443.")
+    parser.add_argument("--keep-www", dest="strip_www", action="store_false",
+                        default=True, help="Keep a leading www. host label.")
+    parser.add_argument("--keep-tracking-params", dest="strip_tracking_params",
+                        action="store_false", default=True,
+                        help="Keep known URL tracking query parameters.")
+    parser.add_argument("--preserve-url-host-case", dest="lowercase_host",
+                        action="store_false", default=True,
+                        help="Preserve host letter case in exported URLs.")
     parser.add_argument("--llm-context", type=_positive_int, default=DEFAULT_LLM_CONTEXT,
                         help=f"llama.cpp context size in tokens (default {DEFAULT_LLM_CONTEXT})")
     parser.add_argument("--llm-gpu-layers", type=_gpu_layers_int, default=0,
@@ -1551,7 +1568,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                         help=f"maximum tokens generated for categorization (default {DEFAULT_LLM_MAX_TOKENS})")
     parser.add_argument("--llm-batch-size", type=_positive_int, default=DEFAULT_LLM_BATCH_SIZE,
                         help=f"llama.cpp prompt batch size (default {DEFAULT_LLM_BATCH_SIZE})")
-    parser.add_argument("--fallback-category", default=DEFAULT_FALLBACK_CATEGORY)
+    parser.add_argument(
+        "--fallback-category",
+        default=DEFAULT_FALLBACK_CATEGORY,
+        help=("Category used when LLM categorization fails "
+              f"(default: {DEFAULT_FALLBACK_CATEGORY})."),
+    )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     return parser.parse_args(argv)
 

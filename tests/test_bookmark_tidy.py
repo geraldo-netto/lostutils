@@ -1080,6 +1080,15 @@ def test_parse_args_help_documents_llm_tuning_flags(capsys):
     assert "model layers to offload" in out
     assert "maximum tokens generated" in out
     assert "prompt batch size" in out
+    assert "Bookmark export format" in out
+    assert "Keep URL fragments" in out
+    assert "Treat HTTP and HTTPS" in out
+    assert "Keep trailing URL" in out
+    assert "Keep explicit default ports" in out
+    assert "Keep a leading www" in out
+    assert "Keep known URL tracking" in out
+    assert "Preserve host letter case" in out
+    assert "Category used when LLM" in out
 
 
 @pytest.mark.parametrize("flag", ["--llm-context", "--llm-max-tokens", "--llm-batch-size"])
