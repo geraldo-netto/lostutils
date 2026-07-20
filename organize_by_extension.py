@@ -2352,7 +2352,6 @@ def build_parser() -> argparse.ArgumentParser:
             'directory containing only symlinks is NOT considered empty.'
         ),
     )
-    parser.set_defaults(sniff=True, prune_empty=False)
     return parser
 
 

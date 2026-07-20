@@ -2283,6 +2283,7 @@ class OrganizeWithPruneTests(unittest.TestCase):
         with patch.object(sys, "argv", ["organize_by_extension.py", "/tmp"]):
             args = parse_args()
         self.assertFalse(getattr(args, "prune_empty", True))
+        self.assertTrue(args.sniff)
 
 
 # --- coverage-finishing tests ----------------------------------------------

@@ -223,7 +223,6 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-cli-01 | open | low | dedupl_numpy.py:18 — usage text is printed to stdout (should be stderr) on the error path, and the script hand-rolls arg handling with no `--help`; migrate to argparse for a consistent CLI surface. | error output on wrong stream
 lq-cli-20 | open | low | link_queue.py:5319 — `main()` never parses `sys.argv`; `link_queue.py --help`, `--version`, or any flag is silently ignored and launches the Tk GUI instead, giving no way to discover config paths/knobs from the shell. Add a minimal argparse front door (at least `--help`/`--version`, optionally `--config`/`--state`) before constructing the app. | CLI / option integrity — unhandled flags are silently ignored (misleading interface)
-oze-cli-01 | open | low | organize_by_extension.py:2348 — `parser.set_defaults(sniff=True, prune_empty=False)` is a no-op: `--no-sniff` (store_false, dest=sniff) already defaults sniff to True and `--prune-empty-dirs` (store_true, dest=prune_empty) already defaults prune_empty to False. Delete the redundant line. | CLI/option integrity — dead argparse config
 
 ## dependency
 
