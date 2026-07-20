@@ -4108,6 +4108,33 @@ def test_immediate_consumer_survives_item_exception(headless_dispatcher):
     assert "boom" in seen and "ok" in seen
 
 
+def test_immediate_consumer_refreshes_depth_after_completion(
+        headless_dispatcher, monkeypatch):
+    disp = headless_dispatcher
+    completed = threading.Event()
+    calls = {"depth": 0, "status": 0}
+    monkeypatch.setattr(
+        disp,
+        "_note_immediate_depth",
+        lambda: calls.__setitem__("depth", calls["depth"] + 1),
+    )
+    monkeypatch.setattr(
+        disp,
+        "_update_status",
+        lambda: calls.__setitem__("status", calls["status"] + 1),
+    )
+    disp._run_immediate_item = lambda _item: completed.set()
+
+    disp._dispatch_immediate(q("magnet:?refresh"))
+
+    assert completed.wait(3)
+    end = time.time() + 3
+    while time.time() < end and calls["status"] == 0:
+        time.sleep(0.01)
+    assert calls["depth"] >= 2
+    assert calls["status"] >= 1
+
+
 def test_immediate_consumer_waits_without_sleep(headless_dispatcher, monkeypatch):
     """lq-perf-02: an idle immediate consumer blocks on the condition instead
     of polling through time.sleep."""

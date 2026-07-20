@@ -1620,6 +1620,8 @@ class Dispatcher:
                 with self._immediate_lock:
                     self._immediate_current[cid] = None
                 work_q.task_done()
+                self._note_immediate_depth()
+                self._update_status()
 
     def _ensure_immediate_pool(self) -> None:
         """Align the live consumer pool to `_immediate_pool_size` (conc-02 /

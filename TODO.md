@@ -154,7 +154,6 @@ _Remaining pyright diagnostics (rescan 2026-07-16) are `reportMissingImports`/`r
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-obs-01 | open | low | dedupl_numpy.py:58 — the `equal files: X / N` summary is `print()`ed to stdout, intermixed with the machine-readable duplicate-path list written to `sys.stdout.buffer` (lines 55-57); route the summary to stderr (as remove-deduplv3.py does) so stdout stays a clean path stream. | three-pillars logs; stdout hygiene
-lq-obs-21 | open | low | link_queue.py:1580 — the immediate consumer's `finally` clears its in-flight slot but never calls `_note_immediate_depth()`/`_update_status()`, so as the immediate backlog drains the "N immediate waiting" status fragment (`_update_status` :4076) and the `_immediate_depth_warned` edge latch (:1734) stay stale until the next `_dispatch_immediate`; when queue workers are idle nothing else repaints. Nudge `_note_immediate_depth()` (or `_update_status`) after each item in the consumer's finally. | three-pillars/health — stale operator-visible state with no refresh trigger
 
 ## watchdog
 
