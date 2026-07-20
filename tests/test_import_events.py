@@ -2875,6 +2875,17 @@ def test_apply_default_tz_leaves_date_and_aware_untouched():
     assert import_events._apply_default_tz(aware, "Europe/Lisbon") is aware
 
 
+def test_timezone_option_validates_at_parse_time(capsys):
+    args = import_events.parse_args(["--timezone", "UTC"])
+    assert args.timezone == "UTC"
+
+    with pytest.raises(SystemExit) as exc:
+        import_events.parse_args(["--timezone", "Not/A_Real_Zone"])
+
+    assert exc.value.code == 2
+    assert "invalid IANA timezone" in capsys.readouterr().err
+
+
 def test_extract_from_ics_applies_default_tz(tmp_path):
     pytest.importorskip("icalendar")
     ics = tmp_path / "tz.ics"

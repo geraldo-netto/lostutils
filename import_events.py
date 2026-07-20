@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, date, timezone
 from typing import List, Dict, Any, Optional, Callable, Tuple, MutableMapping, Iterable, cast
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Default paths to the local GGUF models.
 MODEL_FILENAME = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
@@ -1408,8 +1409,6 @@ def normalize_event_date(value: Any) -> str:
 def _apply_default_tz(value: Any, default_tz: Optional[str] = None) -> Any:
     """Attaches default_tz to a naive datetime; leaves dates/aware values as-is."""
     if default_tz and isinstance(value, datetime) and value.tzinfo is None:
-        from zoneinfo import ZoneInfo
-
         return value.replace(tzinfo=ZoneInfo(default_tz))
     return value
 
@@ -3968,6 +3967,16 @@ def write_events_ics(events: List[Dict[str, Any]], output_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def _iana_timezone(value: str) -> str:
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(
+            f"invalid IANA timezone {value!r}"
+        ) from exc
+    return value
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract calendar events from a directory of .ics, image, PDF and text files.",
@@ -3982,7 +3991,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Scan subdirectories recursively.")
     parser.add_argument("--no-dedup", action="store_true",
                         help="Keep duplicate events (default: drop exact duplicates).")
-    parser.add_argument("--timezone", default=None,
+    parser.add_argument("--timezone", type=_iana_timezone, default=None,
                         help="IANA timezone (e.g. Europe/Lisbon) for naive iCalendar times.")
     parser.add_argument("--summary-only", action="store_true",
                         help="Print only the extraction summary; JSON/ICS outputs still contain all events.")
