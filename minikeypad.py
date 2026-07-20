@@ -930,9 +930,11 @@ class ConnectionMonitor:
         self._on_connected = on_connected
         self.io_busy = False
         self.token = 0
+        self.probe_thread = None
+        self.unresponsive = False
 
     def poll(self):
-        if not self.io_busy:
+        if not self.io_busy and self.probe_thread is None:
             if self._dev().connected:
                 # mkp-thread-01: still_connected() queries the device config
                 # under the device lock; run it off the Tk thread like the
@@ -945,13 +947,19 @@ class ConnectionMonitor:
 
     def _start_probe_worker(self, target, label):
         self.io_busy = True
+        self.unresponsive = False
         self.token += 1
         token = self.token
         try:
-            threading.Thread(target=lambda: target(token), daemon=True).start()
+            worker = threading.Thread(
+                target=lambda: target(token), daemon=True
+            )
+            self.probe_thread = worker
+            worker.start()
         except Exception as e:
             LOG.exception("%s probe failed to start", label)
             self._log("%s probe error: %s" % (label, e))
+            self.probe_thread = None
             self.io_busy = False
             self._on_state()
             return
@@ -961,10 +969,9 @@ class ConnectionMonitor:
         )
 
     def probe_timeout(self, token, label):
-        if token != self.token or not self.io_busy:
+        if token != self.token or self.probe_thread is None:
             return
-        self.token += 1
-        self.io_busy = False
+        self.unresponsive = True
         self._log("%s probe stalled; USB call did not finish" % label)
         self._on_state()
 
@@ -981,6 +988,8 @@ class ConnectionMonitor:
             return False
         if token is not None:
             self.token += 1
+        self.probe_thread = None
+        self.unresponsive = False
         self.io_busy = False
         self._on_state()
         return True
@@ -1539,7 +1548,11 @@ class App(tk.Tk):
         self._monitor.connect_done(ok, token)
 
     def _update_state(self):
-        if self.dev.connected:
+        if self._monitor.unresponsive:
+            self.state_lbl.configure(
+                text="USB unresponsive", bg=COL_DISCONNECTED
+            )
+        elif self.dev.connected:
             self.state_lbl.configure(text="Connected", bg=COL_CONNECTED)
         else:
             self.state_lbl.configure(text="Not connected", bg=COL_DISCONNECTED)
