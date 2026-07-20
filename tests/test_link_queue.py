@@ -1067,6 +1067,20 @@ def test_on_add_summary_reports_rejected_links(app):
     assert "1 rejected" in log
 
 
+def test_on_add_summary_reports_dropped_immediate_link(app, monkeypatch):
+    monkeypatch.setattr(
+        app.dispatcher, "_dispatch_immediate", lambda _item: False
+    )
+    app.url_text.insert("1.0", "magnet:?xt=1\n")
+
+    app._on_add()
+    pump(app, 0.2)
+
+    log = app.log_text.get("1.0", "end-1c")
+    assert "0 immediate" in log
+    assert "1 immediate dropped" in log
+
+
 def test_duplicate_default_immediate_routing(app):
     app.pause_event.set()
     assert app._process_link("http://dup/1") == "queue"

@@ -1489,7 +1489,8 @@ class Dispatcher:
                          shell=shell, extra=tuple(extra))
 
         if mode == "immediate":
-            self._dispatch_immediate(item)
+            if not self._dispatch_immediate(item):
+                return "dropped"
             return outcome
         return self._enqueue_or_skip_duplicate(item, outcome)
 
@@ -3967,7 +3968,14 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             self._log("[add] no links detected")
             return
 
-        counts = {"queue": 0, "immediate": 0, "default": 0, "duplicate": 0, "rejected": 0}
+        counts = {
+            "queue": 0,
+            "immediate": 0,
+            "default": 0,
+            "duplicate": 0,
+            "rejected": 0,
+            "dropped": 0,
+        }
         with self._batch_dispatch():
             for url, extra in entries:
                 outcome = self._process_link(url, extra)
@@ -3984,6 +3992,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             summary += f", {counts['duplicate']} duplicate(s) skipped"  # pragma: no cover - summary with duplicate counts
         if counts["rejected"]:
             summary += f", {counts['rejected']} rejected"
+        if counts["dropped"]:
+            summary += f", {counts['dropped']} immediate dropped"
         self._log(summary)
 
         self.url_text.delete("1.0", tk.END)
