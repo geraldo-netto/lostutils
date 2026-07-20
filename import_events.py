@@ -853,7 +853,13 @@ def _record_extraction_failure(file_path: Path, exc: Exception, action: str) -> 
     global _extraction_failures
     with _EXTRACTION_FAILURE_LOCK:
         _extraction_failures += 1
-    logger.exception("%s %s: %s", action, file_path.name, exc)
+    logger.error(
+        "%s %s: %s",
+        action,
+        file_path.name,
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
 
 
 def reset_ocr_warnings() -> None:
@@ -3237,12 +3243,15 @@ def _safe_pdf_stage(
     stage: str,
     work: Callable[[], Any],
     fallback: Any,
+    failures: Optional[List[Tuple[str, Exception]]] = None,
 ) -> Any:
     try:
         return _timed_stage(config, file_path, stage, work)
     except Exception as exc:
         logger.warning("PDF stage %s failed for %s; continuing with fallback: %s",
                        stage, file_path.name, exc)
+        if failures is not None:
+            failures.append((stage, exc))
         return fallback
 
 
@@ -3343,6 +3352,7 @@ def extract_from_pdf(
     """Extracts events from a PDF: parsed/OCR text first, else vision per page."""
     runtime_config = model_config or ModelConfig()
     text_budget = runtime_config.text_budget_chars()
+    stage_failures: List[Tuple[str, Exception]] = []
     pdf_text = _safe_pdf_stage(
         runtime_config, file_path, "pdf_text",
         lambda: _cached_text_stage(
@@ -3351,6 +3361,7 @@ def extract_from_pdf(
             lambda: _pdf_text(file_path, text_budget),
         ),
         "",
+        stage_failures,
     )
     language, source = _language_for_text_with_source(pdf_text, runtime_config)
     _log_language_preanalysis(file_path, "PDF text", language, source)
@@ -3364,6 +3375,7 @@ def extract_from_pdf(
                     runtime_config, file_path, "pdf_render",
                     lambda: _render_pdf_image_paths(file_path, Path(tmp_dir), runtime_config),
                     [],
+                    stage_failures,
                 )
             return image_paths
 
@@ -3391,6 +3403,7 @@ def extract_from_pdf(
                     lambda: _pdf_ocr_text_from_paths(
                         render_once(), runtime_config, ocr_language, ocr_chain, file_path.name),
                     "",
+                    stage_failures,
                 )
                 _write_stage_cache_text(runtime_config, file_path, "pdf_ocr", ocr_options, ocr_text)
         else:
@@ -3414,6 +3427,13 @@ def extract_from_pdf(
         for image_path in image_paths:
             events.extend(_run_llm(_image_messages(image_path, language, runtime_config),
                                    file_path, "PDF/Vision", llm_client, runtime_config))
+        if not image_paths and stage_failures:
+            failed_stages = ", ".join(stage for stage, _exc in stage_failures)
+            _record_extraction_failure(
+                file_path,
+                stage_failures[0][1],
+                f"PDF recovery exhausted after stage(s) {failed_stages} for",
+            )
         return events
 
 

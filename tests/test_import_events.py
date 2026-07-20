@@ -4084,6 +4084,7 @@ def test_extract_from_pdf_merges_text_and_ocr_before_llm(monkeypatch):
 def test_extract_from_pdf_continues_to_ocr_when_text_stage_fails(monkeypatch, caplog):
     import logging
 
+    import_events.reset_extraction_failures()
     fake = FakeLlm('[{"title": "OCR Event", "start": "2026-06-22"}]')
     monkeypatch.setattr(
         import_events, "_pdf_text",
@@ -4124,7 +4125,8 @@ def test_extract_from_pdf_continues_when_render_stage_fails(monkeypatch, caplog)
 
     assert events == []
     assert "PDF stage pdf_render failed for corrupt.pdf" in caplog.text
-    assert import_events.extraction_failure_count() == 0
+    assert import_events.extraction_failure_count() == 1
+    assert "PDF recovery exhausted" in caplog.text
 
 
 def test_extract_from_pdf_expands_calendar_hierarchy_before_llm(monkeypatch):
