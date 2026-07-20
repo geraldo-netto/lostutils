@@ -234,7 +234,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-doc-01 | open | low | link_queue.py:20 — module docstring says legacy `~/.link_queue_config.json` is migrated on first run, but `LEGACY_CONFIG_FILE_NAME="link_queue_config.json"` resolves via `_resolve_state_path` to the XDG/script dir, never `~/.link_queue_config.json`; correct the docstring to the actual location. | docs-vs-behavior drift
-oze-doc-01 | open | low | organize_by_extension.py:200 — the EXTENSION_ALIASES comment claims the alias exists "so a real JPEG named .jpeg isn't moved to a separate jpg/ bucket," but `resolve_real_extension` (L479-481) returns the unchanged declared extension, so a real `.jpeg` buckets under `jpeg/` separate from `jpg/` (verified: tests/fuzz/fuzz_organize_by_extension.py:205 asserts resolve_real_extension('photo.jpeg')=='jpeg'). Rewrite the comment to state aliases only feed the declared-vs-detected compatibility check, not bucket unification. | documentation — comment-vs-behavior drift; xref resolve_real_extension:479-481
 
 ## UI / UX
 

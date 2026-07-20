@@ -197,8 +197,8 @@ SIGNATURES: tuple[Signature, ...] = (
 )
 
 
-# Synonym → canonical extension. Used so a real JPEG named .jpeg isn't moved
-# to a separate jpg/ bucket from one named .jpg.
+# Synonym → canonical extension used only when comparing a declared extension
+# with a detected header type. Bucket names retain the file's declared suffix.
 EXTENSION_ALIASES: dict[str, str] = {
     "jpeg": "jpg",
     "tif": "tiff",
