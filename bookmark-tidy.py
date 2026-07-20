@@ -1239,7 +1239,9 @@ def _add_chrome_bookmark(
     ids: "_IdFactory",
     index: FolderIndex,
 ) -> None:
-    folder = _ensure_chrome_folder(root, folder_path, ids, index)
+    folder = _ensure_folder(
+        root, folder_path, ids, index, _child_chrome_folder
+    )
     folder["children"].append(
         {
             "date_added": _unix_to_chrome_time(bookmark.add_date),
@@ -1252,15 +1254,16 @@ def _add_chrome_bookmark(
     )
 
 
-def _ensure_chrome_folder(
+def _ensure_folder(
     root: dict[str, Any],
     folder_path: Sequence[str],
     ids: "_IdFactory",
     index: FolderIndex,
+    child_finder: Callable[..., dict[str, Any]],
 ) -> dict[str, Any]:
     current = root
     for name in folder_path:
-        current = _child_chrome_folder(current, name, ids, index)
+        current = child_finder(current, name, ids, index)
     return current
 
 
@@ -1335,20 +1338,10 @@ def _add_firefox_bookmark(
     ids: "_IdFactory",
     index: FolderIndex,
 ) -> None:
-    folder = _ensure_firefox_folder(root, folder_path, ids, index)
+    folder = _ensure_folder(
+        root, folder_path, ids, index, _child_firefox_folder
+    )
     folder["children"].append(_firefox_bookmark_node(bookmark, ids))
-
-
-def _ensure_firefox_folder(
-    root: dict[str, Any],
-    folder_path: Sequence[str],
-    ids: "_IdFactory",
-    index: FolderIndex,
-) -> dict[str, Any]:
-    current = root
-    for name in folder_path:
-        current = _child_firefox_folder(current, name, ids, index)
-    return current
 
 
 def _child_firefox_folder(

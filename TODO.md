@@ -88,7 +88,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-dup-02 | open | med | bookmark-tidy.py:1199-1207,1277-1285 — `_ensure_chrome_folder` and `_ensure_firefox_folder` are byte-identical except for calling `_child_chrome_folder` vs `_child_firefox_folder`; collapse to one helper parametrized by the child-finder callable. | within-file code duplication
 bt-dup-01 | open | med | bookmark-tidy.py:1442-1449 — `_run` duplicates the full body of `tidy_bookmarks` (deduplicate → guard → `_assign_categories`); collapse `_run` onto `tidy_bookmarks` to keep one code path. | within-file dup
 
 ## architecture/modularity/SOLID
