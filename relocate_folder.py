@@ -720,7 +720,10 @@ def _rmtree_logging(path: Path, context: str) -> None:
         if isinstance(exc, OSError):   # pragma: no branch - rmtree passes OSError-shaped excinfo
             failures.append((str(entry), exc))
 
-    shutil.rmtree(path, onerror=_record)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_record)
+    else:
+        shutil.rmtree(path, onerror=_record)
     for entry, exc in failures[:10]:
         _log().warning("cleanup after %s: could not remove %s: %s", context, entry, exc)
     if len(failures) > 10:

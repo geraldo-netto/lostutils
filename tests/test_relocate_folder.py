@@ -2266,9 +2266,10 @@ def test_copy_tree_logs_rmtree_cleanup_failures(tmp_path, monkeypatch, caplog):
     def explode_copy(*a, **kw):
         raise RuntimeError("copy boom")
 
-    def fail_rmtree(path, onerror=None):
-        if onerror is not None:
-            onerror(os.unlink, str(path) + "/zombie", (OSError, OSError("EBUSY"), None))
+    def fail_rmtree(path, onerror=None, onexc=None):
+        callback = onexc or onerror
+        if callback is not None:
+            callback(os.unlink, str(path) + "/zombie", OSError("EBUSY"))
         # don't actually remove
 
     monkeypatch.setattr(rf.shutil, "copytree", explode_copy)
@@ -2276,6 +2277,25 @@ def test_copy_tree_logs_rmtree_cleanup_failures(tmp_path, monkeypatch, caplog):
     with pytest.raises(RuntimeError, match="copy boom"):
         rf.copy_tree(src, dst)
     assert any("cleanup after failed copy" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    ("version_info", "expected_hook"),
+    [((3, 12), "onexc"), ((3, 11), "onerror")],
+)
+def test_rmtree_logging_uses_supported_error_hook(
+        tmp_path, monkeypatch, version_info, expected_hook):
+    seen = {}
+
+    def capture_rmtree(_path, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(rf.sys, "version_info", version_info)
+    monkeypatch.setattr(rf.shutil, "rmtree", capture_rmtree)
+
+    rf._rmtree_logging(tmp_path, "test")
+
+    assert set(seen) == {expected_hook}
 
 
 def test_copy_tree_truncates_many_cleanup_failures(tmp_path, monkeypatch, caplog):
@@ -2286,10 +2306,11 @@ def test_copy_tree_truncates_many_cleanup_failures(tmp_path, monkeypatch, caplog
     def explode_copy(*a, **kw):
         raise RuntimeError("copy boom")
 
-    def many_failures(path, onerror=None):
-        if onerror is not None:
+    def many_failures(path, onerror=None, onexc=None):
+        callback = onexc or onerror
+        if callback is not None:
             for i in range(20):
-                onerror(os.unlink, f"/fake/{i}", (OSError, OSError("EBUSY"), None))
+                callback(os.unlink, f"/fake/{i}", OSError("EBUSY"))
 
     monkeypatch.setattr(rf.shutil, "copytree", explode_copy)
     monkeypatch.setattr(rf.shutil, "rmtree", many_failures)
@@ -4265,9 +4286,10 @@ def test_copy_and_verify_logs_cleanup_failure(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(rf, "verify_copy",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("verify failed")))
 
-    def boom_rmtree(path, onerror=None, **k):
-        if onerror is not None:
-            onerror(os.rmdir, str(path), (OSError, OSError(16, "EBUSY"), None))
+    def boom_rmtree(path, onerror=None, onexc=None, **k):
+        callback = onexc or onerror
+        if callback is not None:
+            callback(os.rmdir, str(path), OSError(16, "EBUSY"))
 
     monkeypatch.setattr(rf.shutil, "rmtree", boom_rmtree)
     with caplog.at_level(_logging.WARNING):
