@@ -790,12 +790,12 @@ def copy_tree(src: Path, dst: Path, *,
 
     `progress_cb(bytes_done, bytes_total)` (rf-obs-01) is invoked after
     each completed file copy when supplied. Total bytes are computed up
-    front via `_src_total_bytes`. The cb is wrapped in a copy_function
+    front via `_src_size_totals`. The cb is wrapped in a copy_function
     shim around `shutil.copy2` so per-file accounting needs no walk of
     its own.
 
     rf-perf-02: `check_space=False` skips the pre-copy disk-space walk
-    (`_src_total_bytes` + `_check_disk_space`). On a multi-TB tree that
+    (`_src_size_totals` + `_check_disk_space`). On a multi-TB tree that
     full lstat walk is itself expensive and merely duplicates the walk
     `shutil.copytree` does anyway; an ENOSPC mid-copy still triggers the
     same cleanup. The walk is also skipped entirely when neither the
@@ -870,7 +870,7 @@ def _check_disk_space(src: Path, dst: Path, *, total_bytes: int | None = None) -
     user-visible failure is then "copy errored, source still present"; a
     precheck fails immediately and cheaply.
 
-    Uses `_src_total_bytes` (a one-pass lstat walk) and `shutil.disk_usage` on
+    Uses `_src_size_totals` (a one-pass lstat walk) and `shutil.disk_usage` on
     the nearest existing ancestor of `dst`. Raises `RuntimeError` when free
     space is below `_DISK_SPACE_HEADROOM * needed`.
 
