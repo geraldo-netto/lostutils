@@ -57,9 +57,14 @@ SAFETY_BANNER_TEMPLATE = (
 RM_ARGV_BYTE_LIMIT = 128 * 1024
 
 
-def detect_encoding(path):
-    with open(path, "rb") as f:
-        head = f.read(4)
+class _InputDecodeError(Exception):
+    def __init__(self, encoding, error):
+        super().__init__(str(error))
+        self.encoding = encoding
+        self.error = error
+
+
+def detect_encoding(head):
     for bom, enc in BOM_TABLE:
         if head.startswith(bom):
             return enc
@@ -97,24 +102,36 @@ def _configure_stdout_errors(err_mode):
     _fail(_("stdout does not expose a binary buffer for utf-8 output"), 2)
 
 
-def _read_groups(path, encoding, err_mode):
+def _read_groups(lines):
     groups = defaultdict(list)
     skipped = 0
-    with open(path, "r", encoding=encoding, errors=err_mode) as f:
-        for raw in f:
-            line = raw.rstrip("\r\n")
-            if not line:
-                skipped += 1
-                continue
-            # split(None, 1) consumes any leading whitespace AND the
-            # whole gap between hash and path; the path keeps its
-            # interior whitespace (tabs, multiple spaces, etc.).
-            parts = line.split(None, 1)
-            if len(parts) < 2:
-                skipped += 1
-                continue
-            groups[parts[0]].append(parts[1])
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        if not line:
+            skipped += 1
+            continue
+        # split(None, 1) consumes any leading whitespace AND the
+        # whole gap between hash and path; the path keeps its
+        # interior whitespace (tabs, multiple spaces, etc.).
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            skipped += 1
+            continue
+        groups[parts[0]].append(parts[1])
     return groups, skipped
+
+
+def _load_groups(path, forced_encoding, err_mode):
+    with open(path, "rb") as binary:
+        encoding = _validate_encoding(
+            forced_encoding or detect_encoding(binary.peek(4))
+        )
+        with io.TextIOWrapper(binary, encoding=encoding, errors=err_mode) as text:
+            try:
+                groups, skipped = _read_groups(text)
+            except UnicodeDecodeError as exc:
+                raise _InputDecodeError(encoding, exc) from exc
+    return encoding, groups, skipped
 
 
 def _validate_encoding(encoding):
@@ -222,27 +239,22 @@ def _silence_stdout_after_broken_pipe():
 
 def main(argv=None):
     args = parse_args(argv)
-    try:
-        encoding = args.encoding or detect_encoding(args.file)
-    except OSError as e:
-        # Same clean contract as the read loop below: a missing/unreadable
-        # input gets `error:` + exit 2, not an uncaught traceback (rdv3-robust-01).
-        _fail(e, 2)
-    encoding = _validate_encoding(encoding)
     err_mode = "strict" if args.strict else "surrogateescape"
     _configure_stdout_errors(err_mode)
 
     try:
-        groups, skipped_lines = _read_groups(args.file, encoding, err_mode)
+        encoding, groups, skipped_lines = _load_groups(
+            args.file, args.encoding, err_mode
+        )
     except OSError as e:
         _fail(e, 2)
-    except UnicodeDecodeError as e:
+    except _InputDecodeError as e:
         print(
-            _("decode error in {file} (encoding={encoding}): {error}\n"
-              "hint: try --encoding <name> or omit --strict").format(
-                file=args.file,
-                encoding=encoding,
-                error=e,
+                _("decode error in {file} (encoding={encoding}): {error}\n"
+                  "hint: try --encoding <name> or omit --strict").format(
+                    file=args.file,
+                    encoding=e.encoding,
+                    error=e.error,
             ),
             file=sys.stderr,
         )

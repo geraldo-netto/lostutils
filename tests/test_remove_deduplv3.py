@@ -45,10 +45,32 @@ def test_unreadable_input_clean_error_exit2(monkeypatch, tmp_path, capsys):
     ],
 )
 def test_detect_encoding_from_bom(tmp_path, bom, expected):
-    f = tmp_path / "hashes.txt"
-    f.write_bytes(bom + b"h /a\n")
+    assert rd.detect_encoding(bom + b"h /a\n") == expected
 
-    assert rd.detect_encoding(f) == expected
+
+def test_load_groups_peeks_without_reopening_or_losing_prefix(monkeypatch):
+    class PeekableBytes(io.BytesIO):
+        def peek(self, size):
+            start = self.tell()
+            return self.getvalue()[start:start + size]
+
+    source = PeekableBytes(b"h /first\nh /second-longer\n")
+    opened = []
+
+    def open_once(path, mode):
+        opened.append((path, mode))
+        return source
+
+    monkeypatch.setattr(builtins, "open", open_once)
+
+    encoding, groups, skipped = rd._load_groups(
+        "stream", None, "surrogateescape"
+    )
+
+    assert opened == [("stream", "rb")]
+    assert encoding == "utf-8"
+    assert groups == {"h": ["/first", "/second-longer"]}
+    assert skipped == 0
 
 
 def test_help_documents_exit_codes(capsys):
