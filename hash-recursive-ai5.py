@@ -1309,9 +1309,12 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
     head_by_key, errors = _run_stage(
         candidates, _make_head_candidate_batch(rep, config), stage1_bytes,
         jobs, **run_kwargs)
-    by_head = _bucket_stage1_heads(
+    by_head, recovered = _bucket_stage1_heads(
         candidates, head_by_key, rep, aliases, config, on_hashed)
-    return by_head, {"stage1": len(head_by_key), "stage1_errors": errors}
+    return by_head, {
+        "stage1": len(head_by_key),
+        "stage1_errors": max(0, errors - recovered),
+    }
 
 
 def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashed):
@@ -1322,6 +1325,7 @@ def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashe
     per candidate on the main thread (hr-log-02). Keys absent from
     ``head_by_key`` or still None after retry are dropped from the buckets."""
     by_head: dict = defaultdict(list)
+    recovered = 0
     total = len(candidates)
     for done, (size, key) in enumerate(candidates, 1):
         if key not in head_by_key:
@@ -1329,12 +1333,13 @@ def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashe
         head = head_by_key[key]
         if head is None and aliases is not None and len(aliases.get(key, ())) > 1:
             head = _retry_head_alias(key, rep[key], aliases, config)
+            recovered += head is not None
         if on_hashed is not None:
             on_hashed(done, total, head, key, aliases)
         if head is None:
             continue
         by_head[(size, head)].append(key)
-    return by_head
+    return by_head, recovered
 
 
 def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
@@ -1370,18 +1375,24 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
         stage2_items, _make_tail_stage2_batch(config), stage2_bytes, jobs,
         **run_kwargs)
     regrouped: dict = {}
+    recovered = 0
     for item in stage2_items:
         _s, _path, head, key = item
         tail = tail_by_item.get(item)
+        failed = item in tail_by_item and tail is None
         # hr-rel-30: retry the tail on a readable sibling alias before dropping a
         # multi-alias inode whose representative lost read access between stages
         # (mirrors the stage-1 head retry).
         if tail is None and aliases is not None and len(aliases.get(key, ())) > 1:
             tail = _retry_tail_alias(key, _path, _s, aliases, config)
+            recovered += failed and tail is not None
         if tail is None:
             continue   # failed/unhashed tail — already in stage2_errors
         regrouped.setdefault((head, tail), []).append(key)
-    return regrouped, {"stage2": len(tail_by_item), "stage2_errors": errors}
+    return regrouped, {
+        "stage2": len(tail_by_item),
+        "stage2_errors": max(0, errors - recovered),
+    }
 
 
 def _prepare_candidates(aliases, inode_size, overflow):

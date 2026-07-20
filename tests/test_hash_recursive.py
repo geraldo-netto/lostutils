@@ -3225,6 +3225,7 @@ def test_stage1_hash_retries_alias_when_rep_unreadable(tmp_path):
     confirmed = [k for keys in by_head.values() for k in keys]
     assert confirmed == [key]
     assert info["stage1"] == 1
+    assert info["stage1_errors"] == 0
 
 
 def test_stage1_hash_no_retry_without_aliases(tmp_path):
@@ -3315,6 +3316,25 @@ def test_retry_tail_alias_returns_none_when_no_sibling_readable(monkeypatch):
 
 def test_retry_tail_alias_unknown_key_returns_none():
     assert hr._retry_tail_alias(("d", 9), "/x", 1, {}, None) is None
+
+
+def test_stage2_recovered_alias_is_not_counted_as_hash_error(monkeypatch):
+    key = ("d", 0)
+    item = (100, "/dead", "HEAD", key)
+    monkeypatch.setattr(
+        hr, "_run_stage", lambda *_args, **_kwargs: ({item: None}, 1)
+    )
+    monkeypatch.setattr(hr, "_retry_tail_alias", lambda *_args: "TAIL")
+
+    regrouped, info = hr._stage2_hash(
+        [item],
+        jobs=1,
+        config=None,
+        aliases={key: ["/dead", "/live"]},
+    )
+
+    assert regrouped == {("HEAD", "TAIL"): [key]}
+    assert info["stage2_errors"] == 0
 
 
 def test_main_dump_writes_composite_for_stage2_files(tmp_path, monkeypatch):
