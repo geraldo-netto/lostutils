@@ -205,7 +205,6 @@ dnv3-adapt-01 | open | low | deduplicate-by-namev3.py:196 — output rows hardco
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-cfg-01 | open | low | link_queue.py:336 — `command_timeout_seconds` (the hung-download safety cap) plus `immediate_worker_count`, `immediate_queue_maxsize`, `queue_render_limit`, `seq_of_sweep_gap` have no UI surface; `_SettingsTabs._build_dispatcher` exposes only sleep/workers/cooldown/max-per-domain/output-folder. Surface `command_timeout_seconds` at least. | safety-relevant timeout is hand-edit-YAML-only. Shipped: `command_timeout_seconds` spinbox in the Dispatcher tab (var + clamped handler + tests). Deferred: the four expert knobs (`immediate_worker_count`, `immediate_queue_maxsize`, `queue_render_limit`, `seq_of_sweep_gap`) — tuning-only, low user value in the dialog; revisit if requested
 
 ## API contract & compatibility
 
