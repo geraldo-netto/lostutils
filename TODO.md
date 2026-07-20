@@ -213,7 +213,6 @@ rdv3-api-01 | open | low | remove-deduplv3.py:70,121-127,94 — documented exit-
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-cli-01 | open | low | dedupl_numpy.py:18 — usage text is printed to stdout (should be stderr) on the error path, and the script hand-rolls arg handling with no `--help`; migrate to argparse for a consistent CLI surface. | error output on wrong stream
-lq-cli-20 | open | low | link_queue.py:5319 — `main()` never parses `sys.argv`; `link_queue.py --help`, `--version`, or any flag is silently ignored and launches the Tk GUI instead, giving no way to discover config paths/knobs from the shell. Add a minimal argparse front door (at least `--help`/`--version`, optionally `--config`/`--state`) before constructing the app. | CLI / option integrity — unhandled flags are silently ignored (misleading interface)
 
 ## dependency
 

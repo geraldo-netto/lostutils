@@ -23,6 +23,7 @@ Config is persisted as YAML to $XDG_CONFIG_HOME/link_queue/link_queue_config.yam
 
 from __future__ import annotations
 
+import argparse
 import base64
 import binascii
 import contextlib
@@ -46,6 +47,8 @@ from datetime import datetime
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Callable, TextIO, cast
 from urllib.parse import urlparse
+
+__version__ = "1.0"
 
 try:
     import fcntl
@@ -5395,7 +5398,22 @@ class MappingEditor(_FormDialog):
 # entrypoint
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Launch the Link Processing Queue GUI.",
+        epilog=f"Config: {CONFIG_FILE}\nState: {STATE_FILE}",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+    )
+    return parser
+
+
+def main(argv: "list[str] | None" = None) -> None:
+    build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     root = tk.Tk()
     try:
         style = ttk.Style()

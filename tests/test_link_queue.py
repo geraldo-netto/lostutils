@@ -2649,7 +2649,7 @@ def test_main_themed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tk, "Tk", fake_tk)
     monkeypatch.setattr(tk.Misc, "mainloop", lambda self, *a, **k: None, raising=False)
-    link_queue.main()
+    link_queue.main([])
     r = created.get("root")
     if r is not None:
         try:
@@ -2673,13 +2673,30 @@ def test_main_smoke(tmp_path, monkeypatch):
 
     monkeypatch.setattr(tk, "Tk", fake_tk)
     monkeypatch.setattr(tk.Misc, "mainloop", lambda self, *a, **k: None, raising=False)
-    link_queue.main()
+    link_queue.main([])
     root = created.get("root")
     if root is not None:
         try:
             root.destroy()
         except tk.TclError:
             pass
+
+
+@pytest.mark.parametrize("flag", ["--help", "--version"])
+def test_main_cli_metadata_does_not_start_tk(flag, monkeypatch, capsys):
+    monkeypatch.setattr(
+        tk,
+        "Tk",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("Tk must not start for CLI metadata")
+        ),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        link_queue.main([flag])
+
+    assert exc.value.code == 0
+    assert capsys.readouterr().out
 
 
 # --- coverage gap-fillers --------------------------------------------------
@@ -4555,7 +4572,7 @@ def test_main_reports_state_lock_error(monkeypatch, capsys):
     )
 
     with pytest.raises(SystemExit) as exc:
-        link_queue.main()
+        link_queue.main([])
 
     assert exc.value.code == 1
     assert "locked" in capsys.readouterr().err
