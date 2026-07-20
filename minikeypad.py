@@ -1655,23 +1655,31 @@ class App(tk.Tk):
             self._update_state()
             return False
 
-    def _run_download(self, reports, flash):
-        """Send all reports on a worker thread; the UI stays responsive."""
+    def _spawn_io_worker(self, work, done, label, failure_result):
         self._io_busy = True
         self._set_actions("disabled")
         rid = self.kp.ReportID
-        flash_buf = self._flash_buf(flash)
 
         def worker():
             try:
-                outcome = self._send_reports(reports, flash_buf, rid)
-            except Exception as e:             # never strand the disabled button
-                LOG.exception("write worker crashed")
-                self.log("Write error: %s" % e)
-                outcome = "error"
-            self._ui_q.put(lambda: self._download_done(outcome))
+                result = work(rid)
+            except Exception as e:
+                LOG.exception("%s worker crashed", label.lower())
+                self.log("%s error: %s" % (label, e))
+                result = failure_result
+            self._ui_q.put(lambda: done(result))
 
-        self._start_action_worker(worker, "Write")
+        self._start_action_worker(worker, label)
+
+    def _run_download(self, reports, flash):
+        """Send all reports on a worker thread; the UI stays responsive."""
+        flash_buf = self._flash_buf(flash)
+        self._spawn_io_worker(
+            lambda rid: self._send_reports(reports, flash_buf, rid),
+            self._download_done,
+            "Write",
+            "error",
+        )
 
     def _download_done(self, outcome):
         self._io_busy = False
@@ -1769,11 +1777,7 @@ class App(tk.Tk):
         self._run_write_all(jobs)
 
     def _run_write_all(self, jobs):
-        self._io_busy = True
-        self._set_actions("disabled")
-        rid = self.kp.ReportID
-
-        def worker():
+        def write_all(rid):
             results = []
             for key, reports, flash_buf in jobs:
                 try:
@@ -1785,9 +1789,11 @@ class App(tk.Tk):
                 if outcome != "ok":
                     self.log("Write-all: %s failed (%s)" % (self._key_name(key[1]), outcome))
                 results.append((key, outcome))
-            self._ui_q.put(lambda: self._write_all_done(results))
+            return results
 
-        self._start_action_worker(worker, "Write-all")
+        self._spawn_io_worker(
+            write_all, self._write_all_done, "Write-all", []
+        )
 
     def _write_all_done(self, results):
         self._io_busy = False
