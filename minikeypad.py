@@ -1589,13 +1589,18 @@ class App(tk.Tk):
         self._flash_status(msg, "black", self.cget("bg"))
         self.log(msg)
 
-    def _download(self):
+    def _precheck_write(self, action):
         if self._io_busy:
             self._dl_note("Busy, try again")
-            return
+            return False
         if not self.dev.connected:
-            self.log("Write ignored: device not connected.")
+            self.log("%s ignored: device not connected." % action)
             self._dl_result(False)
+            return False
+        return True
+
+    def _download(self):
+        if not self._precheck_write("Write"):
             return
         result = self.kp.build_download_reports()
         if result is None:
@@ -1748,12 +1753,7 @@ class App(tk.Tk):
         return kp.build_download_reports()
 
     def _write_all(self):
-        if self._io_busy:
-            self._dl_note("Busy, try again")
-            return
-        if not self.dev.connected:
-            self.log("Write-all ignored: device not connected.")
-            self._dl_result(False)
+        if not self._precheck_write("Write-all"):
             return
         if not self._assignments:
             self._dl_note("Nothing saved to write.")
