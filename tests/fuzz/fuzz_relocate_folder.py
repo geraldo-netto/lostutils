@@ -9,7 +9,7 @@ target asserts both that:
     within its declared domain, AND
   * the output satisfies an invariant that should hold universally (e.g.
     _path_taken is True iff some file/dir/symlink exists at the path,
-    _safe always swallows OSError, MigrationState enum values are stable,
+    _swallow_or_warn always swallows OSError, MigrationState enum values are stable,
     parallel verify_copy returns the same yes/no answer as sequential).
 
 Run:
@@ -87,29 +87,29 @@ class PathTakenFuzz(unittest.TestCase):
             self.assertTrue(rf._path_taken(p))
 
 
-# --- _safe (rf-dup-03) ------------------------------------------------------
+# --- _swallow_or_warn (rf-dup-03) -------------------------------------------
 
-class SafeFuzz(unittest.TestCase):
+class SwallowOrWarnFuzz(unittest.TestCase):
     @settings(parent=FUZZ)
     @given(SAFE_NAME, st.integers(min_value=-(2**31), max_value=2**31 - 1))
-    def test_safe_returns_callable_output(self, label: str, value: int) -> None:
-        self.assertEqual(rf._safe(label, lambda v: v, value), value)
+    def test_returns_callable_output(self, label: str, value: int) -> None:
+        self.assertEqual(rf._swallow_or_warn(label, lambda v: v, value), value)
 
     @settings(parent=FUZZ)
     @given(SAFE_NAME, st.sampled_from([OSError, PermissionError, FileNotFoundError]))
-    def test_safe_swallows_known_oserrors(self, label: str, exc) -> None:
+    def test_swallows_known_oserrors(self, label: str, exc) -> None:
         def boom():
             raise exc("synthetic")
         # Must never raise for any (label, OSError-subclass) pair.
-        self.assertIsNone(rf._safe(label, boom))
+        self.assertIsNone(rf._swallow_or_warn(label, boom))
 
     @settings(parent=FUZZ)
     @given(st.sampled_from([ValueError, RuntimeError, KeyError, TypeError]))
-    def test_safe_propagates_non_oserror(self, exc) -> None:
+    def test_propagates_non_oserror(self, exc) -> None:
         def boom():
             raise exc("propagate me")
         with self.assertRaises(exc):
-            rf._safe("noop", boom)
+            rf._swallow_or_warn("noop", boom)
 
 
 # --- _kind_of / _is_special_file mode-bit coverage --------------------------
@@ -319,7 +319,9 @@ class LoggerInjectionFuzz(unittest.TestCase):
         log.setLevel(logging.WARNING)
         with rf.with_logger(log):
             for label in labels:
-                rf._safe(label, lambda: (_ for _ in ()).throw(OSError("x")))
+                rf._swallow_or_warn(
+                    label, lambda: (_ for _ in ()).throw(OSError("x"))
+                )
         captured.append(stream.getvalue())
         for label in labels:
             self.assertIn(label, captured[0])

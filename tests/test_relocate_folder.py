@@ -842,31 +842,33 @@ def test_path_taken_regular_dir_symlink_broken(tmp_path):
     assert rf._path_taken(tmp_path / "nope") is False
 
 
-# --- rf-dup-03: _safe ------------------------------------------------------
+# --- rf-dup-03: _swallow_or_warn -------------------------------------------
 
-def test_safe_returns_value_when_ok():
-    assert rf._safe("identity", lambda x: x + 1, 41) == 42
+def test_swallow_or_warn_returns_value_when_ok():
+    assert rf._swallow_or_warn("identity", lambda x: x + 1, 41) == 42
 
 
-def test_safe_swallows_oserror_and_logs(caplog):
+def test_swallow_or_warn_swallows_oserror_and_logs(caplog):
     def boom():
         raise OSError("disk gone")
-    result = rf._safe("flush queue", boom)
+    result = rf._swallow_or_warn("flush queue", boom)
     assert result is None
     assert any("could not flush queue" in r.message and "disk gone" in r.message
                for r in caplog.records)
 
 
-def test_safe_swallows_permission_error(caplog):
+def test_swallow_or_warn_swallows_permission_error(caplog):
     def boom():
         raise PermissionError("EPERM")
-    rf._safe("chown /x", boom)
+    rf._swallow_or_warn("chown /x", boom)
     assert any("could not chown" in r.message for r in caplog.records)
 
 
-def test_safe_propagates_unexpected_exception():
+def test_swallow_or_warn_propagates_unexpected_exception():
     with pytest.raises(ValueError):
-        rf._safe("noop", lambda: (_ for _ in ()).throw(ValueError("oops")))
+        rf._swallow_or_warn(
+            "noop", lambda: (_ for _ in ()).throw(ValueError("oops"))
+        )
 
 
 # --- rf-test-01 / rf-sec-02: atomic_swap chowns the replacement symlink ------
@@ -1099,7 +1101,7 @@ def test_create_missing_dirs_noop_when_exists(tmp_path):
 
 
 def test_create_missing_dirs_chmod_failure_raises(tmp_path, monkeypatch):
-    # rf-rel-09: chmod at setup uses _required — failure aborts instead of
+    # rf-rel-09: chmod at setup uses _raise_or_fail — failure aborts instead of
     # silently warning so the user doesn't end up with wrong dest perms.
     src = tmp_path / "src"; src.mkdir()
     monkeypatch.setattr(rf.os, "chmod", _raise_os)
@@ -1702,7 +1704,7 @@ def test_execute_logs_already_migrated_state(tmp_path, caplog):
 
 # --- rf-decl-01: logger injection via contextvar ----------------------------
 
-def test_with_logger_swaps_logger_in_safe():
+def test_with_logger_swaps_logger_in_swallow_or_warn():
     captured = []
 
     class Cap(rf.logging.Logger):
@@ -1714,7 +1716,9 @@ def test_with_logger_swaps_logger_in_safe():
 
     cap = Cap()
     with rf.with_logger(cap):
-        rf._safe("toast", lambda: (_ for _ in ()).throw(OSError("nope")))
+        rf._swallow_or_warn(
+            "toast", lambda: (_ for _ in ()).throw(OSError("nope"))
+        )
     assert any("could not toast" in m for m in captured)
     # outside the context, default logger is restored
     assert rf._log() is rf.LOG
@@ -2994,12 +2998,6 @@ def test_raise_or_fail_propagates():
         raise OSError("expected")
     with pytest.raises(RuntimeError, match="required test failed"):
         rf._raise_or_fail("test", fails)
-
-
-def test_back_compat_aliases_still_work():
-    # rf-arch-08: legacy names kept as aliases.
-    assert rf._safe is rf._swallow_or_warn
-    assert rf._required is rf._raise_or_fail
 
 
 # --- rf-rel-14: dedupe disk-space walk -----------------------------------

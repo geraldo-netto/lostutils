@@ -228,13 +228,6 @@ def _raise_or_fail(label: str, fn: Callable, *args, **kwargs):
         raise RuntimeError(f"required {label} failed: {exc}") from exc
 
 
-# Back-compat aliases (rf-arch-08): keep the old names so external
-# callers / tests that imported `_safe` / `_required` continue to work.
-# The verb-prefixed names are the source of truth.
-_safe = _swallow_or_warn
-_required = _raise_or_fail
-
-
 @dataclass(frozen=True)
 class Plan:
     source: Path
@@ -377,7 +370,7 @@ def _create_missing_dirs(dest_root: Path, source: Path) -> list[Path]:
         # rf-rel-09: chown/chmod at setup time are correctness operations.
         # A silent best-effort failure leaves the dest dir with wrong owner
         # or wrong perms — the user only finds out at first access, long
-        # after the source is gone. Raise via _required so the migration
+        # after the source is gone. Raise via _raise_or_fail so the migration
         # aborts loudly instead of corrupting silently.
         _raise_or_fail(
             f"chown {path} to uid={st.st_uid} gid={st.st_gid}",
