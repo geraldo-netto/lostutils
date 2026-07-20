@@ -2760,8 +2760,14 @@ def test_pending_queue_getitem_cache_invalidates_on_mutation():
 
 # --- scal-04: command_timeout_seconds branches ----------------------------
 
-def test_command_timeout_seconds_default_zero(headless_dispatcher):
-    # test-02b-followup: pure Dispatcher method — headless fixture is enough.
+def test_command_timeout_seconds_has_safe_default(headless_dispatcher):
+    assert headless_dispatcher._command_timeout_seconds() == (
+        link_queue.DEFAULT_COMMAND_TIMEOUT_SECONDS
+    )
+
+
+def test_command_timeout_seconds_zero_explicitly_disables(headless_dispatcher):
+    headless_dispatcher.config["command_timeout_seconds"] = 0
     assert headless_dispatcher._command_timeout_seconds() == 0
 
 

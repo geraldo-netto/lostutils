@@ -431,6 +431,7 @@ COMMAND_TIMEOUT_EXIT = -124
 # The module-level constant stays for legacy callers that import the
 # bare name (tests).
 _SEQ_OF_SWEEP_GAP = 256
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
 
 DEFAULT_CONFIG = {
     "seq_of_sweep_gap": _SEQ_OF_SWEEP_GAP,   # lq-decoup-04
@@ -447,10 +448,11 @@ DEFAULT_CONFIG = {
                                        # in RAM. 0 = unbounded.
     "failure_sleep_seconds": 300,   # 5 minutes — per-domain cooldown after a failure
                                     # (only the failed item's domain pauses; others run)
-    "command_timeout_seconds": 0,   # scal-04: per-item subprocess wall-time cap;
-                                    # 0 = off (wait forever). When > 0, a hung
-                                    # yt-dlp / aria2c gets terminate-then-kill so
-                                    # the worker can pick up the next item.
+    "command_timeout_seconds": DEFAULT_COMMAND_TIMEOUT_SECONDS,
+                                    # watchdog: six-hour per-item wall-time cap.
+                                    # Users may set 0 to disable it explicitly.
+                                    # On expiry yt-dlp / aria2c is terminated,
+                                    # then killed so the worker can continue.
     "max_per_domain": 0,            # 0 = no cap; otherwise cap concurrent workers per domain
     "log_verbosity": "summary",     # "summary" = first line + 25/50/75% milestones + exit
                                     # "verbose" = every line of subprocess output
@@ -2148,7 +2150,9 @@ class Dispatcher:
         Lives on Dispatcher (not LinkQueueApp) so `_run_item` can call it
         directly without going through the app façade — workers run on
         the Dispatcher instance."""
-        raw = self.config.get("command_timeout_seconds", 0)
+        raw = self.config.get(
+            "command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS
+        )
         try:
             v = int(raw)
         except (TypeError, ValueError):
@@ -3565,7 +3569,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         self.max_per_domain_var = tk.StringVar(
             value=str(self.config.get("max_per_domain", 0)))
         self.command_timeout_var = tk.StringVar(
-            value=str(self.config.get("command_timeout_seconds", 0)))
+            value=str(self.config.get(
+                "command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS)))
         self.output_folder_var = tk.StringVar(
             value=str(self.config.get("output_folder", "")))
         self.log_verbosity_var = tk.StringVar(
