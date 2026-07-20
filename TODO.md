@@ -208,7 +208,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-api-20 | open | low | link_queue.py:1443 — `_process_link`'s docstring declares it returns "'queue', 'immediate', 'default', or 'duplicate'", but it also returns "rejected" (:1447, from `_resolve_protocol`'s hard shell+bare-{url} reject), which callers rely on (`_on_add` counts["rejected"] at :3936). Update the docstring to list the full return set so the error surface is an accurate contract. | API contract & compatibility — full error surface must be declared
 rdv3-api-01 | open | low | remove-deduplv3.py:70,121-127,94 — documented exit-code contract (epilog "2 input file error, 3 decode error") is mislabeled: an invalid `--encoding` argument exits 3 ("decode error") though it is an argument error, and a missing stdout binary buffer exits 2 ("input file error") though it is an output error. Align codes/labels or add an argument-error code. | API contract & compatibility — error-surface taxonomy
 
 ## CLI / option integrity

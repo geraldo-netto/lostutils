@@ -1479,8 +1479,9 @@ class Dispatcher:
 
     def _process_link(self, url: str, extra: tuple = ()) -> str:
         """Route one link (with optional mapped flags `extra`). Returns
-        'queue', 'immediate', 'default', or 'duplicate' (if the URL was already
-        pending/running on the queue)."""
+        'queue', 'immediate', 'default', 'duplicate', 'rejected', or 'dropped'.
+        Duplicate means the URL was already pending/running; dropped means the
+        bounded immediate queue had no room."""
         protocol = self._extract_protocol(url)
         mode, cmd_tpl, shell, outcome = self._resolve_protocol(protocol)
         if outcome == "rejected":
