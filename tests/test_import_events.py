@@ -961,6 +961,15 @@ def test_text_and_image_messages_share_prompt_preamble():
     assert image[1]["content"][0]["text"] == expected
 
 
+def test_pdf_ocr_mode_help_describes_never_policy(capsys):
+    with pytest.raises(SystemExit) as exc:
+        import_events.parse_args(["--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "never: skip OCR entirely" in help_text
+    assert "using vision only for unreadable PDFs" in help_text
+
+
 def test_text_messages_nonce_differs_per_call():
     a = import_events._text_messages("x")[1]["content"]
     b = import_events._text_messages("x")[1]["content"]

@@ -4057,7 +4057,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--pdf-ocr-mode", choices=("auto", "always", "never"),
                         default=defaults.pdf_ocr_mode,
                         help=("PDF OCR policy: auto skips OCR when parsed text is usable; "
-                              "always runs OCR; never skips OCR and uses vision for unreadable PDFs "
+                              "always runs OCR; never: skip OCR entirely, using vision "
+                              "only for unreadable PDFs "
                               f"(default: {DEFAULT_PDF_OCR_MODE})."))
     parser.add_argument("--tentative-events", choices=("keep", "skip"),
                         default=defaults.tentative_events,
