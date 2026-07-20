@@ -949,6 +949,18 @@ def test_text_messages_include_language_hint():
     assert "month/year heading applies" in msg[1]["content"]
 
 
+def test_text_and_image_messages_share_prompt_preamble():
+    expected = import_events._prompt_preamble("it", None)
+
+    text = import_events._text_messages("evento", "it")
+    image = import_events._image_messages_from_bytes(
+        b"image", "image/png", "it"
+    )
+
+    assert text[1]["content"].startswith(expected)
+    assert image[1]["content"][0]["text"] == expected
+
+
 def test_text_messages_nonce_differs_per_call():
     a = import_events._text_messages("x")[1]["content"]
     b = import_events._text_messages("x")[1]["content"]
