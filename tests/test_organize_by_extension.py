@@ -123,21 +123,35 @@ class OrganizeByExtensionTest(unittest.TestCase):
             root = Path(temp_dir_name)
             for i in range(3):
                 self.make_file(root, f'a{i}.txt')
-            old_bucket_size = _oze.BUCKET_SIZE
-            try:
-                with patch.object(
-                    sys,
-                    'argv',
-                    ['organize_by_extension.py', str(root), '--bucket-size', '2'],
-                ):
-                    main()
-            finally:
-                _oze.BUCKET_SIZE = old_bucket_size
+            with patch.object(
+                sys,
+                'argv',
+                ['organize_by_extension.py', str(root), '--bucket-size', '2'],
+            ):
+                main()
 
             first_bucket = root / 'txt' / 'a00000'
             second_bucket = root / 'txt' / 'a00001'
             self.assertEqual(len([p for p in first_bucket.iterdir() if p.is_file()]), 2)
             self.assertEqual(len([p for p in second_bucket.iterdir() if p.is_file()]), 1)
+            self.assertEqual(_oze.BUCKET_SIZE, 500)
+
+    def test_programmatic_bucket_size_does_not_leak_between_runs(self):
+        with TemporaryDirectory() as temp_dir_name:
+            base = Path(temp_dir_name)
+            custom = base / "custom"
+            default = base / "default"
+            custom.mkdir()
+            default.mkdir()
+            for root in (custom, default):
+                for i in range(3):
+                    self.make_file(root, f"a{i}.txt")
+
+            organize(custom, bucket_size=2)
+            organize(default)
+
+            self.assertTrue((custom / "txt" / "a00001").exists())
+            self.assertFalse((default / "txt" / "a00001").exists())
 
     def test_duplicate_filenames_move_to_next_directory(self):
         with TemporaryDirectory() as temp_dir_name:

@@ -214,7 +214,6 @@ lq-cfg-01 | open | low | link_queue.py:336 — `command_timeout_seconds` (the hu
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-api-20 | open | low | link_queue.py:1443 — `_process_link`'s docstring declares it returns "'queue', 'immediate', 'default', or 'duplicate'", but it also returns "rejected" (:1447, from `_resolve_protocol`'s hard shell+bare-{url} reject), which callers rely on (`_on_add` counts["rejected"] at :3936). Update the docstring to list the full return set so the error surface is an accurate contract. | API contract & compatibility — full error surface must be declared
-oze-api-01 | open | med | organize_by_extension.py:2236,2265 — `BUCKET_SIZE` is a mutable module global reassigned by `main()` via `global`; `organize()` exposes no `bucket_size` param, so library callers can't set it and the mutation is process-global and never restored (leaks across successive `organize()`/test calls in one process). Thread `bucket_size` through `organize()`/`BucketManager`. | config discoverability: --bucket-size has no per-call accessor
 rdv3-api-01 | open | low | remove-deduplv3.py:70,121-127,94 — documented exit-code contract (epilog "2 input file error, 3 decode error") is mislabeled: an invalid `--encoding` argument exits 3 ("decode error") though it is an argument error, and a missing stdout binary buffer exits 2 ("input file error") though it is an output error. Align codes/labels or add an argument-error code. | API contract & compatibility — error-surface taxonomy
 
 ## CLI / option integrity

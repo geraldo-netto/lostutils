@@ -838,6 +838,7 @@ def _find_reusable_bucket(
     state_cache: dict[Path, Set[str] | frozenset[str]],
     indices: list[int],
     first_non_full_index: int = 0,
+    bucket_size: int = BUCKET_SIZE,
 ) -> BucketChoice:
     """Walk `indices` sorted, looking for an existing bucket with room and
     without a name clash on `filename` (oze-cx-01). Returns a
@@ -869,7 +870,7 @@ def _find_reusable_bucket(
         if names is None:
             names = bucket_file_names(bucket_path)
             state_cache[bucket_path] = names
-        if len(names) >= BUCKET_SIZE:
+        if len(names) >= bucket_size:
             state_cache[bucket_path] = _BUCKET_FULL
             next_expected = index + 1
             first_non_full = index + 1
@@ -903,6 +904,7 @@ def choose_bucket(
     state_cache: dict[Path, Set[str] | frozenset[str]],
     indices: list[int],
     first_non_full_index: int = 0,
+    bucket_size: int = BUCKET_SIZE,
 ) -> tuple[Path, int]:
     """Choose or create the bucket for `filename`, preferring gaps and
     existing rooms. Returns ``(bucket_path, first_non_full)`` where the
@@ -911,7 +913,7 @@ def choose_bucket(
     (oze-cx-01)."""
     choice = _find_reusable_bucket(
         ext_dir, prefix, filename, state_cache, indices,
-        first_non_full_index)
+        first_non_full_index, bucket_size)
     if choice.bucket is not None:
         return choice.bucket, choice.first_non_full
     bucket = _allocate_new_bucket(
@@ -940,14 +942,15 @@ class Bucket:
     prefix: str
     index: int
     members: Set[str] | frozenset[str] = field(default_factory=set)
+    capacity: int = BUCKET_SIZE
 
     @property
     def name(self) -> str:
         return self.path.name
 
     def is_full(self) -> bool:
-        """True once the bucket has reached ``BUCKET_SIZE`` (oze-scal-02)."""
-        return self.members is _BUCKET_FULL or len(self.members) >= BUCKET_SIZE
+        """True once the bucket has reached its capacity (oze-scal-02)."""
+        return self.members is _BUCKET_FULL or len(self.members) >= self.capacity
 
     def reserve(self, filename: str) -> None:
         """Record ``filename`` as taken in this bucket. Caller must check
@@ -978,6 +981,7 @@ class BucketManager:
     """
 
     root: Path
+    bucket_size: int = BUCKET_SIZE
     state_cache: dict[Path, Set[str] | frozenset[str]] = field(default_factory=dict)
     # Indices cache is keyed by *directory* (oze-perf-05): one scandir per
     # ext_dir populates every prefix at once, so the 26-times-per-extension
@@ -1034,7 +1038,8 @@ class BucketManager:
         cursor_key = (ext_dir, prefix)
         cursor = self._first_non_full.get(cursor_key, 0)
         bucket_path, new_cursor = choose_bucket(
-            ext_dir, prefix, source.name, self.state_cache, indices, cursor)
+            ext_dir, prefix, source.name, self.state_cache, indices, cursor,
+            self.bucket_size)
         self._first_non_full[cursor_key] = new_cursor
         names = self.state_cache[bucket_path]
         if not isinstance(names, set):  # _BUCKET_FULL frozenset sentinel (oze-cx-05)
@@ -1057,6 +1062,7 @@ class BucketManager:
             prefix=match.group(1),
             index=int(match.group(2)),
             members=names,
+            capacity=self.bucket_size,
         )
         if bucket.is_full():
             self.state_cache[bucket_path] = _BUCKET_FULL
@@ -1070,6 +1076,7 @@ class BucketManager:
                 prefix=bucket.prefix,
                 index=bucket.index,
                 members=_BUCKET_FULL,
+                capacity=self.bucket_size,
             )
         return bucket
 
@@ -2128,11 +2135,16 @@ def _clamp_num_threads(num_threads: int) -> int:
 
 def _run_move_stage(root: Path, files: list[Path], ctx: SniffContext, *,
                     preview: bool, verbose: bool, num_threads: int,
+                    bucket_size: int,
                     bucket_manager: BucketManager | None,
                     head_cache: dict[Path, HeadBytes]) -> None:
     """Plan then execute the moves for the scanned `files` (oze-arch pipeline
     stage): plan_moves over a BucketManager, run the pool, and log run stats."""
-    manager = bucket_manager if bucket_manager is not None else BucketManager(root=root)
+    manager = (
+        bucket_manager
+        if bucket_manager is not None
+        else BucketManager(root=root, bucket_size=bucket_size)
+    )
     plan = plan_moves(root, sorted(files), manager, ctx=ctx, preview=preview)
     stats = _run_moves(
         plan,
@@ -2173,6 +2185,7 @@ def organize(
     num_threads: int = 3,
     sniff: bool = True,
     extra_zip_family: frozenset[str] = frozenset(),
+    bucket_size: int = BUCKET_SIZE,
     bucket_manager: BucketManager | None = None,
     head_cache: dict[Path, HeadBytes] | None = None,
     prune_empty: bool = False,
@@ -2194,6 +2207,11 @@ def organize(
     stays streaming: plans are issued one at a time, never buffered.
     """
     num_threads = _clamp_num_threads(num_threads)
+    if (not isinstance(bucket_size, int) or isinstance(bucket_size, bool)
+            or bucket_size < 1):
+        raise ValueError(
+            f"bucket_size must be a positive integer, got {bucket_size!r}"
+        )
     root = resolve_root(root)
     if verbose:
         logger.info(f"Organizing files in: {root}")
@@ -2223,6 +2241,7 @@ def organize(
         _run_move_stage(
             root, files, ctx,
             preview=preview, verbose=verbose, num_threads=num_threads,
+            bucket_size=bucket_size,
             bucket_manager=bucket_manager, head_cache=head_cache,
         )
 
@@ -2402,7 +2421,6 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """Entry point for script execution."""
-    global BUCKET_SIZE
     parser = build_parser()
     args = parser.parse_args()
     # oze-dup-08: single basicConfig call. The previous code configured
@@ -2431,7 +2449,6 @@ def main() -> None:
         root = resolve_root(args.root)
     except (ValueError, TypeError, FileNotFoundError) as exc:
         raise SystemExit(str(exc)) from exc
-    BUCKET_SIZE = args.bucket_size
     try:
         organize(
             root,
@@ -2440,6 +2457,7 @@ def main() -> None:
             num_threads=args.threads,
             sniff=args.sniff,
             extra_zip_family=_parse_extra_zip_family(args.extra_zip_family),
+            bucket_size=args.bucket_size,
             prune_empty=args.prune_empty,
         )
     except KeyboardInterrupt:
