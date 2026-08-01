@@ -4478,6 +4478,26 @@ def test_cooldown_wait_hint_sleeps_until_expiry(headless_dispatcher):
     assert hint is not None and 40.0 < hint <= 50.0     # sleep until expiry
 
 
+def test_claim_or_wait_for_cooldown_waits_until_next_expiry(
+    headless_dispatcher, monkeypatch
+):
+    waits = []
+    monkeypatch.setattr(
+        headless_dispatcher, "_try_claim_item", lambda _idx: None
+    )
+    monkeypatch.setattr(
+        headless_dispatcher, "_cooldown_wait_hint", lambda: 2.5
+    )
+    monkeypatch.setattr(
+        headless_dispatcher._dispatch_cv,
+        "wait",
+        lambda timeout: waits.append(timeout),
+    )
+
+    assert headless_dispatcher._claim_or_wait_for_cooldown(0) == (None, True)
+    assert waits == [2.5]
+
+
 def test_immediate_item_crash_records_failure_metric(headless_dispatcher):
     """lq-mt-10: an immediate item that raises is counted as a failure."""
     disp = headless_dispatcher
