@@ -941,12 +941,26 @@ def _assign_categories(
 ) -> list[Bookmark]:
     if not bookmarks:
         return []
+    _ensure_categorizer_ready(categorizer)
     result: list[Bookmark] = []
     failures = 0
     for batch in _chunks(bookmarks, max(1, batch_size)):
         categories, failures = _categorize_if_available(categorizer, batch, failures)
         result.extend(_apply_category_batch(batch, categories, fallback))
     return result
+
+
+def _ensure_categorizer_ready(categorizer: CategoryProvider | None) -> None:
+    """Force a deferred model load before batching starts (bt-perf-50).
+
+    Loading inside the batch loop would put the failure inside
+    :func:`_categorize_batch`'s ``except Exception``, silently downgrading an
+    unloadable model to "every bookmark gets the fallback category". Doing it
+    here keeps a load failure fatal, exactly as the eager construction was.
+    """
+    ensure = getattr(categorizer, "ensure", None)
+    if callable(ensure):
+        ensure()
 
 
 def _categorize_if_available(
@@ -1681,6 +1695,43 @@ def _categorizer_from_args(args: argparse.Namespace, bookmarks: Sequence[Bookmar
     )
 
 
+class _LazyCategorizer:
+    """Defer the GGUF load until a batch actually needs it (bt-perf-50).
+
+    ``tidy_bookmarks`` only invokes a categorizer for bookmarks that survive
+    dedup and are not immutable. Constructing one up front paid a full model
+    load — up to ``LLAMA_MODEL_LOAD_TIMEOUT_SECONDS`` — even on runs where
+    every bookmark was immutable and the model was closed without a single
+    inference.
+
+    ``ensure()`` is called once by :func:`_assign_categories` before batching
+    so a load failure still aborts the run rather than being absorbed as a
+    per-batch fallback.
+    """
+
+    def __init__(self, factory: Callable[[], CategoryProvider | None]) -> None:
+        self._factory = factory
+        self._provider: CategoryProvider | None = None
+
+    def ensure(self) -> CategoryProvider:
+        provider = self._provider
+        if provider is None:
+            provider = self._factory()
+            if provider is None:
+                raise UserError("missing --model for LLM categorization")
+            self._provider = provider
+        return provider
+
+    def __call__(self, bookmarks: Sequence[Bookmark]) -> Mapping[int, Sequence[str] | str]:
+        return self.ensure()(bookmarks)
+
+    def close(self) -> None:
+        provider, self._provider = self._provider, None
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+
+
 def _run(args: argparse.Namespace) -> int:
     paths = _input_paths_from_args(args)
     if not paths:
@@ -1691,7 +1742,7 @@ def _run(args: argparse.Namespace) -> int:
     immutable = list(args.immutable_root) + load_immutable_file(args.immutable_file)
     options = _normalization_from_args(args)
     categorizer = (
-        _categorizer_from_args(args, bookmarks)
+        _LazyCategorizer(lambda: _categorizer_from_args(args, bookmarks))
         if args.model is not None
         else None
     )

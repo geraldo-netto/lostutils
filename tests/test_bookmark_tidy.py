@@ -1280,6 +1280,91 @@ def test_run_uses_tidy_path_for_all_immutable_bookmarks(tmp_path, monkeypatch):
     assert written["roots"]["bookmark_bar"]["children"][0]["name"] == "Work"
 
 
+def test_run_skips_model_load_when_every_bookmark_is_immutable(tmp_path, monkeypatch):
+    """bt-perf-50: an all-immutable run must not pay a full GGUF load."""
+    output = tmp_path / "out.json"
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
+    args = bookmark_tidy.parse_args(
+        ["input.html", "--immutable-root", "Work", "--model", str(model),
+         "-o", str(output)]
+    )
+    monkeypatch.setattr(
+        bookmark_tidy, "_input_paths_from_args", lambda _args: [tmp_path / "input.html"]
+    )
+    monkeypatch.setattr(
+        bookmark_tidy, "read_all_bookmarks",
+        lambda _paths: [
+            bookmark_tidy.Bookmark("https://example.test", "Example", ("Work",))
+        ],
+    )
+    built = []
+    monkeypatch.setattr(
+        bookmark_tidy, "LlamaCategorizer",
+        lambda **kwargs: built.append(kwargs) or (lambda _b: {}),
+    )
+
+    assert bookmark_tidy._run(args) == 0
+    assert built == []
+
+
+def test_lazy_categorizer_builds_once_and_closes(monkeypatch):
+    calls = []
+
+    class FakeProvider:
+        def __init__(self):
+            self.closed = False
+
+        def __call__(self, bookmarks):
+            calls.append(len(bookmarks))
+            return {}
+
+        def close(self):
+            self.closed = True
+
+    provider = FakeProvider()
+    built = []
+
+    def factory():
+        built.append(1)
+        return provider
+
+    lazy = bookmark_tidy._LazyCategorizer(factory)
+    assert built == []
+    lazy([_sample_bookmark()])
+    lazy([_sample_bookmark()])
+    assert built == [1]
+    assert calls == [1, 1]
+    lazy.close()
+    assert provider.closed
+    # close() is idempotent and a never-loaded categorizer closes cleanly.
+    lazy.close()
+    bookmark_tidy._LazyCategorizer(factory).close()
+    assert built == [1]
+
+
+def test_lazy_categorizer_load_failure_is_fatal_not_a_fallback():
+    """bt-perf-50: the deferred load must not be swallowed by the per-batch
+    except in _categorize_batch."""
+    def factory():
+        raise bookmark_tidy.UserError("boom")
+
+    lazy = bookmark_tidy._LazyCategorizer(factory)
+    with pytest.raises(bookmark_tidy.UserError, match="boom"):
+        bookmark_tidy._assign_categories([_sample_bookmark()], lazy, "Uncategorized", 30)
+
+
+def test_lazy_categorizer_rejects_a_none_factory_result():
+    lazy = bookmark_tidy._LazyCategorizer(lambda: None)
+    with pytest.raises(bookmark_tidy.UserError, match="missing --model"):
+        lazy.ensure()
+
+
+def test_ensure_categorizer_ready_ignores_plain_callables():
+    bookmark_tidy._ensure_categorizer_ready(None)
+    bookmark_tidy._ensure_categorizer_ready(lambda _b: {})
+
+
 def test_parse_args_help_documents_llm_tuning_flags(capsys):
     with pytest.raises(SystemExit) as exc:
         bookmark_tidy.parse_args(["--help"])

@@ -57,7 +57,6 @@ mkp-di-50 | open | low | minikeypad.py:1844-1847 — `_write_all_done` sets `amb
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-perf-50 | open | low | bookmark-tidy.py:1675-1679 — `_run` constructs `LlamaCategorizer` (a full GGUF load, up to `LLAMA_MODEL_LOAD_TIMEOUT_SECONDS`=300s) before `tidy_bookmarks` runs dedup. When every bookmark falls under `--immutable-root`, `mutable` is empty and the model is loaded and closed without a single inference. Defer construction until the first non-empty batch. | performance — eager expensive init ahead of the branch that decides whether it is needed
 
 ## scalability
 
