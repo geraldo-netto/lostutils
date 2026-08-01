@@ -517,6 +517,21 @@ def test_emitters_use_configured_output_delimiter(monkeypatch):
     assert "cat|car|1" in text
 
 
+def test_emit_results_handles_broken_pipe():
+    args = dn._build_parser().parse_args(["names.txt", "-w", "1"])
+
+    def closed_pipe(_text):
+        raise BrokenPipeError
+
+    assert not dn._emit_results(
+        {"same": [1, 2]},
+        ["same"],
+        1,
+        args,
+        closed_pipe,
+    )
+
+
 def test_main_cleanup_flags_override_defaults(monkeypatch, tmp_path, capsys):
     f = tmp_path / "names.txt"
     f.write_text("A# skip\nA\n", encoding="utf-8")

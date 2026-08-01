@@ -200,6 +200,22 @@ def _emit_self_collisions(line_nums, write):
             )
 
 
+def _emit_results(line_nums, cleaned_strs, threshold, args, write):
+    try:
+        _emit_self_collisions(line_nums, write)
+        emit_pairs(
+            cleaned_strs,
+            threshold,
+            args.workers,
+            write,
+            block_threshold=args.block_threshold,
+            block_rows=args.block_rows,
+        )
+    except BrokenPipeError:
+        return False
+    return True
+
+
 def main():
     args = _build_parser().parse_args()
 
@@ -225,14 +241,12 @@ def main():
     threshold = clamp_threshold(args.threshold)
 
     write = sys.stdout.write
-    _emit_self_collisions(line_nums, write)
-    emit_pairs(
+    _emit_results(
+        line_nums,
         cleaned_strs,
         threshold,
-        args.workers,
+        args,
         write,
-        block_threshold=args.block_threshold,
-        block_rows=args.block_rows,
     )
 
 
