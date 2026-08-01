@@ -314,8 +314,15 @@ class NetscapeBookmarkParser(HTMLParser):
         )
 
 
+def _read_utf8_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise UserError(f"bookmark file is not valid UTF-8: {path}") from exc
+
+
 def read_netscape_bookmarks(path: Path) -> list[Bookmark]:
-    return netscape_html_to_bookmarks(path.read_text(encoding="utf-8", errors="replace"), str(path))
+    return netscape_html_to_bookmarks(_read_utf8_text(path), str(path))
 
 
 def netscape_html_to_bookmarks(text: str, source: str) -> list[Bookmark]:
@@ -623,19 +630,18 @@ def _detect_bookmark_format_with_data(path: Path) -> tuple[str, Any | None]:
         return "firefox-jsonlz4", None
     if path.name == "places.sqlite" or path.suffix.casefold() in {".sqlite", ".sqlite3"}:
         return "firefox-sqlite", None
-    with path.open(encoding="utf-8", errors="replace") as handle:
-        sample = handle.read(FORMAT_SNIFF_CHARS)
-        stripped = sample.lstrip()
-        if stripped.startswith("<"):
-            return "netscape", sample + handle.read()
-        if stripped.startswith("{"):
-            data = _parse_json_bookmark_text(sample + handle.read(), path)
-            return _json_bookmark_format(data, path), data
+    text = _read_utf8_text(path)
+    stripped = text[:FORMAT_SNIFF_CHARS].lstrip()
+    if stripped.startswith("<"):
+        return "netscape", text
+    if stripped.startswith("{"):
+        data = _parse_json_bookmark_text(text, path)
+        return _json_bookmark_format(data, path), data
     raise UserError(f"unsupported bookmark file: {path}")
 
 
 def _load_json_bookmark(path: Path) -> Any:
-    return _parse_json_bookmark_text(path.read_text(encoding="utf-8", errors="replace"), path)
+    return _parse_json_bookmark_text(_read_utf8_text(path), path)
 
 
 def _parse_json_bookmark_text(text: str, path: Path) -> Any:

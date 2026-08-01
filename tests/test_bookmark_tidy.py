@@ -499,6 +499,15 @@ def test_read_firefox_jsonlz4_rejects_bad_container():
         bookmark_tidy._decode_lz4_block(bytes([0x10, 0x01, 0x00]))
 
 
+@pytest.mark.parametrize("suffix", [".html", ".json"])
+def test_bookmark_readers_reject_invalid_utf8(tmp_path, suffix):
+    path = tmp_path / f"bookmarks{suffix}"
+    path.write_bytes(b'{"roots":{"bookmark_bar":{"children":[' + b"\xff" + b"]}}}")
+
+    with pytest.raises(bookmark_tidy.UserError, match="valid UTF-8"):
+        bookmark_tidy.read_bookmark_file(path)
+
+
 def test_lz4_match_copy_decodes_repeated_sequence():
     data = bytes([0x32]) + b"abc" + b"\x03\x00"
 
