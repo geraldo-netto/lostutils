@@ -586,6 +586,15 @@ def test_state_file_lock_pidfile_reclaims_old_invalid_metadata(
         lock.release()
 
 
+def test_pidfile_staleness_rejects_missing_and_recent_malformed_files(tmp_path):
+    lock = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+
+    assert not lock._pidfile_is_stale()
+
+    Path(lock.lock_path).write_text("pid=not-a-number\n", encoding="utf-8")
+    assert not lock._pidfile_is_stale()
+
+
 def test_state_file_lock_flock_release_keeps_lockfile(tmp_path):
     if link_queue.fcntl is None:
         pytest.skip("fcntl flock path unavailable")
