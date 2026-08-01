@@ -132,7 +132,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-state-50 | open | low | minikeypad.py:1820-1844 — `_warn_if_layers_collapse` now warns before a multi-layer Write-all on a reportID-0 device, but the write still proceeds and the layers still overwrite each other on the hardware. | state machine integrity — PARTIAL: the warning shipped (see `_warn_if_layers_collapse`); the hard refusal is deferred because whether reportID 0 really means "this firmware cannot switch layers" is a property of the original C# protocol that is still unconfirmed, and refusing would break a legitimate program-one-layer-at-a-time workflow. Confirm against the decompiled original, then decide refuse vs keep-warning.
 
 ## test coverage
 

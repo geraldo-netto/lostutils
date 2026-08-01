@@ -1674,17 +1674,30 @@ def test_write_all_reports_failure_stays_unambiguous(app):
     assert "ambiguous" not in app._assignments[(1, 1)]
 
 
-def test_write_all_warns_when_report_id_zero_collapses_layers(app):
-    """mkp-state-50: reportID 0 emits no layer-switch, so multi-layer profiles
-    overwrite each other on the device."""
+def _collapsing_write_all(app, monkeypatch, answer, report_id=0):
+    """Arm a two-layer write-all on a reportID-0 device; returns the prompts."""
+    prompts = []
+
+    def fake_askyesno(title, message, **kwargs):
+        prompts.append((title, message, kwargs))
+        return answer
+
+    monkeypatch.setattr(minikeypad.messagebox, "askyesno", fake_askyesno)
     app._io_busy = False
-    app.kp.ReportID = 0
+    app.kp.ReportID = report_id
     data = _one_key_assignment(app)
     app._assignments = {
         (1, 1): {"data": data, "desc": "A"},
         (3, 1): {"data": data, "desc": "B"},
     }
     app.dev = FakeDev(connected=True, write_ok=True)
+    return prompts
+
+
+def test_write_all_asks_before_report_id_zero_collapses_layers(app, monkeypatch):
+    """mkp-state-50: reportID 0 emits no layer-switch, so multi-layer profiles
+    overwrite each other on the device."""
+    prompts = _collapsing_write_all(app, monkeypatch, answer=True)
 
     app._write_all()
     _wait_drain(app)
@@ -1692,13 +1705,56 @@ def test_write_all_warns_when_report_id_zero_collapses_layers(app):
     log = app.log_box.get("1.0", "end")
     assert "no layer-switch command" in log
     assert "layers 1, 3" in log
+    assert len(prompts) == 1
+    _title, message, kwargs = prompts[0]
+    assert "layers 1, 3" in message
+    assert kwargs["default"] == "no"        # the safe answer is preselected
+
+
+def test_write_all_cancelled_sends_nothing(app, monkeypatch):
+    """Answering no must stop the write, not just warn about it."""
+    _collapsing_write_all(app, monkeypatch, answer=False)
+    sent = []
+    monkeypatch.setattr(app, "_run_write_all", lambda jobs: sent.append(jobs))
+
+    app._write_all()
+    _wait_drain(app)
+
+    assert sent == []
+    assert "cancelled" in app.log_box.get("1.0", "end").lower()
+
+
+def test_collapse_prompt_flags_an_unconfirmed_report_id(app, monkeypatch):
+    """0 is also the no-answer fallback, so the prompt says which case it is."""
+    prompts = _collapsing_write_all(app, monkeypatch, answer=False)
+    app._report_id_confirmed = False
+
+    app._write_all()
+    _wait_drain(app)
+
+    assert "fallback default" in prompts[0][1]
+
+
+def test_collapse_prompt_stays_quiet_about_a_device_reported_zero(app, monkeypatch):
+    prompts = _collapsing_write_all(app, monkeypatch, answer=False)
+    app._report_id_confirmed = True
+
+    app._write_all()
+    _wait_drain(app)
+
+    assert "fallback default" not in prompts[0][1]
 
 
 @pytest.mark.parametrize(
     ("report_id", "layers"),
     [(0, (1,)), (2, (1, 3))],
 )
-def test_write_all_stays_quiet_when_layers_cannot_collapse(app, report_id, layers):
+def test_write_all_does_not_ask_when_layers_cannot_collapse(
+        app, monkeypatch, report_id, layers):
+    def refuse(*_a, **_k):
+        raise AssertionError("must not prompt when no layer can be overwritten")
+
+    monkeypatch.setattr(minikeypad.messagebox, "askyesno", refuse)
     app._io_busy = False
     app.kp.ReportID = report_id
     data = _one_key_assignment(app)
@@ -1709,6 +1765,19 @@ def test_write_all_stays_quiet_when_layers_cannot_collapse(app, report_id, layer
     _wait_drain(app)
 
     assert "no layer-switch command" not in app.log_box.get("1.0", "end")
+
+
+def test_apply_report_id_records_whether_the_device_answered(app):
+    app._apply_report_id(2, "probed")
+    assert app.kp.ReportID == 2 and app._report_id_confirmed is True
+
+    app._apply_report_id(0, "fallback", confirmed=False)
+    assert app.kp.ReportID == 0 and app._report_id_confirmed is False
+
+
+def test_report_id_starts_unconfirmed(app):
+    """KeyParam defaults ReportID to 0 before any probe has run."""
+    assert minikeypad.KeyParam().ReportID == 0
 
 
 def test_write_all_clears_ambiguous_after_a_successful_rewrite(app):

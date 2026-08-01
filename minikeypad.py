@@ -58,6 +58,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 from tkinter import filedialog
+from tkinter import messagebox
 from tkinter import scrolledtext
 from typing import Any
 
@@ -1082,6 +1083,9 @@ class App(tk.Tk):
         self._ui_q = queue.SimpleQueue()
 
         self.kp = KeyParam()
+        # mkp-state-50: KeyParam starts at ReportID 0, which is also the
+        # no-answer fallback — untrue until _version_check says otherwise.
+        self._report_id_confirmed = False
         self.dev = KeypadDevice(log=self.log)
         # mkp-rob-50: devices abandoned by a stalled probe, waiting for their
         # orphan thread to leave libusb so the handle can be released.
@@ -1670,10 +1674,14 @@ class App(tk.Tk):
                     found, "Keyboard reportID = %d" % found))
                 return
         self._ui_q.put(lambda: self._apply_report_id(
-            0, "Version check: no reportID accepted, defaulting to 0"))
+            0, "Version check: no reportID accepted, defaulting to 0",
+            confirmed=False))
 
-    def _apply_report_id(self, report_id, message):
+    def _apply_report_id(self, report_id, message, confirmed=True):
         self.kp.ReportID = report_id
+        # mkp-state-50: 0 is both a real report ID and the no-answer fallback.
+        # Only the device-reported case says anything about the protocol.
+        self._report_id_confirmed = confirmed
         self.log(message)
 
     # ---- send routines (port of FormMain.Download_Click etc.) ------------
@@ -1907,7 +1915,9 @@ class App(tk.Tk):
         if not self._assignments:
             self._dl_note("Nothing saved to write.")
             return
-        self._warn_if_layers_collapse()
+        if not self._confirm_layer_collapse():
+            self._dl_note("Write-all cancelled.")
+            return
         jobs = []
         for (layer, kid), rec in self._assignments.items():
             built = self._reports_for(layer, rec["data"])
@@ -1918,8 +1928,8 @@ class App(tk.Tk):
             jobs.append(((layer, kid), reports, self._flash_buf(flash)))
         self._run_write_all(jobs)
 
-    def _warn_if_layers_collapse(self):
-        """Warn before a multi-layer write-all on a reportID-0 device (mkp-state-50).
+    def _confirm_layer_collapse(self):
+        """Confirm a multi-layer write-all on a reportID-0 device (mkp-state-50).
 
         `build_download_reports` prepends the 0xA1 layer-switch command only
         when ReportID != 0. With reportID 0 there is no switch, so every saved
@@ -1927,21 +1937,38 @@ class App(tk.Tk):
         the later ones overwrite the earlier — the profile is intact on disk,
         but the device keeps only the last layer written.
 
-        Deliberately a warning, not a refusal: whether reportID 0 really means
-        "this firmware cannot switch layers" is a property of the original C#
-        protocol that has not been confirmed, and refusing would break a
-        legitimate program-one-layer-at-a-time workflow.
+        A confirmation rather than a refusal, for two reasons. Programming one
+        layer at a time is a legitimate workflow. And reportID 0 is also what
+        `_version_check` falls back to when NO report ID was accepted, so the
+        value does not reliably mean "this firmware cannot switch layers" —
+        `_report_id_confirmed` separates the two cases in the prompt.
+
+        Returns True when the write should go ahead.
         """
         if self.kp.ReportID != 0:
-            return
+            return True
         layers = sorted({layer for layer, _kid in self._assignments})
         if len(layers) < 2:
-            return
+            return True
+        listed = ", ".join(str(x) for x in layers)
         self.log(
             "Write-all: reportID 0 sends no layer-switch command, so layers "
             "%s will all be written to the layer the device is on now and "
             "overwrite each other. Select one layer at a time to program them "
-            "separately." % ", ".join(str(x) for x in layers)
+            "separately." % listed
+        )
+        unconfirmed = "" if self._report_id_confirmed else (
+            "\n\nThe version check accepted no report ID, so 0 here is the "
+            "fallback default rather than a value the device reported."
+        )
+        return messagebox.askyesno(
+            "Layers will overwrite each other",
+            "reportID 0 sends no layer-switch command, so layers %s will all "
+            "be written to the layer the device is on now and overwrite each "
+            "other.%s\n\nSelect one layer at a time to program them "
+            "separately.\n\nWrite all layers anyway?" % (listed, unconfirmed),
+            default="no",
+            parent=self,
         )
 
     def _run_write_all(self, jobs):
