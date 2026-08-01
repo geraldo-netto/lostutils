@@ -548,6 +548,44 @@ def test_state_file_lock_pidfile_rejects_live_pid(tmp_path, monkeypatch):
         link_queue.StateFileLock(state_path).acquire()
 
 
+def test_state_file_lock_pidfile_cleans_up_metadata_failure(tmp_path, monkeypatch):
+    state_path = str(tmp_path / "state.yaml")
+    lock_path = state_path + ".lock"
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    lock = link_queue.StateFileLock(state_path)
+    monkeypatch.setattr(
+        lock,
+        "_write_metadata",
+        lambda _fd: (_ for _ in ()).throw(OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        lock.acquire()
+
+    assert lock._fd is None
+    assert not lock._owns_pidfile
+    assert not os.path.exists(lock_path)
+
+
+def test_state_file_lock_pidfile_reclaims_old_invalid_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    state_path = str(tmp_path / "state.yaml")
+    lock_path = state_path + ".lock"
+    Path(lock_path).write_text("", encoding="utf-8")
+    old = time.time() - link_queue.INVALID_PIDFILE_GRACE_SECONDS - 1
+    os.utime(lock_path, (old, old))
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    lock = link_queue.StateFileLock(state_path)
+
+    lock.acquire()
+    try:
+        assert f"pid={os.getpid()}" in Path(lock_path).read_text(encoding="utf-8")
+    finally:
+        lock.release()
+
+
 def test_state_file_lock_flock_release_keeps_lockfile(tmp_path):
     if link_queue.fcntl is None:
         pytest.skip("fcntl flock path unavailable")

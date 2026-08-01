@@ -234,6 +234,7 @@ def _temporary_sibling_path(directory: str, prefix: str, name: str) -> "str | No
 CONFIG_FILE = _resolve_state_path(CONFIG_FILE_NAME)
 LEGACY_CONFIG_FILE = _resolve_state_path(LEGACY_CONFIG_FILE_NAME)
 STATE_FILE = _resolve_state_path(STATE_FILE_NAME)
+INVALID_PIDFILE_GRACE_SECONDS = 5.0
 
 
 class StateFileLockError(RuntimeError):
@@ -289,11 +290,24 @@ class StateFileLock:
                 raise self._locked_error() from retry_exc
         self._fd = fd
         self._owns_pidfile = True
-        self._write_metadata(fd)
+        try:
+            self._write_metadata(fd)
+        except BaseException:
+            try:
+                self._release_pidfile()
+            except OSError:
+                pass
+            raise
 
     def _pidfile_is_stale(self) -> bool:
         pid = self._read_pidfile_pid()
-        return pid is not None and not self._pid_is_running(pid)
+        if pid is not None:
+            return not self._pid_is_running(pid)
+        try:
+            age = time.time() - os.stat(self.lock_path).st_mtime
+        except OSError:
+            return False
+        return age >= INVALID_PIDFILE_GRACE_SECONDS
 
     def _read_pidfile_pid(self) -> "int | None":
         try:
