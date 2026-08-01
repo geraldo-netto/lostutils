@@ -21,6 +21,7 @@ or:
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 import tempfile
 import unittest
@@ -232,10 +233,7 @@ class FuzzPureHelpers(unittest.TestCase):
            tpl=template_strategy)
     def test_domain_of_queueitem_never_crashes(self, url, proto, tpl):
         # Build a QueueItem with arbitrary fields and feed it in.
-        try:
-            it = QueueItem(url=url, protocol=proto, template=tpl, shell=False)
-        except Exception:
-            return
+        it = QueueItem(url=url, protocol=proto, template=tpl, shell=False)
         out = LinkQueueApp._domain_of(it)
         self.assertIsInstance(out, str)
         self.assertTrue(out)
@@ -248,10 +246,16 @@ class FuzzPureHelpers(unittest.TestCase):
         # Single-pass substitution: a substituted value's own braces
         # must NOT be re-substituted. So if the URL contains the {url}
         # placeholder text, that literal must survive untouched.
+        replacements = (
+            (PH_URL, url),
+            (PH_URL_QUOTED, shlex.quote(url)),
+            ("{protocol}", proto),
+        )
+        for placeholder, replacement in replacements:
+            if placeholder in tpl:
+                self.assertIn(replacement, out)
         if PH_URL in url and PH_URL in tpl:
-            # Absence of crash plus the dedicated self-substitution test
-            # below is the actual contract we care about.
-            pass
+            self.assertIn(PH_URL, out)
 
     def test_resolve_command_no_self_resubstitution(self):
         # Direct regression test for the property the docstring promises.
@@ -841,12 +845,9 @@ class FuzzInternationalEncodings(unittest.TestCase):
         # _resolve_command: always returns a str (best-effort).
         out = LinkQueueApp._resolve_command(DEFAULT_TPL, url, proto)
         self.assertIsInstance(out, str)
-        # _build_argv: documented to raise ValueError on bad quoting,
-        # otherwise returns list[str].
-        try:
-            argv = LinkQueueApp._build_argv(DEFAULT_TPL, url, proto)
-        except ValueError:
-            return
+        # DEFAULT_TPL is valid shell syntax, so arbitrary URL content cannot
+        # make parsing fail: template splitting happens before substitution.
+        argv = LinkQueueApp._build_argv(DEFAULT_TPL, url, proto)
         self.assertIsInstance(argv, list)
         for a in argv:
             self.assertIsInstance(a, str)
@@ -900,10 +901,7 @@ class FuzzInternationalEncodings(unittest.TestCase):
     def test_build_argv_unicode_url(self, url):
         """`_build_argv` must keep unicode URLs in their own argv slot
         with the codepoints intact (proves it didn't bytes-roundtrip)."""
-        try:
-            argv = LinkQueueApp._build_argv("echo {url}", url, "https")
-        except ValueError:
-            return  # legitimate template-quoting failure
+        argv = LinkQueueApp._build_argv("echo {url}", url, "https")
         self.assertEqual(len(argv), 2)
         self.assertEqual(argv[0], "echo")
         self.assertEqual(argv[1], url)
