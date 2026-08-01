@@ -136,7 +136,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves the array-bounds path (dnp-rel-01) untested; add fixtures with short lines, single line, and md5-vs-sha256 widths to lock behavior. | coverage
 dnv3-test-01 | open | low | deduplicate-by-namev3.py:130-136 — add focused end-to-end coverage that token removal collapses equivalent cleaned inputs into one self-collision. | test coverage — unit expectations were normalized with dnv3-rel-01; end-to-end provenance coverage remains deferred to the test-coverage category
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
 hr-test-02 | open | low | hash-recursive-ai5.py:1540 — `_emit_stage2_groups` has no executed statements; cover group emission and its empty-input boundary. | CI function coverage gate: 0/4 statements (0.00%) in run 30700525661
