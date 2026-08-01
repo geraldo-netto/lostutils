@@ -21,7 +21,6 @@ or:
 from __future__ import annotations
 
 import os
-import string
 import sys
 import tempfile
 import unittest
@@ -355,9 +354,7 @@ class FuzzPureHelpers(unittest.TestCase):
     @given(line=weird_text,
            already=st.sets(st.sampled_from((25, 50, 75, 100)), max_size=4))
     def test_milestones_crossed_subset_of_constant(self, line, already):
-        # Need an instance — _milestones_crossed is a regular method but
-        # only reads class state. Build a minimal stub instance.
-        app = _StubApp()
+        app = _dispatcher()
         out = app._milestones_crossed(line, already)
         self.assertIsInstance(out, list)
         for m in out:
@@ -384,7 +381,7 @@ class FuzzRefactoredHelpers(unittest.TestCase):
     def test_pick_next_item_picks_min_active_under_cap(
         self, domain_active, urls, cap
     ):
-        app = _StubApp()
+        app = _dispatcher()
         app._domain_active = dict(domain_active)
         # _pick_next_item reads the per-domain index, so build a real
         # _PendingQueue (the plain-list path can't carry those indexes).
@@ -433,13 +430,13 @@ class FuzzRefactoredHelpers(unittest.TestCase):
         self, deadline_offset, blocked, sleep_for
     ):
         import time as _t
-        deadline = _t.time() + deadline_offset
+        deadline = _t.monotonic() + deadline_offset
         out = LinkQueueApp._dispatch_wait_remaining(deadline, blocked, sleep_for)
         self.assertIsInstance(out, float)
         # Always non-negative.
         self.assertGreaterEqual(out, 0.0)
         # Never exceeds the original "remaining" budget.
-        self.assertLessEqual(out, max(0.0, deadline - _t.time()) + 1e-3)
+        self.assertLessEqual(out, max(0.0, deadline - _t.monotonic()) + 1e-3)
         # If blocked and a positive sleep_for is given, output is capped by it.
         if blocked and sleep_for > 0 and out > 0:
             self.assertLessEqual(out, sleep_for + 1e-3)
@@ -451,7 +448,7 @@ class FuzzRefactoredHelpers(unittest.TestCase):
         target=url_strategy,
     )
     def test_duplicate_status_tri_state(self, urls, running_urls, target):
-        app = _StubApp()
+        app = _dispatcher()
         # _duplicate_status reads queue_items.urls, so use a real _PendingQueue.
         app.queue_items = link_queue._PendingQueue(
             (QueueItem(url=u, protocol="x", template=DEFAULT_TPL, shell=False)
@@ -462,7 +459,10 @@ class FuzzRefactoredHelpers(unittest.TestCase):
             i: QueueItem(url=u, protocol="x", template=DEFAULT_TPL, shell=False)
             for i, u in enumerate(running_urls)
         }
-        out = LinkQueueApp._duplicate_status(app, target)
+        target_item = QueueItem(
+            url=target, protocol="x", template=DEFAULT_TPL, shell=False
+        )
+        out = LinkQueueApp._duplicate_status(app, target_item)
         self.assertIn(out, (None, "pending", "running"))
         # Cross-check with reality.
         if any(u == target for u in urls):
@@ -482,16 +482,23 @@ class FuzzRefactoredHelpers(unittest.TestCase):
         # Property: _remove_pending_urls removes exactly the pending items
         # whose URL was selected, leaves the rest in order, and never errors.
         import threading as _th
-        app = _StubApp()
+        app = _dispatcher()
         app.queue_lock = _th.Lock()
         app._dispatch_cv = _th.Condition(app.queue_lock)
-        app.queue_items = [
-            QueueItem(url=u, protocol="x", template=DEFAULT_TPL, shell=False)
-            for u in urls
-        ]
+        app.queue_items = link_queue._PendingQueue(
+            (
+                QueueItem(
+                    url=u, protocol="x", template=DEFAULT_TPL, shell=False
+                )
+                for u in urls
+            ),
+            domain_fn=LinkQueueApp._domain_of,
+        )
         want = set(sel_urls)
         before = list(app.queue_items)
-        removed = LinkQueueApp._remove_pending_urls(app, sel_urls)
+        removed = LinkQueueApp._remove_pending_urls(
+            app, [(url, ()) for url in sel_urls]
+        )
         # Removed items are exactly the pending ones whose URL was requested.
         self.assertEqual({it.url for it in removed}, want & set(urls))
         # Survivors are the complement, preserving original order.
@@ -671,8 +678,8 @@ class FuzzStateFileLoad(unittest.TestCase):
     def test_random_bytes_in_state_file_safe(self, blob):
         with open(link_queue.STATE_FILE, "wb") as f:
             f.write(blob)
-        app = _StubApp()
-        in_flight, pending = LinkQueueApp._load_state_items(app)
+        app = _dispatcher(link_queue.STATE_FILE)
+        in_flight, pending = app._load_state_items()
         self.assertIsInstance(in_flight, list)
         self.assertIsInstance(pending, list)
         for it in in_flight + pending:
@@ -717,8 +724,8 @@ class FuzzStateFileLoad(unittest.TestCase):
         data = {"queue": queue, "in_flight": in_flight}
         with open(link_queue.STATE_FILE, "w", encoding="utf-8") as f:
             yaml.safe_dump(data, f)
-        app = _StubApp()
-        out_in_flight, out_pending = LinkQueueApp._load_state_items(app)
+        app = _dispatcher(link_queue.STATE_FILE)
+        out_in_flight, out_pending = app._load_state_items()
         for it in out_in_flight + out_pending:
             self.assertIsInstance(it, QueueItem)
             self.assertIsInstance(it.url, str)
@@ -933,8 +940,8 @@ class FuzzInternationalEncodings(unittest.TestCase):
         data = {"queue": [entry], "in_flight": []}
         with open(link_queue.STATE_FILE, "w", encoding="utf-8") as f:
             link_queue._yaml_dump(data, f, allow_unicode=True)
-        app = _StubApp()
-        in_flight, pending = LinkQueueApp._load_state_items(app)
+        app = _dispatcher(link_queue.STATE_FILE)
+        in_flight, pending = app._load_state_items()
         self.assertEqual(in_flight, [])
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0].url, url)
@@ -958,9 +965,9 @@ class FuzzInternationalEncodings(unittest.TestCase):
                   b"    template: echo {url}\n    shell: false\n")
         with open(link_queue.STATE_FILE, "wb") as f:
             f.write(framed)
-        app = _StubApp()
+        app = _dispatcher(link_queue.STATE_FILE)
         # Documented contract: any failure -> ([], [])
-        in_flight, pending = LinkQueueApp._load_state_items(app)
+        in_flight, pending = app._load_state_items()
         self.assertIsInstance(in_flight, list)
         self.assertIsInstance(pending, list)
         for it in in_flight + pending:
@@ -991,8 +998,8 @@ class FuzzInternationalEncodings(unittest.TestCase):
         ).encode("utf-8")
         with open(link_queue.STATE_FILE, "wb") as f:
             f.write(bom + body)
-        app = _StubApp()
-        in_flight, pending = LinkQueueApp._load_state_items(app)
+        app = _dispatcher(link_queue.STATE_FILE)
+        in_flight, pending = app._load_state_items()
         self.assertIsInstance(in_flight, list)
         self.assertIsInstance(pending, list)
 
@@ -1000,6 +1007,12 @@ class FuzzInternationalEncodings(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Helpers used by the fuzzers
 # ---------------------------------------------------------------------------
+
+def _dispatcher(state_path=None):
+    return link_queue.Dispatcher.headless(
+        state_path=state_path, acquire_state_lock=False
+    )
+
 
 class _StubApp(LinkQueueApp):
     """Bare-minimum stand-in for LinkQueueApp.  Inheriting gives us all
