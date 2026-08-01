@@ -105,6 +105,13 @@ PDF_VISION_DPI = 150
 # clamping. Named here so the parse-time validator and the clamp agree.
 PDF_VISION_DPI_MIN = 36
 LLM_CONTEXT_MIN = 512
+# ie-mem-02: ceilings on how much of an untrusted input file is materialised in
+# memory. The image cap matters most: the bytes are base64-encoded before the
+# vision call, so the peak is roughly 7/3 of the file (raw bytes plus the
+# expanded string). The text cap backstops --max-content-chars, whose byte
+# window is four times the character budget.
+MAX_IMAGE_BYTES = 128 * 1024 * 1024
+MAX_TEXT_BYTES = 128 * 1024 * 1024
 PDF_RENDER_MAX_PIXELS = 40_000_000
 # ie-scal-50: total temp-disk budget for one document's rendered pages. The
 # per-page pixel cap above bounds a single page, but PDF_VISION_MAX_PAGES
@@ -697,6 +704,8 @@ class ModelConfig:
     workers: int = DEFAULT_WORKERS
     deterministic_order: bool = DEFAULT_DETERMINISTIC_ORDER
     max_ics_bytes: int = 4 * 1024 * 1024
+    max_image_bytes: int = MAX_IMAGE_BYTES
+    max_text_bytes: int = MAX_TEXT_BYTES
 
     @staticmethod
     def _resolve_paths_and_digests(
@@ -770,6 +779,8 @@ class ModelConfig:
             workers=max(1, args.workers),
             deterministic_order=args.deterministic_order,
             max_ics_bytes=args.max_ics_bytes,
+            max_image_bytes=args.max_image_bytes,
+            max_text_bytes=args.max_text_bytes,
         )
 
     def text_budget_chars(self) -> int:
@@ -2380,8 +2391,17 @@ def _image_messages(
     config: Optional[ModelConfig] = None,
 ) -> List[Any]:
     mime = IMAGE_MIME.get(file_path.suffix.lower(), "image/jpeg")
+    # ie-mem-02: read one byte past the limit so an oversize file is rejected
+    # rather than truncated — a half-read image is not a valid image. Matches
+    # how _read_ics_text enforces --max-ics-bytes.
+    limit = MAX_IMAGE_BYTES if config is None else config.max_image_bytes
     with open(file_path, "rb") as f:
-        return _image_messages_from_bytes(f.read(), mime, language, config)
+        raw = f.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError(
+            f"Image file {file_path.name} exceeds --max-image-bytes={limit}"
+        )
+    return _image_messages_from_bytes(raw, mime, language, config)
 
 
 def _sniff_text_encoding(raw: bytes) -> Optional[str]:
@@ -2423,11 +2443,16 @@ def _decode_text_bytes(raw: bytes, source: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _read_text(file_path: Path, max_chars: int = MAX_CONTENT_CHARS) -> str:
+def _read_text(file_path: Path, max_chars: int = MAX_CONTENT_CHARS,
+               max_bytes: int = MAX_TEXT_BYTES) -> str:
     # Read a bounded byte window (≤4 bytes/UTF-8 char) so the budget stays
     # bounded, then decode with encoding detection before truncating to chars.
+    # ie-mem-02: --max-text-bytes caps that window, so a large
+    # --max-content-chars cannot turn this into an effectively unbounded read.
+    # Text truncates rather than rejects — a prefix of a text file is still
+    # usable, unlike a prefix of an image.
     with open(file_path, "rb") as f:
-        raw = f.read(max(1, max_chars) * 4)
+        raw = f.read(min(max(1, max_chars) * 4, max_bytes))
     return _decode_text_bytes(raw, file_path.name)[:max_chars]
 
 
@@ -3301,7 +3326,8 @@ def extract_with_llm(
                                   model_config=runtime_config)
     content = _timed_stage(
         runtime_config, file_path, "text_read",
-        lambda: _read_text(file_path, runtime_config.text_budget_chars()),
+        lambda: _read_text(file_path, runtime_config.text_budget_chars(),
+                           runtime_config.max_text_bytes),
     )
     language, source = _language_for_text_with_source(content, runtime_config)
     _log_language_preanalysis(file_path, "text", language, source)
@@ -4437,6 +4463,22 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=MAX_ICS_BYTES,
         help=("Reject an iCalendar input larger than this many bytes "
               f"(default: {MAX_ICS_BYTES})."),
+    )
+    parser.add_argument(
+        "--max-image-bytes",
+        type=_positive_int,
+        default=MAX_IMAGE_BYTES,
+        help=("Reject an image input larger than this many bytes before it is "
+              "base64-encoded for the vision model "
+              f"(default: {MAX_IMAGE_BYTES})."),
+    )
+    parser.add_argument(
+        "--max-text-bytes",
+        type=_positive_int,
+        default=MAX_TEXT_BYTES,
+        help=("Ceiling on bytes read from a text input; --max-content-chars "
+              "still bounds what reaches the model "
+              f"(default: {MAX_TEXT_BYTES})."),
     )
     parser.add_argument("-r", "--recursive", action="store_true",
                         help="Scan subdirectories recursively.")

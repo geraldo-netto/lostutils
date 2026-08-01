@@ -188,7 +188,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-mem-01 | open | med | dedupl_numpy.py:72 — `hash_idx = line_starts[:, None] + np.arange(hash_width)` materializes an `(n_lines, hash_width)` int64 index matrix in addition to the gathered bytes; process record starts in bounded chunks so peak auxiliary memory is capped. | memory scaling — an int32 `arange` alone does not help because the int64 line starts upcast the result
-ie-mem-02 | open | low | import_events.py:2330-2337 — `_image_messages` reads the whole image file and base64-encodes it in memory with no size bound before the vision call; a multi-GB image is fully materialized. Bound image size like `_read_text` bounds text. | memory bound
 
 ## data structure
 

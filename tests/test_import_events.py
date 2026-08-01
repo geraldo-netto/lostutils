@@ -5921,3 +5921,67 @@ def test_unit_interval_rejects_outside_the_range(value):
         import_events.argparse.ArgumentTypeError, match="between 0.0 and 1.0"
     ):
         import_events._unit_interval(value)
+
+
+def _png(tmp_path, size):
+    img = tmp_path / "big.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (size - 8))
+    return img
+
+
+def test_image_messages_rejects_an_oversize_file(tmp_path):
+    """ie-mem-02: the file is base64-encoded in memory, so it needs a bound."""
+    img = _png(tmp_path, 4096)
+    config = import_events.ModelConfig(max_image_bytes=1024)
+
+    with pytest.raises(ValueError, match="--max-image-bytes=1024"):
+        import_events._image_messages(img, "en", config)
+
+
+def test_image_messages_accepts_a_file_on_the_limit(tmp_path):
+    img = _png(tmp_path, 1024)
+    config = import_events.ModelConfig(max_image_bytes=1024)
+
+    messages = import_events._image_messages(img, "en", config)
+
+    assert messages[1]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_image_messages_defaults_to_the_module_limit(tmp_path, monkeypatch):
+    """Passing no config must still bound the read."""
+    monkeypatch.setattr(import_events, "MAX_IMAGE_BYTES", 16)
+
+    with pytest.raises(ValueError, match="--max-image-bytes=16"):
+        import_events._image_messages(_png(tmp_path, 64), "en")
+
+
+def test_read_text_caps_the_byte_window(tmp_path):
+    """ie-mem-02: --max-text-bytes backstops a large --max-content-chars."""
+    f = tmp_path / "big.txt"
+    f.write_text("a" * 5000, encoding="utf-8")
+
+    assert import_events._read_text(f, max_chars=5000, max_bytes=10) == "a" * 10
+
+
+def test_read_text_leaves_the_char_budget_in_charge_below_the_ceiling(tmp_path):
+    f = tmp_path / "small.txt"
+    f.write_text("a" * 5000, encoding="utf-8")
+
+    assert import_events._read_text(f, max_chars=20, max_bytes=1 << 20) == "a" * 20
+
+
+def test_size_limits_default_to_128_mb():
+    assert import_events.MAX_IMAGE_BYTES == 128 * 1024 * 1024
+    assert import_events.MAX_TEXT_BYTES == 128 * 1024 * 1024
+    config = import_events.ModelConfig.from_args(import_events.parse_args([]))
+    assert config.max_image_bytes == 128 * 1024 * 1024
+    assert config.max_text_bytes == 128 * 1024 * 1024
+
+
+@pytest.mark.parametrize("flag", ["--max-image-bytes", "--max-text-bytes"])
+def test_size_limit_flags_reject_nonpositive_values(flag, capsys):
+    with pytest.raises(SystemExit) as exc:
+        import_events.parse_args([flag, "0"])
+
+    assert exc.value.code == 2
+    assert flag in capsys.readouterr().err
