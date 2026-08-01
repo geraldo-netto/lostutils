@@ -2956,6 +2956,20 @@ def test_timezone_option_validates_at_parse_time(capsys):
     assert "invalid IANA timezone" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("value, expected", [("1", 1), ("42", 42)])
+def test_positive_int_accepts_positive_values(value, expected):
+    assert import_events._positive_int(value) == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-3"])
+def test_positive_int_rejects_nonpositive_values(value):
+    with pytest.raises(
+        import_events.argparse.ArgumentTypeError,
+        match="greater than zero",
+    ):
+        import_events._positive_int(value)
+
+
 def test_extract_from_ics_applies_default_tz(tmp_path):
     pytest.importorskip("icalendar")
     ics = tmp_path / "tz.ics"

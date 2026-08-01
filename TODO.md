@@ -137,7 +137,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
-ie-test-07 | open | low | import_events.py:4284 — `_positive_int` has no coverage for valid and invalid CLI values. | CI function coverage gate: 0/4 statements (0.00%) in run 30700525661
 lq-test-01 | open | low | link_queue.py:302 — `StateFileLock._pidfile_is_stale` lacks coverage for an unreadable or malformed PID file. | CI function coverage gate: 6/8 statements (75.00%) in run 30700525661
 lq-test-02 | open | low | link_queue.py:851 — `ConfigStore._coerce_bool` lacks coverage for supported boolean spellings and invalid values. | CI function coverage gate: 2/10 statements (20.00%) in run 30700525661
 lq-test-03 | open | low | link_queue.py:879 — `ConfigStore._coerce_string_scalars` lacks coverage for nested scalar coercion and invalid values. | CI function coverage gate: 8/12 statements (66.67%) in run 30700525661
