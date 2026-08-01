@@ -28,6 +28,7 @@ import argparse
 import codecs
 import gettext
 import io
+import json
 import os
 import shlex
 import sys
@@ -56,6 +57,7 @@ SAFETY_BANNER_TEMPLATE = (
 # with the environment; 128 KiB keeps each emitted command safely below it.
 RM_ARGV_BYTE_LIMIT = 128 * 1024
 RM_COMMAND_PREFIX = "rm -f --"
+_ESCAPED_PATH_PREFIX = "@lostutils-json:"
 
 
 class _InputDecodeError(Exception):
@@ -70,6 +72,16 @@ def detect_encoding(head):
         if head.startswith(bom):
             return enc
     return "utf-8"
+
+
+def _decode_record_path(path):
+    if not path.startswith(_ESCAPED_PATH_PREFIX):
+        return path
+    try:
+        decoded = json.loads(path[len(_ESCAPED_PATH_PREFIX):])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return decoded if isinstance(decoded, str) else None
 
 
 def parse_args(argv=None):
@@ -121,7 +133,11 @@ def _read_groups(lines):
         if len(parts) < 2:
             skipped += 1
             continue
-        groups[parts[0]].append(parts[1])
+        path = _decode_record_path(parts[1])
+        if path is None:
+            skipped += 1
+            continue
+        groups[parts[0]].append(path)
     return groups, skipped
 
 

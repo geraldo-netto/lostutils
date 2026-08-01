@@ -73,6 +73,18 @@ def test_load_groups_peeks_without_reopening_or_losing_prefix(monkeypatch):
     assert skipped == 0
 
 
+def test_read_groups_decodes_tagged_path_and_skips_invalid_payload():
+    groups, skipped = rd._read_groups(
+        [
+            'h @lostutils-json:"/with\\nnewline"\n',
+            "h @lostutils-json:not-json\n",
+        ]
+    )
+
+    assert groups == {"h": ["/with\nnewline"]}
+    assert skipped == 1
+
+
 def test_help_documents_exit_codes(capsys):
     with pytest.raises(SystemExit) as exc:
         rd.parse_args(["--help"])

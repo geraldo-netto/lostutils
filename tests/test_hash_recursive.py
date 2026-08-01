@@ -2574,11 +2574,7 @@ def test_format_digest_none_tail_returns_head_unchanged():
 
 # --- hr-test-14: newline/space in path roundtrip ---------------------------
 
-def test_emit_groups_path_with_newline_breaks_format(tmp_path):
-    """Documenting the limitation: paths containing newline garble the
-    `'<digest> <path>\\n'` format. This test pins the misbehaviour so
-    a future fix (path quoting / NUL-delimited output) is detectable.
-    """
+def test_emit_groups_newline_path_cannot_inject_record_boundary(tmp_path):
     written = []
     aliases = {
         ("d", 0): ["/normal", "/with\nnewline"],
@@ -2586,11 +2582,10 @@ def test_emit_groups_path_with_newline_breaks_format(tmp_path):
     final_groups = {"abc": [("d", 0)]}
     hr.emit_groups(final_groups, aliases, written.append)
     out = "".join(written)
-    # The emitted block contains an embedded newline → two visual lines
-    # for one logical entry → downstream `split('\n')` parsing gets
-    # confused. Expectation: number of lines > number of paths in group.
-    lines = [ln for ln in out.split("\n") if ln]
-    assert len(lines) > 2   # would be 2 if format were robust
+    lines = out.splitlines()
+    assert len(lines) == 2
+    assert all(line.startswith("abc ") for line in lines)
+    assert "@lostutils-json:" in lines[1]
 
 
 # --- hr-test-15: _fmt_count boundaries -------------------------------------

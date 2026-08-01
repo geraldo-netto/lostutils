@@ -30,6 +30,7 @@ import argparse
 import errno
 import hashlib
 import io
+import json
 import os
 import queue
 import signal
@@ -87,6 +88,7 @@ STALL_WARN_SECONDS = 60.0
 # hr-ux-01: the hash dump is opt-in so a normal run does not create
 # hashes.txt in the caller's current working directory.
 DEFAULT_HASHES_FILE = None
+_ESCAPED_PATH_PREFIX = "@lostutils-json:"
 # hr-cmplx-01: the alias cap is stored as Optional[int] — `None` means
 # "no cap". The disabled state is detected via `alias_cap is not None`
 # (see `alias_cap_active`), so a legitimate positive cap of any size
@@ -1226,6 +1228,17 @@ def _count_real_paths(expanded) -> int:
     return sum(1 for p in expanded if not isinstance(p, _MoreSentinel))
 
 
+def _encode_record_path(path: str) -> str:
+    """Keep one physical line per record for every legal filesystem path."""
+    if (
+        path.startswith(_ESCAPED_PATH_PREFIX)
+        or "\n" in path
+        or "\r" in path
+    ):
+        return _ESCAPED_PATH_PREFIX + json.dumps(path, ensure_ascii=True)
+    return path
+
+
 def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
     """Render a single duplicate group (hr-dup-03).
 
@@ -1246,7 +1259,9 @@ def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
     if real_count <= 1:
         return 0, 0
     label = _format_digest(digest_key)
-    write("".join(f"{label} {p}\n" for p in all_paths))
+    write("".join(
+        f"{label} {_encode_record_path(p)}\n" for p in all_paths
+    ))
     return 1, real_count
 
 
@@ -1942,7 +1957,8 @@ class HashDumpWriter:
 
     def _write_line(self, digest: str, path: str) -> int:
         offset = self._handle.tell()
-        self._handle.write(f"{_dump_digest_field(digest)} {path}\n")
+        encoded_path = _encode_record_path(path)
+        self._handle.write(f"{_dump_digest_field(digest)} {encoded_path}\n")
         return offset
 
 
@@ -2042,7 +2058,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--hashes-file", default=DEFAULT_HASHES_FILE, metavar="PATH",
         help=("Dump '<digest> <path>' for every hashed file to this path, "
-              "appending to it (default: disabled)."))
+              "appending to it; line-breaking paths use tagged JSON escaping "
+              "(default: disabled)."))
     return ap
 
 

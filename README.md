@@ -33,7 +33,7 @@ Finds duplicate regular files under a directory and writes one line per file in 
 python3 hash-recursive-ai5.py /path/to/tree
 ```
 
-The output shape is `<digest> <path>`. The script first groups by file size, then hashes staged windows with BLAKE3: head, tail, center, and mid-file samples for large files. It is hardlink-aware and hashes one inode representative while still emitting aliases. By default it appends every hashed file to `hashes.txt`; change that with `--hashes-file`.
+The output shape is `<digest> <path>`. Paths containing a line break, or the reserved `@lostutils-json:` prefix, use a tagged JSON representation so one filename cannot create forged records; `remove-deduplv3.py` decodes that representation before building commands. The script first groups by file size, then hashes staged windows with BLAKE3: head, tail, center, and mid-file samples for large files. It is hardlink-aware and hashes one inode representative while still emitting aliases. Hash-dump output is disabled by default; enable it with `--hashes-file`.
 
 Useful options include `--jobs`, `--quiet`, `--alias-cap`, `--hash-error-verbose-cap`, `--block-size`, and `--sample-size`.
 
@@ -59,7 +59,7 @@ It groups records by a 32-byte hash at the start of each line, prints duplicate 
 
 ### `remove-deduplv3.py`
 
-Reads a hash file where each line is `<hash><whitespace><path>` and emits quoted `rm -f` commands for duplicates while keeping the entry with the longest basename:
+Reads a hash file where each line is `<hash><whitespace><path>` (including the tagged JSON path representation emitted for line-breaking filenames) and emits quoted `rm -f` commands for duplicates while keeping the entry with the longest basename:
 
 ```bash
 python3 remove-deduplv3.py hashes.txt > remove-duplicates.sh
