@@ -284,7 +284,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-unused-01 | open | low | bookmark-tidy.py:616,648 — `detect_bookmark_format` and `_detect_json_format` have no in-file callers; live code uses `_detect_bookmark_format_with_data` and `_json_bookmark_format`. Delete or wire. | grep-proven unused
 hr-unf-01 | open | low | hash-recursive-ai5.py:221 — `threaded_walk` has no production caller (main uses `iter_threaded_walk`); only tests invoke it. Keep as documented API or delete with tests. | grep-proven test-only
 ie-unused-06 | open | low | import_events.py:567 — `_ocr_language_chain` has no production caller; production uses `_ocr_language_chain_with_source`. Delete and point tests at the live function, or wire. | grep-proven test-only wrapper
 ie-unused-07 | open | low | import_events.py:582 — `_language_for_text` has no production caller; extractors use `_language_for_text_with_source`. Delete it or move tests to the live variant. | grep-proven test-only wrapper

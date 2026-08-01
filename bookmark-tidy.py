@@ -573,11 +573,6 @@ def _firefox_json_bookmark(
     )
 
 
-def detect_bookmark_format(path: Path) -> str:
-    fmt, _ = _detect_bookmark_format_with_data(path)
-    return fmt
-
-
 def _detect_bookmark_format_with_data(path: Path) -> tuple[str, Any | None]:
     if path.suffix.casefold() == ".jsonlz4":
         return "firefox-jsonlz4", None
@@ -602,10 +597,6 @@ def _parse_json_bookmark_text(text: str, path: Path) -> Any:
         return json.loads(text)
     except json.JSONDecodeError as exc:
         raise UserError(f"invalid JSON bookmark file {path}: {exc}") from exc
-
-
-def _detect_json_format(path: Path) -> str:
-    return _json_bookmark_format(_load_json_bookmark(path), path)
 
 
 def _json_bookmark_format(data: Any, path: Path) -> str:

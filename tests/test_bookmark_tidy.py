@@ -434,7 +434,7 @@ def test_read_firefox_jsonlz4_bookmarks(tmp_path):
     assert bookmarks == [
         bookmark_tidy.Bookmark("https://lz4.example.test", "LZ4", (), root="other", source=str(path))
     ]
-    assert bookmark_tidy.detect_bookmark_format(path) == "firefox-jsonlz4"
+    assert bookmark_tidy._detect_bookmark_format_with_data(path)[0] == "firefox-jsonlz4"
     assert bookmark_tidy._supported_input_file(path)
 
 
@@ -508,16 +508,16 @@ def test_detect_and_read_bookmark_formats(tmp_path):
     unknown_json.write_text('{"x":1}', encoding="utf-8")
     unsupported.write_text("plain", encoding="utf-8")
 
-    assert bookmark_tidy.detect_bookmark_format(chrome) == "chromium"
-    assert bookmark_tidy.detect_bookmark_format(firefox) == "firefox-json"
-    assert bookmark_tidy.detect_bookmark_format(netscape) == "netscape"
+    assert bookmark_tidy._detect_bookmark_format_with_data(chrome)[0] == "chromium"
+    assert bookmark_tidy._detect_bookmark_format_with_data(firefox)[0] == "firefox-json"
+    assert bookmark_tidy._detect_bookmark_format_with_data(netscape)[0] == "netscape"
     assert bookmark_tidy.read_bookmark_file(netscape)[0].title == "Alpha"
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy.detect_bookmark_format(bad_json)
+        bookmark_tidy._detect_bookmark_format_with_data(bad_json)
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy.detect_bookmark_format(unknown_json)
+        bookmark_tidy._detect_bookmark_format_with_data(unknown_json)
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy.detect_bookmark_format(unsupported)
+        bookmark_tidy._detect_bookmark_format_with_data(unsupported)
 
 
 def test_read_bookmark_file_dispatches_every_format(monkeypatch, tmp_path):
@@ -581,7 +581,7 @@ def test_read_bookmark_file_parses_json_larger_than_sniff_window(tmp_path):
         encoding="utf-8",
     )
 
-    assert bookmark_tidy.detect_bookmark_format(path) == "chromium"
+    assert bookmark_tidy._detect_bookmark_format_with_data(path)[0] == "chromium"
     bookmarks = bookmark_tidy.read_bookmark_file(path)
     assert [item.url for item in bookmarks] == ["https://example.test/a"]
 
@@ -1302,10 +1302,3 @@ def test_run_without_inputs_reports_error(monkeypatch):
 
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy._run(bookmark_tidy.parse_args([]))
-
-
-def test_detect_json_format_reads_and_classifies_file(tmp_path):
-    source = tmp_path / "bookmarks.json"
-    source.write_text('{"roots": {}}', encoding="utf-8")
-
-    assert bookmark_tidy._detect_json_format(source) == "chromium"
