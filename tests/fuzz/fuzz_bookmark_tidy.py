@@ -18,10 +18,6 @@ SPEC.loader.exec_module(bookmark_tidy)
 FUZZ = settings(max_examples=300, deadline=None)
 
 
-href_text = st.text(
-    alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters='"\x00<>'),
-    max_size=100,
-)
 url_part = st.text(alphabet=string.ascii_letters + string.digits + "-_", min_size=1, max_size=12)
 host_label = st.text(alphabet=string.ascii_lowercase + string.digits, min_size=1, max_size=12)
 web_url = st.builds(
@@ -42,33 +38,6 @@ folder_text = st.text(
     min_size=0,
     max_size=30,
 )
-
-
-def _link(href):
-    tree = bookmark_tidy.BeautifulSoup(f'<a href="{href}">x</a>', "html.parser")
-    return bookmark_tidy.links_extract(tree)[0]
-
-
-@given(hrefs=st.lists(href_text, max_size=50))
-@FUZZ
-def test_links_cleanup_keeps_first_unique_href(hrefs):
-    links = [_link(href) for href in hrefs]
-
-    cleaned = bookmark_tidy.links_cleanup(links)
-
-    expected = list(dict.fromkeys(hrefs))
-    assert [link.get("href", "") for link in cleaned] == expected
-
-
-@given(href=href_text)
-@FUZZ
-def test_filter_youtube_never_removes_non_youtube_href(href):
-    link = _link(href)
-
-    filtered = bookmark_tidy.filter_youtube(link)
-
-    if "youtube" not in href or "&" not in href:
-        assert filtered.get("href", "") == href
 
 
 @given(url=web_url)

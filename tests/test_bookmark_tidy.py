@@ -18,10 +18,6 @@ bookmark_tidy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(bookmark_tidy)
 
 
-def _tree(html):
-    return bookmark_tidy.BeautifulSoup(html, "html.parser")
-
-
 def _sample_bookmark(url="https://example.test/a", title="Example", folders=("Docs",)):
     return bookmark_tidy.Bookmark(url, title, folders, root="bookmark_bar", add_date=10, last_modified=20)
 
@@ -132,34 +128,6 @@ def _install_fake_llama(monkeypatch, llama_cls):
     monkeypatch.setitem(sys.modules, "llama_cpp", module)
 
 
-def test_links_cleanup_deduplicates_by_href_preserving_first_seen():
-    links = bookmark_tidy.links_extract(
-        _tree(
-            '<a href="https://example.test/a">A</a>'
-            '<a href="https://example.test/a">Again</a>'
-            '<a href="https://example.test/b">B</a>'
-        )
-    )
-
-    cleaned = bookmark_tidy.links_cleanup(links)
-
-    assert [link.get("href") for link in cleaned] == [
-        "https://example.test/a",
-        "https://example.test/b",
-    ]
-
-
-def test_filter_youtube_removes_query_tail_in_href_only():
-    link = bookmark_tidy.links_extract(
-        _tree('<a href="https://youtube.test/watch?v=1&list=2">Video</a>')
-    )[0]
-
-    filtered = bookmark_tidy.filter_youtube(link)
-
-    assert filtered.get("href") == "https://youtube.test/watch?v=1"
-    assert filtered.text == "Video"
-
-
 def test_main_reports_missing_bookmark_file(capsys):
     assert bookmark_tidy.main(["/no/such/bookmarks.html", "/no/such/config.json"]) == 1
     assert "missing bookmark file" in capsys.readouterr().err
@@ -266,28 +234,6 @@ def test_chrome_export_places_categorized_bookmarks_under_bookmark_bar():
     assert folder["name"] == "Reference"
     assert nested["name"] == "Docs"
     assert link["url"] == "https://example.test/a"
-
-
-def test_fallback_soup_extracts_links():
-    tree = bookmark_tidy._FallbackSoup('<a href="https://example.test">Text</a>')
-
-    links = tree.find_all("a")
-
-    assert len(links) == 1
-    assert links[0].get("href") == "https://example.test"
-    assert links[0].text == "Text"
-    assert tree.find_all("div") == []
-
-
-def test_config_and_bookmark_read_helpers(tmp_path):
-    config = tmp_path / "config.json"
-    html = tmp_path / "bookmarks.html"
-    config.write_text('{"options":["x"]}', encoding="utf-8")
-    html.write_text('<a href="https://example.test">Example</a>', encoding="utf-8")
-
-    assert bookmark_tidy.config_read(str(config)) == {"options": ["x"]}
-    assert bookmark_tidy.links_extract(bookmark_tidy.bookmark_read(str(html)))[0].text == "Example"
-    assert bookmark_tidy.get_current_unix_epoch() > 0
 
 
 def test_small_helpers_cover_root_and_time_edges():

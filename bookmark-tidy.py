@@ -82,49 +82,6 @@ ROOT_ALIASES = {
 }
 
 
-try:
-    from bs4 import BeautifulSoup as _BeautifulSoup
-except ImportError:  # pragma: no cover - used only on lean local installs.
-    _BeautifulSoup = None
-
-
-class _FallbackAnchor(dict[str, str]):
-    def __init__(self, attrs: Mapping[str, str], text: str) -> None:
-        super().__init__(attrs)
-        self.text = text
-
-
-class _FallbackSoup(HTMLParser):
-    def __init__(self, markup: str, parser: str = "html.parser") -> None:
-        super().__init__(convert_charrefs=True)
-        self._anchors: list[_FallbackAnchor] = []
-        self._active_attrs: dict[str, str] | None = None
-        self._active_text: list[str] = []
-        self.feed(markup)
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.casefold() == "a":
-            self._active_attrs = {key: value or "" for key, value in attrs}
-            self._active_text = []
-
-    def handle_data(self, data: str) -> None:
-        if self._active_attrs is not None:
-            self._active_text.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.casefold() != "a" or self._active_attrs is None:
-            return
-        self._anchors.append(_FallbackAnchor(self._active_attrs, "".join(self._active_text)))
-        self._active_attrs = None
-        self._active_text = []
-
-    def find_all(self, name: str) -> list[_FallbackAnchor]:
-        return list(self._anchors) if name.casefold() == "a" else []
-
-
-BeautifulSoup = _BeautifulSoup or _FallbackSoup
-
-
 @dataclass
 class Bookmark:
     url: str
@@ -150,43 +107,6 @@ class NormalizeOptions:
 
 class UserError(Exception):
     pass
-
-
-def config_read(file_name: str) -> Any:
-    with open(file_name, "r", encoding="utf-8") as json_file:
-        return json.loads(json_file.read())
-
-
-def bookmark_read(file_name: str) -> Any:
-    with open(file_name, "r", encoding="utf-8") as html_file:
-        return BeautifulSoup(html_file.read(), "html.parser")
-
-
-def links_extract(tree: Any) -> list[Any]:
-    return list(tree.find_all("a"))
-
-
-def links_cleanup(links: Sequence[Any]) -> list[Any]:
-    links_clean = []
-    seen_hrefs = set()
-    for link_curr in links:
-        href = link_curr.get("href", "")
-        if href in seen_hrefs:
-            continue
-        links_clean.append(filter_youtube(link_curr))
-        seen_hrefs.add(href)
-    return links_clean
-
-
-def filter_youtube(link: Any) -> Any:
-    href = link.get("href", "")
-    if "youtube" in href and "&" in href:
-        link["href"] = href.split("&")[0]
-    return link
-
-
-def get_current_unix_epoch() -> float:
-    return time.time()
 
 
 def _clean_folder_part(value: Any) -> str:
