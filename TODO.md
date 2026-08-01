@@ -122,7 +122,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-rel-50 | open | med | relocate_folder.py:1309-1314 — `_assert_complete_inventory_match` runs `src EXCEPT tgt UNION ALL tgt EXCEPT src`. SQLite evaluates compound operators strictly left to right, so this reduces to `((src EXCEPT tgt) UNION ALL tgt) EXCEPT src` == `tgt \ src` — target-only extras only. The last check before the source is deleted therefore detects the case `verify_copy`'s own docstring (1243-1244) says cannot arise, and misses the missing-entry case it exists for. Parenthesise each side, or run two separate EXCEPT queries. | reliability — verified in sqlite3: a source entry absent from the target returns None; a target-only extra is returned. Per-entry `_verify_file` still catches missing files, so this is a broken backstop rather than the sole protection
 
 ## robustness / recovery
 

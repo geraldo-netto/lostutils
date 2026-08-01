@@ -1299,25 +1299,54 @@ def _load_inventory(
         )
 
 
+# rf-rel-50: two separate EXCEPTs, deliberately NOT one compound statement.
+# `A EXCEPT B UNION ALL B EXCEPT A` reads like a symmetric difference, but
+# SQLite evaluates compound operators strictly left to right, so it collapses
+# to `((A EXCEPT B) UNION ALL B) EXCEPT A` == `B \ A` — target-only extras
+# only, which `copy_tree` already makes impossible by refusing a pre-existing
+# target. The missing-entry case this check exists for was never detected.
+_INVENTORY_MISSING_SQL = (
+    "SELECT path, kind FROM source_entries "
+    "EXCEPT SELECT path, kind FROM target_entries LIMIT 1"
+)
+_INVENTORY_EXTRA_SQL = (
+    "SELECT path, kind FROM target_entries "
+    "EXCEPT SELECT path, kind FROM source_entries LIMIT 1"
+)
+
+
 def _assert_complete_inventory_match(src: Path, dst: Path) -> None:
+    """Entry-for-entry comparison of the two trees immediately before the swap.
+
+    This is the last gate before the source is deleted, so it must catch an
+    entry that never made it into the copy (rf-rel-50)."""
     database = sqlite3.connect("")
     try:
         database.execute("CREATE TABLE source_entries (path BLOB, kind INTEGER)")
         database.execute("CREATE TABLE target_entries (path BLOB, kind INTEGER)")
         _load_inventory(database, "source_entries", src, source=True)
         _load_inventory(database, "target_entries", dst, source=False)
-        mismatch = database.execute(
-            "SELECT path, kind FROM source_entries "
-            "EXCEPT SELECT path, kind FROM target_entries "
-            "UNION ALL SELECT path, kind FROM target_entries "
-            "EXCEPT SELECT path, kind FROM source_entries LIMIT 1"
-        ).fetchone()
+        missing = database.execute(_INVENTORY_MISSING_SQL).fetchone()
+        extra = database.execute(_INVENTORY_EXTRA_SQL).fetchone()
     finally:
         database.close()
-    if mismatch is not None:
-        raise RuntimeError(
-            "source/destination inventory mismatch immediately before swap"
-        )
+    _raise_on_inventory_divergence(missing, extra)
+
+
+def _raise_on_inventory_divergence(missing, extra) -> None:
+    """Report WHICH side diverged so the operator can act without re-walking
+    both trees by hand (rf-rel-50)."""
+    if missing is None and extra is None:
+        return
+    detail = (
+        f"missing from the copy: {os.fsdecode(missing[0])!r}"
+        if missing is not None
+        else f"present only in the copy: {os.fsdecode(extra[0])!r}"
+    )
+    raise RuntimeError(
+        f"source/destination inventory mismatch immediately before swap "
+        f"({detail})"
+    )
 
 
 def _kind_verify_task(full: Path, counterpart: Path, rel: Path,

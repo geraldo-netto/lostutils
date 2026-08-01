@@ -4646,3 +4646,64 @@ def test_rename_noreplace_falls_back_when_libc_has_no_symbol(
     rf._rename_noreplace(source, target)
 
     assert renamed == [(source, target)]
+
+
+def test_inventory_match_detects_an_entry_missing_from_the_copy(tmp_path):
+    """rf-rel-50: the last gate before the source is deleted must catch a file
+    the copy never received."""
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    (src / "sub").mkdir(parents=True)
+    (dst / "sub").mkdir(parents=True)
+    (src / "sub" / "kept.txt").write_text("a", encoding="utf-8")
+    (dst / "sub" / "kept.txt").write_text("a", encoding="utf-8")
+    (src / "sub" / "lost.txt").write_text("b", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="missing from the copy.*lost.txt"):
+        rf._assert_complete_inventory_match(src, dst)
+
+
+def test_inventory_match_detects_a_target_only_entry(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    (dst / "extra.txt").write_text("b", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="present only in the copy.*extra.txt"):
+        rf._assert_complete_inventory_match(src, dst)
+
+
+def test_inventory_match_detects_a_kind_change(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    (src / "entry").write_text("a", encoding="utf-8")
+    (dst / "entry").mkdir()
+
+    with pytest.raises(RuntimeError, match="inventory mismatch"):
+        rf._assert_complete_inventory_match(src, dst)
+
+
+def test_inventory_match_accepts_a_faithful_copy(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    (src / "sub").mkdir(parents=True)
+    (dst / "sub").mkdir(parents=True)
+    (src / "sub" / "a.txt").write_text("a", encoding="utf-8")
+    (dst / "sub" / "a.txt").write_text("a", encoding="utf-8")
+    (src / "link").symlink_to("a.txt")
+    (dst / "link").symlink_to("a.txt")
+
+    rf._assert_complete_inventory_match(src, dst)   # must not raise
+
+
+def test_inventory_match_ignores_special_files_the_copy_skips(tmp_path):
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    src.mkdir()
+    dst.mkdir()
+    os.mkfifo(src / "pipe")
+
+    rf._assert_complete_inventory_match(src, dst)   # must not raise
