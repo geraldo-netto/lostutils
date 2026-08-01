@@ -152,6 +152,36 @@ def test_no_duplicate_path_in_rm_line(monkeypatch, tmp_path):
         assert len(targets) == len(set(targets)), f"duplicate path in: {ln}"
 
 
+def test_case_variant_paths_are_never_nominated_for_removal(monkeypatch, tmp_path):
+    """rdv3-plat-03: on NTFS/APFS these name one file, so removing either
+    deletes the copy the `# saving:` line just promised to keep."""
+    out = _run(monkeypatch, tmp_path, "h /photos/x.jpg\nh /Photos/x.jpg\n")
+
+    assert [ln for ln in out.splitlines() if ln.startswith("rm -f")] == []
+    assert "SKIPPED" in out
+    assert "/photos/x.jpg" in out and "/Photos/x.jpg" in out
+
+
+def test_case_variants_do_not_block_the_rest_of_a_group(monkeypatch, tmp_path):
+    """Only the ambiguous spellings are withheld, not every path sharing the
+    hash — but a survivor is still never chosen from among them."""
+    out = _run(
+        monkeypatch, tmp_path,
+        "h /a/x.jpg\nh /A/x.jpg\nh /b/longer-name.jpg\nh /c/y.jpg\n")
+    removals = [ln for ln in out.splitlines() if ln.startswith("rm -f")]
+
+    assert removals == ["rm -f -- /c/y.jpg"]
+    assert "# saving: /b/longer-name.jpg" in out
+    assert "SKIPPED" in out
+
+
+def test_case_variant_detection_ignores_distinct_names(monkeypatch, tmp_path):
+    out = _run(monkeypatch, tmp_path, "h /a/one.jpg\nh /a/two-longer.jpg\n")
+
+    assert "SKIPPED" not in out
+    assert "rm -f -- /a/one.jpg" in out
+
+
 def test_survivor_splits_on_slash_regardless_of_host_separators(monkeypatch):
     """rdv3-plat-02: the records and the emitted script are POSIX-dialect, so
     the same input must nominate the same survivor on every OS."""

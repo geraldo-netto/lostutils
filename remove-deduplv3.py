@@ -199,6 +199,33 @@ def _chunked_quoted(paths, limit=RM_ARGV_BYTE_LIMIT):
         yield " ".join(chunk)
 
 
+def _case_variant_conflicts(paths):
+    """Paths in a group that another path matches except for letter case.
+
+    rdv3-plat-03: on NTFS or the APFS default those spellings name one file,
+    so emitting `rm` for either destroys the copy the "saving" line promised
+    to keep. On ext4 they really are two files, but this script only nominates
+    deletions — a missed dedup is recoverable and a deleted original is not,
+    so the conservative reading wins on both.
+    """
+    by_fold = {}
+    for path in paths:
+        by_fold.setdefault(path.casefold(), []).append(path)
+    return {path for same in by_fold.values() if len(same) > 1 for path in same}
+
+
+def _emit_case_variant_warning(digest, conflicts, out):
+    out(_(
+        "# duplicates: {hash}\n"
+        "# SKIPPED: these paths differ only by letter case, so on a\n"
+        "#   case-insensitive filesystem they are one file and removing\n"
+        "#   either would delete the copy the other one names:\n"
+    ).format(hash=digest))
+    for path in sorted(conflicts):
+        out(f"#   {path}\n")
+    out("\n")
+
+
 def _emit_remove_commands(groups, out):
     out(_(SAFETY_BANNER_TEMPLATE))
     groups_with_dups = 0
@@ -210,6 +237,12 @@ def _emit_remove_commands(groups, out):
         paths = list(dict.fromkeys(paths))
         if len(paths) < 2:
             continue
+        conflicts = _case_variant_conflicts(paths)
+        if conflicts:
+            _emit_case_variant_warning(h, conflicts, out)
+            paths = [p for p in paths if p not in conflicts]
+            if len(paths) < 2:
+                continue
         keep = _survivor(paths)
         to_remove = [p for p in paths if p != keep]
         groups_with_dups += 1
