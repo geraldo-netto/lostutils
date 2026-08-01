@@ -21,7 +21,7 @@ from organize_by_extension import (
     organize,
     resolve_root,
     main,
-    parse_args,
+    build_parser,
 )
 from organize_by_extension import ( # Added for new tests
     is_bucketed_file,
@@ -616,9 +616,8 @@ class OrganizeByExtensionTest(unittest.TestCase):
             resolve_root(123)  # type: ignore[arg-type]
 
     def test_parse_args_returns_namespace(self):
-        """parse_args wires argv into the parsed namespace."""
-        with patch.object(sys, 'argv', ['prog', '/some/dir', '--preview', '-j', '7']):
-            args = parse_args()
+        """The parser wires argv into the parsed namespace."""
+        args = build_parser().parse_args(['/some/dir', '--preview', '-j', '7'])
         self.assertEqual(args.root, '/some/dir')
         self.assertTrue(args.preview)
         self.assertEqual(args.threads, 7)
@@ -2294,13 +2293,11 @@ class OrganizeWithPruneTests(unittest.TestCase):
             self.assertTrue((root / "a.txt").exists())  # file not moved either
 
     def test_cli_flag_parses(self):
-        with patch.object(sys, "argv", ["organize_by_extension.py", "--prune-empty-dirs", "/tmp"]):
-            args = parse_args()
+        args = build_parser().parse_args(["--prune-empty-dirs", "/tmp"])
         self.assertTrue(getattr(args, "prune_empty", False))
 
     def test_cli_default_is_false(self):
-        with patch.object(sys, "argv", ["organize_by_extension.py", "/tmp"]):
-            args = parse_args()
+        args = build_parser().parse_args(["/tmp"])
         self.assertFalse(getattr(args, "prune_empty", True))
         self.assertTrue(args.sniff)
 

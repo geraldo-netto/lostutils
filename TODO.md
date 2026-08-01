@@ -284,7 +284,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-unf-02 | open | low | organize_by_extension.py:2439 — `parse_args()` has no production caller; main calls `build_parser().parse_args()` directly at 2446-2447. Keep as documented API or inline. | grep-proven test-only
 
 ## legacy / deprecation
 

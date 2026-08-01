@@ -2629,11 +2629,6 @@ def _parse_extra_zip_family(raw: str) -> frozenset[str]:
     return frozenset(out)
 
 
-def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments and return the parsed namespace."""
-    return build_parser().parse_args()
-
-
 def main() -> None:
     """Entry point for script execution."""
     parser = build_parser()
