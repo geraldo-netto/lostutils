@@ -2992,6 +2992,24 @@ def test_timezone_option_validates_at_parse_time(capsys):
     assert "invalid IANA timezone" in capsys.readouterr().err
 
 
+def test_timezone_option_blames_the_missing_tzdata_package(capsys, monkeypatch):
+    """ie-plat-04: Windows has no system tz database, so every valid name fails
+    without `tzdata` — reporting the name as invalid sends the user hunting a
+    typo that isn't there."""
+    def no_database(name):
+        raise import_events.ZoneInfoNotFoundError(name)
+
+    monkeypatch.setattr(import_events, "ZoneInfo", no_database)
+
+    with pytest.raises(SystemExit) as exc:
+        import_events.parse_args(["--timezone", "Europe/Lisbon"])
+
+    err = capsys.readouterr().err
+    assert exc.value.code == 2
+    assert "tzdata" in err
+    assert "invalid IANA timezone" not in err
+
+
 @pytest.mark.parametrize("value, expected", [("1", 1), ("42", 42)])
 def test_positive_int_accepts_positive_values(value, expected):
     assert import_events._positive_int(value) == expected

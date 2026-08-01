@@ -4461,10 +4461,26 @@ def write_events_ics(events: List[Dict[str, Any]], output_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
+def _timezone_database_available() -> bool:
+    """Whether stdlib zoneinfo can find any tz database at all."""
+    try:
+        ZoneInfo("UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+    return True
+
+
 def _iana_timezone(value: str) -> str:
     try:
         ZoneInfo(value)
     except (ZoneInfoNotFoundError, ValueError) as exc:
+        # ie-plat-04: Windows ships no system tz database, so every valid name
+        # fails there without the `tzdata` package. Saying the name is invalid
+        # sends the user hunting a typo instead of installing it.
+        if not _timezone_database_available():
+            raise argparse.ArgumentTypeError(
+                "no timezone database available — install the 'tzdata' package"
+            ) from exc
         raise argparse.ArgumentTypeError(
             f"invalid IANA timezone {value!r}"
         ) from exc
