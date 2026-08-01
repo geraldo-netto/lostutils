@@ -4982,6 +4982,15 @@ def test_put_worker_sentinel_stops_when_full_queue_is_shutting_down():
     import_events._put_worker_sentinel(FullQueue(), stop)
 
 
+def test_feeder_result_count_reraises_feeder_failure():
+    failure = RuntimeError("input scan failed")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        import_events._feeder_result_count(0, failure)
+
+    assert exc_info.value is failure
+
+
 def test_shutdown_workers_does_not_block_on_full_queue(monkeypatch):
     work_queue = queue.Queue(maxsize=1)
     work_queue.put((0, Path("pending")))
