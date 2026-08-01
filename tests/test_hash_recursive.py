@@ -31,6 +31,13 @@ def _isolate_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
 
+def _drain_walk(root, jobs, cancel_event=None, skip_ino=None):
+    walk = hr.iter_threaded_walk(
+        root, jobs, cancel_event=cancel_event, skip_ino=skip_ino
+    )
+    return list(walk), walk.stats
+
+
 # --- hr-rel-01: jobs is clamped to >=1 so a walk never silently no-ops ------
 
 def test_threaded_walk_clamps_zero_jobs():
@@ -39,7 +46,7 @@ def test_threaded_walk_clamps_zero_jobs():
         (root / "a.txt").write_text("x")
         (root / "sub").mkdir()
         (root / "sub" / "b.txt").write_text("y")
-        results, stats = hr.threaded_walk(root, 0)      # 0 -> clamped to 1
+        results, stats = _drain_walk(root, 0)      # 0 -> clamped to 1
         names = sorted(Path(p).name for p, *_ in results)
         assert names == ["a.txt", "b.txt"]
         assert stats["files"] == 2
@@ -49,7 +56,7 @@ def test_threaded_walk_clamps_negative_jobs():
     with TemporaryDirectory() as d:
         root = Path(d)
         (root / "a.txt").write_text("x")
-        results, _ = hr.threaded_walk(root, -5)
+        results, _ = _drain_walk(root, -5)
         assert len(results) == 1
 
 
@@ -167,7 +174,7 @@ def test_find_duplicate_groups_stage1_and_stage2():
         # a unique file -> never a candidate
         _write(root / "uniq.bin", b"unique-content-xyz")
 
-        files, _ = hr.threaded_walk(root, 2)
+        files, _ = _drain_walk(root, 2)
         result = hr.find_duplicate_groups(files, 2)
         final_groups, aliases, info = result.groups, result.aliases, result.info
         out = []
@@ -194,7 +201,7 @@ def test_no_false_dup_for_files_between_cap_and_2cap():
         assert len(a) == len(b) and hr.CAP < len(a) <= 2 * hr.CAP
         (root / "x1.bin").write_bytes(a)
         (root / "x2.bin").write_bytes(b)
-        files, _ = hr.threaded_walk(root, 2)
+        files, _ = _drain_walk(root, 2)
         result = hr.find_duplicate_groups(files, 2)
         final_groups, aliases = result.groups, result.aliases
         # different content -> NOT in the same final group
@@ -225,7 +232,7 @@ def test_center_block_catches_middle_only_difference(tmp_path):
     assert a[2 * third:2 * third + hr.SAMPLE] == b[2 * third:2 * third + hr.SAMPLE]
     (tmp_path / "a.bin").write_bytes(a)
     (tmp_path / "b.bin").write_bytes(b)
-    files, _ = hr.threaded_walk(tmp_path, 1)
+    files, _ = _drain_walk(tmp_path, 1)
     result = hr.find_duplicate_groups(files, 1)
     for keys in result.groups.values():
         paths = [p for k in keys for p in result.aliases[k]
@@ -266,7 +273,7 @@ def test_find_duplicate_groups_no_candidates():
     with TemporaryDirectory() as d:
         root = Path(d)
         _write(root / "only.bin", b"x")
-        files, _ = hr.threaded_walk(root, 1)
+        files, _ = _drain_walk(root, 1)
         result = hr.find_duplicate_groups(files, 1)
         final_groups, info = result.groups, result.info
         assert final_groups == {} and info["candidates"] == 0
@@ -527,7 +534,7 @@ def test_threaded_walk_single_stat_per_entry(monkeypatch):
                 counter["calls"] += 1
             return real_stat(self, follow_symlinks=follow_symlinks)
 
-        # is_dir / is_file MUST NOT be called from threaded_walk anymore;
+        # is_dir / is_file MUST NOT be called from the threaded iterator;
         # spying on them lets us prove the optimisation stuck.
         real_is_dir = _os.DirEntry.is_dir
         real_is_file = _os.DirEntry.is_file
@@ -543,7 +550,7 @@ def test_threaded_walk_single_stat_per_entry(monkeypatch):
         monkeypatch.setattr(_os.DirEntry, "stat", counting_stat)
         monkeypatch.setattr(_os.DirEntry, "is_dir", counting_is_dir)
         monkeypatch.setattr(_os.DirEntry, "is_file", counting_is_file)
-        results, stats = hr.threaded_walk(root, 1)
+        results, stats = _drain_walk(root, 1)
         assert stats["files"] == 5
         # 5 regular files + 1 subdir == 6 entries, one stat each.
         assert counter["calls"] >= 6
@@ -566,7 +573,7 @@ def test_threaded_walk_handles_stat_failure_on_entry():
             return real_stat(self, follow_symlinks=follow_symlinks)
 
         with mock.patch.object(_os.DirEntry, "stat", flaky_stat):
-            results, stats = hr.threaded_walk(root, 1)
+            results, stats = _drain_walk(root, 1)
         names = [Path(p).name for p, *_ in results]
         assert names == ["ok.bin"]
         assert stats["entry_errors"] == 1
@@ -612,7 +619,7 @@ def test_threaded_walk_cancels_via_event():
             (root / f"f{i}.bin").write_bytes(b"x")
         event = _t.Event()
         event.set()                                  # pre-cancelled
-        results, stats = hr.threaded_walk(root, 2, cancel_event=event)
+        results, stats = _drain_walk(root, 2, cancel_event=event)
         # The root dir's scan is skipped, so we record dirs=0 and no files.
         assert results == []
         assert stats["files"] == 0
@@ -625,7 +632,7 @@ def test_threaded_walk_runs_normally_when_event_unset():
         root = Path(d)
         (root / "a.bin").write_bytes(b"x")
         event = _t.Event()                           # never set
-        results, stats = hr.threaded_walk(root, 2, cancel_event=event)
+        results, stats = _drain_walk(root, 2, cancel_event=event)
         assert stats["files"] == 1
         assert len(results) == 1
 
@@ -642,7 +649,7 @@ def test_threaded_walk_results_complete_with_many_workers():
             sd = root / f"d{sub}"; sd.mkdir()
             for i in range(50):
                 (sd / f"f{i}.bin").write_bytes(b"x")
-        results, stats = hr.threaded_walk(root, 8)
+        results, stats = _drain_walk(root, 8)
         assert stats["files"] == 20 * 50
         names = [Path(p).name for p, *_ in results]
         # No duplicate paths.
@@ -651,10 +658,10 @@ def test_threaded_walk_results_complete_with_many_workers():
         assert len(names) == 1000
 
 
-def test_threaded_walk_no_results_lock_attr():
+def test_walk_iterator_no_results_lock_attr():
     """Sanity: the new design has no shared `results_lock` to take per-entry."""
     import inspect
-    src = inspect.getsource(hr.threaded_walk)
+    src = inspect.getsource(hr._WalkIter.__iter__)
     assert "results_lock" not in src
 
 
@@ -824,7 +831,7 @@ def test_threaded_walk_records_dir_error(tmp_path, monkeypatch):
         raise OSError("denied")
 
     monkeypatch.setattr(hr.os, "scandir", boom)
-    _, stats = hr.threaded_walk(tmp_path, 1)
+    _, stats = _drain_walk(tmp_path, 1)
     assert stats["dir_errors"] >= 1
 
 
@@ -852,7 +859,7 @@ def test_threaded_walk_records_entry_error(tmp_path, monkeypatch):
         return Wrapper(it)
 
     monkeypatch.setattr(hr.os, "scandir", fake_scandir)
-    _, stats = hr.threaded_walk(tmp_path, 1)
+    _, stats = _drain_walk(tmp_path, 1)
     assert stats.get("entry_errors", 0) >= 1
 
 
@@ -944,7 +951,7 @@ def test_threaded_walk_skips_non_regular_non_dir(tmp_path, monkeypatch):
     # False, so the loop falls through (covers branch 120->107).
     _os.mkfifo(tmp_path / "f")
     (tmp_path / "real.txt").write_text("x")
-    results, stats = hr.threaded_walk(tmp_path, 1)
+    results, stats = _drain_walk(tmp_path, 1)
     # FIFO is not counted as file; only real.txt is.
     assert stats["files"] == 1
 
@@ -2814,7 +2821,7 @@ def test_walk_worker_requeues_dir_on_base_exception(tmp_path, monkeypatch):
     monkeypatch.setattr(hr.os, "scandir", flaky_scandir)
     # Single worker: the same worker that died is gone, but it re-enqueued
     # root, and... with jobs=2 a surviving worker retries it.
-    results, stats = hr.threaded_walk(tmp_path, 2)
+    results, stats = _drain_walk(tmp_path, 2)
     names = sorted(Path(p).name for p, *_ in results)
     # All 4 files recovered despite the first root scan failing.
     assert names == ["f0.bin", "f1.bin", "f2.bin", "top.bin"]
@@ -2910,7 +2917,7 @@ def test_scan_dir_base_exception_preserves_siblings_and_stats(
     monkeypatch.setattr(hr, "_scan_dir", flaky_scan_dir)
     # jobs>=2 so a surviving worker retries the re-enqueued directory after
     # the worker that hit the BaseException dies.
-    results, stats = hr.threaded_walk(tmp_path, 3)
+    results, stats = _drain_walk(tmp_path, 3)
     names = sorted(Path(p).name for p, *_ in results)
     assert names == ["f0.bin", "f1.bin", "g0.bin", "s0.bin", "top.bin"]
     assert state["boomed"] is True            # the BaseException really fired

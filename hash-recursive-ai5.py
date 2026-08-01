@@ -220,25 +220,6 @@ class RootError(Exception):
     call the preflight helper to validate a user-supplied directory."""
 
 
-def threaded_walk(root, jobs, cancel_event=None, skip_ino=None):
-    """Back-compat wrapper: drain :func:`iter_threaded_walk` into a list
-    and return ``(entries, stats)`` (hr-scal-05).
-
-    Prefer the iterator form when memory matters — this wrapper still
-    materialises every entry into a list.
-
-    Returns
-    -------
-    results : list of ``(path, size, dev, ino)`` tuples.
-    stats : dict with keys ``dirs``, ``files``, ``dir_errors``,
-        ``entry_errors``, ``worker_failures``, and ``last_worker_error``.
-    """
-    it = iter_threaded_walk(
-        root, jobs, cancel_event=cancel_event, skip_ino=skip_ino)
-    results = list(it)
-    return results, it.stats
-
-
 def iter_threaded_walk(root, jobs, cancel_event=None, skip_ino=None):
     """Stream entries from a threaded walk (hr-scal-05).
 
@@ -248,9 +229,9 @@ def iter_threaded_walk(root, jobs, cancel_event=None, skip_ino=None):
     ``{dirs, files, dir_errors, entry_errors, worker_failures,
     last_worker_error}`` totals.
 
-    Unlike :func:`threaded_walk`, the full file list is never
-    materialised — RAM tracks "currently buffered" entries, not "every
-    file ever seen". On a 50M-file tree this drops peak RSS from
+    The full file list is never materialised — RAM tracks "currently
+    buffered" entries, not "every file ever seen". On a 50M-file tree this
+    drops peak RSS from
     multi-GB to whatever the consumer keeps in flight.
 
     `skip_ino` (hr-log-04): an optional ``(st_dev, st_ino)`` tuple whose
@@ -401,8 +382,8 @@ class _WalkIter:
     (hr-scal-05).
 
     Same cooperative cancel (hr-conc-02), same per-worker stats merge
-    (hr-conc-01), same 0/negative-jobs guard (hr-rel-01) as the original
-    `threaded_walk` — only the materialisation strategy changed. Workers
+    (hr-conc-01), and same 0/negative-jobs guard (hr-rel-01) as the original
+    eager walk. Workers
     push entries into an output queue; a coordinator thread joins the
     workers and posts an end-of-stream sentinel so the consumer can
     unblock from ``out_q.get()`` and then merge stats safely."""

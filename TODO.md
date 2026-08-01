@@ -284,7 +284,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-unf-01 | open | low | hash-recursive-ai5.py:221 — `threaded_walk` has no production caller (main uses `iter_threaded_walk`); only tests invoke it. Keep as documented API or delete with tests. | grep-proven test-only
 ie-unused-06 | open | low | import_events.py:567 — `_ocr_language_chain` has no production caller; production uses `_ocr_language_chain_with_source`. Delete and point tests at the live function, or wire. | grep-proven test-only wrapper
 ie-unused-07 | open | low | import_events.py:582 — `_language_for_text` has no production caller; extractors use `_language_for_text_with_source`. Delete it or move tests to the live variant. | grep-proven test-only wrapper
 ie-unused-05 | open | low | import_events.py:587,592 — `_language_for_ocr_with_source` and `_language_for_ocr` have no production callers; production calls `_ocr_language_chain_with_source` directly. Delete the pair or wire. | grep-proven test-only chain

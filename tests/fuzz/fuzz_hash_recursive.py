@@ -230,7 +230,7 @@ class EmitGroupsFuzz(unittest.TestCase):
                 self.assertTrue(line.count(" ") >= 1)
 
 
-# --- threaded_walk on a real synthetic tree --------------------------------
+# --- threaded iterator on a real synthetic tree -----------------------------
 
 class ThreadedWalkFuzz(unittest.TestCase):
     @settings(parent=FUZZ, max_examples=20)
@@ -241,7 +241,9 @@ class ThreadedWalkFuzz(unittest.TestCase):
             root = Path(d)
             for i, sz in enumerate(sizes):
                 (root / f"f{i}.bin").write_bytes(b"x" * sz)
-            results, stats = hr.threaded_walk(root, jobs=2)
+            walk = hr.iter_threaded_walk(root, jobs=2)
+            results = list(walk)
+            stats = walk.stats
             self.assertEqual(stats["files"], len(sizes))
             self.assertEqual(len({p for p, *_ in results}), len(sizes))
 
