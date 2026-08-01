@@ -672,6 +672,8 @@ class ModelConfig:
     clip_sha256: Optional[str] = CLIP_SHA256
     model_url: str = MODEL_URL
     clip_url: str = CLIP_URL
+    model_managed: bool = True
+    clip_managed: bool = True
     llm_cache_size: int = DEFAULT_LLM_CACHE_SIZE
     llm_context_size: int = DEFAULT_LLM_CONTEXT_SIZE
     llm_max_tokens: int = DEFAULT_LLM_MAX_TOKENS
@@ -732,6 +734,8 @@ class ModelConfig:
             clip_path=clip_path,
             model_sha256=model_sha256,
             clip_sha256=clip_sha256,
+            model_managed=args.model_path is None,
+            clip_managed=args.clip_path is None,
             llm_cache_size=max(0, args.llm_cache_size),
             llm_context_size=(0 if args.llm_context <= 0 else max(512, args.llm_context)),
             llm_max_tokens=max(1, args.llm_max_tokens),
@@ -1020,8 +1024,10 @@ def _quiet_output_context(verbose: bool):
 # --------------------------------------------------------------------------- #
 # Model bootstrap
 # --------------------------------------------------------------------------- #
-def _verify_sha256(path: str, expected: Optional[str]) -> None:
-    """Verifies a downloaded model against its pinned digest; deletes on mismatch."""
+def _verify_sha256(
+    path: str, expected: Optional[str], *, delete_on_mismatch: bool = True
+) -> None:
+    """Verify a model digest, deleting only managed-cache files on mismatch."""
     if not expected:
         logger.warning("No SHA-256 pinned for %s; skipping integrity check.", _display_path(path))
         return
@@ -1031,12 +1037,13 @@ def _verify_sha256(path: str, expected: Optional[str]) -> None:
             h.update(chunk)
     actual = h.hexdigest()
     if actual != expected:
+        action = "deleting managed cache entry" if delete_on_mismatch else "leaving custom file unchanged"
         logger.warning(
-            "SHA-256 mismatch for %s (expected %s, got %s); deleting corrupt "
-            "download so the next attempt re-fetches it.",
-            _display_path(path), expected, actual,
+            "SHA-256 mismatch for %s (expected %s, got %s); %s.",
+            _display_path(path), expected, actual, action,
         )
-        os.remove(path)
+        if delete_on_mismatch:
+            os.remove(path)
         raise ValueError(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
 
 
@@ -1212,7 +1219,9 @@ class ModelUnavailableError(RuntimeError):
         self.partial_events: List[Dict[str, Any]] = partial_events or []
 
 
-def _ensure_one_model(path_str: str, url: str, expected: Optional[str]) -> None:
+def _ensure_one_model(
+    path_str: str, url: str, expected: Optional[str], *, managed: bool = True
+) -> None:
     """Download (if missing) and verify one model, retrying transient failures.
 
     A SHA mismatch deletes the corrupt file (in _verify_sha256) and counts as a
@@ -1221,6 +1230,18 @@ def _ensure_one_model(path_str: str, url: str, expected: Optional[str]) -> None:
     unavailable — raise ModelUnavailableError so the run aborts with a partial
     result rather than looping forever (ie-robust-01).
     """
+    if not managed:
+        if not Path(path_str).is_file():
+            raise ModelUnavailableError(
+                f"custom model {_display_path(path_str)} must already exist"
+            )
+        try:
+            _verify_sha256(path_str, expected, delete_on_mismatch=False)
+        except (OSError, ValueError) as exc:
+            raise ModelUnavailableError(
+                f"custom model {_display_path(path_str)} is invalid: {exc}"
+            ) from exc
+        return
     last_exc: Optional[Exception] = None
     for attempt in range(1, MODEL_DOWNLOAD_ATTEMPTS + 1):
         try:
@@ -1247,11 +1268,13 @@ def ensure_models_exist(config: Optional[ModelConfig] = None) -> None:
     """
     config = config or ModelConfig()
     models = [
-        (config.model_path, config.model_url, config.model_sha256),
-        (config.clip_path, config.clip_url, config.clip_sha256),
+        (config.model_path, config.model_url, config.model_sha256,
+         config.model_managed),
+        (config.clip_path, config.clip_url, config.clip_sha256,
+         config.clip_managed),
     ]
-    for path_str, url, expected in models:
-        _ensure_one_model(path_str, url, expected)
+    for path_str, url, expected, managed in models:
+        _ensure_one_model(path_str, url, expected, managed=managed)
         if path_str == config.clip_path:
             _validate_clip_projector(path_str)
 

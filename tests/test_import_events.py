@@ -3118,6 +3118,33 @@ def test_ensure_models_exist_downloads_missing_from_config(tmp_path, monkeypatch
     assert model.exists()
 
 
+def test_custom_model_path_is_never_downloaded_or_deleted(tmp_path, monkeypatch):
+    custom = tmp_path / "custom.gguf"
+    custom.write_bytes(b"user-owned")
+    downloads = []
+    cfg = import_events.ModelConfig(
+        model_path=str(custom),
+        model_sha256="0" * 64,
+        model_managed=False,
+    )
+    monkeypatch.setattr(
+        import_events,
+        "_download_to_cache",
+        lambda *args: downloads.append(args),
+    )
+
+    with pytest.raises(import_events.ModelUnavailableError):
+        import_events._ensure_one_model(
+            cfg.model_path,
+            cfg.model_url,
+            cfg.model_sha256,
+            managed=cfg.model_managed,
+        )
+
+    assert custom.read_bytes() == b"user-owned"
+    assert downloads == []
+
+
 def test_validate_clip_projector_accepts_mtmd_metadata(tmp_path):
     clip = tmp_path / "clip.gguf"
     clip.write_bytes(valid_clip_bytes())
