@@ -137,7 +137,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
-lq-test-07 | open | low | link_queue.py:2560 — `Dispatcher._deadline_remaining` lacks coverage for expired deadlines. | CI function coverage gate: 2/3 statements (66.67%) in run 30700525661
 lq-test-08 | open | low | link_queue.py:2566 — `Dispatcher._close_subprocess_pipe` has no coverage for successful and failed pipe closure. | CI function coverage gate: 0/7 statements (0.00%) in run 30700525661
 lq-test-09 | open | low | link_queue.py:2673 — `Dispatcher._claim_or_wait_for_cooldown` lacks coverage for the cooldown wait path. | CI function coverage gate: 6/8 statements (75.00%) in run 30700525661
 mkp-test-01 | open | low | minikeypad.py:200 — `KeypadDevice._rollback_connect` lacks coverage for rollback after a failed connect. | CI function coverage gate: 3/4 statements (75.00%) in run 30700525661

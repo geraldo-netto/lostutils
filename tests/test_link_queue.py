@@ -4847,6 +4847,14 @@ def test_read_subprocess_output_handles_success_and_read_failure(
     assert calls == [("stdout", "job", "summary")]
 
 
+def test_subprocess_deadline_remaining_handles_expired_deadline(monkeypatch):
+    monkeypatch.setattr(link_queue.time, "monotonic", lambda: 100.0)
+
+    assert link_queue.Dispatcher._deadline_remaining(None) is None
+    assert link_queue.Dispatcher._deadline_remaining(90.0) == 0.0
+    assert link_queue.Dispatcher._deadline_remaining(103.0) == 3.0
+
+
 def test_stream_deadline_closes_inherited_output_pipe(
         headless_dispatcher, monkeypatch):
     joins = []
