@@ -4803,7 +4803,14 @@ def _configure_logging() -> None:
     root.setLevel(logging.INFO)
     if _APP_LOG_FILE is None:
         try:
-            _APP_LOG_FILE = os.fdopen(os.dup(2), "w", buffering=1)
+            # ie-plat-06: os.fdopen defaults to the locale encoding under
+            # strict errors — the ANSI code page on Windows, for a redirected
+            # stream as much as a console one — so a record carrying a
+            # non-ASCII filename or an LLM excerpt would raise inside
+            # StreamHandler.emit and be dropped for a "Logging error" notice.
+            _APP_LOG_FILE = os.fdopen(
+                os.dup(2), "w", buffering=1,
+                encoding="utf-8", errors="backslashreplace")
         except OSError:
             _APP_LOG_FILE = sys.stderr
     for handler in list(root.handlers):

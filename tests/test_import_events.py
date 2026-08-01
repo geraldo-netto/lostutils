@@ -4690,7 +4690,7 @@ def test_configure_logging_uses_dedicated_stderr_fd(monkeypatch):
     fake_file = FakeStream()
     monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
     monkeypatch.setattr(import_events.os, "dup", lambda fd: 77)
-    monkeypatch.setattr(import_events.os, "fdopen", lambda fd, mode, buffering=1: fake_file)
+    monkeypatch.setattr(import_events.os, "fdopen", lambda fd, mode, **kw: fake_file)
 
     try:
         import_events._configure_logging()
@@ -4706,6 +4706,58 @@ def test_configure_logging_uses_dedicated_stderr_fd(monkeypatch):
         assert app_handlers[0].formatter.datefmt == "%Y-%m-%d %H:%M:%S"
     finally:
         root.handlers[:] = original_handlers
+        monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
+
+
+def test_configure_logging_wraps_the_stderr_fd_as_lenient_utf8(monkeypatch):
+    """ie-plat-06: the locale default would drop non-ASCII records on Windows."""
+    root = import_events.logging.getLogger()
+    original_handlers = list(root.handlers)
+    opened = {}
+
+    class FakeStream:
+        def write(self, _text):
+            pass
+
+        def flush(self):
+            pass
+
+    def fake_fdopen(fd, mode, **kwargs):
+        opened.update(kwargs)
+        return FakeStream()
+
+    monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
+    monkeypatch.setattr(import_events.os, "dup", lambda fd: 77)
+    monkeypatch.setattr(import_events.os, "fdopen", fake_fdopen)
+
+    try:
+        import_events._configure_logging()
+
+        assert opened["encoding"] == "utf-8"
+        assert opened["errors"] == "backslashreplace"
+    finally:
+        root.handlers[:] = original_handlers
+        monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
+
+
+def test_configured_logging_keeps_non_ascii_records(tmp_path, monkeypatch):
+    """A record holding characters outside the host code page must survive."""
+    root = import_events.logging.getLogger()
+    original_handlers = list(root.handlers)
+    log_path = tmp_path / "app.log"
+    log_file = log_path.open("w", encoding="utf-8", errors="backslashreplace",
+                             buffering=1)
+    monkeypatch.setattr(import_events, "_APP_LOG_FILE", log_file)
+
+    try:
+        import_events._configure_logging()
+        import_events.logger.info("filename: %s", "日本語 фото σχέδιο")
+        log_file.flush()
+
+        assert "日本語 фото σχέδιο" in log_path.read_text(encoding="utf-8")
+    finally:
+        root.handlers[:] = original_handlers
+        log_file.close()
         monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
 
 
