@@ -2403,12 +2403,18 @@ def _drain_futures(
     manager: BucketManager | None = None,
     wait_timeout: float = MOVE_STALL_WARN_SECONDS,
     max_stall_seconds: float = MOVE_MAX_STALL_SECONDS,
-    now_fn: Callable[[], float] = time.monotonic,
+    now_fn: Callable[[], float] | None = None,
 ) -> None:
     """Block until at least one future completes, then log results and prune
-    the head_cache for finished sources (oze-conc-03 / oze-scal-05)."""
+    the head_cache for finished sources (oze-conc-03 / oze-scal-05).
+
+    ``now_fn`` defaults to ``None`` rather than to ``time.monotonic`` so the
+    watchdog clock is looked up per call: a default argument would bind the
+    real clock at import time and leave the abort deadline unreachable for any
+    caller that substitutes one.
+    """
     done = _wait_for_move_futures(
-        futures, wait_timeout, max_stall_seconds, now_fn)
+        futures, wait_timeout, max_stall_seconds, now_fn or time.monotonic)
     for future in done:
         _drain_move_future(
             future, futures, stats, preview, head_cache, manager)

@@ -4548,6 +4548,35 @@ def test_main_reports_a_stalled_move_stage_cleanly(tmp_path, monkeypatch, capsys
     assert "Traceback" not in capsys.readouterr().err
 
 
+def test_move_watchdog_reads_the_clock_at_call_time(monkeypatch, caplog):
+    """oze-time-01: binding ``time.monotonic`` as a default argument froze the
+    watchdog on the real clock, so a substituted clock could never reach the
+    abort deadline and the loop warned on every iteration for the full 300s."""
+    from concurrent.futures import Future
+
+    clock = [0.0]
+
+    def never_completes(futures, timeout, return_when):
+        clock[0] += organize_by_extension.MOVE_MAX_STALL_SECONDS
+        return set(), set(futures)
+
+    monkeypatch.setattr(organize_by_extension, "wait", never_completes)
+    monkeypatch.setattr(
+        organize_by_extension.time, "monotonic", lambda: clock[0])
+
+    fut: Future = Future()
+    with caplog.at_level(logging.WARNING, "organize_by_extension"):
+        with pytest.raises(organize_by_extension.MoveStallError):
+            organize_by_extension._drain_futures(
+                {fut: Path("/slow/source.bin")},
+                organize_by_extension._RunStats(),
+                preview=False,
+                head_cache={},
+            )
+
+    assert [r for r in caplog.records if "move stage stalled" in r.message] == []
+
+
 def test_move_stall_error_stays_a_runtime_error():
     """Subclassing keeps the pre-existing bare-RuntimeError callers working."""
     assert issubclass(organize_by_extension.MoveStallError, RuntimeError)
