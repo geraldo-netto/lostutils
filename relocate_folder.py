@@ -259,8 +259,15 @@ class Plan:
         if not src.name:
             raise ValueError(f"source has no basename to relocate: {src}")
         target = dst_root / src.name
-        if src == target:
+        canonical_source = _canonical_path_location(src)
+        canonical_target = _canonical_path_location(target)
+        if canonical_source == canonical_target:
             raise ValueError(f"source equals computed target: {src}")
+        if _paths_overlap(canonical_source, canonical_target):
+            raise ValueError(
+                "source and computed target overlap: "
+                f"{canonical_source} <-> {canonical_target}"
+            )
         return cls(
             source=src,
             target=target,
@@ -274,6 +281,15 @@ class Plan:
             jobs=getattr(args, "jobs", None),
             check_space=not getattr(args, "no_space_check", False),
         )
+
+
+def _canonical_path_location(path: Path) -> Path:
+    """Resolve parent aliases without following the final path component."""
+    return path.parent.resolve(strict=False) / path.name
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    return first in second.parents or second in first.parents
 
 
 # --- validation -------------------------------------------------------------

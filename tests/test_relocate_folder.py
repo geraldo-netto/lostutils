@@ -1582,6 +1582,37 @@ def test_plan_from_args_rejects_source_equals_target(tmp_path):
         rf.Plan.from_args(ns)
 
 
+@pytest.mark.parametrize("target_is_descendant", [True, False])
+def test_plan_from_args_rejects_source_target_overlap(
+        tmp_path, target_is_descendant):
+    import argparse
+    if target_is_descendant:
+        source = tmp_path / "cache"
+        source.mkdir()
+        dest_root = source / "nested"
+    else:
+        source = tmp_path / "cache" / "cache"
+        source.mkdir(parents=True)
+        dest_root = tmp_path
+    ns = argparse.Namespace(source=str(source), dest_root=str(dest_root))
+    with pytest.raises(ValueError, match="overlap"):
+        rf.Plan.from_args(ns)
+
+
+def test_plan_from_args_rejects_symlinked_dest_inside_source(tmp_path):
+    import argparse
+    source = tmp_path / "source"
+    source.mkdir()
+    alias = tmp_path / "source-alias"
+    alias.symlink_to(source, target_is_directory=True)
+    ns = argparse.Namespace(
+        source=str(source),
+        dest_root=str(alias / "nested"),
+    )
+    with pytest.raises(ValueError, match="overlap"):
+        rf.Plan.from_args(ns)
+
+
 def test_plan_from_args_defaults_when_optional_attrs_missing():
     import argparse
     ns = argparse.Namespace(source="/x", dest_root="/y")
