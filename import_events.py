@@ -10,6 +10,7 @@ import json
 import atexit
 import base64
 import hashlib
+import importlib.metadata
 import secrets
 import logging
 import argparse
@@ -3444,13 +3445,22 @@ class _PdfRenderer:
 
 
 def _pdf_ocr_options(config: ModelConfig, ocr_chain: Tuple[str, ...]) -> Dict[str, Any]:
+    tesseract_executable = shutil.which(config.tesseract_path) or config.tesseract_path
+    try:
+        paddle_version: Optional[str] = importlib.metadata.version("paddleocr")
+    except importlib.metadata.PackageNotFoundError:
+        paddle_version = None
     return {
         "ocr_chain": ocr_chain,
         "ocr_engine": config.ocr_engine,
+        "ocr_language_score": config.ocr_language_score,
+        "text_budget_chars": config.text_budget_chars(),
         "paddle_ocr_device": config.paddle_ocr_device,
+        "paddleocr_version": paddle_version,
         "pdf_vision_dpi": config.pdf_vision_dpi,
         "pdf_vision_pages": config.pdf_vision_max_pages,
         "tesseract_path": config.tesseract_path,
+        "tesseract_identity": _llm_file_identity(tesseract_executable),
         "tesseract_psm": config.tesseract_psm,
     }
 

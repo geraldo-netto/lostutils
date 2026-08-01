@@ -195,7 +195,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-cache-04 | open | med | import_events.py:3384-3410 — `pdf_ocr` cache options omit `ocr_language_score` and effective text budget, so results survive behavior-changing settings. Include both values plus backend/model identity. | key shape / invalidation trigger
 
 ## memory and cpu management
 

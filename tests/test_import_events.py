@@ -2203,6 +2203,23 @@ def test_run_text_llm_stage_cache_key_tracks_model_identity(tmp_path, monkeypatc
     assert captured[0]["clip_identity"] == captured[1]["clip_identity"]
 
 
+def test_pdf_ocr_cache_options_cover_behavior_settings():
+    base = import_events.ModelConfig(
+        ocr_language_score=0.5, max_content_chars=1000
+    )
+    changed = import_events.ModelConfig(
+        ocr_language_score=0.8, max_content_chars=2000
+    )
+
+    first = import_events._pdf_ocr_options(base, ("eng",))
+    second = import_events._pdf_ocr_options(changed, ("eng",))
+
+    assert first["ocr_language_score"] != second["ocr_language_score"]
+    assert first["text_budget_chars"] != second["text_budget_chars"]
+    assert "paddleocr_version" in first
+    assert "tesseract_identity" in first
+
+
 def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypatch):
     img = tmp_path / "poster.png"
     img.write_bytes(b"image")
