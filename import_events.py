@@ -102,6 +102,11 @@ FILE_SHA256_CACHE_MAX = 128
 PDF_VISION_MAX_PAGES = 0
 PDF_VISION_DPI = 150
 PDF_RENDER_MAX_PIXELS = 40_000_000
+# ie-scal-50: total temp-disk budget for one document's rendered pages. The
+# per-page pixel cap above bounds a single page, but PDF_VISION_MAX_PAGES
+# defaults to 0 ("all pages"), so a long scanned PDF could fill TMPDIR one
+# legitimate page at a time.
+PDF_RENDER_MAX_TOTAL_BYTES = 512 << 20
 TEXT_CHARS_PER_TOKEN = 4
 TEXT_PROMPT_RESERVED_TOKENS = 768
 MIN_CONTENT_CHARS = 512
@@ -3371,24 +3376,61 @@ def _render_pdf_image_paths(
         logger.warning("PyMuPDF not installed; cannot OCR/vision-scan PDF %s", file_path.name)
         return []
     image_paths: List[Path] = []
+    remaining = PDF_RENDER_MAX_TOTAL_BYTES
     with fitz.open(str(file_path)) as doc:
         for page in doc:
-            if (runtime_config.pdf_vision_max_pages > 0 and
-                    len(image_paths) >= runtime_config.pdf_vision_max_pages):
-                logger.info("Capping vision scan of %s at %d pages",
-                            file_path.name, runtime_config.pdf_vision_max_pages)
+            if _pdf_page_cap_reached(file_path, len(image_paths), runtime_config):
                 break
-            pixel_count = _pdf_page_pixel_count(page, runtime_config.pdf_vision_dpi)
-            if pixel_count is not None and pixel_count > PDF_RENDER_MAX_PIXELS:
-                logger.warning(
-                    "Skipping oversized PDF page %d in %s: %d pixels exceeds cap %d",
-                    len(image_paths) + 1, file_path.name, pixel_count, PDF_RENDER_MAX_PIXELS,
-                )
+            rendered = _render_pdf_page(
+                page, output_dir, len(image_paths) + 1, file_path, runtime_config)
+            if rendered is None:
                 continue
-            image_path = output_dir / f"page-{len(image_paths) + 1:06d}.png"
-            image_path.write_bytes(page.get_pixmap(dpi=runtime_config.pdf_vision_dpi).tobytes("png"))
+            image_path, written = rendered
             image_paths.append(image_path)
+            remaining -= written
+            if remaining <= 0:
+                _log_pdf_render_budget_exhausted(file_path, len(image_paths))
+                break
     return image_paths
+
+
+def _pdf_page_cap_reached(file_path: Path, rendered: int, config: ModelConfig) -> bool:
+    if config.pdf_vision_max_pages <= 0 or rendered < config.pdf_vision_max_pages:
+        return False
+    logger.info("Capping vision scan of %s at %d pages",
+                file_path.name, config.pdf_vision_max_pages)
+    return True
+
+
+def _render_pdf_page(
+    page: Any,
+    output_dir: Path,
+    index: int,
+    file_path: Path,
+    config: ModelConfig,
+) -> Optional[Tuple[Path, int]]:
+    """Render one page to PNG, or None when it exceeds the per-page pixel cap.
+    Returns ``(path, bytes_written)`` so the caller can hold a temp-disk budget."""
+    pixel_count = _pdf_page_pixel_count(page, config.pdf_vision_dpi)
+    if pixel_count is not None and pixel_count > PDF_RENDER_MAX_PIXELS:
+        logger.warning(
+            "Skipping oversized PDF page %d in %s: %d pixels exceeds cap %d",
+            index, file_path.name, pixel_count, PDF_RENDER_MAX_PIXELS,
+        )
+        return None
+    image_path = output_dir / f"page-{index:06d}.png"
+    payload = page.get_pixmap(dpi=config.pdf_vision_dpi).tobytes("png")
+    image_path.write_bytes(payload)
+    return image_path, len(payload)
+
+
+def _log_pdf_render_budget_exhausted(file_path: Path, rendered: int) -> None:
+    logger.warning(
+        "Stopping the vision render of %s after %d page(s): the %s temporary-"
+        "image budget is exhausted. Lower --pdf-vision-dpi, or set "
+        "--pdf-vision-pages to scan a chosen prefix instead.",
+        file_path.name, rendered, _format_bytes(PDF_RENDER_MAX_TOTAL_BYTES),
+    )
 
 
 def _pdf_page_pixel_count(page: Any, dpi: int) -> Optional[int]:

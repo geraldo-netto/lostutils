@@ -60,7 +60,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-scal-50 | open | med | import_events.py:3325-3354 — `_render_pdf_image_paths` caps pages only when `pdf_vision_max_pages > 0`, and the shipped default `PDF_VISION_MAX_PAGES = 0` means "all pages". A large scanned PDF writes one 150-DPI PNG per page into the `tempfile.TemporaryDirectory` (3541) — unbounded total bytes, always under TMPDIR. Per-page pixels are capped by `PDF_RENDER_MAX_PIXELS`, but nothing bounds the aggregate. Add a byte budget or a non-zero default page cap. | scalability — temp-disk growth tracks input size with no ceiling
 
 ## N+1 / call efficiency
 

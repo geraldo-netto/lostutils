@@ -5716,3 +5716,68 @@ def test_tesseract_decode_of_undecodable_bytes_does_not_raise(tmp_path, monkeypa
     text = import_events._ocr_with_tesseract(tmp_path / "page.png", "en")
 
     assert "bar" in text          # decoded lossily instead of raising
+
+
+class _BudgetPage:
+    def __init__(self, payload, width=100.0, height=100.0):
+        self._payload = payload
+        self.rect = types.SimpleNamespace(width=width, height=height)
+
+    def get_pixmap(self, dpi):
+        return types.SimpleNamespace(tobytes=lambda _fmt: self._payload)
+
+
+class _BudgetDoc:
+    def __init__(self, pages):
+        self._pages = pages
+
+    def __iter__(self):
+        return iter(self._pages)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _install_budget_fitz(monkeypatch, pages):
+    module = types.ModuleType("fitz")
+    module.open = lambda _path: _BudgetDoc(pages)
+    monkeypatch.setitem(sys.modules, "fitz", module)
+
+
+def test_pdf_render_stops_at_the_temp_disk_budget(tmp_path, monkeypatch, caplog):
+    """ie-scal-50: --pdf-vision-pages defaults to 'all pages', so the aggregate
+    temp-image size needs its own ceiling."""
+    monkeypatch.setattr(import_events, "PDF_RENDER_MAX_TOTAL_BYTES", 300)
+    _install_budget_fitz(monkeypatch, [_BudgetPage(b"x" * 100) for _ in range(10)])
+    caplog.set_level(logging.WARNING)
+
+    paths = import_events._render_pdf_image_paths(
+        tmp_path / "scan.pdf", tmp_path)
+
+    assert len(paths) == 3          # 3 x 100 bytes reaches the 300-byte budget
+    assert all(p.exists() for p in paths)
+    assert "temporary-image budget is exhausted" in caplog.text
+
+
+def test_pdf_render_page_cap_still_wins_when_set(tmp_path, monkeypatch):
+    _install_budget_fitz(monkeypatch, [_BudgetPage(b"x" * 10) for _ in range(10)])
+    config = import_events.ModelConfig(pdf_vision_max_pages=2)
+
+    paths = import_events._render_pdf_image_paths(
+        tmp_path / "scan.pdf", tmp_path, config)
+
+    assert [p.name for p in paths] == ["page-000001.png", "page-000002.png"]
+
+
+def test_pdf_render_skips_an_oversized_page_without_consuming_its_index(
+        tmp_path, monkeypatch):
+    huge = _BudgetPage(b"x", width=1e6, height=1e6)
+    _install_budget_fitz(monkeypatch, [huge, _BudgetPage(b"ok")])
+
+    paths = import_events._render_pdf_image_paths(tmp_path / "scan.pdf", tmp_path)
+
+    assert [p.name for p in paths] == ["page-000001.png"]
+    assert paths[0].read_bytes() == b"ok"
