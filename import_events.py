@@ -101,6 +101,10 @@ STAGE_CACHE_VERSION = 1
 FILE_SHA256_CACHE_MAX = 128
 PDF_VISION_MAX_PAGES = 0
 PDF_VISION_DPI = 150
+# ie-cli-50: lower bounds ModelConfig.from_args used to enforce by silently
+# clamping. Named here so the parse-time validator and the clamp agree.
+PDF_VISION_DPI_MIN = 36
+LLM_CONTEXT_MIN = 512
 PDF_RENDER_MAX_PIXELS = 40_000_000
 # ie-scal-50: total temp-disk budget for one document's rendered pages. The
 # per-page pixel cap above bounds a single page, but PDF_VISION_MAX_PAGES
@@ -715,6 +719,13 @@ class ModelConfig:
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ModelConfig":
+        """Build a config from parsed CLI arguments.
+
+        ie-cli-50: the `max()`/`min()` bounds below are no longer how the CLI
+        enforces its ranges — `parse_args` rejects an out-of-range value
+        instead of silently rewriting it. They stay as the backstop for callers
+        that hand-build a Namespace.
+        """
         cache_dir = (Path(args.model_cache_dir).expanduser()
                      if args.model_cache_dir else _default_cache_dir())
         model_path, clip_path, model_sha256, clip_sha256 = \
@@ -727,7 +738,8 @@ class ModelConfig:
             model_managed=args.model_path is None,
             clip_managed=args.clip_path is None,
             llm_cache_size=max(0, args.llm_cache_size),
-            llm_context_size=(0 if args.llm_context <= 0 else max(512, args.llm_context)),
+            llm_context_size=(0 if args.llm_context <= 0
+                              else max(LLM_CONTEXT_MIN, args.llm_context)),
             llm_max_tokens=max(1, args.llm_max_tokens),
             llm_gpu_layers=args.llm_gpu_layers,
             llm_main_gpu=max(0, args.llm_main_gpu),
@@ -749,7 +761,7 @@ class ModelConfig:
             tentative_events=args.tentative_events,
             no_activity_events=args.no_activity_events,
             pdf_vision_max_pages=max(0, args.pdf_vision_pages),
-            pdf_vision_dpi=max(36, args.pdf_vision_dpi),
+            pdf_vision_dpi=max(PDF_VISION_DPI_MIN, args.pdf_vision_dpi),
             stage_cache=args.stage_cache,
             stage_cache_dir=(args.stage_cache_dir or str(cache_dir / "stage-cache")),
             stage_cache_max_entries=max(1, args.stage_cache_max_entries),
@@ -4374,6 +4386,41 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _at_least(minimum: int) -> Callable[[str], int]:
+    """Build an argparse ``type=`` for an int with an inclusive floor.
+
+    ie-cli-50: `ModelConfig.from_args` enforced these floors with `max()`, so
+    an out-of-range value was accepted and silently rewritten — `--workers -5`
+    ran at 1 while the user believed concurrency was constrained. Rejecting at
+    parse time is what makes the flag mean what it says.
+    """
+    def parse(value: str) -> int:
+        parsed = int(value)
+        if parsed < minimum:
+            raise argparse.ArgumentTypeError(f"value must be {minimum} or greater")
+        return parsed
+    return parse
+
+
+def _llm_context_size(value: str) -> int:
+    """0 keeps the model-native context; any other value must clear llama.cpp's
+    minimum (ie-cli-50)."""
+    parsed = int(value)
+    if parsed != 0 and parsed < LLM_CONTEXT_MIN:
+        raise argparse.ArgumentTypeError(
+            "value must be 0 (model-native context) or at least "
+            f"{LLM_CONTEXT_MIN}")
+    return parsed
+
+
+def _unit_interval(value: str) -> float:
+    """A confidence threshold in [0.0, 1.0] (ie-cli-50)."""
+    parsed = float(value)
+    if not 0.0 <= parsed <= 1.0:
+        raise argparse.ArgumentTypeError("value must be between 0.0 and 1.0")
+    return parsed
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract calendar events from a directory of .ics, image, PDF and text files.",
@@ -4410,25 +4457,26 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--clip-path", default=None,
                         help=(f"Path to the local GGUF vision (clip) model "
                               f"(default: cache/{CLIP_FILENAME})."))
-    parser.add_argument("--llm-cache-size", type=int, default=defaults.llm_cache_size,
+    parser.add_argument("--llm-cache-size", type=_at_least(0), default=defaults.llm_cache_size,
                         help=(f"Max loaded LLM instances retained in memory "
                               f"(default: {DEFAULT_LLM_CACHE_SIZE}; 0 disables)."))
-    parser.add_argument("--llm-context", type=int, default=defaults.llm_context_size,
-                        help=("LLM context size in tokens "
-                              "(default: 0, use model-native context)."))
-    parser.add_argument("--llm-max-tokens", type=int, default=defaults.llm_max_tokens,
+    parser.add_argument("--llm-context", type=_llm_context_size, default=defaults.llm_context_size,
+                        help=("LLM context size in tokens: 0 uses the model-native "
+                              f"context, otherwise at least {LLM_CONTEXT_MIN} "
+                              "(default: 0)."))
+    parser.add_argument("--llm-max-tokens", type=_positive_int, default=defaults.llm_max_tokens,
                         help=(f"Max tokens generated per LLM call "
                               f"(default: {DEFAULT_LLM_MAX_TOKENS})."))
     parser.add_argument("--llm-gpu-layers", type=int, default=defaults.llm_gpu_layers,
                         help=("Number of model layers to offload to GPU; -1 offloads as many "
                               f"as possible, 0 forces CPU (default: {DEFAULT_LLM_GPU_LAYERS})."))
-    parser.add_argument("--llm-main-gpu", type=int, default=defaults.llm_main_gpu,
+    parser.add_argument("--llm-main-gpu", type=_at_least(0), default=defaults.llm_main_gpu,
                         help=f"Main GPU index for llama.cpp offload (default: {DEFAULT_LLM_MAIN_GPU}).")
     parser.add_argument("--mlock", "--llm-mlock", dest="llm_mlock", action="store_true",
                         default=defaults.llm_mlock,
                         help=("Ask llama.cpp to lock model memory only when the estimated "
                               "GGUF footprint is at most 70%% of environment memory."))
-    parser.add_argument("--max-content-chars", type=int, default=None,
+    parser.add_argument("--max-content-chars", type=_positive_int, default=None,
                         help=("Max text characters sent to the LLM per file "
                               "(default: computed from --llm-context)."))
     parser.add_argument("--llm-verbose", action="store_true",
@@ -4446,12 +4494,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=("Comma-separated OCR language chain used when no text can "
                               "be detected before OCR (default: Brazilian Portuguese, "
                               "English, Spanish, Italian, French, German)."))
-    parser.add_argument("--ocr-language-score", type=float,
+    parser.add_argument("--ocr-language-score", type=_unit_interval,
                         default=defaults.ocr_language_score,
                         help=("First OCR language confidence threshold from 0.0 to 1.0; "
                               "when met, remaining OCR languages are skipped "
                               f"(default: {DEFAULT_OCR_LANGUAGE_SCORE:.2f})."))
-    parser.add_argument("--ocr-timeout", type=int, default=defaults.ocr_timeout_seconds,
+    parser.add_argument("--ocr-timeout", type=_positive_int, default=defaults.ocr_timeout_seconds,
                         help=("Seconds before one Tesseract subprocess times out; "
                               "PaddleOCR runs in-process and cannot be interrupted "
                               f"(default: {OCR_TIMEOUT_SECONDS})."))
@@ -4483,11 +4531,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         default=defaults.no_activity_events,
                         help=("Policy for no-activity rows such as SEM ATIVIDADE "
                               f"(default: {DEFAULT_NO_ACTIVITY_EVENTS})."))
-    parser.add_argument("--pdf-vision-pages", type=int, default=defaults.pdf_vision_max_pages,
+    parser.add_argument("--pdf-vision-pages", type=_at_least(0), default=defaults.pdf_vision_max_pages,
                         help=("Max rendered PDF pages for OCR/vision fallback; 0 scans all pages "
                               f"(default: {PDF_VISION_MAX_PAGES})."))
-    parser.add_argument("--pdf-vision-dpi", type=int, default=defaults.pdf_vision_dpi,
-                        help=f"PDF render DPI for OCR/vision fallback (default: {PDF_VISION_DPI}).")
+    parser.add_argument("--pdf-vision-dpi", type=_at_least(PDF_VISION_DPI_MIN), default=defaults.pdf_vision_dpi,
+                        help=(f"PDF render DPI for OCR/vision fallback, at least "
+                              f"{PDF_VISION_DPI_MIN} (default: {PDF_VISION_DPI})."))
     parser.add_argument("--stage-cache", choices=("off", "on", "refresh"),
                         default=defaults.stage_cache,
                         help=("Local cache for parsed PDF text, OCR text, and text-LLM responses; "
@@ -4495,7 +4544,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                               f"(default: {DEFAULT_STAGE_CACHE})."))
     parser.add_argument("--stage-cache-dir", default=None,
                         help="Directory for --stage-cache entries (default: model cache/stage-cache).")
-    parser.add_argument("--stage-cache-max-entries", type=int,
+    parser.add_argument("--stage-cache-max-entries", type=_positive_int,
                         default=defaults.stage_cache_max_entries,
                         help=("Max JSON entries retained in the stage cache "
                               f"(default: {DEFAULT_STAGE_CACHE_MAX_ENTRIES})."))
@@ -4504,7 +4553,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="Delete stage-cache JSON entries before processing.")
     parser.add_argument("--benchmark", action="store_true",
                         help="Log per-file stage timings for precision/speed tuning.")
-    parser.add_argument("--workers", type=int, default=defaults.workers,
+    parser.add_argument("--workers", type=_positive_int, default=defaults.workers,
                         help=f"Parallel file worker threads (default: {DEFAULT_WORKERS}).")
     parser.add_argument("--deterministic-order", action="store_true",
                         help="Sort all matching files before processing; slower on large recursive trees.")

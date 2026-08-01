@@ -5837,3 +5837,87 @@ def test_create_lock_file_gives_up_when_the_slot_is_retaken(tmp_path, monkeypatc
 
     with pytest.raises(FileExistsError, match="is already writing"):
         import_events._create_lock_file(lock, "the output")
+
+
+@pytest.mark.parametrize(
+    "flag, value",
+    [
+        ("--workers", "-5"),
+        ("--workers", "0"),
+        ("--llm-cache-size", "-1"),
+        ("--llm-context", "100"),
+        ("--llm-context", "-1"),
+        ("--llm-main-gpu", "-2"),
+        ("--llm-max-tokens", "0"),
+        ("--max-content-chars", "0"),
+        ("--ocr-timeout", "0"),
+        ("--ocr-language-score", "1.5"),
+        ("--ocr-language-score", "-0.1"),
+        ("--pdf-vision-pages", "-1"),
+        ("--pdf-vision-dpi", "10"),
+        ("--stage-cache-max-entries", "0"),
+    ],
+)
+def test_parse_args_rejects_out_of_range_values(flag, value, capsys):
+    """ie-cli-50: an out-of-range value was accepted and silently clamped."""
+    with pytest.raises(SystemExit) as exc:
+        import_events.parse_args([flag, value])
+
+    assert exc.value.code == 2
+    assert flag in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "flag, value",
+    [
+        ("--llm-cache-size", "0"),      # 0 disables the cache
+        ("--llm-context", "0"),         # 0 means model-native context
+        ("--llm-context", "512"),
+        ("--llm-main-gpu", "0"),
+        ("--pdf-vision-pages", "0"),    # 0 means all pages
+        ("--pdf-vision-dpi", "36"),
+        ("--ocr-language-score", "0.0"),
+        ("--ocr-language-score", "1.0"),
+        ("--llm-gpu-layers", "-1"),     # -1 offloads as many as possible
+    ],
+)
+def test_parse_args_keeps_meaningful_boundary_values(flag, value):
+    import_events.parse_args([flag, value])   # must not raise
+
+
+@pytest.mark.parametrize("value, expected", [("0", 0), ("7", 7)])
+def test_at_least_accepts_values_on_and_above_the_floor(value, expected):
+    assert import_events._at_least(0)(value) == expected
+
+
+def test_at_least_rejects_below_the_floor():
+    with pytest.raises(
+        import_events.argparse.ArgumentTypeError, match="36 or greater"
+    ):
+        import_events._at_least(36)("35")
+
+
+@pytest.mark.parametrize("value, expected", [("0", 0), ("512", 512), ("4096", 4096)])
+def test_llm_context_size_accepts_zero_and_the_floor(value, expected):
+    assert import_events._llm_context_size(value) == expected
+
+
+@pytest.mark.parametrize("value", ["1", "511", "-1"])
+def test_llm_context_size_rejects_below_the_floor(value):
+    with pytest.raises(
+        import_events.argparse.ArgumentTypeError, match="model-native context"
+    ):
+        import_events._llm_context_size(value)
+
+
+@pytest.mark.parametrize("value, expected", [("0", 0.0), ("0.5", 0.5), ("1", 1.0)])
+def test_unit_interval_accepts_the_closed_range(value, expected):
+    assert import_events._unit_interval(value) == expected
+
+
+@pytest.mark.parametrize("value", ["-0.01", "1.01"])
+def test_unit_interval_rejects_outside_the_range(value):
+    with pytest.raises(
+        import_events.argparse.ArgumentTypeError, match="between 0.0 and 1.0"
+    ):
+        import_events._unit_interval(value)
