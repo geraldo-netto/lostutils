@@ -381,18 +381,20 @@ def _create_missing_dirs(dest_root: Path, source: Path) -> list[Path]:
     if not created:
         return []
     st = source.stat()
-    for path in created:
-        os.mkdir(path, mode=0o700)
-        # rf-rel-09: chown/chmod at setup time are correctness operations.
-        # A silent best-effort failure leaves the dest dir with wrong owner
-        # or wrong perms — the user only finds out at first access, long
-        # after the source is gone. Raise via _raise_or_fail so the migration
-        # aborts loudly instead of corrupting silently.
-        _raise_or_fail(
-            f"chown {path} to uid={st.st_uid} gid={st.st_gid}",
-            os.chown, path, st.st_uid, st.st_gid,
-        )
-        _raise_or_fail(f"chmod {path} to 0o755", os.chmod, path, 0o755)
+    made: list[Path] = []
+    try:
+        for path in created:
+            os.mkdir(path, mode=0o700)
+            made.append(path)
+            # rf-rel-09: ownership and permissions are required setup steps.
+            _raise_or_fail(
+                f"chown {path} to uid={st.st_uid} gid={st.st_gid}",
+                os.chown, path, st.st_uid, st.st_gid,
+            )
+            _raise_or_fail(f"chmod {path} to 0o755", os.chmod, path, 0o755)
+    except BaseException:
+        _cleanup_created_dirs(made)
+        raise
     return created
 
 

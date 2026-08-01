@@ -1107,6 +1107,7 @@ def test_create_missing_dirs_chmod_failure_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(rf.os, "chmod", _raise_os)
     with pytest.raises(RuntimeError, match="required chmod"):
         rf._create_missing_dirs(tmp_path / "new", src)
+    assert not (tmp_path / "new").exists()
 
 
 # --- rf-sec-03: cross-device check -----------------------------------------

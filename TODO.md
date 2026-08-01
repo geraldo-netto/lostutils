@@ -127,7 +127,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-rob-01 | open | low | relocate_folder.py:367-380 — `_create_missing_dirs` can create outer ancestors then fail before returning its cleanup list, leaving partial directories. Track successful creations and clean them inside the helper on BaseException. | partial-state recovery
 rf-rob-02 | open | low | relocate_folder.py:835-846,2345-2349 — cleanup covers `copytree` but not later ownership replication, and `_copy_and_verify` invokes `copy_tree` before its cleanup try; interruption can leave a full target blocking retry. Enclose ownership and the copy call in BaseException cleanup. | kill safety
 rf-rob-03 | open | high | relocate_folder.py:1769-1771,2345-2361 — verified destination and parent swap are never fsynced before backup deletion; power loss can leave neither durable destination data nor durable source binding. Add file/directory durability barriers before swap and fsync the source parent around rename/symlink lifecycle. | power-loss durability
 
