@@ -1629,6 +1629,41 @@ def test_write_all_reports_failure_stays_unambiguous(app):
     assert "ambiguous" not in app._assignments[(1, 1)]
 
 
+def test_write_all_clears_ambiguous_after_a_successful_rewrite(app):
+    """mkp-di-50: a key confirmed by a later write-all must stop showing as
+    ambiguous."""
+    app._io_busy = False
+    data = _one_key_assignment(app)
+    app._assignments = {(1, 1): {"data": data, "desc": "A", "ambiguous": True}}
+    app.dev = FakeDev(connected=True, write_ok=True)
+
+    app._write_all()
+    _wait_drain(app)
+
+    assert "ambiguous" not in app._assignments[(1, 1)]
+    assert "1/1" in app.log_box.get("1.0", "end")
+
+
+def test_apply_write_all_outcomes_reports_whether_a_repaint_is_needed(app):
+    app._assignments = {
+        (1, 1): {"data": b"", "desc": "A"},
+        (1, 2): {"data": b"", "desc": "B", "ambiguous": True},
+    }
+
+    # No-op: already-ambiguous stays ambiguous, 'reports' leaves the flag alone.
+    assert app._apply_write_all_outcomes([((1, 2), "flash")]) is False
+    assert app._apply_write_all_outcomes([((1, 1), "reports")]) is False
+    assert "ambiguous" not in app._assignments[(1, 1)]
+    # A vanished key is skipped rather than resurrected.
+    assert app._apply_write_all_outcomes([((9, 9), "ok")]) is False
+    assert (9, 9) not in app._assignments
+    # Real transitions in both directions report a repaint.
+    assert app._apply_write_all_outcomes([((1, 1), "error")]) is True
+    assert app._assignments[(1, 1)]["ambiguous"] is True
+    assert app._apply_write_all_outcomes([((1, 1), "ok")]) is True
+    assert "ambiguous" not in app._assignments[(1, 1)]
+
+
 def test_write_all_skips_unbuildable(app):
     app._io_busy = False
     app.dev = FakeDev(connected=True, write_ok=True)

@@ -1740,6 +1740,30 @@ class App(tk.Tk):
         self._pending = None
         self._dl_result(outcome == "ok")
 
+    def _apply_write_all_outcomes(self, results):
+        """Sync each key's `ambiguous` flag with this run's outcome (mkp-di-50).
+
+        Same post-commit semantics as _download_done: 'flash'/'error' left the
+        device state ambiguous, 'reports' persisted nothing (so the previous
+        verdict stands). A successful rewrite must CLEAR the flag — without
+        that a key stayed marked ambiguous forever once any write-all had
+        failed on it, even after a later run confirmed it. The single-key path
+        clears it implicitly because _record_pending_assignment replaces the
+        whole record. Returns True when the key map needs a repaint.
+        """
+        changed = False
+        for key, outcome in results:
+            rec = self._assignments.get(key)
+            if rec is None:
+                continue
+            if outcome in ("flash", "error"):
+                if not rec.get("ambiguous"):
+                    rec["ambiguous"] = True
+                    changed = True
+            elif outcome == "ok" and rec.pop("ambiguous", None) is not None:
+                changed = True
+        return changed
+
     def _record_pending_assignment(self, ambiguous):
         pending = self._pending
         if pending is None:
@@ -1839,13 +1863,7 @@ class App(tk.Tk):
     def _write_all_done(self, results):
         self._io_busy = False
         self._set_actions("normal")
-        # Same post-commit semantics as _download_done: 'flash'/'error' left
-        # the device state ambiguous, 'reports' persisted nothing.
-        ambiguous = [key for key, outcome in results
-                     if outcome in ("flash", "error") and key in self._assignments]
-        for key in ambiguous:
-            self._assignments[key]["ambiguous"] = True
-        if ambiguous:
+        if self._apply_write_all_outcomes(results):
             self._refresh_key_map()
         ok = sum(1 for _, outcome in results if outcome == "ok")
         total = len(results)

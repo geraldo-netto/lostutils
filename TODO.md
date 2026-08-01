@@ -50,7 +50,6 @@ lq-gov-50 | open | low | link_queue.py:5654-5665 — `build_parser` puts the res
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-di-50 | open | low | minikeypad.py:1844-1847 — `_write_all_done` sets `ambiguous=True` on a failed key but never clears it, so a key that later writes successfully via Write-all stays flagged forever. The single-key path clears it only incidentally, because `_record_pending_assignment` replaces the whole record. Clear the flag on an `ok` outcome. | data integrity — derived UI state not invalidated on the success path
 
 ## performance
 
