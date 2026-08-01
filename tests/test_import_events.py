@@ -1658,35 +1658,6 @@ def test_ocr_image_path_stops_chain_when_later_language_scores_high(tmp_path, mo
     assert "Festa de São João" in text
 
 
-def test_ocr_image_bytes_uses_temp_file_and_cleans_it(monkeypatch):
-    seen = []
-
-    def fake_ocr(path, config=None, language="en"):
-        seen.append(path)
-        assert path.exists()
-        return "OCR text"
-
-    monkeypatch.setattr(import_events, "_ocr_image_path", fake_ocr)
-
-    assert import_events._ocr_image_bytes(b"png") == "OCR text"
-    assert seen and not seen[0].exists()
-
-
-def test_ocr_image_bytes_cleans_temp_file_on_keyboard_interrupt(monkeypatch):
-    seen = {}
-
-    def interrupt(path, config=None, language="en"):
-        seen["path"] = path
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(import_events, "_ocr_image_path", interrupt)
-
-    with pytest.raises(KeyboardInterrupt):
-        import_events._ocr_image_bytes(b"png")
-
-    assert seen["path"].exists() is False
-
-
 def test_ocr_with_tesseract_returns_stdout(tmp_path, monkeypatch):
     img = tmp_path / "scan.png"
     img.write_bytes(b"image")
@@ -1916,14 +1887,6 @@ def test_ocr_with_tesseract_propagates_keyboard_interrupt(tmp_path, monkeypatch)
 
     with pytest.raises(KeyboardInterrupt):
         import_events._ocr_with_tesseract(img)
-
-
-def test_ocr_image_bytes_ignores_cleanup_error(monkeypatch):
-    monkeypatch.setattr(import_events, "_ocr_image_path",
-                        lambda path, config=None, language="en": "OCR text")
-    monkeypatch.setattr(import_events.os, "unlink", lambda path: (_ for _ in ()).throw(OSError))
-
-    assert import_events._ocr_image_bytes(b"png") == "OCR text"
 
 
 def test_extract_from_image_uses_ocr_before_llm(tmp_path, monkeypatch):
@@ -4898,26 +4861,6 @@ def test_read_text_truncates_to_max_chars(tmp_path):
     f = tmp_path / "a.txt"
     f.write_text("a" * 100, encoding="utf-8")
     assert import_events._read_text(f, max_chars=10) == "a" * 10
-
-
-def test_ocr_image_bytes_closes_fd_on_fdopen_failure(monkeypatch):
-    """If os.fdopen raises, the raw descriptor must be closed, not leaked
-    (ie-robust-03)."""
-    closed = []
-    real_close = os.close
-
-    def fake_fdopen(*_a, **_k):
-        raise OSError("fdopen boom")
-
-    def tracking_close(fd):
-        closed.append(fd)
-        return real_close(fd)
-
-    monkeypatch.setattr(import_events.os, "fdopen", fake_fdopen)
-    monkeypatch.setattr(import_events.os, "close", tracking_close)
-    with pytest.raises(OSError):
-        import_events._ocr_image_bytes(b"\x89PNG")
-    assert closed, "descriptor was not explicitly closed on fdopen failure"
 
 
 def test_feed_file_queue_count_excludes_unqueued_on_early_stop():

@@ -3026,35 +3026,6 @@ def _ocr_image_path(
     )
 
 
-def _ocr_image_bytes(
-    image_data: bytes,
-    config: Optional[ModelConfig] = None,
-    language: str = DEFAULT_OCR_FALLBACK_LANGUAGE,
-    language_chain: Optional[Tuple[str, ...]] = None,
-    stage: str = "OCR",
-) -> str:
-    fd, tmp_name = tempfile.mkstemp(suffix=".png")
-    try:
-        # ie-robust-03: if os.fdopen itself raises, the raw fd is never wrapped
-        # (so the `with` can't close it) and only the path is unlinked below —
-        # close the descriptor explicitly on that failure to avoid an fd leak.
-        try:
-            tmp = os.fdopen(fd, "wb")
-        except BaseException:
-            os.close(fd)
-            raise
-        with tmp:
-            tmp.write(image_data)
-        if language_chain is None and stage == "OCR":
-            return _ocr_image_path(Path(tmp_name), config, language)
-        return _ocr_image_path(Path(tmp_name), config, language, language_chain, stage)
-    finally:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-
-
 def _current_llm_stall_callback() -> Optional[Callable[..., None]]:
     callback = getattr(_LLM_STALL_CONTEXT, "callback", None)
     if callable(callback):
