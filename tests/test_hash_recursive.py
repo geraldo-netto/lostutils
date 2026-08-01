@@ -3455,6 +3455,65 @@ def test_stage2_recovered_alias_is_not_counted_as_hash_error(monkeypatch):
     assert info["stage2_errors"] == 0
 
 
+def test_retry_full_alias_uses_the_next_readable_sibling(monkeypatch):
+    """hr-rel-50: stage 3 recovers a vanished rep like stages 1 and 2 do."""
+    aliases = {("d", 0): ["/dead", "/live"]}
+    calls = []
+
+    def fake_full(path, size, config=None):
+        calls.append(path)
+        return None if path == "/dead" else "GOODFULL"
+
+    monkeypatch.setattr(hr, "hash_full", fake_full)
+    assert hr._retry_full_alias(("d", 0), "/dead", 1234, aliases, None) == "GOODFULL"
+    assert "/dead" not in calls   # already-tried rep skipped
+
+
+def test_retry_full_alias_returns_none_when_no_sibling_readable(monkeypatch):
+    monkeypatch.setattr(hr, "hash_full", lambda p, s, config=None: None)
+    aliases = {("d", 0): ["/dead", "/alsodead"]}
+    assert hr._retry_full_alias(("d", 0), "/dead", 1, aliases, None) is None
+    assert hr._retry_full_alias(("d", 9), "/x", 1, {}, None) is None
+
+
+def test_stage3_recovers_a_vanished_representative(monkeypatch):
+    """hr-rel-50: the inode stays in its confirmed group and the recovery is
+    not double-counted as a hash error."""
+    key = ("d", 0)
+    items = {("/dead", 100, ("HEAD", "TAIL"), key): None}
+    monkeypatch.setattr(hr, "_run_stage", lambda *_a, **_k: (items, 1))
+    monkeypatch.setattr(hr, "_retry_full_alias", lambda *_a: "FULL")
+
+    by_full, info = hr._stage3_hash(
+        {("HEAD", "TAIL"): [key, ("d", 1)]},
+        rep={key: "/dead", ("d", 1): "/other"},
+        sizes={key: 100, ("d", 1): 100},
+        jobs=1,
+        config=None,
+        aliases={key: ["/dead", "/live"], ("d", 1): ["/other"]},
+    )
+
+    assert by_full == {"FULL": [key]}
+    assert info["stage3_errors"] == 0
+
+
+def test_stage3_without_aliases_still_drops_a_failed_representative(monkeypatch):
+    key = ("d", 0)
+    items = {("/dead", 100, ("HEAD", "TAIL"), key): None}
+    monkeypatch.setattr(hr, "_run_stage", lambda *_a, **_k: (items, 1))
+
+    by_full, info = hr._stage3_hash(
+        {("HEAD", "TAIL"): [key, ("d", 1)]},
+        rep={key: "/dead", ("d", 1): "/other"},
+        sizes={key: 100, ("d", 1): 100},
+        jobs=1,
+        config=None,
+    )
+
+    assert by_full == {}
+    assert info["stage3_errors"] == 1
+
+
 def test_main_dump_marks_unconfirmed_stage2_files_provisional(tmp_path, monkeypatch):
     """Files rejected by sampled stage 2 keep unique provisional identities."""
     head = b"H" * 64
