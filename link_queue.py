@@ -508,6 +508,27 @@ DEFAULT_CONFIG = {
     },
 }
 
+_CONFIG_INT_SCHEMA = {
+    "seq_of_sweep_gap": (_SEQ_OF_SWEEP_GAP, 0),
+    "sleep_between_items": (5, 0),
+    "worker_count": (1, 1),
+    "immediate_worker_count": (0, 0),
+    "immediate_queue_maxsize": (10000, 0),
+    "failure_sleep_seconds": (300, 0),
+    "command_timeout_seconds": (DEFAULT_COMMAND_TIMEOUT_SECONDS, 0),
+    "max_per_domain": (0, 0),
+    "log_max_lines": (100, 0),
+    "queue_render_limit": (2000, 0),
+}
+_CONFIG_STRING_SCHEMA = {
+    "log_file": "",
+    "output_folder": "",
+}
+_CONFIG_ENUM_SCHEMA = {
+    "log_verbosity": ("summary", frozenset(("summary", "verbose", "silent"))),
+    "default_mode": ("queue", frozenset(("queue", "immediate"))),
+}
+
 
 # ---------------------------------------------------------------------------
 # Pending queue with O(1) dispatch indexes
@@ -789,6 +810,18 @@ class ConfigStore(dict):
                 cfg["protocols"].pop(name, None)
                 continue
             pc.setdefault("mode", "queue")
+            if (
+                not isinstance(pc["mode"], str)
+                or pc["mode"].casefold() not in {"queue", "immediate"}
+            ):
+                ConfigStore._warn_scalar_fallback(
+                    f"protocols.{name}.mode",
+                    pc["mode"],
+                    "queue",
+                )
+                pc["mode"] = "queue"
+            else:
+                pc["mode"] = pc["mode"].casefold()
             pc.setdefault("command", "echo {url}")
             if not isinstance(pc["command"], str):
                 # lq-input-20: a YAML int/bool/null template would raise
@@ -801,15 +834,72 @@ class ConfigStore(dict):
                 )
                 pc["command"] = "echo {url}"
             pc.setdefault("shell", False)
-            pc["shell"] = bool(pc["shell"])
+            pc["shell"] = ConfigStore._coerce_bool(
+                f"protocols.{name}.shell",
+                pc["shell"],
+                False,
+            )
+
+    @staticmethod
+    def _warn_scalar_fallback(key, value, default) -> None:
+        print(
+            f"[warn] config: {key}={value!r} is invalid; using {default!r}",
+            file=sys.stderr,
+        )
+
+    @staticmethod
+    def _coerce_bool(key, value, default) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().casefold()
+            if normalized in {"true", "yes", "1"}:
+                return True
+            if normalized in {"false", "no", "0"}:
+                return False
+        ConfigStore._warn_scalar_fallback(key, value, default)
+        return default
+
+    @staticmethod
+    def _coerce_integer_scalars(cfg: dict) -> None:
+        for key, (default, minimum) in _CONFIG_INT_SCHEMA.items():
+            value = cfg.get(key, default)
+            try:
+                if isinstance(value, (bool, float)):
+                    raise ValueError
+                normalized = int(value)
+                if normalized < minimum:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                ConfigStore._warn_scalar_fallback(key, value, default)
+                normalized = default
+            cfg[key] = normalized
+
+    @staticmethod
+    def _coerce_string_scalars(cfg: dict) -> None:
+        for key, default in _CONFIG_STRING_SCHEMA.items():
+            value = cfg.get(key, default)
+            if not isinstance(value, str):
+                ConfigStore._warn_scalar_fallback(key, value, default)
+                value = default
+            cfg[key] = value
+        for key, (default, allowed) in _CONFIG_ENUM_SCHEMA.items():
+            value = cfg.get(key, default)
+            if not isinstance(value, str) or value.casefold() not in allowed:
+                ConfigStore._warn_scalar_fallback(key, value, default)
+                value = default
+            cfg[key] = value.casefold()
 
     @staticmethod
     def _coerce_config_scalars(cfg: dict) -> None:
         """Coerce scalar config values to their expected types (lq-val-01) so a
         hand-edited non-numeric value degrades to its default instead of
         crashing startup; also filter token_mappings to str->str entries."""
-        cfg.setdefault("default_shell", False)
-        cfg["default_shell"] = bool(cfg.get("default_shell", False))
+        cfg["default_shell"] = ConfigStore._coerce_bool(
+            "default_shell",
+            cfg.get("default_shell", False),
+            False,
+        )
         if not isinstance(cfg.get("default_command", ""), str):
             # lq-input-20: same fallback as per-protocol commands.
             print(
@@ -818,20 +908,8 @@ class ConfigStore(dict):
                 file=sys.stderr,
             )
             cfg["default_command"] = "echo {url}"
-        for key, default in (("worker_count", 1),
-                             ("immediate_worker_count", 0),
-                             ("immediate_queue_maxsize", 0)):
-            if key not in cfg:
-                continue
-            try:
-                cfg[key] = int(cfg[key])
-            except (TypeError, ValueError):
-                print(
-                    f"[warn] config: {key}={cfg[key]!r} is not an integer; "
-                    f"using {default}",
-                    file=sys.stderr,
-                )
-                cfg[key] = default
+        ConfigStore._coerce_integer_scalars(cfg)
+        ConfigStore._coerce_string_scalars(cfg)
         tm = cfg.get("token_mappings")
         if not isinstance(tm, dict):
             tm = {}

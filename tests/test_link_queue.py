@@ -4286,7 +4286,9 @@ def test_normalize_config_coerces_garbage_numeric_scalars():
     link_queue.ConfigStore._normalize_config_schema(cfg)
     assert cfg["worker_count"] == 1
     assert cfg["immediate_worker_count"] == 0
-    assert cfg["immediate_queue_maxsize"] == 0
+    assert cfg["immediate_queue_maxsize"] == link_queue.DEFAULT_CONFIG[
+        "immediate_queue_maxsize"
+    ]
 
 
 def test_normalize_config_keeps_valid_numeric_strings():

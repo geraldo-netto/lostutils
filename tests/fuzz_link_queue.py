@@ -543,6 +543,44 @@ class FuzzConfigSchema(unittest.TestCase):
 
     @FUZZ
     @given(
+        key=st.sampled_from(tuple(
+            key
+            for key, value in link_queue.DEFAULT_CONFIG.items()
+            if not isinstance(value, dict)
+        )),
+        value=st.one_of(
+            st.none(),
+            st.booleans(),
+            st.integers(),
+            st.floats(allow_nan=True, allow_infinity=True),
+            weird_text,
+            st.lists(weird_text, max_size=3),
+            st.dictionaries(weird_text, weird_text, max_size=3),
+        ),
+    )
+    def test_every_default_scalar_normalizes_to_declared_type(self, key, value):
+        import copy
+        cfg = copy.deepcopy(link_queue.DEFAULT_CONFIG)
+        cfg[key] = value
+
+        LinkQueueApp._normalize_config_schema(cfg)
+
+        default = link_queue.DEFAULT_CONFIG[key]
+        if isinstance(default, bool):
+            self.assertIsInstance(cfg[key], bool)
+        elif isinstance(default, int):
+            self.assertIsInstance(cfg[key], int)
+            self.assertGreaterEqual(
+                cfg[key],
+                link_queue._CONFIG_INT_SCHEMA[key][1],
+            )
+        elif isinstance(default, str):
+            self.assertIsInstance(cfg[key], str)
+        if key in link_queue._CONFIG_ENUM_SCHEMA:
+            self.assertIn(cfg[key], link_queue._CONFIG_ENUM_SCHEMA[key][1])
+
+    @FUZZ
+    @given(
         user=st.one_of(
             st.none(),
             st.text(max_size=20),
@@ -588,6 +626,8 @@ class FuzzConfigSchema(unittest.TestCase):
             self.assertIn("mode", pc)
             self.assertIn("command", pc)
             self.assertIn("shell", pc)
+            self.assertIn(pc["mode"], ("queue", "immediate"))
+            self.assertIsInstance(pc["command"], str)
             self.assertIsInstance(pc["shell"], bool)
         self.assertIn("default_shell", cfg)
         self.assertIsInstance(cfg["default_shell"], bool)

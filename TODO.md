@@ -233,7 +233,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-config-01 | open | med | link_queue.py:774-810 — schema coercion validates only three numeric keys; hand-edited YAML can leave other numeric, path, and mode settings wrong-typed, causing startup crashes or repeated worker drops. Add typed accessors/schema, bounds/enums, and fuzz coverage for every `DEFAULT_CONFIG` scalar. | runtime-knob validation
 
 ## API contract & compatibility
 
