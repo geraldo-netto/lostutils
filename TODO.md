@@ -135,7 +135,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-test-02 | open | low | tests/test_import_events.py:343 — `test_encode_image_dead_code_removed` only asserts that a previously deleted private helper remains absent. Remove the stale tombstone test. | Stale-test audit: no supported API or runtime behavior is exercised
 rf-test-05 | open | low | tests/test_relocate_folder.py:1406,3385 — two tests only assert that previously deleted private implementation symbols remain absent. Remove the stale tombstones while retaining coverage of their live replacements. | Stale-test audit: `_collect_chown_error` and `STAGING_PREFIX` already have behavioral coverage immediately beside these tombstones
 
 ## test / fuzz coverage
