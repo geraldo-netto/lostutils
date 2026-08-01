@@ -60,9 +60,15 @@ except ImportError:  # pragma: no cover - Windows fallback
 try:
     import yaml  # PyYAML
 except ImportError:  # pragma: no cover
-    sys.stderr.write(
+    # lq-plat-04: pythonw.exe is how a Tk app is launched on Windows without a
+    # console, and it leaves sys.stderr as None. print() tolerates that and
+    # still reaches the documented exit; sys.stderr.write would raise
+    # AttributeError instead, turning a clear diagnostic into an invisible
+    # traceback and the wrong exit code.
+    print(
         "error: PyYAML is required. Install with:\n"
-        "    pip install pyyaml\n"
+        "    pip install pyyaml",
+        file=sys.stderr,
     )
     sys.exit(2)
 

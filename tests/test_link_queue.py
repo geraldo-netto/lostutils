@@ -5288,3 +5288,37 @@ def test_pid_probe_assumes_alive_when_the_exit_code_is_unreadable(monkeypatch):
 
     assert link_queue.StateFileLock._pid_is_running_windows(4242) is True
     assert calls["closed"] == [7]
+
+
+# --- lq-plat-04: the missing-PyYAML path must survive a headless launch -----
+
+
+class _BlockYamlImport:
+    def find_spec(self, name, path=None, target=None):
+        if name == "yaml":
+            raise ImportError("blocked for the test")
+        return None
+
+
+def test_missing_pyyaml_exits_two_even_without_a_console(monkeypatch):
+    """pythonw.exe is how a Tk app launches on Windows with no console, and it
+    leaves sys.stderr as None — writing to it directly would raise
+    AttributeError instead of reaching the documented exit 2."""
+    import importlib
+
+    blocker = _BlockYamlImport()
+    saved_module = sys.modules.pop("link_queue", None)
+    saved_yaml = sys.modules.pop("yaml", None)
+    sys.meta_path.insert(0, blocker)
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(sys, "stdout", None)
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            importlib.import_module("link_queue")
+        assert excinfo.value.code == 2
+    finally:
+        sys.meta_path.remove(blocker)
+        if saved_yaml is not None:
+            sys.modules["yaml"] = saved_yaml
+        if saved_module is not None:
+            sys.modules["link_queue"] = saved_module
