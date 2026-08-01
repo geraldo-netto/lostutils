@@ -673,6 +673,22 @@ def test_connect_usberror_returns_false(monkeypatch):
     assert any("USB error" in m for m in logs)
 
 
+def test_connect_failure_reattaches_and_disposes_detached_device(monkeypatch):
+    usb, USBError = make_usb(ep=FakeEP())
+    dev = FakeUsbDev(kernel_active=True, cfg_exc=USBError("claim failed"))
+    usb.core._find_dev = dev
+    _install_usb(monkeypatch, usb)
+    d = minikeypad.KeypadDevice()
+
+    assert d.connect() is False
+
+    assert dev.detached is True
+    assert dev.attached is True
+    assert dev in usb.util.disposed
+    assert d.dev is None
+    assert d._detached is False
+
+
 def test_still_connected_none_when_no_dev():
     assert minikeypad.KeypadDevice().still_connected() is False
 

@@ -169,8 +169,9 @@ class KeypadDevice:
         with self._lock:
             if self.dev is not None:
                 return True
+            dev: Any = None
             try:
-                dev: Any = usb.core.find(idVendor=VID, idProduct=PID)
+                dev = usb.core.find(idVendor=VID, idProduct=PID)
                 if dev is None:
                     return False
                 self._detach_kernel_driver(dev)
@@ -189,12 +190,18 @@ class KeypadDevice:
                 return True
             except usb.core.USBError as e:
                 self.log(f"USB error on connect: {e}")
-                self.dev = None
+                self._rollback_connect(dev)
                 return False
             except Exception as e:  # pragma: no cover
                 self.log(f"connect() failed: {e}")
-                self.dev = None
+                self._rollback_connect(dev)
                 return False
+
+    def _rollback_connect(self, dev: Any) -> None:
+        if dev is None:
+            return
+        self.dev = dev
+        self.close()
 
     def _detach_kernel_driver(self, dev: Any):
         """Detach usbhid from the HID interface so we can claim it (Linux)."""

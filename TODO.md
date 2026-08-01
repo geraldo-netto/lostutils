@@ -151,7 +151,6 @@ rf-rob-03 | open | high | relocate_folder.py:1769-1771,2345-2361 — verified de
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-state-01 | open | med | import_events.py:3626-3646 — `stall_event` is sticky; after one stalled call recovers, a later healthy call with a long result gap can trigger false unrecoverable-stall shutdown. Track active stalled request IDs and clear each on completion. | legal recovery transition missing
-mkp-state-01 | open | low | minikeypad.py:176-197 — `connect()` detaches the kernel HID driver before interface claim/endpoint discovery, but post-detach failures clear `self.dev` without reattaching the local device; `close()` then cannot recover. Roll back detach/dispose on every failure path. | terminal error cleanup
 
 ## test coverage
 
