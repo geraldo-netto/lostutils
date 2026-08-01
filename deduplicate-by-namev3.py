@@ -195,7 +195,9 @@ def _emit_self_collisions(line_nums, write):
         if len(lines) > 1:
             src = ",".join(str(x) for x in lines)
             write(f"# source lines: {src}\n")
-            write(f"{cleaned};{cleaned};0\n")
+            write(
+                f"{cleaned}{OUTPUT_DELIMITER}{cleaned}{OUTPUT_DELIMITER}0\n"
+            )
 
 
 def main():
@@ -262,7 +264,10 @@ def emit_pairs(cleaned_strs, threshold, workers, write, block_threshold=None, bl
         for r, c in zip(rows.tolist(), cols.tolist()):
             i = start + r
             j = start + c
-            write(f"{cleaned_strs[i]};{cleaned_strs[j]};{int(block[r, c])}\n")
+            write(
+                f"{cleaned_strs[i]}{OUTPUT_DELIMITER}{cleaned_strs[j]}"
+                f"{OUTPUT_DELIMITER}{int(block[r, c])}\n"
+            )
 
 
 if __name__ == "__main__":

@@ -489,6 +489,18 @@ def test_strip_chars_override_still_strips_output_delimiter():
     assert dn.cleanup("a;b#c", replacements, None) == "abc"
 
 
+def test_emitters_use_configured_output_delimiter(monkeypatch):
+    monkeypatch.setattr(dn, "OUTPUT_DELIMITER", "|")
+    output = []
+
+    dn._emit_self_collisions({"same": [1, 2]}, output.append)
+    dn.emit_pairs(["cat", "car"], 1, 1, output.append)
+
+    text = "".join(output)
+    assert "same|same|0" in text
+    assert "cat|car|1" in text
+
+
 def test_main_cleanup_flags_override_defaults(monkeypatch, tmp_path, capsys):
     f = tmp_path / "names.txt"
     f.write_text("A# skip\nA\n", encoding="utf-8")
