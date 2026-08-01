@@ -5322,3 +5322,32 @@ def test_missing_pyyaml_exits_two_even_without_a_console(monkeypatch):
             sys.modules["yaml"] = saved_yaml
         if saved_module is not None:
             sys.modules["link_queue"] = saved_module
+
+
+# --- lq-plat-06: the shipped defaults must run on the host that ships them --
+
+
+def test_placeholder_command_is_a_bare_echo_here():
+    assert link_queue._placeholder_command() == "echo {url}"
+    assert link_queue._placeholder_command("http") == "echo [http] {url}"
+
+
+def test_placeholder_command_is_resolvable_on_windows(monkeypatch):
+    """`echo` is a cmd.exe builtin, not an executable, and the shipped
+    protocols run with shell=False — CreateProcess cannot resolve it."""
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+
+    assert link_queue._placeholder_command() == "cmd /c echo {url}"
+    assert link_queue._placeholder_command("magnet") == "cmd /c echo [magnet] {url}"
+
+
+def test_shipped_defaults_build_a_runnable_argv_on_windows(monkeypatch):
+    """End to end: the default template must survive lexing into an argv whose
+    first element is something CreateProcess can find."""
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    template = link_queue._placeholder_command("http")
+
+    argv = LinkQueueApp._build_argv(template, "http://example.com/x", "http")
+
+    assert argv[:3] == ["cmd", "/c", "echo"]
+    assert argv[-1] == "http://example.com/x"

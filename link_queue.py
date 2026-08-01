@@ -501,6 +501,20 @@ COMMAND_TIMEOUT_EXIT = -124
 _SEQ_OF_SWEEP_GAP = 256
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
 
+
+def _placeholder_command(tag: str = "") -> str:
+    """The shipped do-nothing command template, in a form the host can run.
+
+    lq-plat-06: `echo` is a cmd.exe builtin, not an executable, and the shipped
+    protocols all set shell=False — so on Windows CreateProcess cannot resolve
+    it and every link fails with WinError 2 out of the box, each failure arming
+    the per-domain cooldown. `cmd /c echo` is the resolvable equivalent.
+    """
+    body = f"[{tag}] {{url}}" if tag else "{url}"
+    prefix = "cmd /c echo" if os.name == "nt" else "echo"
+    return f"{prefix} {body}"
+
+
 DEFAULT_CONFIG = {
     "seq_of_sweep_gap": _SEQ_OF_SWEEP_GAP,   # lq-decoup-04
     "sleep_between_items": 5,
@@ -541,14 +555,14 @@ DEFAULT_CONFIG = {
 
     "output_folder": "",               # cwd for all protocol actions; empty = script dir
     "default_mode": "queue",
-    "default_command": "echo {url}",
+    "default_command": _placeholder_command(),
     "default_shell": False,
     "protocols": {
-        "http":    {"mode": "queue",     "shell": False, "command": "echo [http] {url}"},
-        "https":   {"mode": "queue",     "shell": False, "command": "echo [https] {url}"},
-        "ftp":     {"mode": "queue",     "shell": False, "command": "echo [ftp] {url}"},
-        "magnet":  {"mode": "immediate", "shell": False, "command": "echo [magnet] {url}"},
-        "file":    {"mode": "immediate", "shell": False, "command": "echo [file] {url}"},
+        "http":    {"mode": "queue",     "shell": False, "command": _placeholder_command("http")},
+        "https":   {"mode": "queue",     "shell": False, "command": _placeholder_command("https")},
+        "ftp":     {"mode": "queue",     "shell": False, "command": _placeholder_command("ftp")},
+        "magnet":  {"mode": "immediate", "shell": False, "command": _placeholder_command("magnet")},
+        "file":    {"mode": "immediate", "shell": False, "command": _placeholder_command("file")},
     },
 }
 
@@ -866,7 +880,7 @@ class ConfigStore(dict):
                 pc["mode"] = "queue"
             else:
                 pc["mode"] = pc["mode"].casefold()
-            pc.setdefault("command", "echo {url}")
+            pc.setdefault("command", _placeholder_command())
             if not isinstance(pc["command"], str):
                 # lq-input-20: a YAML int/bool/null template would raise
                 # TypeError in _template_has_bare_url and must not become a
@@ -876,7 +890,7 @@ class ConfigStore(dict):
                     f"{pc['command']!r} is not a string; using default",
                     file=sys.stderr,
                 )
-                pc["command"] = "echo {url}"
+                pc["command"] = _placeholder_command()
             pc.setdefault("shell", False)
             pc["shell"] = ConfigStore._coerce_bool(
                 f"protocols.{name}.shell",
@@ -951,7 +965,7 @@ class ConfigStore(dict):
                 f"is not a string; using default",
                 file=sys.stderr,
             )
-            cfg["default_command"] = "echo {url}"
+            cfg["default_command"] = _placeholder_command()
         ConfigStore._coerce_integer_scalars(cfg)
         ConfigStore._coerce_string_scalars(cfg)
         tm = cfg.get("token_mappings")
@@ -1507,7 +1521,7 @@ class Dispatcher:
         return QueueItem(
             url=url,
             protocol=_decode_state_field(entry, "protocol", ""),
-            template=_decode_state_field(entry, "template", "echo {url}"),
+            template=_decode_state_field(entry, "template", _placeholder_command()),
             shell=bool(entry.get("shell", False)),
             extra=extra,
         ), url
@@ -1671,7 +1685,7 @@ class Dispatcher:
         proto_cfg = self.config["protocols"].get(protocol)
         if proto_cfg is None:
             mode = self.config.get("default_mode", "queue")
-            cmd_tpl = self.config.get("default_command", "echo {url}")
+            cmd_tpl = self.config.get("default_command", _placeholder_command())
             shell = bool(self.config.get("default_shell", False))
             if shell and _template_has_bare_url(cmd_tpl):
                 # sec-01: mirror the per-item runtime reject (_run_item) at
@@ -1686,7 +1700,7 @@ class Dispatcher:
             self._log(f"[warn] unknown protocol '{protocol}' — using default ({mode})")
             return mode, cmd_tpl, shell, "default"
         mode = proto_cfg.get("mode", "queue")
-        cmd_tpl = proto_cfg.get("command", "echo {url}")
+        cmd_tpl = proto_cfg.get("command", _placeholder_command())
         shell = bool(proto_cfg.get("shell", False))
         return mode, cmd_tpl, shell, mode
 
@@ -5638,7 +5652,7 @@ class ProtocolEditor(_FormDialog):
         ttk.Label(frm, text="Command template:").grid(row=3, column=0, sticky="nw")
         self.cmd_text = tk.Text(frm, width=56, height=4)
         self.cmd_text.grid(row=3, column=1, sticky="we", pady=2)
-        self.cmd_text.insert("1.0", self.existing.get("command", "echo {url}"))
+        self.cmd_text.insert("1.0", self.existing.get("command", _placeholder_command()))
         host.install_text_editing(self.cmd_text, "text")
 
         ttk.Label(
@@ -5659,7 +5673,7 @@ class ProtocolEditor(_FormDialog):
         """True if the template is OK to save. exec mode must shlex-split;
         shell mode with a bare {url} prompts (sec-01) and returns the user's
         choice."""
-        probe = command or "echo {url}"
+        probe = command or _placeholder_command()
         if not shell:
             try:
                 # Same lexer the dispatcher will use, so the editor never
@@ -5693,7 +5707,7 @@ class ProtocolEditor(_FormDialog):
         host.protocols[name] = {
             "mode": self.mode_var.get(),
             "shell": shell,
-            "command": command or "echo {url}",
+            "command": command or _placeholder_command(),
         }
         host.save()
         host.refresh()
