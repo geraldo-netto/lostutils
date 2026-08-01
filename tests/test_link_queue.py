@@ -4742,6 +4742,22 @@ def test_windows_timeout_targets_full_process_tree(
     assert all(call[1]["check"] is False for call in calls)
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("taskkill missing"), link_queue.subprocess.TimeoutExpired("taskkill", 5)],
+)
+def test_taskkill_process_tree_reports_launch_failures(monkeypatch, failure):
+    monkeypatch.setattr(
+        link_queue.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    assert not link_queue.Dispatcher._taskkill_process_tree(
+        types.SimpleNamespace(pid=456), force=True
+    )
+
+
 def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monkeypatch):
     class Proc:
         stdout = ()
