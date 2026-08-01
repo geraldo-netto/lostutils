@@ -224,7 +224,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-cli-03 | open | low | relocate_folder.py:2550 — `Plan.from_args(ns)` runs outside `main` error handling; invalid root-shaped source emits a raw traceback. Catch validation errors and return the documented clean CLI error. | actionable error surface
 
 ## dependency
 

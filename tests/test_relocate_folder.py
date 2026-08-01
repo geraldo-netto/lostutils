@@ -4290,6 +4290,13 @@ def test_plan_from_args_rejects_empty_basename(tmp_path):
         rf.Plan.from_args(ns)
 
 
+def test_main_reports_invalid_plan_without_traceback(tmp_path, caplog):
+    rc = rf.main(["/", str(tmp_path)])
+
+    assert rc == 2
+    assert "source has no basename" in caplog.text
+
+
 def test_positive_jobs_validator():
     """rf-cli-01: --jobs must reject non-positive values."""
     import argparse as _ap

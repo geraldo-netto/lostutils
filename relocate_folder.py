@@ -2583,7 +2583,11 @@ def main(argv: list[str] | None = None) -> int:
     if ns.dest_root is None:
         _log().error("FAILED: dest_root is required unless --recover is given")
         return 2
-    plan = Plan.from_args(ns)
+    try:
+        plan = Plan.from_args(ns)
+    except (OSError, ValueError) as exc:
+        _log().error("FAILED: %s", exc)
+        return 2
     _log().info("plan: source=%s target=%s dry_run=%s verify=%s checksum=%s strict=%s",
                 plan.source, plan.target, plan.dry_run, plan.verify,
                 plan.checksum, plan.strict)
