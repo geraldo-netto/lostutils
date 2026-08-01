@@ -3988,32 +3988,35 @@ def _fake_rendered_paths(output_dir, *contents):
     return paths
 
 
-def test_pdf_to_images_scans_all_pages_by_default(monkeypatch):
+def test_render_pdf_image_paths_scans_all_pages_by_default(monkeypatch, tmp_path):
     _install_fake_fitz(monkeypatch, pages=50)
 
-    images = import_events._pdf_to_images(Path("big.pdf"))
+    images = import_events._render_pdf_image_paths(Path("big.pdf"), tmp_path)
 
     assert import_events.PDF_VISION_MAX_PAGES == 0
     assert len(images) == 50
 
 
-def test_pdf_to_images_uses_configured_dpi(monkeypatch):
+def test_render_pdf_image_paths_uses_configured_dpi(monkeypatch, tmp_path):
     _install_fake_fitz(monkeypatch, pages=1)
 
-    images = import_events._pdf_to_images(Path("one.pdf"))
+    images = import_events._render_pdf_image_paths(Path("one.pdf"), tmp_path)
 
-    assert images == [f"png:{import_events.PDF_VISION_DPI}".encode("utf-8")]
+    assert [path.read_bytes() for path in images] == [
+        f"png:{import_events.PDF_VISION_DPI}".encode("utf-8")
+    ]
 
 
-def test_pdf_to_images_uses_runtime_config(monkeypatch):
+def test_render_pdf_image_paths_uses_runtime_config(monkeypatch, tmp_path):
     _install_fake_fitz(monkeypatch, pages=5)
 
-    images = import_events._pdf_to_images(
+    images = import_events._render_pdf_image_paths(
         Path("custom.pdf"),
+        tmp_path,
         import_events.ModelConfig(pdf_vision_max_pages=2, pdf_vision_dpi=96),
     )
 
-    assert images == [b"png:96", b"png:96"]
+    assert [path.read_bytes() for path in images] == [b"png:96", b"png:96"]
 
 
 def test_render_pdf_image_paths_skips_oversized_page(monkeypatch, tmp_path, caplog):
@@ -4047,7 +4050,7 @@ def test_render_pdf_image_paths_skips_oversized_page(monkeypatch, tmp_path, capl
     assert "Skipping oversized PDF page" in caplog.text
 
 
-def test_pdf_to_images_returns_empty_without_pymupdf(monkeypatch):
+def test_render_pdf_image_paths_returns_empty_without_pymupdf(monkeypatch, tmp_path):
     import builtins
     real_import = builtins.__import__
 
@@ -4058,7 +4061,7 @@ def test_pdf_to_images_returns_empty_without_pymupdf(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", blocked)
 
-    assert import_events._pdf_to_images(Path("x.pdf")) == []
+    assert import_events._render_pdf_image_paths(Path("x.pdf"), tmp_path) == []
 
 
 def test_merge_text_blocks_preserves_primary_calendar_grid_rows():
@@ -4081,10 +4084,10 @@ def test_extract_from_pdf_auto_skips_ocr_when_text_is_usable(monkeypatch):
     fake = FakeLlm('[{"title": "Reservation", "start": "2026-06-22"}]')
     monkeypatch.setattr(import_events, "_pdf_text", lambda path, max_chars=1000: text)
 
-    def fail_render(path, config=None):
+    def fail_render(path, output_dir, config=None):
         raise AssertionError("PDF OCR should be skipped for usable parsed text")
 
-    monkeypatch.setattr(import_events, "_pdf_to_images", fail_render)
+    monkeypatch.setattr(import_events, "_render_pdf_image_paths", fail_render)
 
     events = import_events.extract_from_pdf(
         Path("text.pdf"),
@@ -4193,7 +4196,11 @@ def test_extract_from_pdf_expands_calendar_hierarchy_before_llm(monkeypatch):
         import_events, "_pdf_text",
         lambda path, max_chars=import_events.MAX_CONTENT_CHARS: calendar_text,
     )
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+    monkeypatch.setattr(
+        import_events,
+        "_render_pdf_image_paths",
+        lambda path, output_dir, config=None: [],
+    )
 
     events = import_events.extract_from_pdf(
         Path("agenda.pdf"),
@@ -4309,7 +4316,11 @@ def test_extract_from_synthetic_calendar_pdf_expands_hierarchy(tmp_path, monkeyp
         ],
     )
     fake = FakeLlm('[{"title": "Mystic Fair BH", "start": "2026-03-08"}]')
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+    monkeypatch.setattr(
+        import_events,
+        "_render_pdf_image_paths",
+        lambda path, output_dir, config=None: [],
+    )
 
     events = import_events.extract_from_pdf(pdf, llm_client=fake)
 
@@ -4337,7 +4348,11 @@ def test_extract_from_synthetic_calendar_pdf_expands_hierarchy(tmp_path, monkeyp
 
 def test_sample_hierarchy_calendar_pdf_expands_rows(monkeypatch):
     fake = FakeLlm('[{"title": "Mystic Fair BH", "start": "2026-03-08"}]')
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+    monkeypatch.setattr(
+        import_events,
+        "_render_pdf_image_paths",
+        lambda path, output_dir, config=None: [],
+    )
 
     events = import_events.extract_from_pdf(SAMPLE_HIERARCHY_CALENDAR_PDF, llm_client=fake)
 
@@ -4375,7 +4390,11 @@ def test_extract_from_synthetic_table_pdf_expands_day_month_rows(tmp_path, monke
         ],
     )
     fake = FakeLlm('[{"title": "astrologia - cap 4", "start": "2026-06-19"}]')
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+    monkeypatch.setattr(
+        import_events,
+        "_render_pdf_image_paths",
+        lambda path, output_dir, config=None: [],
+    )
 
     events = import_events.extract_from_pdf(pdf, llm_client=fake)
 
@@ -4396,7 +4415,11 @@ def test_extract_from_synthetic_compact_table_pdf_expands_rows(tmp_path, monkeyp
         ],
     )
     fake = FakeLlm('[{"title": "Topic Alpha", "start": "2026-06-19"}]')
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+    monkeypatch.setattr(
+        import_events,
+        "_render_pdf_image_paths",
+        lambda path, output_dir, config=None: [],
+    )
 
     import_events.extract_from_pdf(pdf, llm_client=fake)
 
@@ -4408,7 +4431,11 @@ def test_extract_from_synthetic_compact_table_pdf_expands_rows(tmp_path, monkeyp
 
 def test_sample_table_calendar_pdf_expands_multilingual_rows(monkeypatch):
     fake = FakeLlm('[{"title": "Topic Alpha", "start": "2026-06-19"}]')
-    monkeypatch.setattr(import_events, "_pdf_to_images", lambda path, config=None: [])
+    monkeypatch.setattr(
+        import_events,
+        "_render_pdf_image_paths",
+        lambda path, output_dir, config=None: [],
+    )
 
     events = import_events.extract_from_pdf(SAMPLE_TABLE_CALENDAR_PDF, llm_client=fake)
 

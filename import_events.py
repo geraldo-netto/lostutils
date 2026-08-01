@@ -3386,14 +3386,6 @@ def _pdf_page_pixel_count(page: Any, dpi: int) -> Optional[int]:
     return math.ceil(width * dpi / 72) * math.ceil(height * dpi / 72)
 
 
-def _pdf_to_images(file_path: Path, config: Optional[ModelConfig] = None) -> List[bytes]:
-    with tempfile.TemporaryDirectory(prefix="import-events-pdf-") as tmp_dir:
-        return [
-            path.read_bytes()
-            for path in _render_pdf_image_paths(file_path, Path(tmp_dir), config)
-        ]
-
-
 def _pdf_ocr_text_from_paths(
     image_paths: List[Path],
     config: Optional[ModelConfig] = None,

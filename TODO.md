@@ -279,7 +279,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-unused-03 | open | low | import_events.py:3302 — `_pdf_to_images` has no production caller; tests monkeypatch it while production renders via `_render_pdf_image_paths`, creating false coverage. Delete it and patch tests at the live seam. | dead + misleading tests
 ie-unused-04 | open | low | import_events.py:3333 — `_pdf_ocr_from_file` has no production caller because `extract_from_pdf` inlines render plus `_pdf_ocr_text_from_paths`. Delete or wire. | grep-proven dead
 oze-unf-01 | open | low | organize_by_extension.py:935,958,965 — `Bucket.name` and `Bucket.reserve` have no production caller; `choose` mutates name sets directly and downstream uses only `bucket.path`. Delete or wire through `choose`. | grep-proven test-only
 rf-unused-10 | open | low | relocate_folder.py:926 — `_src_total_bytes` has no live caller; `_src_size_totals` superseded it and callers use tuple fields directly. Delete it and update its test. | grep-proven test-only
