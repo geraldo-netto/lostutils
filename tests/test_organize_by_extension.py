@@ -3228,7 +3228,7 @@ class SourceCollisionResolution(unittest.TestCase):
                     manager=_oze.BucketManager(root=Path(".")),
                 )
 
-        self.assertEqual(shutdown_calls, [{"wait": False, "cancel_futures": True}])
+        self.assertEqual(shutdown_calls, [{"wait": True, "cancel_futures": True}])
 
     def test_progress_line_fires_at_threshold(self, ):
         # oze-obs-02: progress line every PROGRESS_EVERY items. Patch the

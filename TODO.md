@@ -172,7 +172,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-watch-01 | open | med | organize_by_extension.py:2030-2037,2123-2129 — abort cancels futures but running filesystem workers cannot be cancelled; executor shutdown uses `wait=False`, a RuntimeError escapes, and mutations can continue during traceback/exit. Add cooperative cancellation and deterministic join, or explicitly wait for non-abortable workers. | watchdog abort semantics / thread lifecycle
 
 ## time & scheduling correctness
 

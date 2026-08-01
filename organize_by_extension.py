@@ -2268,12 +2268,14 @@ def _run_moves(
             _drain_futures(futures, stats, preview, head_cache, manager)
             _maybe_log_progress(stats, total_files, progress)
     except KeyboardInterrupt:
-        executor.shutdown(wait=False, cancel_futures=True)
+        executor.shutdown(wait=True, cancel_futures=True)
         logger.info(f"\nInterrupted. Processed {stats.processed} file(s), "
                     f"skipped {stats.skipped} file(s), partial {stats.partial}.")
         raise SystemExit(1) from None
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        # Running filesystem calls cannot be cancelled safely. Wait for them so
+        # no mutation continues after this function reports failure or returns.
+        executor.shutdown(wait=True, cancel_futures=True)
     return stats
 
 
