@@ -1241,10 +1241,6 @@ def _pair_walk(src: Path, dst: Path) -> Iterable[tuple[Path, Path]]:
             yield Path(root) / name, dst / rel / name
 
 
-_VERIFY_WORKERS = _OWNERSHIP_WORKERS  # rf-perf-02: reuse pool sizing
-_VERIFY_INFLIGHT = _OWNERSHIP_INFLIGHT
-
-
 def verify_copy(src: Path, dst: Path, checksum: bool = False,
                 verify_ownership: bool = False,
                 *, jobs: int | None = None) -> None:
@@ -1259,8 +1255,8 @@ def verify_copy(src: Path, dst: Path, checksum: bool = False,
     compared against src (rf-rel-04).
 
     When `checksum` is True the per-file SHA-256 work is fanned out across
-    `_VERIFY_WORKERS` threads (rf-perf-02). Verification used to dominate
-    wall time on content-heavy migrations because the existing
+    the configured `jobs` worker count (rf-perf-02). Verification used to
+    dominate wall time on content-heavy migrations because the existing
     ownership-replication pool was unused once we left `copy_tree`.
 
     Task contract (rf-scal-04)

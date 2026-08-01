@@ -1916,7 +1916,7 @@ def test_verify_copy_parallel_drains_bounded_inflight(tmp_path, monkeypatch):
         (src / f"f{i}.bin").write_bytes(b"payload-" + str(i).encode())
     dst = tmp_path / "t"
     rf.copy_tree(src, dst)
-    monkeypatch.setattr(rf, "_VERIFY_INFLIGHT", 2)
+    monkeypatch.setattr(rf, "_inflight_cap", lambda _workers: 2)
     rf.verify_copy(src, dst, checksum=True)   # exercise the wait+resubmit branch
 
 

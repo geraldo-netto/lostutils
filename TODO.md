@@ -280,7 +280,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 rf-unused-12 | open | low | relocate_folder.py:994 — `_OWNERSHIP_INFLIGHT` is never read by live code; inflight bounds come from `_inflight_cap(workers)`. Delete it. | dead const — delete
-rf-unused-11 | open | low | relocate_folder.py:1222-1223 — `_VERIFY_WORKERS` and `_VERIFY_INFLIGHT` are assigned but never read by live code. Delete both. | dead const — delete
 rdv3-unused-01 | open | low | remove-deduplv3.py:188-189 — `if not to_remove: continue` is unreachable after distinct-path dedup and the `len(paths) < 2` guard. Delete the branch. | unused/dead-code — logic-proven unreachable
 
 ## unused functions/methods
