@@ -5063,6 +5063,25 @@ def test_worker_pool_clears_only_recovered_stall(monkeypatch):
     assert not pool.stall_event.is_set()
 
 
+def test_run_llm_recovery_callback_notifies_bound_owner():
+    class CallbackOwner:
+        def __init__(self):
+            self.recovered = []
+
+        def on_stall(self, *_args):
+            return None
+
+        def on_llm_recovered(self, request_id):
+            self.recovered.append(request_id)
+
+    owner = CallbackOwner()
+
+    import_events._run_llm_recovery_callback(owner.on_stall, "request-7")
+    import_events._run_llm_recovery_callback(None, "ignored")
+
+    assert owner.recovered == ["request-7"]
+
+
 def test_memory_helpers_cover_unreadable_and_physical_paths(tmp_path, monkeypatch):
     assert import_events._cgroup_memory_limit_bytes([tmp_path / "missing"]) is None
 
