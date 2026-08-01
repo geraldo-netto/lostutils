@@ -86,7 +86,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-dep-50 | open | low | relocate_folder.py:1303 — `_assert_complete_inventory_match` uses the same `sqlite3.connect("")` on-disk temp database with no `except sqlite3.Error`. It runs at the very end of verify, so a full temp filesystem converts a fully-copied, fully-verified migration into a traceback (and, per rf-rob-50, strands the target). | dependability — same shape as oze-dep-50; fix both or neither
 
 ## code complexity
 

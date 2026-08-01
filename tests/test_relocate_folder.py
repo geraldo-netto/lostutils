@@ -1,6 +1,7 @@
 """Tests for relocate_folder.py — focused on the rf-rel-* reliability fixes
 plus the functions they touch (verify_copy/_inventory/_classify, atomic_swap,
 parse_args, execute)."""
+import logging
 import os
 import sys
 from pathlib import Path
@@ -4707,3 +4708,48 @@ def test_inventory_match_ignores_special_files_the_copy_skips(tmp_path):
     os.mkfifo(src / "pipe")
 
     rf._assert_complete_inventory_match(src, dst)   # must not raise
+
+
+def test_inventory_db_reports_an_unusable_temp_database(monkeypatch):
+    """rf-dep-50: a full / read-only TMPDIR must not end a verified migration
+    with a traceback."""
+    def refuse(_path):
+        raise rf.sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(rf.sqlite3, "connect", refuse)
+
+    with pytest.raises(rf.InventorySpoolError, match="TMPDIR"):
+        with rf._inventory_db():
+            pass
+
+
+def test_inventory_db_wraps_a_mid_use_sqlite_failure():
+    with pytest.raises(rf.InventorySpoolError, match="SQLITE_TMPDIR"):
+        with rf._inventory_db() as database:
+            database.execute("SELECT * FROM does_not_exist")
+
+
+def test_inventory_db_closes_the_connection():
+    with rf._inventory_db() as database:
+        database.execute("CREATE TABLE t (x INTEGER)")
+    with pytest.raises(rf.sqlite3.ProgrammingError):
+        database.execute("SELECT 1")
+
+
+def test_main_reports_an_inventory_spool_failure_without_a_traceback(
+        tmp_path, monkeypatch, caplog):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "a.txt").write_text("a", encoding="utf-8")
+    dest_root = tmp_path / "dest"
+
+    def refuse(_path):
+        raise rf.sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(rf.sqlite3, "connect", refuse)
+    caplog.set_level(logging.ERROR)
+
+    assert rf.main([str(source), str(dest_root)]) == 1
+    assert "TMPDIR" in caplog.text
+    assert source.exists()                      # source untouched
+    assert not (dest_root / "src").exists()     # partial target cleaned up

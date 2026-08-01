@@ -1315,21 +1315,58 @@ _INVENTORY_EXTRA_SQL = (
 )
 
 
+class InventorySpoolError(RuntimeError):
+    """The temporary inventory database could not be used (rf-dep-50)."""
+
+
+_INVENTORY_SPOOL_HINT = (
+    "set TMPDIR (or SQLITE_TMPDIR) to a writable filesystem with free space"
+)
+
+
+@contextmanager
+def _inventory_db() -> Iterator[sqlite3.Connection]:
+    """Open the temporary inventory database (rf-dep-50).
+
+    ``sqlite3.connect("")`` opens a private temporary database ON DISK under
+    TMPDIR / SQLITE_TMPDIR — which is exactly what keeps a multi-million-entry
+    inventory off the heap — so a full or read-only temp filesystem is a real
+    failure mode. It bites at the very END of verify, where a raw
+    ``OperationalError`` turned a fully-copied, fully-verified migration into a
+    traceback. A typed error lets ``main`` report it as a plain FAILED line
+    (and ``_copy_and_verify`` still removes the unswapped target, leaving the
+    source intact for a retry).
+    """
+    try:
+        database = sqlite3.connect("")
+    except sqlite3.Error as exc:
+        raise InventorySpoolError(
+            f"could not open the temporary inventory database ({exc}); "
+            f"{_INVENTORY_SPOOL_HINT}"
+        ) from exc
+    try:
+        yield database
+    except sqlite3.Error as exc:
+        raise InventorySpoolError(
+            f"the temporary inventory database failed ({exc}); "
+            f"{_INVENTORY_SPOOL_HINT}"
+        ) from exc
+    finally:
+        database.close()
+
+
 def _assert_complete_inventory_match(src: Path, dst: Path) -> None:
     """Entry-for-entry comparison of the two trees immediately before the swap.
 
     This is the last gate before the source is deleted, so it must catch an
     entry that never made it into the copy (rf-rel-50)."""
-    database = sqlite3.connect("")
-    try:
+    with _inventory_db() as database:
         database.execute("CREATE TABLE source_entries (path BLOB, kind INTEGER)")
         database.execute("CREATE TABLE target_entries (path BLOB, kind INTEGER)")
         _load_inventory(database, "source_entries", src, source=True)
         _load_inventory(database, "target_entries", dst, source=False)
         missing = database.execute(_INVENTORY_MISSING_SQL).fetchone()
         extra = database.execute(_INVENTORY_EXTRA_SQL).fetchone()
-    finally:
-        database.close()
     _raise_on_inventory_divergence(missing, extra)
 
 
