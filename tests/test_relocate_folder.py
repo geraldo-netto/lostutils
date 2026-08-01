@@ -61,6 +61,25 @@ def test_verify_happy_path_files_links_dirs():
         rf.verify_copy(src, dst, checksum=True)   # no exception
 
 
+def test_fsync_directory_ignores_unsupported_error_but_raises_io_failure(
+    tmp_path, monkeypatch
+):
+    def fail_with(error_number):
+        def fail(_fd):
+            raise OSError(error_number, os.strerror(error_number))
+
+        return fail
+
+    monkeypatch.setattr(rf.os, "fsync", fail_with(rf.errno.EINVAL))
+    rf._fsync_directory(tmp_path)
+
+    monkeypatch.setattr(rf.os, "fsync", fail_with(rf.errno.EIO))
+    with pytest.raises(OSError) as exc_info:
+        rf._fsync_directory(tmp_path)
+
+    assert exc_info.value.errno == rf.errno.EIO
+
+
 # --- rf-rel-02: empty directory structure is verified -----------------------
 
 def test_verify_detects_missing_empty_dir():

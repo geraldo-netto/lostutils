@@ -137,7 +137,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
-rf-test-01 | open | low | relocate_folder.py:1747 — `_fsync_directory` lacks coverage for unsupported and failed directory fsync. | CI function coverage gate: 4/7 statements (57.14%) in run 30700525661
 rf-test-02 | open | low | relocate_folder.py:2018 — `_is_orphaned_staging_dir` lacks coverage for malformed staging metadata. | CI function coverage gate: 5/7 statements (71.43%) in run 30700525661
 
 ## test / fuzz coverage
