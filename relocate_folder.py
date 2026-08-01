@@ -677,10 +677,16 @@ def _is_under(path: Path, root: Path) -> bool:
 
 
 def _read_comm(pid: int) -> str:
+    # rf-plat-02: `comm` is arbitrary bytes — any process can set its own with
+    # prctl(PR_SET_NAME) — so a strict locale decode raises UnicodeDecodeError,
+    # a ValueError this OSError-only guard does not catch. It would escape into
+    # _check_no_open_files and abort an otherwise-valid migration because some
+    # unrelated process has an odd name.
     try:
-        return Path(f"/proc/{pid}/comm").read_text().strip()
+        raw = Path(f"/proc/{pid}/comm").read_bytes()
     except OSError:
         return "?"
+    return raw.decode("utf-8", "replace").strip()
 
 
 def _stale_pid_warn_threshold() -> int:

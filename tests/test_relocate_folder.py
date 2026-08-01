@@ -3010,6 +3010,28 @@ def test_read_comm_zero_pid_returns_fallback():
     assert rf._read_comm(0) == "?"
 
 
+def test_read_comm_survives_an_undecodable_process_name(tmp_path, monkeypatch):
+    """rf-plat-02: `comm` is arbitrary bytes (prctl(PR_SET_NAME)), and a strict
+    decode raises ValueError — which the OSError guard would not catch, so an
+    unrelated process's name would abort the whole migration pre-flight."""
+    comm = tmp_path / "comm"
+    comm.write_bytes(b"weird\xff\xfename\n")
+
+    class FakeProcPath:
+        def __init__(self, _path):
+            pass
+
+        def read_bytes(self):
+            return comm.read_bytes()
+
+    monkeypatch.setattr(rf, "Path", FakeProcPath)
+
+    name = rf._read_comm(1)
+
+    assert name.startswith("weird")
+    assert "\n" not in name
+
+
 def test_read_comm_huge_pid_returns_fallback():
     # 2^31 — far above any real PID.
     assert rf._read_comm(2**31) == "?"

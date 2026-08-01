@@ -180,7 +180,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-plat-02 | open | low | relocate_folder.py:681 — `_read_comm` calls `Path(f"/proc/{pid}/comm").read_text()` with no `encoding=` and catches only `OSError`. | platform: an encoding assumption on this file's own Linux-only path, not a Windows gap. `comm` is arbitrary bytes — any process can set it via `prctl(PR_SET_NAME)` — and `read_text()` decodes with the locale encoding under strict errors, so invalid bytes raise `UnicodeDecodeError`, a `ValueError`, which escapes `_read_comm` through `find_open_file_holders` into `_check_no_open_files`: an unrelated process's odd name aborts an otherwise-valid migration with `FAILED` exit 1. The sibling `_staging_owner_pid` (2084) already gets this right with `encoding="ascii"` and `except (OSError, ValueError)`. Confidence med — the uncaught path is certain, the trigger rare
 
 ## caching strategy
 
