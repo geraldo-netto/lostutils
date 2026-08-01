@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import mmap
+import os
 import sys
 
 import numpy as np
@@ -90,6 +91,8 @@ def main() -> None:
     args = _parse_args()
 
     with open(args.hash_file, "rb") as f:
+        if os.fstat(f.fileno()).st_size == 0:
+            return
         mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
 
     data = np.frombuffer(mm, dtype=np.uint8)

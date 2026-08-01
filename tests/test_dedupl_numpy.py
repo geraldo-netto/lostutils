@@ -164,3 +164,19 @@ def test_main_closes_mmap(monkeypatch, tmp_path, capfd):
 
     capfd.readouterr()
     assert mappings[0].closed
+
+
+def test_main_accepts_empty_input(monkeypatch, tmp_path, capfd):
+    source = tmp_path / "empty.txt"
+    source.write_bytes(b"")
+    monkeypatch.setattr(
+        dedupl_numpy.sys,
+        "argv",
+        ["dedupl_numpy.py", str(source)],
+    )
+
+    dedupl_numpy.main()
+
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
