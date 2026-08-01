@@ -515,6 +515,15 @@ def _placeholder_command(tag: str = "") -> str:
     return f"{prefix} {body}"
 
 
+def _system_shell_label() -> str:
+    """Name the shell `shell=True` really hands the string to (lq-plat-09).
+
+    subprocess routes shell=True through %COMSPEC% on Windows, so promising
+    /bin/sh there would steer users into writing sh syntax cmd.exe mishandles.
+    """
+    return "cmd.exe /c" if os.name == "nt" else "/bin/sh -c"
+
+
 DEFAULT_CONFIG = {
     "seq_of_sweep_gap": _SEQ_OF_SWEEP_GAP,   # lq-decoup-04
     "sleep_between_items": 5,
@@ -5645,7 +5654,8 @@ class ProtocolEditor(_FormDialog):
         shell_row.grid(row=2, column=1, sticky="we", pady=2)
         ttk.Checkbutton(
             shell_row,
-            text="Run via /bin/sh -c (enables pipes, redirects, &&, …)",
+            text=f"Run via {_system_shell_label()} "
+                 f"(enables pipes, redirects, &&, …)",
             variable=self.shell_var,
         ).pack(side=tk.LEFT)
 

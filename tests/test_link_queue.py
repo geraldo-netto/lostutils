@@ -5351,3 +5351,13 @@ def test_shipped_defaults_build_a_runnable_argv_on_windows(monkeypatch):
 
     assert argv[:3] == ["cmd", "/c", "echo"]
     assert argv[-1] == "http://example.com/x"
+
+
+# --- lq-plat-09: name the shell that shell=True actually uses ---------------
+
+
+def test_system_shell_label_names_the_real_shell(monkeypatch):
+    assert link_queue._system_shell_label() == "/bin/sh -c"
+
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    assert link_queue._system_shell_label() == "cmd.exe /c"
