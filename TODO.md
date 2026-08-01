@@ -279,7 +279,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-unused-01 | open | low | dedupl_numpy.py:43 — `uniq` unpacked from `np.unique` is never used (only `inverse`/`counts` are); bind to `_`. | static unused-value finding; Ruff 0.16.1 reports `RUF059`, while pinned CI Ruff 0.15.22 does not
 ie-unused-01 | open | low | import_events.py:2193 — `_decode_event_payload` has no production caller (parse_llm_events uses `_decode_event_payload_or_none`); only tests call it. Delete and point tests at the real function. | grep-proven test-only
 ie-unused-02 | open | low | import_events.py:2958 — `_ocr_image_bytes` has no production caller (OCR paths use `_ocr_image_path`/`_ocr_image_path_once`); only tests call it. Delete or wire. | grep-proven test-only
 ie-unused-03 | open | low | import_events.py:3302 — `_pdf_to_images` has no production caller; tests monkeypatch it while production renders via `_render_pdf_image_paths`, creating false coverage. Delete it and patch tests at the live seam. | dead + misleading tests

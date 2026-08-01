@@ -74,7 +74,7 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     np.take(data, hash_idx, out=hash_bytes)
     hashes = hash_bytes.view(f"S{hash_width}").ravel()
 
-    uniq, inverse, counts = np.unique(
+    _, inverse, counts = np.unique(
         hashes, return_inverse=True, return_counts=True)
     group_size = counts[inverse]
     dup_line_indices = np.flatnonzero(group_size > 1)
