@@ -5084,6 +5084,55 @@ def test_run_file_workers_returns_partials_on_unrecoverable_stall(tmp_path, monk
     assert [e["source"] for e in events] == ["event-1.txt"]  # event-0 abandoned
 
 
+def test_run_file_workers_aborts_and_attaches_partials_on_model_failure(
+    monkeypatch,
+):
+    partial = [{"title": "Recovered before failure"}]
+
+    class FakePool:
+        done_queue = queue.Queue()
+        stall_event = threading.Event()
+        stop_event = threading.Event()
+        results = {}
+
+        def __init__(self, *_args):
+            self.started = False
+            self.aborted = False
+
+        def start(self):
+            self.started = True
+
+        def abort(self):
+            self.aborted = True
+
+        def flattened_events(self):
+            return partial
+
+    pools = []
+
+    def make_pool(*args):
+        pool = FakePool(*args)
+        pools.append(pool)
+        return pool
+
+    failure = import_events.ModelUnavailableError("model stopped")
+    monkeypatch.setattr(import_events, "_FileWorkerPool", make_pool)
+    monkeypatch.setattr(
+        import_events,
+        "_collect_file_results",
+        lambda *_args: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(import_events.ModelUnavailableError) as exc_info:
+        import_events._run_file_workers(
+            [], import_events.ModelConfig(workers=1), None, None
+        )
+
+    assert exc_info.value is failure
+    assert failure.partial_events == partial
+    assert pools[0].started and pools[0].aborted
+
+
 def test_worker_pool_clears_only_recovered_stall(monkeypatch):
     pool = import_events._FileWorkerPool(
         [], import_events.ModelConfig(workers=1), None, None
