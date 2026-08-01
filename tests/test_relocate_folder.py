@@ -4753,3 +4753,74 @@ def test_main_reports_an_inventory_spool_failure_without_a_traceback(
     assert "TMPDIR" in caplog.text
     assert source.exists()                      # source untouched
     assert not (dest_root / "src").exists()     # partial target cleaned up
+
+
+def test_fsync_tree_warns_instead_of_stranding_a_verified_target(tmp_path, monkeypatch, caplog):
+    """rf-rob-50: a durability fsync must not abort a verified migration."""
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "a.txt").write_text("a", encoding="utf-8")
+    real_open = rf.os.open
+
+    def flaky_open(path, flags, *args):
+        if str(path).endswith("a.txt"):
+            raise OSError(5, "I/O error")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(rf.os, "open", flaky_open)
+    caplog.set_level(logging.WARNING)
+
+    rf._fsync_tree(root)          # must not raise
+
+    assert "could not fsync" in caplog.text
+    assert "may not survive an immediate power loss" in caplog.text
+
+
+def test_fsync_tree_reports_a_directory_fsync_failure(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "tree"
+    root.mkdir()
+    monkeypatch.setattr(
+        rf, "_fsync_directory",
+        lambda _p: (_ for _ in ()).throw(OSError(5, "I/O error")))
+    caplog.set_level(logging.WARNING)
+
+    rf._fsync_tree(root)
+
+    assert "could not fsync" in caplog.text
+
+
+def test_fsync_tree_is_silent_when_everything_syncs(tmp_path, caplog):
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "a.txt").write_text("a", encoding="utf-8")
+    caplog.set_level(logging.WARNING)
+
+    rf._fsync_tree(root)
+
+    assert "could not fsync" not in caplog.text
+
+
+def test_post_verify_swap_failure_names_the_target_as_complete(
+        tmp_path, monkeypatch, caplog):
+    """rf-rob-50: the operator must learn the target is a finished copy."""
+    plan = rf.Plan(source=tmp_path / "src", target=tmp_path / "dst")
+    monkeypatch.setattr(
+        rf, "atomic_swap",
+        lambda _s, _t: (_ for _ in ()).throw(OSError("swap exploded")))
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(OSError, match="swap exploded"):
+        rf._swap_or_explain(plan)
+
+    assert "COMPLETE, verified copy" in caplog.text
+    assert str(plan.target) in caplog.text
+
+
+def test_swap_or_explain_is_quiet_on_success(tmp_path, monkeypatch, caplog):
+    plan = rf.Plan(source=tmp_path / "src", target=tmp_path / "dst")
+    monkeypatch.setattr(rf, "atomic_swap", lambda _s, _t: None)
+    caplog.set_level(logging.ERROR)
+
+    rf._swap_or_explain(plan)
+
+    assert caplog.text == ""

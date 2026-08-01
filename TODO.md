@@ -126,7 +126,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-rob-50 | open | med | relocate_folder.py:1739-1753 — `_fsync_tree` (the first statement of `atomic_swap`) has no error handling, so one `os.open`/`os.fsync` failure propagates. By then `_copy_and_verify` has returned, so its cleanup no longer applies, and `_execute_migration`'s except only runs `_cleanup_created_dirs` (rmdir, stops at the first non-empty). The fully-copied, fully-verified target survives, and the next run dies in `copy_tree` (827-832) with "target already exists … may be a stale partial target" — which it is not. Guard the fsync walk and/or make the message distinguish complete from partial targets. | robustness — post-verify failure leaves an unrecoverable-looking state
 
 ## state machine integrity
 

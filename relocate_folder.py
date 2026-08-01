@@ -1803,20 +1803,59 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _fsync_tree(root: Path) -> None:
+    """Best-effort fsync of every regular file and directory under `root`.
+
+    rf-rob-50: this is durability hardening, NOT correctness — by the time it
+    runs the bytes are written AND verified. Letting a single os.open/os.fsync
+    error propagate out of `atomic_swap` stranded that complete, verified
+    target: `_copy_and_verify`'s cleanup had already returned, and
+    `_execute_migration`'s unwind only rmdirs the (now non-empty) destination
+    ancestors. The next run then died in `copy_tree` calling it "a stale
+    partial target", which is the opposite of the truth. Failures are warned
+    (capped) and the swap proceeds.
+    """
+    failures: list[str] = []
     for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
         directory = Path(dirpath)
         for name in filenames:
-            path = directory / name
-            if path.is_symlink() or not path.is_file():
-                continue
-            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(path, flags)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        _fsync_directory(directory)
-    _fsync_directory(root.parent)
+            _fsync_regular_file(directory / name, failures)
+        _fsync_directory_best_effort(directory, failures)
+    _fsync_directory_best_effort(root.parent, failures)
+    _warn_fsync_failures(root, failures)
+
+
+def _fsync_regular_file(path: Path, failures: "list[str]") -> None:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        failures.append(f"{path}: {exc}")
+        return
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        failures.append(f"{path}: {exc}")
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory_best_effort(path: Path, failures: "list[str]") -> None:
+    try:
+        _fsync_directory(path)
+    except OSError as exc:
+        failures.append(f"{path}: {exc}")
+
+
+def _warn_fsync_failures(root: Path, failures: "list[str]") -> None:
+    if not failures:
+        return
+    for detail in failures[:5]:
+        _log().warning("could not fsync %s", detail)
+    _log().warning(
+        "%d entr(ies) under %s could not be fsynced; the copy is verified but "
+        "may not survive an immediate power loss", len(failures), root,
+    )
 
 @contextmanager
 def _backup_target(target: Path) -> Iterator[Path]:
@@ -2316,7 +2355,7 @@ def _execute_migration(plan: Plan,
             # verify so a verify-failed run logs an honest intermediate state.
             _copy_and_verify(plan, on_state=advance)
             advance(MigrationState.VERIFIED)
-            atomic_swap(plan.source, plan.target)
+            _swap_or_explain(plan)
             advance(MigrationState.SWAPPED)
             return f"ok: {plan.source} -> {plan.target}"
         except BaseException:
@@ -2328,6 +2367,30 @@ def _execute_migration(plan: Plan,
             raise
     finally:
         os.close(src_fd)
+
+
+def _swap_or_explain(plan: Plan) -> None:
+    """Run the swap; on failure say that the target is a COMPLETE copy (rf-rob-50).
+
+    Everything up to here succeeded, so `_copy_and_verify`'s cleanup no longer
+    applies and the finished target survives on the destination volume. Without
+    this line the operator's only clue is the NEXT run failing in `copy_tree`
+    with "may be a stale partial target" — the opposite of the truth. Name both
+    ways out instead."""
+    try:
+        atomic_swap(plan.source, plan.target)
+    except BaseException:
+        _log().error(
+            "swap failed AFTER the copy was verified: %s holds a COMPLETE, "
+            "verified copy and %s is untouched. Either remove %s and re-run to "
+            "copy again, or finish by hand: "
+            "`mv %s %s%s && ln -s %s %s && rm -rf %s%s`.",
+            plan.target, plan.source, plan.target,
+            plan.source, plan.source, BACKUP_SUFFIX,
+            plan.target, plan.source,
+            plan.source, BACKUP_SUFFIX,
+        )
+        raise
 
 
 def execute(plan: Plan) -> str:
