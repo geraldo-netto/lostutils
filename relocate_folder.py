@@ -1057,10 +1057,7 @@ def _run_streamed(
         if abort:
             break
         if len(inflight) >= max_inflight:
-            done, inflight = wait(inflight, return_when=FIRST_COMPLETED)
-            for fut in done:
-                if on_done(fut):
-                    abort = True
+            inflight, abort = _consume_completed(inflight, on_done)
         inflight.add(submit(task))
     # rf-conc-02: drains (and thus joins) every still-inflight future —
     # including running ones — so callers that delete shared state after
@@ -1071,6 +1068,17 @@ def _run_streamed(
     # `on_done` — even though the drain ignores its abort return.
     for fut in inflight:
         on_done(fut)
+
+
+def _consume_completed(
+    inflight: set,
+    on_done: Callable[["Future"], bool],
+) -> tuple[set, bool]:
+    done, pending = wait(inflight, return_when=FIRST_COMPLETED)
+    abort = False
+    for future in done:
+        abort = on_done(future) or abort
+    return pending, abort
 
 
 def _replicate_ownership(src: Path, dst: Path, *, jobs: int | None = None) -> None:
@@ -1892,15 +1900,7 @@ def _sweep_orphaned_staging_dirs(parent: Path) -> int:
         _log().warning("could not scan staging dir parent %s: %s", parent, exc)
         return 0
     for entry in entries:
-        if not entry.name.startswith(STAGING_PREFIX):
-            continue
-        try:
-            mode = entry.lstat().st_mode
-        except OSError:
-            continue
-        if not stat.S_ISDIR(mode) or stat.S_ISLNK(mode):
-            continue
-        if not _staging_dir_orphaned(entry):
+        if not _is_orphaned_staging_dir(entry):
             continue
         _cleanup_staging(entry)
         if not _path_taken(entry):
@@ -1912,6 +1912,16 @@ def _sweep_orphaned_staging_dirs(parent: Path) -> int:
             parent,
         )
     return removed
+
+
+def _is_orphaned_staging_dir(entry: Path) -> bool:
+    if not entry.name.startswith(STAGING_PREFIX):
+        return False
+    try:
+        mode = entry.lstat().st_mode
+    except OSError:
+        return False
+    return stat.S_ISDIR(mode) and not stat.S_ISLNK(mode) and _staging_dir_orphaned(entry)
 
 
 def _chown_to_owner(path: Path, owner: tuple[int, int]) -> None:

@@ -139,8 +139,6 @@ oze-cmplx-07 | open | med | organize_by_extension.py:1574 — `_move_cross_devic
 oze-cmplx-08 | open | med | organize_by_extension.py:1656 — `_walk_prunable_dirs` cognitive complexity 12 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
 oze-cmplx-09 | open | med | organize_by_extension.py:1880 — `_preplan_resolve_collisions` cognitive complexity 13 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
 oze-cmplx-10 | open | med | organize_by_extension.py:2011 — `_drain_futures` cognitive complexity 20 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-rf-cmplx-01 | open | med | relocate_folder.py:1023 — `_run_streamed` cognitive complexity 13 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-rf-cmplx-02 | open | med | relocate_folder.py:1887 — `_sweep_orphaned_staging_dirs` cognitive complexity 14 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
 
 ## code duplication
 
