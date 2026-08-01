@@ -39,6 +39,7 @@ import time
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
+from functools import partial
 from typing import NamedTuple, NoReturn
 
 try:
@@ -296,39 +297,43 @@ def _walk_worker(idx, state: "_WalkState") -> None:
         d = state.pending.get()
         if d is state.sentinel:
             return
-        scanned = True
-        try:
-            if state.cancel_event is not None and state.cancel_event.is_set():
-                scanned = False
-                continue
-            _scan_dir(d, state, wstats)
-        except (OSError, ValueError):
-            wstats["dir_errors"] += 1
-            scanned = False
-        except BaseException as exc:
-            # hr-rel-18 / hr-obs-01: any non-OSError/ValueError escape would
-            # leave the consumer hanging on out_q.get() or surface only
-            # through threading.excepthook. Record it in shared state, retry
-            # the directory on a surviving worker, and let this worker exit.
-            # hr-conc-01: re-enqueue `d` (under the same lock that guards
-            # inflight) before exiting so the dying worker doesn't drop
-            # the directory's not-yet-scanned subtree — a surviving worker
-            # retries it. The +1 here balances the unconditional -1 in the
-            # finally, so inflight nets the re-enqueued directory.
-            scanned = False
-            with state.lock:
-                state.worker_failures.append((idx, repr(exc)))
-                state.inflight[0] += 1
-                state.pending.put(d)
+        scanned, worker_failed = _process_walk_dir(idx, d, state, wstats)
+        _finish_walk_dir(scanned, state, wstats)
+        if worker_failed:
             return
-        finally:
-            if scanned:
-                wstats["dirs"] += 1
-            with state.lock:
-                state.inflight[0] -= 1
-                if state.inflight[0] == 0:
-                    for _ in range(state.jobs):
-                        state.pending.put(state.sentinel)
+
+
+def _process_walk_dir(idx, directory, state: "_WalkState", wstats) -> tuple[bool, bool]:
+    try:
+        if state.cancel_event is not None and state.cancel_event.is_set():
+            return False, False
+        _scan_dir(directory, state, wstats)
+        return True, False
+    except (OSError, ValueError):
+        wstats["dir_errors"] += 1
+        return False, False
+    except BaseException as exc:
+        _record_walk_worker_failure(idx, directory, exc, state)
+        return False, True
+
+
+def _record_walk_worker_failure(idx, directory, exc, state: "_WalkState") -> None:
+    # The +1 balances `_finish_walk_dir` so a surviving worker can retry the
+    # directory without letting the inflight count reach zero prematurely.
+    with state.lock:
+        state.worker_failures.append((idx, repr(exc)))
+        state.inflight[0] += 1
+        state.pending.put(directory)
+
+
+def _finish_walk_dir(scanned: bool, state: "_WalkState", wstats) -> None:
+    if scanned:
+        wstats["dirs"] += 1
+    with state.lock:
+        state.inflight[0] -= 1
+        if state.inflight[0] == 0:
+            for _ in range(state.jobs):
+                state.pending.put(state.sentinel)
 
 
 def _scan_dir(d, state: "_WalkState", wstats) -> None:
@@ -650,44 +655,39 @@ def _hash_file_windows(path, windows, config=None):
     windows = [w if isinstance(w, FileWindow) else FileWindow(*w)
                for w in windows]
     try:
-        fd = os.open(path, _hash_open_flags())
-        try:
-            f = os.fdopen(fd, "rb", buffering=0)
-        except BaseException:
-            # hr-rob-02: fdopen never took ownership of the raw fd, so the
-            # `with` below never runs to close it; close it here so a fdopen
-            # failure can't leak one fd per file across a long run.
-            os.close(fd)
-            raise
-        with f:
-            h = _require_blake3().blake3()
-            for window in windows:
-                f.seek(window.offset, window.whence)
-                if not _read_window_into(
-                        h, f, window.length, window.strict):
-                    # File shrank / partial read in a strict window — abort
-                    # the hash so a truncated window can't silently produce
-                    # a different digest from a full re-read (hr-rel-09).
-                    # hr-rel-01: tick the dedicated shrank counter so this
-                    # None isn't silently lumped into hash_errors with no
-                    # trace — a file truncated mid-run is observable apart
-                    # from a permission / I/O failure.
-                    _tick_shrank(config)
-                    return None
-            return h.hexdigest()
+        with _open_hash_file(path) as file_obj:
+            return _digest_file_windows(file_obj, windows, config)
     except OSError as exc:
-        # hr-obs-01 / hr-conc-02: a vanished-after-walk file is a benign
-        # skip, not a real error. ENOENT on `os.open` (FileNotFoundError)
-        # AND ENOENT/ESTALE raised mid-read (a sibling thread or another
-        # process deleted the file, or an NFS handle went stale, after the
-        # open succeeded) all mean "the file is gone" — route every one of
-        # them to the dedicated vanished counter so the summary separates
-        # racy deletes from EACCES/EIO failures worth investigating.
-        if exc.errno in _VANISHED_ERRNOS:
-            _tick_vanished(config)
-        else:
-            _log_hash_error(path, exc, config)
+        _handle_hash_error(path, exc, config)
         return None
+
+
+def _open_hash_file(path):
+    fd = os.open(path, _hash_open_flags())
+    try:
+        return os.fdopen(fd, "rb", buffering=0)
+    except BaseException:
+        # fdopen never took ownership of the raw fd, so close it explicitly.
+        os.close(fd)
+        raise
+
+
+def _digest_file_windows(file_obj, windows, config):
+    hasher = _require_blake3().blake3()
+    for window in windows:
+        file_obj.seek(window.offset, window.whence)
+        if not _read_window_into(
+                hasher, file_obj, window.length, window.strict):
+            _tick_shrank(config)
+            return None
+    return hasher.hexdigest()
+
+
+def _handle_hash_error(path, exc: OSError, config) -> None:
+    if exc.errno in _VANISHED_ERRNOS:
+        _tick_vanished(config)
+    else:
+        _log_hash_error(path, exc, config)
 
 
 def hash_head(path, config=None):
@@ -1184,10 +1184,7 @@ def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
     # hr-cmplx-01: a resolved cap of None means the cap is disabled —
     # return every path with no truncation and no sentinel.
     if cap is None:
-        out: list = []
-        for key in keys:
-            out.extend(aliases.get(key, ()))
-        return out
+        return _expand_uncapped_aliases(keys, aliases)
     # hr-arch-01: `overflow` is now passed explicitly by the emit layer
     # (`_emit_one_group` threads it from `on_group`/`emit_groups`). It is
     # no longer smuggled on `config`, so emit correctness no longer
@@ -1195,23 +1192,34 @@ def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
     out = []
     total = 0
     for key in keys:
-        paths = aliases.get(key, ())
-        total += len(paths)
-        if overflow is not None:
-            total += overflow.get(key, 0)
-        # hr-scal-01: extend only up to the remaining room under `cap` so a
-        # single inode whose bucket far exceeds `cap` never materialises the
-        # whole list before the final slice.
-        room = cap - len(out)
-        if room > 0:
-            out.extend(paths[:room])
+        total += _append_capped_aliases(out, key, aliases, overflow, cap)
     if total > cap:
-        if config is not None:
-            # hr-conc-06: guard against torn `+= 1` on free-threaded py3.13.
-            with config._counter_lock:
-                config.alias_cap_hits += 1
+        _tick_alias_cap(config)
         return out[:cap] + [_MoreSentinel(f"+{total - cap} more")]
     return out
+
+
+def _expand_uncapped_aliases(keys, aliases) -> list:
+    out: list = []
+    for key in keys:
+        out.extend(aliases.get(key, ()))
+    return out
+
+
+def _append_capped_aliases(out, key, aliases, overflow, cap: int) -> int:
+    paths = aliases.get(key, ())
+    room = cap - len(out)
+    if room > 0:
+        out.extend(paths[:room])
+    elided = overflow.get(key, 0) if overflow is not None else 0
+    return len(paths) + elided
+
+
+def _tick_alias_cap(config) -> None:
+    if config is not None:
+        # Guard against torn `+= 1` on free-threaded Python builds.
+        with config._counter_lock:
+            config.alias_cap_hits += 1
 
 
 def _count_real_paths(expanded) -> int:
@@ -1377,15 +1385,10 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     regrouped: dict = {}
     recovered = 0
     for item in stage2_items:
-        _s, _path, head, key = item
-        tail = tail_by_item.get(item)
-        failed = item in tail_by_item and tail is None
-        # hr-rel-30: retry the tail on a readable sibling alias before dropping a
-        # multi-alias inode whose representative lost read access between stages
-        # (mirrors the stage-1 head retry).
-        if tail is None and aliases is not None and len(aliases.get(key, ())) > 1:
-            tail = _retry_tail_alias(key, _path, _s, aliases, config)
-            recovered += failed and tail is not None
+        _size, _path, head, key = item
+        tail, was_recovered = _stage2_tail(
+            item, tail_by_item, aliases, config)
+        recovered += was_recovered
         if tail is None:
             continue   # failed/unhashed tail — already in stage2_errors
         regrouped.setdefault((head, tail), []).append(key)
@@ -1393,6 +1396,15 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
         "stage2": len(tail_by_item),
         "stage2_errors": max(0, errors - recovered),
     }
+
+
+def _stage2_tail(item, tail_by_item, aliases, config):
+    size, path, _head, key = item
+    tail = tail_by_item.get(item)
+    failed = item in tail_by_item and tail is None
+    if tail is None and aliases is not None and len(aliases.get(key, ())) > 1:
+        tail = _retry_tail_alias(key, path, size, aliases, config)
+    return tail, bool(failed and tail is not None)
 
 
 def _prepare_candidates(aliases, inode_size, overflow):
@@ -1411,13 +1423,17 @@ def _prepare_candidates(aliases, inode_size, overflow):
     cand_keys = {key for _, key in candidates}
     # hr-scal-01: drop non-candidate buckets in place so we never briefly
     # hold a second full-size copy of the alias dict.
-    for key in [k for k in aliases if k not in cand_keys]:
-        del aliases[key]
+    _retain_candidate_keys(aliases, cand_keys)
     if overflow is not None:
-        for key in [k for k in overflow if k not in cand_keys]:
-            del overflow[key]
+        _retain_candidate_keys(overflow, cand_keys)
     rep = {key: _readable_rep(aliases[key]) for _, key in candidates}
     return candidates, rep
+
+
+def _retain_candidate_keys(mapping, candidate_keys) -> None:
+    for key in list(mapping):
+        if key not in candidate_keys:
+            del mapping[key]
 
 
 def _split_stage1_buckets(by_head, rep, accept_group, config):
@@ -2072,39 +2088,45 @@ def _disable_hash_dump(hashes_state, hashes_file, exc) -> None:
             pass
 
 
-def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet):
-    """Wire the pipeline callbacks that feed the hashes dump and the live
-    hashing progress log (hr-cx-06 extraction from :func:`main`).
+def _dump_hashed_file(
+    hashes_state,
+    hashes_file,
+    stall_monitor,
+    _done,
+    _total,
+    head,
+    key,
+    aliases,
+) -> None:
+    stall_monitor.touch("hash")
+    writer = hashes_state["writer"]
+    if head is None or writer is None:
+        return
+    try:
+        writer.write_head(key, head, aliases.get(key, ()))
+    except OSError as exc:
+        _disable_hash_dump(hashes_state, hashes_file, exc)
 
-    Returns ``(on_hashed, on_composite, on_stage_progress)`` closures over
-    ``hashes_state`` — a one-key dict so :func:`_disable_hash_dump` and
-    :func:`_finalize_hash_dump` observe the same writer slot as main."""
-    progress_state: dict = {}
 
-    def on_hashed(done, total, head, key, aliases):
-        # hr-log-02: record every hashed file for the dump. Live progress is
-        # emitted by `on_stage_progress` as each hash batch completes.
-        stall_monitor.touch("hash")
-        writer = hashes_state["writer"]
-        if head is not None and writer is not None:
-            try:
-                writer.write_head(key, head, aliases.get(key, ()))
-            except OSError as exc:
-                _disable_hash_dump(hashes_state, hashes_file, exc)
+def _dump_composite_hash(hashes_state, hashes_file, key, composite) -> None:
+    writer = hashes_state["writer"]
+    if writer is None:
+        return
+    try:
+        writer.patch_composite(key, composite)
+    except OSError as exc:
+        _disable_hash_dump(hashes_state, hashes_file, exc)
 
-    def on_composite(key, composite):
-        # hr-obs-02: upgrade the stage-1 head digest to the composite
-        # head:tail once stage 2 has resolved the tail for this key.
-        writer = hashes_state["writer"]
-        if writer is not None:
-            try:
-                writer.patch_composite(key, composite)
-            except OSError as exc:
-                _disable_hash_dump(hashes_state, hashes_file, exc)
 
-    def on_stage_progress(stage, done, total):
-        stall_monitor.touch(stage)
-        state = progress_state.setdefault(
+class _StageProgress:
+    def __init__(self, stall_monitor, quiet):
+        self.stall_monitor = stall_monitor
+        self.quiet = quiet
+        self.state: dict = {}
+
+    def __call__(self, stage, done, total) -> None:
+        self.stall_monitor.touch(stage)
+        state = self.state.setdefault(
             stage, {"started": time.monotonic(), "last": 0})
         if done != total and done - state["last"] < LOG_EVERY_N_FILES:
             return
@@ -2115,10 +2137,21 @@ def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet):
             f"hashing {stage} {pct}% ({done}/{total}) "
             f"elapsed={_fmt_elapsed(elapsed)} "
             f"rate={_fmt_rate(done, elapsed)}/s",
-            quiet,
+            self.quiet,
         )
 
-    return on_hashed, on_composite, on_stage_progress
+
+def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet):
+    """Wire the pipeline callbacks that feed the hashes dump and the live
+    hashing progress log (hr-cx-06 extraction from :func:`main`).
+
+    Returns ``(on_hashed, on_composite, on_stage_progress)`` closures over
+    ``hashes_state`` — a one-key dict so :func:`_disable_hash_dump` and
+    :func:`_finalize_hash_dump` observe the same writer slot as main."""
+    on_hashed = partial(
+        _dump_hashed_file, hashes_state, hashes_file, stall_monitor)
+    on_composite = partial(_dump_composite_hash, hashes_state, hashes_file)
+    return on_hashed, on_composite, _StageProgress(stall_monitor, quiet)
 
 
 def main():
