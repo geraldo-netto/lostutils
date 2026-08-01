@@ -612,8 +612,12 @@ def make_usb(find_dev=None, ep=None):
     class USBError(Exception):
         pass
 
+    class NoBackendError(Exception):
+        """pyusb raises this when libusb itself is absent (mkp-plat-01)."""
+
     core = types.SimpleNamespace()
     core.USBError = USBError
+    core.NoBackendError = NoBackendError
     core._find_dev = find_dev
     core.find = lambda **kw: core._find_dev
     util = types.SimpleNamespace()
@@ -2447,3 +2451,45 @@ def test_no_auto_install_wins_over_each_opt_in(monkeypatch, argv, env):
     minikeypad.main(argv)
 
     assert called == []
+
+
+# --- mkp-plat-01: a missing libusb backend is reported once, not per poll ---
+
+
+def test_missing_libusb_backend_is_reported_once(monkeypatch):
+    """pyusb imports fine without libusb — the default on Windows and macOS —
+    and then every one-second connection poll raises NoBackendError."""
+    usb, _ = make_usb()
+
+    def no_backend(**_kwargs):
+        raise usb.core.NoBackendError("No backend available")
+
+    usb.core.find = no_backend
+    _install_usb(monkeypatch, usb)
+    logs = []
+    device = minikeypad.KeypadDevice(log=logs.append)
+
+    for _ in range(5):
+        assert device.connect() is False
+
+    assert len(logs) == 1
+    assert "libusb" in logs[0]
+
+
+def test_a_real_usb_error_is_still_reported_every_time(monkeypatch):
+    """Only the permanent no-backend condition is deduplicated."""
+    usb, USBError = make_usb()
+
+    def failing(**_kwargs):
+        raise USBError("device busy")
+
+    usb.core.find = failing
+    _install_usb(monkeypatch, usb)
+    logs = []
+    device = minikeypad.KeypadDevice(log=logs.append)
+
+    assert device.connect() is False
+    assert device.connect() is False
+
+    assert len(logs) == 2
+    assert all("device busy" in message for message in logs)

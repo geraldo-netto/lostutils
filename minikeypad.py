@@ -183,6 +183,10 @@ class KeypadDevice:
         self.ep_out: Any = None    # OUT endpoint, or None -> control SET_REPORT
         self.intf: Any = None
         self._detached = False
+        # mkp-plat-01: the connection poller runs once a second for the life of
+        # the process, so a permanent condition must be reported once, not
+        # every tick.
+        self._backend_missing_logged = False
         self._lock = threading.RLock()
 
     @property
@@ -215,6 +219,10 @@ class KeypadDevice:
                          f"interface={intf.bInterfaceNumber} "
                          f"out_ep={'ctrl' if ep_out is None else hex(ep_out.bEndpointAddress)}")
                 return True
+            except usb.core.NoBackendError:
+                self._report_missing_backend()
+                self._rollback_connect(dev)
+                return False
             except usb.core.USBError as e:
                 self.log(f"USB error on connect: {e}")
                 self._rollback_connect(dev)
@@ -223,6 +231,23 @@ class KeypadDevice:
                 self.log(f"connect() failed: {e}")
                 self._rollback_connect(dev)
                 return False
+
+    def _report_missing_backend(self) -> None:
+        """Say what is missing once, instead of once per poll.
+
+        mkp-plat-01: pyusb imports fine without libusb, which is the default
+        state on Windows and macOS, and then every `usb.core.find` raises
+        NoBackendError. On Linux with no device attached `find` just returns
+        None and the poll is silent, so this noise is platform-asymmetric —
+        and the generic handler's message never said libusb was the problem.
+        """
+        if self._backend_missing_logged:
+            return
+        self._backend_missing_logged = True
+        self.log(
+            "No USB backend: pyusb is installed but libusb-1.0 is not. "
+            "Install libusb-1.0 (Windows: a libusb driver/DLL; "
+            "macOS: `brew install libusb`). Retrying quietly.")
 
     def _rollback_connect(self, dev: Any) -> None:
         if dev is None:
