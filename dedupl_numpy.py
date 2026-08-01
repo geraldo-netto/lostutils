@@ -69,11 +69,9 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
 
     # Build the hash slice via index broadcasting; view as fixed-width bytes.
     hash_idx = line_starts[:, None] + np.arange(hash_width)
-    hashes = (
-        np.ascontiguousarray(data[hash_idx])
-        .view(f"S{hash_width}")
-        .ravel()
-    )
+    hash_bytes = np.empty(hash_idx.shape, dtype=np.uint8)
+    np.take(data, hash_idx, out=hash_bytes)
+    hashes = hash_bytes.view(f"S{hash_width}").ravel()
 
     uniq, inverse, counts = np.unique(
         hashes, return_inverse=True, return_counts=True)

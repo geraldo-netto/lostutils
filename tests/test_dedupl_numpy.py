@@ -203,3 +203,25 @@ def test_main_reports_unreadable_input(monkeypatch, tmp_path, capfd, kind):
     captured = capfd.readouterr()
     assert captured.out == ""
     assert f"error: cannot read {source}" in captured.err
+
+
+def test_group_duplicates_does_not_make_contiguous_gather_copy(monkeypatch):
+    digest = b"a" * 32
+    raw = digest + b" /one\n" + digest + b" /two\n"
+
+    def fail_ascontiguousarray(*_args, **_kwargs):
+        raise AssertionError("unexpected full contiguous copy")
+
+    monkeypatch.setattr(
+        dedupl_numpy.np,
+        "ascontiguousarray",
+        fail_ascontiguousarray,
+    )
+
+    paths, equal_files, record_count = dedupl_numpy.group_duplicates(
+        dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
+    )
+
+    assert paths == {b"/one", b"/two"}
+    assert equal_files == 1
+    assert record_count == 2

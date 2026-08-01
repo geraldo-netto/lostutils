@@ -61,7 +61,6 @@ oze-int-01 | open | low | organize_by_extension.py:1591-1611 — any existing ze
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-perf-01 | open | low | dedupl_numpy.py:36-41 — np.ascontiguousarray(data[hash_idx]) materializes a full (n_lines×32) copy, transiently doubling memory for large files. Process in chunks or view directly where strides allow. | memory
 
 ## scalability
 
