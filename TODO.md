@@ -205,7 +205,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-cfg-50 | open | low | relocate_folder.py:671-686,876-888,1683-1696 — three runtime knobs (`RELOCATE_STALE_PID_WARN_AT`, `RELOCATE_DISK_SPACE_HEADROOM`, `RELOCATE_SHA256_RETRY_ATTEMPTS`) each have a default, a typed accessor, and validation, but none appears in `_build_parser`'s help (2569-2621), the module docstring, or README.md. Document them in one of those surfaces. | configuration discoverability — undocumented coverage is the only leg of the AGENTS.md checklist these knobs fail
 
 ## API contract & compatibility
 

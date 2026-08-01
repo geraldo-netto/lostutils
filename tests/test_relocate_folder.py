@@ -4824,3 +4824,33 @@ def test_swap_or_explain_is_quiet_on_success(tmp_path, monkeypatch, caplog):
     rf._swap_or_explain(plan)
 
     assert caplog.text == ""
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "RELOCATE_STALE_PID_WARN_AT",
+        "RELOCATE_DISK_SPACE_HEADROOM",
+        "RELOCATE_SHA256_RETRY_ATTEMPTS",
+    ],
+)
+def test_help_documents_every_environment_knob(capsys, name):
+    """rf-cfg-50: each knob had a default, an accessor, and validation, but no
+    documented surface."""
+    rf._build_parser().print_help()
+    out = capsys.readouterr().out
+
+    assert name in out
+    assert name in rf.__doc__
+
+
+def test_help_states_the_documented_defaults(capsys):
+    rf._build_parser().print_help()
+    out = capsys.readouterr().out
+
+    assert str(rf._DISK_SPACE_HEADROOM) in out
+    assert str(rf._SHA256_RETRY_ATTEMPTS) in out
+    # The defaults in the help are the ones the accessors actually apply.
+    assert rf._disk_space_headroom() == rf._DISK_SPACE_HEADROOM
+    assert rf._sha256_retry_attempts() == rf._SHA256_RETRY_ATTEMPTS
+    assert rf._stale_pid_warn_threshold() == 1

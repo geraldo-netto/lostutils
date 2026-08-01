@@ -17,6 +17,17 @@ What it does
 4. Atomically rename <source> aside, create symlink <source> -> <target>,
    delete the renamed-aside original.
 
+Environment
+-----------
+- RELOCATE_STALE_PID_WARN_AT: stale-PID count at which the open-file precheck
+  warns that its snapshot is not authoritative (default 1, i.e. warn on any).
+  Raise it on noisy hosts where short-lived processes churn.
+- RELOCATE_DISK_SPACE_HEADROOM: how much destination free space the pre-flight
+  check demands relative to the payload (default 1.05). Below 1.0 clamps to 1.0.
+- RELOCATE_SHA256_RETRY_ATTEMPTS: verify-hash attempts per file when the read
+  hits a transient truncation (default 2). Clamped to at least 1.
+An unparseable value falls back to the default in all three cases.
+
 Caveats
 -------
 - Processes that already have files open from <source> keep using the old
@@ -2700,7 +2711,22 @@ def _build_parser() -> argparse.ArgumentParser:
     (rf-arch-02) so tests can introspect/extend flags without invoking
     `parse_args`."""
     p = argparse.ArgumentParser(
-        description="Move a directory to another filesystem and symlink it back."
+        description="Move a directory to another filesystem and symlink it back.",
+        # rf-cfg-50: these three knobs had a default, a typed accessor, and
+        # validation, but no documented surface anywhere.
+        epilog=(
+            "Environment variables:\n"
+            "  RELOCATE_STALE_PID_WARN_AT      stale-PID count at which the "
+            f"open-file precheck warns (default: 1)\n"
+            "  RELOCATE_DISK_SPACE_HEADROOM    destination free-space factor "
+            f"over the payload size (default: {_DISK_SPACE_HEADROOM}; values "
+            "below 1.0 clamp to 1.0)\n"
+            "  RELOCATE_SHA256_RETRY_ATTEMPTS  verify-hash attempts per file "
+            f"for a transient truncation (default: {_SHA256_RETRY_ATTEMPTS}; "
+            "clamped to at least 1)\n"
+            "An unparseable value falls back to the default."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("source", help="path to the directory to move (e.g. ~/.cache)")
     p.add_argument("dest_root", nargs="?", default=None,
