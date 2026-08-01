@@ -178,6 +178,26 @@ def test_emit_stage2_groups_publishes_and_filters_singletons(monkeypatch):
     assert accepted == [(("head", "tail"), [(1, 1), (1, 2)])]
 
 
+def test_publish_stage2_digests_handles_callbacks_and_empty_inputs():
+    published = []
+    regrouped = {
+        ("head", "tail"): [(1, 1), (1, 2)],
+        ("other", "digest"): [(1, 3)],
+    }
+
+    hr._publish_stage2_digests(regrouped, None)
+    hr._publish_stage2_digests({}, lambda *entry: published.append(entry))
+    hr._publish_stage2_digests(
+        regrouped, lambda *entry: published.append(entry)
+    )
+
+    assert published == [
+        ((1, 1), "head:tail"),
+        ((1, 2), "head:tail"),
+        ((1, 3), "other:digest"),
+    ]
+
+
 def _write(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
