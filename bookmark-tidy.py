@@ -1651,8 +1651,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                         help="number of llama.cpp model layers to offload to GPU; -1 offloads all (default 0)")
     parser.add_argument("--llm-max-tokens", type=_positive_int, default=DEFAULT_LLM_MAX_TOKENS,
                         help=f"maximum tokens generated for categorization (default {DEFAULT_LLM_MAX_TOKENS})")
+    # bt-cli-50: this is NOT llama.cpp's n_batch, which the script never sets.
     parser.add_argument("--llm-batch-size", type=_positive_int, default=DEFAULT_LLM_BATCH_SIZE,
-                        help=f"llama.cpp prompt batch size (default {DEFAULT_LLM_BATCH_SIZE})")
+                        help=("bookmarks sent to the model per categorization "
+                              f"request (default {DEFAULT_LLM_BATCH_SIZE})"))
     parser.add_argument(
         "--fallback-category",
         default=DEFAULT_FALLBACK_CATEGORY,

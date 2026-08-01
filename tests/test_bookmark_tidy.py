@@ -1402,7 +1402,7 @@ def test_parse_args_help_documents_llm_tuning_flags(capsys):
     assert "llama.cpp context size" in out
     assert "model layers to offload" in out
     assert "maximum tokens generated" in out
-    assert "prompt batch size" in out
+    assert "bookmarks sent to the model per categorization request" in out
     assert "Bookmark export format" in out
     assert "Keep URL fragments" in out
     assert "Treat HTTP and HTTPS" in out
@@ -1456,3 +1456,24 @@ def test_run_without_inputs_reports_error(monkeypatch):
 
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy._run(bookmark_tidy.parse_args([]))
+
+
+def test_llm_batch_size_is_bookmarks_per_request_not_n_batch(monkeypatch):
+    """bt-cli-50: the help said "llama.cpp prompt batch size", but the value is
+    the number of bookmarks per categorization call and never reaches
+    llama.cpp."""
+    seen = []
+
+    class RecordingCategorizer:
+        def __call__(self, batch):
+            seen.append(len(batch))
+            return {index: ["Cat"] for index, _ in enumerate(batch)}
+
+    bookmarks = [
+        bookmark_tidy.Bookmark(title=f"b{i}", url=f"https://e.test/{i}")
+        for i in range(7)
+    ]
+
+    bookmark_tidy._assign_categories(bookmarks, RecordingCategorizer(), "Fallback", 3)
+
+    assert seen == [3, 3, 1]      # bookmarks per request, not tokens per batch

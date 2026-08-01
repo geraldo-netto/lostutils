@@ -216,7 +216,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-cli-50 | open | low | bookmark-tidy.py:1609-1610 — `--llm-batch-size` help reads "llama.cpp prompt batch size", but the value is the number of bookmarks per categorization batch (`_assign_categories`, 918-931) and is never passed to llama.cpp (`n_batch` is not set anywhere). Reword the help. | CLI / option integrity — help text describes a different knob than the flag controls
 
 ## dependency
 
