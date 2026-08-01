@@ -320,6 +320,22 @@ def _finish_walk_dir(scanned: bool, state: "_WalkState", wstats) -> None:
                 state.pending.put(state.sentinel)
 
 
+def _identity_stat(entry, st):
+    """Return a stat for `entry` that carries a real (st_dev, st_ino).
+
+    hr-plat-06: os.DirEntry.stat() is served from the directory scan on
+    Windows, where CPython documents st_dev, st_ino and st_nlink as always
+    zero. Every file would then share the inode key (0, 0): index_inodes folds
+    the whole tree into one alias set, size_collision_candidates never sees a
+    second key, and the run hashes nothing and reports zero duplicates on any
+    input — silently, with exit 0. Costs one extra os.stat per regular file,
+    and only where the cheap stat came back empty.
+    """
+    if st.st_dev or st.st_ino:
+        return st
+    return os.stat(entry.path, follow_symlinks=False)
+
+
 def _scan_dir(d, state: "_WalkState", wstats) -> None:
     """Scan one directory: enqueue subdirs, emit regular files
     (hr-cx-02). Per-entry errors are counted, never raised."""
@@ -335,6 +351,7 @@ def _scan_dir(d, state: "_WalkState", wstats) -> None:
                         state.inflight[0] += 1
                     state.pending.put(e.path)
                 elif stat.S_ISREG(mode):
+                    st = _identity_stat(e, st)
                     # hr-log-04: drop the run's own hashes dump (matched by
                     # inode) so it is never counted, hashed, or self-listed.
                     if (state.skip_ino is not None

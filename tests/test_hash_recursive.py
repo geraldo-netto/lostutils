@@ -3647,3 +3647,80 @@ def test_composite_dump_failure_disables_writer(monkeypatch):
 
     assert state["writer"] is None
     assert writer.closed
+
+
+# --- hr-plat-06: DirEntry.stat reports dev/ino as zero on Windows -----------
+
+
+class _ZeroedStat:
+    """A DirEntry.stat() result with the Windows dev/ino shape."""
+
+    def __init__(self, real):
+        self.st_mode = real.st_mode
+        self.st_size = real.st_size
+        self.st_dev = 0
+        self.st_ino = 0
+
+
+def test_identity_stat_restats_when_dev_and_ino_are_zero(tmp_path):
+    target = tmp_path / "f.bin"
+    target.write_bytes(b"x")
+    real = os.stat(target)
+
+    class Entry:
+        path = str(target)
+
+    got = hr._identity_stat(Entry(), _ZeroedStat(real))
+
+    assert (got.st_dev, got.st_ino) == (real.st_dev, real.st_ino)
+
+
+def test_identity_stat_keeps_a_populated_stat(tmp_path):
+    target = tmp_path / "f.bin"
+    target.write_bytes(b"x")
+    real = os.stat(target)
+
+    class Entry:
+        path = "/must/not/be/stat-ed"
+
+    assert hr._identity_stat(Entry(), real) is real
+
+
+def _zeroing_scandir(real_scandir):
+    """Wrap os.scandir so every entry reports the Windows dev/ino shape."""
+    class Entry:
+        def __init__(self, inner):
+            self._inner = inner
+            self.path = inner.path
+            self.name = inner.name
+
+        def stat(self, follow_symlinks=True):
+            return _ZeroedStat(self._inner.stat(follow_symlinks=follow_symlinks))
+
+    class Scandir:
+        def __init__(self, path):
+            self._it = real_scandir(path)
+
+        def __enter__(self):
+            return (Entry(e) for e in self._it.__enter__())
+
+        def __exit__(self, *exc):
+            return self._it.__exit__(*exc)
+
+    return Scandir
+
+
+def test_walk_still_reports_real_inodes_when_the_cheap_stat_is_empty(
+        tmp_path, monkeypatch):
+    """The end-to-end guarantee: without this the whole tree collapses into
+    inode (0, 0) and the run finds zero duplicates on any input."""
+    (tmp_path / "a.bin").write_bytes(b"payload")
+    (tmp_path / "b.bin").write_bytes(b"payload")
+    monkeypatch.setattr(hr.os, "scandir", _zeroing_scandir(os.scandir))
+
+    results, _stats = _drain_walk(tmp_path, 1)
+
+    keys = {(dev, ino) for _path, _size, dev, ino in results}
+    assert len(results) == 2
+    assert (0, 0) not in keys
+    assert len(keys) == 2       # two distinct files, two distinct inode keys
