@@ -140,11 +140,35 @@ dnp-test-02 | open | med | dedupl_numpy.py:1-62 — focused valid-input and CLI-
 dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves the array-bounds path (dnp-rel-01) untested; add fixtures with short lines, single line, and md5-vs-sha256 widths to lock behavior. | coverage
 dnv3-test-01 | open | low | deduplicate-by-namev3.py:130-136 — add focused end-to-end coverage that token removal collapses equivalent cleaned inputs into one self-collision. | test coverage — unit expectations were normalized with dnv3-rel-01; end-to-end provenance coverage remains deferred to the test-coverage category
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
+hr-test-02 | open | low | hash-recursive-ai5.py:1540 — `_emit_stage2_groups` has no executed statements; cover group emission and its empty-input boundary. | CI function coverage gate: 0/4 statements (0.00%) in run 30700525661
+hr-test-03 | open | low | hash-recursive-ai5.py:1553 — `_publish_stage2_digests` has no executed statements; cover digest publication and its empty-input boundary. | CI function coverage gate: 0/5 statements (0.00%) in run 30700525661
+ie-test-01 | open | low | import_events.py:2573 — `_read_stage_cache_text` lacks coverage for invalid or unreadable cached stage content. | CI function coverage gate: 18/24 statements (75.00%) in run 30700525661
+ie-test-02 | open | low | import_events.py:3099 — `_run_llm_recovery_callback` lacks coverage for callback failure recovery. | CI function coverage gate: 3/4 statements (75.00%) in run 30700525661
+ie-test-03 | open | low | import_events.py:3756 — `_put_file_work` lacks coverage for the queue-shutdown path. | CI function coverage gate: 5/7 statements (71.43%) in run 30700525661
+ie-test-04 | open | low | import_events.py:3780 — `_put_worker_sentinel` lacks coverage for the queue-shutdown path. | CI function coverage gate: 4/7 statements (57.14%) in run 30700525661
+ie-test-05 | open | low | import_events.py:3880 — `_feeder_result_count` lacks coverage for a failed feeder result. | CI function coverage gate: 2/3 statements (66.67%) in run 30700525661
+ie-test-06 | open | low | import_events.py:4010 — `_run_file_workers` lacks coverage for worker-startup cleanup. | CI function coverage gate: 10/13 statements (76.92%) in run 30700525661
+ie-test-07 | open | low | import_events.py:4284 — `_positive_int` has no coverage for valid and invalid CLI values. | CI function coverage gate: 0/4 statements (0.00%) in run 30700525661
+lq-test-01 | open | low | link_queue.py:302 — `StateFileLock._pidfile_is_stale` lacks coverage for an unreadable or malformed PID file. | CI function coverage gate: 6/8 statements (75.00%) in run 30700525661
+lq-test-02 | open | low | link_queue.py:851 — `ConfigStore._coerce_bool` lacks coverage for supported boolean spellings and invalid values. | CI function coverage gate: 2/10 statements (20.00%) in run 30700525661
+lq-test-03 | open | low | link_queue.py:879 — `ConfigStore._coerce_string_scalars` lacks coverage for nested scalar coercion and invalid values. | CI function coverage gate: 8/12 statements (66.67%) in run 30700525661
+lq-test-04 | open | low | link_queue.py:2238 — `Dispatcher._taskkill_process_tree` lacks coverage for Windows taskkill failure reporting. | CI function coverage gate: 6/8 statements (75.00%) in run 30700525661
+lq-test-05 | open | low | link_queue.py:2343 — `Dispatcher._terminate_active_processes` lacks coverage for graceful termination and forced cleanup. | CI function coverage gate: 4/14 statements (28.57%) in run 30700525661
+lq-test-06 | open | low | link_queue.py:2551 — `Dispatcher._read_subprocess_output` lacks coverage for successful and timed-out reads. | CI function coverage gate: 2/4 statements (50.00%) in run 30700525661
+lq-test-07 | open | low | link_queue.py:2560 — `Dispatcher._deadline_remaining` lacks coverage for expired deadlines. | CI function coverage gate: 2/3 statements (66.67%) in run 30700525661
+lq-test-08 | open | low | link_queue.py:2566 — `Dispatcher._close_subprocess_pipe` has no coverage for successful and failed pipe closure. | CI function coverage gate: 0/7 statements (0.00%) in run 30700525661
+lq-test-09 | open | low | link_queue.py:2673 — `Dispatcher._claim_or_wait_for_cooldown` lacks coverage for the cooldown wait path. | CI function coverage gate: 6/8 statements (75.00%) in run 30700525661
+mkp-test-01 | open | low | minikeypad.py:200 — `KeypadDevice._rollback_connect` lacks coverage for rollback after a failed connect. | CI function coverage gate: 3/4 statements (75.00%) in run 30700525661
+oze-test-01 | open | low | organize_by_extension.py:1140 — `BucketManager.release` lacks coverage for releasing reserved names and empty buckets. | CI function coverage gate: 9/12 statements (75.00%) in run 30700525661
+oze-test-02 | open | low | organize_by_extension.py:1681 — `_fsync_directory` lacks coverage for unsupported and failed directory fsync. | CI function coverage gate: 5/9 statements (55.56%) in run 30700525661
+rf-test-01 | open | low | relocate_folder.py:1747 — `_fsync_directory` lacks coverage for unsupported and failed directory fsync. | CI function coverage gate: 4/7 statements (57.14%) in run 30700525661
+rf-test-02 | open | low | relocate_folder.py:2018 — `_is_orphaned_staging_dir` lacks coverage for malformed staging metadata. | CI function coverage gate: 5/7 statements (71.43%) in run 30700525661
 
 ## test / fuzz coverage
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+oze-fuzz-01 | open | low | tests/fuzz/fuzz_organize_by_extension.py:34-48 — the fuzz harness imports seven archive/signature constants removed from `organize_by_extension.py`, so explicit collection fails before any property runs. Retarget its strategies and invariants to the current signature registry and extension resolver. | test/fuzz coverage — `pytest -q tests/fuzz/fuzz_organize_by_extension.py` fails during collection
 
 ## ruff (lint)
 
@@ -274,6 +298,7 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ci-wire-01 | open | low | .github/workflows/ci.yml:43-44 — the step named “unit, regression, integration, and fuzz tests” runs default pytest discovery, which ignores `fuzz_*.py`; explicitly pass both fuzz globs or configure `python_files` so the advertised fuzz suite is wired into CI. | wiring gap — current CI passes its test step while explicit fuzz collection fails
 
 ## unused code
 
