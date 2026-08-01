@@ -4167,6 +4167,30 @@ def test_cross_device_preserves_ambiguous_zero_byte_target(tmp_path):
     assert src.read_bytes() == b"payload"
 
 
+def test_cross_device_fsyncs_destination_before_source_directory(
+        tmp_path, monkeypatch):
+    src = tmp_path / "source" / "src.bin"
+    dst = tmp_path / "target" / "dst.bin"
+    src.parent.mkdir()
+    dst.parent.mkdir()
+    src.write_bytes(b"payload")
+    calls = []
+    monkeypatch.setattr(
+        oze, "_fsync_file", lambda path: calls.append(("file", path.parent))
+    )
+    monkeypatch.setattr(
+        oze, "_fsync_directory", lambda path: calls.append(("dir", path))
+    )
+
+    oze._move_cross_device(src, dst)
+
+    assert calls == [
+        ("file", dst.parent),
+        ("dir", dst.parent),
+        ("dir", src.parent),
+    ]
+
+
 def test_cross_device_empty_source_zero_target_is_recovery(tmp_path):
     """An empty source onto an empty target is a completed move (same content),
     so the source is removed — not misread as a stranded collision."""

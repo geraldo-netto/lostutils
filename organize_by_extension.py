@@ -1662,12 +1662,32 @@ def _prepare_cross_device_target(source: Path, target: Path) -> bool:
         raise
 
 
+def _fsync_file(path: Path) -> None:
+    with open(path, "rb") as stream:
+        os.fsync(stream.fileno())
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
 def _copy_cross_device_target(source: Path, target: Path, tmp: Path) -> None:
     replaced = False
     try:
         shutil.copy2(source, tmp)
+        _fsync_file(tmp)
         os.replace(tmp, target)  # atomic: target only ever holds the complete file
         replaced = True
+        _fsync_directory(target.parent)
     except BaseException:
         # oze-cx-03: cleanup must never mask the real failure. Narrow to OSError
         # (the only thing os.unlink can raise on a missing/locked leftover) and
@@ -1701,6 +1721,8 @@ def _unlink_cross_device_source(source: Path, target: Path) -> None:
             "duplicate left at %s — remove it manually",
             source, target, unlink_exc, source,
         )
+    else:
+        _fsync_directory(source.parent)
 
 
 def _walk_prunable_dirs(
