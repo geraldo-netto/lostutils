@@ -137,7 +137,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
-hr-test-02 | open | low | hash-recursive-ai5.py:1540 — `_emit_stage2_groups` has no executed statements; cover group emission and its empty-input boundary. | CI function coverage gate: 0/4 statements (0.00%) in run 30700525661
 hr-test-03 | open | low | hash-recursive-ai5.py:1553 — `_publish_stage2_digests` has no executed statements; cover digest publication and its empty-input boundary. | CI function coverage gate: 0/5 statements (0.00%) in run 30700525661
 ie-test-01 | open | low | import_events.py:2573 — `_read_stage_cache_text` lacks coverage for invalid or unreadable cached stage content. | CI function coverage gate: 18/24 statements (75.00%) in run 30700525661
 ie-test-02 | open | low | import_events.py:3099 — `_run_llm_recovery_callback` lacks coverage for callback failure recovery. | CI function coverage gate: 3/4 statements (75.00%) in run 30700525661
