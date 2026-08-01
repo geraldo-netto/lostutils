@@ -137,7 +137,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
-mkp-test-01 | open | low | minikeypad.py:200 — `KeypadDevice._rollback_connect` lacks coverage for rollback after a failed connect. | CI function coverage gate: 3/4 statements (75.00%) in run 30700525661
 oze-test-01 | open | low | organize_by_extension.py:1140 — `BucketManager.release` lacks coverage for releasing reserved names and empty buckets. | CI function coverage gate: 9/12 statements (75.00%) in run 30700525661
 oze-test-02 | open | low | organize_by_extension.py:1681 — `_fsync_directory` lacks coverage for unsupported and failed directory fsync. | CI function coverage gate: 5/9 statements (55.56%) in run 30700525661
 rf-test-01 | open | low | relocate_folder.py:1747 — `_fsync_directory` lacks coverage for unsupported and failed directory fsync. | CI function coverage gate: 4/7 statements (57.14%) in run 30700525661

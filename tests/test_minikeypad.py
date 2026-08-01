@@ -689,6 +689,21 @@ def test_connect_failure_reattaches_and_disposes_detached_device(monkeypatch):
     assert d._detached is False
 
 
+def test_rollback_connect_ignores_failure_before_device_discovery(monkeypatch):
+    device = minikeypad.KeypadDevice()
+    existing = object()
+    device.dev = existing
+    monkeypatch.setattr(
+        device,
+        "close",
+        lambda: (_ for _ in ()).throw(AssertionError("close called")),
+    )
+
+    device._rollback_connect(None)
+
+    assert device.dev is existing
+
+
 def test_still_connected_none_when_no_dev():
     assert minikeypad.KeypadDevice().still_connected() is False
 
