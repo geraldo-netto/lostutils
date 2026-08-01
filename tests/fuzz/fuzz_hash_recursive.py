@@ -91,8 +91,8 @@ class ReadableRepFuzz(unittest.TestCase):
     @given(st.lists(st.text(alphabet=_SAFE_PATH_CHARS, min_size=1, max_size=20),
                     min_size=1, max_size=10))
     def test_rep_is_in_input(self, paths):
-        # os.access raises on embedded NUL; the fuzz harness intentionally
-        # avoids NUL chars and slashes — see hr-rel-XX TODO entry.
+        # NUL and slash are excluded so every generated value is a legal
+        # synthetic path component on the supported filesystems.
         rep = hr._readable_rep(paths)
         self.assertIn(rep, paths)
 
@@ -138,14 +138,14 @@ class FindDuplicatesFuzz(unittest.TestCase):
                 st_ = os.stat(p)
                 files.append((str(p), st_.st_size, st_.st_dev, st_.st_ino))
             result = hr.find_duplicate_groups(files, jobs=1)
-            groups = result.groups
-            # Either every key collapses into one group, or hashing produced
-            # no group (very small payload edge cases). Both are acceptable.
-            for digest, keys in groups.items():
-                # All keys in a group must share size.
-                sizes = {next(s for s, k_ in
-                              [(len(payload), k) for k in keys]) for _ in keys}
-                self.assertEqual(len(sizes), 1)
+            self.assertEqual(len(result.groups), 1)
+            keys = next(iter(result.groups.values()))
+            expected_keys = {(dev, ino) for _path, _size, dev, ino in files}
+            self.assertEqual(set(keys), expected_keys)
+            self.assertEqual(len(keys), n)
+            paths = [path for key in keys for path in result.aliases[key]]
+            self.assertEqual(set(paths), {path for path, *_rest in files})
+            self.assertEqual(len(paths), n)
 
     @settings(parent=FUZZ, max_examples=80)
     @given(
