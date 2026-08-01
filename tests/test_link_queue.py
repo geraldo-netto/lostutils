@@ -4855,6 +4855,43 @@ def test_subprocess_deadline_remaining_handles_expired_deadline(monkeypatch):
     assert link_queue.Dispatcher._deadline_remaining(103.0) == 3.0
 
 
+def test_close_subprocess_pipe_uses_fd_and_safe_fallbacks():
+    read_fd, write_fd = os.pipe()
+
+    class FdPipe:
+        @staticmethod
+        def fileno():
+            return write_fd
+
+    try:
+        link_queue.Dispatcher._close_subprocess_pipe(FdPipe())
+        with pytest.raises(OSError):
+            os.fstat(write_fd)
+    finally:
+        os.close(read_fd)
+
+    closed = []
+
+    class FallbackPipe:
+        @staticmethod
+        def fileno():
+            raise ValueError("no descriptor")
+
+        @staticmethod
+        def close():
+            closed.append(True)
+
+    link_queue.Dispatcher._close_subprocess_pipe(FallbackPipe())
+    assert closed == [True]
+
+    class BrokenPipe(FallbackPipe):
+        @staticmethod
+        def close():
+            raise OSError("already closed")
+
+    link_queue.Dispatcher._close_subprocess_pipe(BrokenPipe())
+
+
 def test_stream_deadline_closes_inherited_output_pipe(
         headless_dispatcher, monkeypatch):
     joins = []
