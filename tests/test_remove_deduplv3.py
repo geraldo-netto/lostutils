@@ -152,16 +152,26 @@ def test_no_duplicate_path_in_rm_line(monkeypatch, tmp_path):
         assert len(targets) == len(set(targets)), f"duplicate path in: {ln}"
 
 
-def test_survivor_uses_platform_separators(monkeypatch):
+def test_survivor_splits_on_slash_regardless_of_host_separators(monkeypatch):
+    """rdv3-plat-02: the records and the emitted script are POSIX-dialect, so
+    the same input must nominate the same survivor on every OS."""
+    paths = ["/a/very/long/directory/a.txt", "/b/longer-name.txt"]
+    expected = rd._survivor(paths)
+
     monkeypatch.setattr(rd.os, "sep", "\\")
     monkeypatch.setattr(rd.os, "altsep", "/")
+    assert rd._survivor(paths) == expected == "/b/longer-name.txt"
 
-    keep = rd._survivor([
-        r"C:\very\long\directory\a.txt",
-        r"C:\b\longer-name.txt",
-    ])
 
-    assert keep == r"C:\b\longer-name.txt"
+def test_survivor_keeps_a_backslash_in_a_name_out_of_the_basename(monkeypatch):
+    """A backslash is a legal filename character on Linux; treating it as a
+    separator on Windows would pick a different file to delete."""
+    paths = [r"/data/weird\name.txt", "/data/short.txt"]
+    expected = rd._survivor(paths)
+
+    monkeypatch.setattr(rd.os, "sep", "\\")
+    monkeypatch.setattr(rd.os, "altsep", None)
+    assert rd._survivor(paths) == expected == r"/data/weird\name.txt"
 
 
 def test_survivor_tiebreaks_by_lexicographic_path():

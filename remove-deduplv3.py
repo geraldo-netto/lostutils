@@ -172,8 +172,14 @@ def _survivor(paths):
     # max key: (basename_length, path). Computing basename length via
     # rfind avoids building a basename string per call (str.rfind +
     # arithmetic is ~5× faster than os.path.basename).
-    seps = (os.sep,) if os.altsep is None else (os.sep, os.altsep)
-    return max(paths, key=lambda p: (len(p) - max(p.rfind(sep) for sep in seps) - 1, p))
+    #
+    # rdv3-plat-02: split on "/" only, never the host's os.sep. The records
+    # come from a hash file whose separator convention was fixed by whichever
+    # machine produced it, and the emitted script is POSIX by design, so
+    # honouring the host's separators would make the same input nominate
+    # different survivors on different platforms — a backslash inside a name
+    # is legal on Linux and would read as a separator on Windows.
+    return max(paths, key=lambda p: (len(p) - p.rfind("/") - 1, p))
 
 
 def _chunked_quoted(paths, limit=RM_ARGV_BYTE_LIMIT):
