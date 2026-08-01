@@ -22,16 +22,11 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = _parse_args()
-
-    with open(args.hash_file, "rb") as f:
-        mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
-
-    data = np.frombuffer(mm, dtype=np.uint8)
+def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
+    """Return duplicate paths, redundant-file count, and record count."""
     nl = np.flatnonzero(data == 0x0A)
     if len(nl) == 0:
-        return
+        return set(), 0, 0
 
     # Line starts: 0, then position after each newline.
     line_starts = np.empty(len(nl), dtype=np.int64)
@@ -59,6 +54,20 @@ def main() -> None:
         bytes(data[line_starts[i] + PATH_OFFSET : nl[i]])
         for i in dup_line_indices.tolist()
     }
+    return paths, file_equal, n_lines
+
+
+def main() -> None:
+    args = _parse_args()
+
+    with open(args.hash_file, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+
+    data = np.frombuffer(mm, dtype=np.uint8)
+    paths, file_equal, n_lines = group_duplicates(data)
+    if n_lines == 0:
+        return
+
     out = sys.stdout.buffer
     for p in sorted(paths):
         out.write(p + b"\n")

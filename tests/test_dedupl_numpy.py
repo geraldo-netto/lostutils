@@ -56,3 +56,16 @@ def test_main_groups_duplicate_hashes(monkeypatch, tmp_path, capfd):
     assert "second.bin" in output
     assert "unique.bin" not in output
     assert "equal files: 1 / 3" in output
+
+
+def test_group_duplicates_is_pure():
+    digest = b"a" * 32
+    raw = digest + b" /one\n" + digest + b" /two\n"
+
+    paths, equal_files, record_count = dedupl_numpy.group_duplicates(
+        dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
+    )
+
+    assert paths == {b"aaaaaa /one", b"aaaaaa /two"}
+    assert equal_files == 1
+    assert record_count == 2

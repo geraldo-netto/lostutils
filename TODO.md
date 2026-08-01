@@ -114,7 +114,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-arch-01 | open | low | dedupl_numpy.py:16 — single `main()` fuses arg parsing, mmap I/O, vectorized grouping, and stdout emission with no seam; the grouping logic can't be unit-tested without a file + subprocess (feeds dnp-test-01). Extract a pure `group_duplicates(data) -> (paths, counts)` helper. | architecture / decoupling / SOLID — no testability boundary; SRP
 
 ## system design
 
