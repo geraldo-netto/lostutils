@@ -1148,6 +1148,8 @@ class Dispatcher:
         self.current_items: dict[int, QueueItem | None] = {}
         self.metrics = {"timeouts": 0, "failures": 0, "completions": 0}
         self._metrics_lock = threading.Lock()
+        self._active_processes: set = set()
+        self._active_processes_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()
         # Per-domain failure cooldown: domain -> until-timestamp. A failed
@@ -2305,6 +2307,39 @@ class Dispatcher:
             return self._spawn_shell_proc(item, label, cwd, cwd_note)
         return self._spawn_exec_proc(item, label, cwd, cwd_note)
 
+    def _register_process(self, proc) -> None:
+        with self._active_processes_lock:
+            self._active_processes.add(proc)
+        if self.stop_event.is_set():
+            self._terminate_process_tree(proc)
+
+    def _unregister_process(self, proc) -> None:
+        with self._active_processes_lock:
+            self._active_processes.discard(proc)
+
+    def _terminate_active_processes(self, deadline: float) -> None:
+        """Terminate every tracked child before shutdown releases state.
+
+        Registration checks ``stop_event`` too, closing the race where a worker
+        spawns between shutdown's snapshot and this method.
+        """
+        with self._active_processes_lock:
+            processes = list(self._active_processes)
+        for proc in processes:
+            self._terminate_process_tree(proc)
+        for proc in processes:
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                proc.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                self._kill_process_tree(proc)
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    self._log(
+                        "[shutdown] child remained alive after forced kill"
+                    )
+
     def _spawn_shell_proc(self, item: QueueItem, label: str, cwd, cwd_note: str):
         """shell=True branch (opt-in). sec-04: REFUSE a bare {url}, which would
         be interpolated UNQUOTED into /bin/sh -c — an adversarial URL like
@@ -2389,10 +2424,12 @@ class Dispatcher:
         label = f"{label} {self._item_log_id(item)}"
         folder = self.config.get("output_folder", "")
         cwd, cwd_note = self._resolve_item_cwd(folder)
+        proc = None
         try:
             proc = self._spawn_proc(item, label, cwd, cwd_note)
             if proc is None:
                 return -1
+            self._register_process(proc)
             # cx-07: real check (not assert) so `python -O` keeps the guard.
             # `stdout=subprocess.PIPE` above guarantees this, but a future
             # caller might drop the PIPE and the silent crash would be a
@@ -2427,6 +2464,9 @@ class Dispatcher:
         except Exception as e:  # pragma: no cover - worker step caught exception
             self._log(f"[{label} error] {e}  url={url}")  # pragma: no cover - log + return -1 after exception
             return -1  # pragma: no cover - log + return -1 after exception
+        finally:
+            if proc is not None:
+                self._unregister_process(proc)
 
     def _resolve_item_cwd(self, folder: str) -> "tuple[str | None, str]":
         """Resolve the configured output folder to a subprocess cwd (lq-cx-05),
@@ -5261,6 +5301,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         # arming it and the join can't zero `remaining` and abandon worker
         # threads unjoined (the Tcl_AsyncDelete hazard the join exists to avoid).
         deadline = time.monotonic() + timeout
+        self.dispatcher._terminate_active_processes(deadline)
         self._join_threads(self._snapshot_worker_threads(), deadline)
         self._join_threads(self._snapshot_immediate_threads(), deadline)
 

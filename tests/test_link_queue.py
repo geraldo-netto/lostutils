@@ -2022,6 +2022,44 @@ def test_shutdown_post_join_save_persists_settled_queue(app):
     assert [it.url for it in pending] == ["http://keep/1", "http://keep/2"]
 
 
+def test_shutdown_terminates_active_processes_before_join(app, monkeypatch):
+    stop_bg_workers(app)
+    order = []
+    monkeypatch.setattr(
+        app.dispatcher,
+        "_terminate_active_processes",
+        lambda _deadline: order.append("terminate"),
+    )
+    monkeypatch.setattr(
+        app,
+        "_join_threads",
+        lambda _threads, _deadline: order.append("join"),
+    )
+
+    app._shutdown(timeout=0.1)
+
+    assert order[0] == "terminate"
+    assert "join" in order[1:]
+
+
+def test_register_process_during_shutdown_terminates_it(
+        headless_dispatcher, monkeypatch):
+    disp = headless_dispatcher
+    proc = object()
+    terminated = []
+    monkeypatch.setattr(
+        disp,
+        "_terminate_process_tree",
+        lambda candidate: terminated.append(candidate),
+    )
+    disp.stop_event.set()
+
+    disp._register_process(proc)
+
+    assert terminated == [proc]
+    disp._unregister_process(proc)
+
+
 def test_text_editing_menu_commands(app):
     menu = next(w for w in app.url_text.winfo_children()
                 if isinstance(w, tk.Menu))
