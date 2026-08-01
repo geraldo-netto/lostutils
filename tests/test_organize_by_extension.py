@@ -4641,3 +4641,117 @@ def test_preview_keeps_reservations(tmp_path):
     organize_by_extension.organize(tmp_path, preview=True, bucket_manager=manager)
 
     assert any("a.txt" in names for names in manager._reserved_names.values())
+
+
+# --- oze-plat-04: case-folding filesystems (NTFS, APFS default) -------------
+
+
+def test_filesystem_folds_case_agrees_with_the_real_filesystem(tmp_path):
+    """The probe must report what the host actually does, either way."""
+    organize_by_extension.reset_case_fold_cache()
+    marker = tmp_path / "CaseMarker"
+    marker.write_text("x", encoding="utf-8")
+    truth = (tmp_path / "casemarker").exists()
+
+    assert organize_by_extension.filesystem_folds_case(tmp_path) is truth
+
+
+def test_filesystem_folds_case_probes_once_per_directory(tmp_path, monkeypatch):
+    organize_by_extension.reset_case_fold_cache()
+    probes = []
+    monkeypatch.setattr(
+        organize_by_extension, "_probe_case_folding",
+        lambda directory: probes.append(directory) or True)
+
+    assert organize_by_extension.filesystem_folds_case(tmp_path) is True
+    assert organize_by_extension.filesystem_folds_case(tmp_path) is True
+    assert probes == [tmp_path]
+
+    organize_by_extension.reset_case_fold_cache()
+    assert organize_by_extension.filesystem_folds_case(tmp_path) is True
+    assert probes == [tmp_path, tmp_path]
+
+
+def test_filesystem_folds_case_leaves_no_probe_file_behind(tmp_path):
+    organize_by_extension.reset_case_fold_cache()
+    organize_by_extension.filesystem_folds_case(tmp_path)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_case_probe_falls_back_to_the_host_default_when_unwritable(tmp_path):
+    """An unwritable root must not fold names the probe could not verify."""
+    assert organize_by_extension._probe_case_folding(
+        tmp_path / "missing") is (os.name == "nt")
+
+
+def test_bucket_file_names_folds_when_asked(tmp_path):
+    bucket = tmp_path / "txt" / "f00000"
+    bucket.mkdir(parents=True)
+    (bucket / "ReadMe.TXT").write_text("x", encoding="utf-8")
+
+    assert bucket_file_names(bucket) == {"ReadMe.TXT"}
+    assert bucket_file_names(bucket, True) == {"readme.txt"}
+
+
+def test_choose_bucket_treats_case_variants_as_taken_when_folding(tmp_path):
+    """A case-folding filesystem has one entry, so the slot is not free."""
+    ext_dir = tmp_path / "txt"
+    bucket = ext_dir / "r00000"
+    bucket.mkdir(parents=True)
+    (bucket / "readme.txt").write_text("x", encoding="utf-8")
+
+    taken, _ = choose_bucket(ext_dir, "r", "README.txt", {}, [0], 0, BUCKET_SIZE, True)
+    free, _ = choose_bucket(ext_dir, "r", "README.txt", {}, [0], 0, BUCKET_SIZE, False)
+
+    assert taken.name == "r00001"   # folded: pushed to the next bucket
+    assert free.name == "r00000"    # case-sensitive: genuinely a free slot
+
+
+def test_bucket_manager_does_not_hand_out_a_case_colliding_slot(tmp_path):
+    """The end-to-end guarantee: the planner must not pick a name os.link
+    would reject as FileExistsError on every re-run."""
+    bucket = tmp_path / "txt" / "r00000"
+    bucket.mkdir(parents=True)
+    (bucket / "readme.txt").write_text("x", encoding="utf-8")
+    manager = BucketManager(root=tmp_path, _folds_case=True)
+    source = tmp_path / "README.txt"
+    source.write_text("y", encoding="utf-8")
+
+    chosen = manager.choose(source, tmp_path / "txt", "r")
+
+    assert not (chosen.path / "readme.txt").exists()
+
+
+def test_release_and_confirm_use_the_same_folded_key(tmp_path):
+    """A reservation stored folded must be findable by the release path."""
+    bucket = tmp_path / "txt" / "r00000"
+    bucket.mkdir(parents=True)
+    manager = BucketManager(root=tmp_path, _folds_case=True)
+    source = tmp_path / "ReadMe.TXT"
+    source.write_text("x", encoding="utf-8")
+
+    manager.choose(source, tmp_path / "txt", "r")
+    assert manager._reserved_names[bucket] == {"readme.txt"}
+
+    manager.release(source, bucket)
+    assert bucket not in manager._reserved_names
+    assert manager.state_cache[bucket] == set()
+
+
+def test_is_bucketed_file_accepts_a_case_variant_directory_when_folding(
+        tmp_path, monkeypatch):
+    """`PDF/` and `pdf/` are one directory when the filesystem folds, so a
+    case-sensitive compare would re-plan the file into where it already is."""
+    monkeypatch.setattr(
+        organize_by_extension, "filesystem_folds_case", lambda directory: True)
+    bucket = tmp_path / "TXT" / "a00000"
+    bucket.mkdir(parents=True)
+    target = bucket / "a.txt"
+    target.write_text("x", encoding="utf-8")
+
+    assert is_bucketed_file(tmp_path, target) is True
+
+    monkeypatch.setattr(
+        organize_by_extension, "filesystem_folds_case", lambda directory: False)
+    assert is_bucketed_file(tmp_path, target) is False

@@ -657,9 +657,12 @@ def is_bucketed_file(
     # with a .doc suffix would slip through a structural-only check. The sniff
     # head_cache (oze-perf-04) keeps the cost to one read per file across the
     # whole run anyway.
-    return ext_dir == resolve_real_extension(
-        path, ctx=ctx, log_mismatch=False
-    )
+    # oze-plat-04: `pdf/` and `PDF/` are one directory on a case-folding
+    # filesystem, so a case-sensitive compare would re-plan a file into the
+    # directory it already sits in and skip it forever on the collision.
+    folds = filesystem_folds_case(root)
+    resolved = resolve_real_extension(path, ctx=ctx, log_mismatch=False)
+    return _name_key(ext_dir, folds) == _name_key(resolved, folds)
 
 
 def _scan_regular_path(
@@ -882,10 +885,65 @@ def _scan_bucket_indices(ext_dir: Path) -> dict[str, list[int]]:
     return by_prefix
 
 
-def bucket_file_names(bucket_path: Path) -> Set[str]:
+# oze-plat-04: one entry per probed directory — in practice the single run
+# root, so the cap is the number of roots a process organizes. Invalidated only
+# by `reset_case_fold_cache`, since a mounted filesystem cannot change its
+# case behaviour underneath a live run.
+_CASE_FOLD_CACHE: dict[Path, bool] = {}
+
+
+def _probe_case_folding(directory: Path) -> bool:
+    """Create one mixed-case file in `directory` and look for it lowercased."""
+    probe = directory / f"OzeCase{secrets.token_hex(8)}.probe"
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError:
+        # Unwritable or missing: assume the host default rather than fold
+        # names we could not verify.
+        return os.name == "nt"
+    try:
+        return probe.with_name(probe.name.lower()).exists()
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(probe)
+        except OSError:
+            pass
+
+
+def filesystem_folds_case(directory: Path) -> bool:
+    """Whether `directory`'s filesystem treats file names case-insensitively.
+
+    oze-plat-04: NTFS and the APFS default fold case while ext4 does not, and
+    `os.path.normcase` only models the Windows half of that — macOS needs a
+    real probe. Cached per directory; one probe file per run.
+    """
+    cached = _CASE_FOLD_CACHE.get(directory)
+    if cached is None:
+        cached = _probe_case_folding(directory)
+        _CASE_FOLD_CACHE[directory] = cached
+    return cached
+
+
+def reset_case_fold_cache() -> None:
+    """Public reset hook for :func:`filesystem_folds_case`."""
+    _CASE_FOLD_CACHE.clear()
+
+
+def _name_key(name: str, folds: bool) -> str:
+    """Bucket-membership key for `name` (oze-plat-04).
+
+    On a case-folding filesystem `readme.txt` and `README.txt` are one
+    directory entry, so they must share a key or the planner hands out a slot
+    the move cannot take.
+    """
+    return name.lower() if folds else name
+
+
+def bucket_file_names(bucket_path: Path, folds: bool = False) -> Set[str]:
     """Return the set of file names currently present in a bucket."""
     with _safe_scandir(bucket_path) as entries:
-        return {entry.name for entry in entries
+        return {_name_key(entry.name, folds) for entry in entries
                 if entry.is_file(follow_symlinks=False)}
 
 
@@ -912,6 +970,7 @@ def _find_reusable_bucket(
     indices: list[int],
     first_non_full_index: int = 0,
     bucket_size: int = BUCKET_SIZE,
+    folds: bool = False,
 ) -> BucketChoice:
     """Walk `indices` sorted, looking for an existing bucket with room and
     without a name clash on `filename` (oze-cx-01). Returns a
@@ -935,7 +994,7 @@ def _find_reusable_bucket(
         if index > next_expected:
             break                           # first gap: caller fills it
         bucket_path, full = _reusable_bucket_at_index(
-            ext_dir, prefix, filename, state_cache, index, bucket_size)
+            ext_dir, prefix, filename, state_cache, index, bucket_size, folds)
         if full:
             next_expected = index + 1
             first_non_full = index + 1
@@ -953,18 +1012,20 @@ def _reusable_bucket_at_index(
     state_cache: dict[Path, Set[str] | frozenset[str]],
     index: int,
     bucket_size: int,
+    folds: bool = False,
 ) -> tuple[Path | None, bool]:
     bucket_path = ext_dir / bucket_name(prefix, index)
     names = state_cache.get(bucket_path)
     if names is _BUCKET_FULL:
         return None, True
     if names is None:
-        names = bucket_file_names(bucket_path)
+        names = bucket_file_names(bucket_path, folds)
         state_cache[bucket_path] = names
     if len(names) >= bucket_size:
         state_cache[bucket_path] = _BUCKET_FULL
         return None, True
-    return (bucket_path if filename not in names else None), False
+    taken = _name_key(filename, folds) in names
+    return (bucket_path if not taken else None), False
 
 
 def _allocate_new_bucket(
@@ -991,6 +1052,7 @@ def choose_bucket(
     indices: list[int],
     first_non_full_index: int = 0,
     bucket_size: int = BUCKET_SIZE,
+    folds: bool = False,
 ) -> tuple[Path, int]:
     """Choose or create the bucket for `filename`, preferring gaps and
     existing rooms. Returns ``(bucket_path, first_non_full)`` where the
@@ -999,7 +1061,7 @@ def choose_bucket(
     (oze-cx-01)."""
     choice = _find_reusable_bucket(
         ext_dir, prefix, filename, state_cache, indices,
-        first_non_full_index, bucket_size)
+        first_non_full_index, bucket_size, folds)
     if choice.bucket is not None:
         return choice.bucket, choice.first_non_full
     bucket = _allocate_new_bucket(
@@ -1063,6 +1125,9 @@ class BucketManager:
     indices_cache: dict[tuple[Path, str], list[int]] = field(default_factory=dict)
     _first_non_full: dict[tuple[Path, str], int] = field(default_factory=dict)
     _reserved_names: dict[Path, set[str]] = field(default_factory=dict)
+    # oze-plat-04: probed from `root` on first use rather than at construction,
+    # so a manager built for a directory that does not exist yet still works.
+    _folds_case: bool | None = None
     # oze-obs-01: per-allocation counters surfaced in the end-of-run
     # debug line so the user can tune BUCKET_SIZE / spot pathological
     # name distributions. Incremented inside `choose` and `choose_bucket`.
@@ -1071,6 +1136,13 @@ class BucketManager:
         "bucket_reused": 0,
         "buckets_full": 0,
     })
+
+    @property
+    def folds_case(self) -> bool:
+        """Whether the destination filesystem folds name case (oze-plat-04)."""
+        if self._folds_case is None:
+            self._folds_case = filesystem_folds_case(self.root)
+        return self._folds_case
 
     def _indices_for(self, ext_dir: Path, prefix: str) -> list[int]:
         # Honour any pre-seeded entry in the legacy-shape view first so tests
@@ -1109,7 +1181,7 @@ class BucketManager:
         cursor = self._first_non_full.get(cursor_key, 0)
         bucket_path, new_cursor = choose_bucket(
             ext_dir, prefix, source.name, self.state_cache, indices, cursor,
-            self.bucket_size)
+            self.bucket_size, self.folds_case)
         self._first_non_full[cursor_key] = new_cursor
         names = self.state_cache[bucket_path]
         if not isinstance(names, set):  # _BUCKET_FULL frozenset sentinel (oze-cx-05)
@@ -1120,8 +1192,9 @@ class BucketManager:
             self.stats["new_bucket_allocated"] += 1
         else:
             self.stats["bucket_reused"] += 1
-        names.add(source.name)
-        self._reserved_names.setdefault(bucket_path, set()).add(source.name)
+        key = _name_key(source.name, self.folds_case)
+        names.add(key)
+        self._reserved_names.setdefault(bucket_path, set()).add(key)
         match = BUCKET_NAME_PATTERN.match(bucket_path.name)
         if match is None:
             raise RuntimeError(
@@ -1161,7 +1234,8 @@ class BucketManager:
         run. Callers must not call this for a preview move — nothing was
         written, so the reservation is still the only record of it.
         """
-        self._release_reserved_name(bucket_dir, source.name)
+        self._release_reserved_name(
+            bucket_dir, _name_key(source.name, self.folds_case))
 
     def release(self, source: Path, bucket_dir: Path) -> None:
         """Undo a planned reservation after a move is skipped."""
@@ -1174,12 +1248,13 @@ class BucketManager:
             return
         if not isinstance(names, set):
             return
-        names.discard(source.name)
+        names.discard(_name_key(source.name, self.folds_case))
         self._mark_bucket_non_full(bucket_dir)
-        self._release_reserved_name(bucket_dir, source.name)
+        self._release_reserved_name(
+            bucket_dir, _name_key(source.name, self.folds_case))
 
     def _restore_mutable_bucket_names(self, bucket_dir: Path) -> Set[str]:
-        names = bucket_file_names(bucket_dir)
+        names = bucket_file_names(bucket_dir, self.folds_case)
         names.update(self._reserved_names.get(bucket_dir, set()))
         self.state_cache[bucket_dir] = names
         return names
