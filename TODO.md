@@ -6,7 +6,7 @@ Proposed corrections / improvements. One table per review category. Format:
 
 Scan scope = root-directory `.py`/`.sh` files only (per AGENTS.md); cache/build paths are excluded. Tables sorted by `description` (each starts with `file:line`). Scripts are standalone — dedup findings are within-file only, never cross-file module extraction.
 
-Latest full rescan: 2026-08-01 — 10 root scripts / 22,397 lines; pinned lint and type gates clean; default-discovery Python 3.12 suite 1,981 passed, 1 skipped; total coverage 96.51%; 1,279 of 1,302 functions/methods meet the 80% function gate.
+Latest full verification: 2026-08-01 — 10 root scripts / 22,430 lines; pinned lint and type gates clean; CI Python 3.12 suite 2,120 passed, 1 skipped, 6 subtests passed, including 103 explicitly collected fuzz cases; total coverage 97.48%; all 1,304 functions/methods meet the 80% function gate.
 
 id prefix | file name
 --- | ---
@@ -269,7 +269,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ci-wire-01 | open | low | .github/workflows/ci.yml:43-44 — the step named “unit, regression, integration, and fuzz tests” runs default pytest discovery, which ignores `fuzz_*.py`; explicitly pass both fuzz globs or configure `python_files` so the advertised fuzz suite is wired into CI. | wiring gap — current CI passes its test step while explicit fuzz collection fails
 
 ## unused code
 

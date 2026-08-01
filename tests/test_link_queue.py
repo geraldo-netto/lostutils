@@ -2776,6 +2776,7 @@ def test_main_themed(tmp_path, monkeypatch):
     monkeypatch.setattr(ttk.Style, "theme_use", lambda self, *a, **k: None)
     created = {}
     real_tk = tk.Tk
+    real_app = link_queue.LinkQueueApp
 
     def fake_tk(*a, **k):
         r = real_tk(*a, **k)
@@ -2783,9 +2784,18 @@ def test_main_themed(tmp_path, monkeypatch):
         created["root"] = r
         return r
 
+    def fake_app(root):
+        app = real_app(root)
+        created["app"] = app
+        return app
+
     monkeypatch.setattr(tk, "Tk", fake_tk)
+    monkeypatch.setattr(link_queue, "LinkQueueApp", fake_app)
     monkeypatch.setattr(tk.Misc, "mainloop", lambda self, *a, **k: None, raising=False)
     link_queue.main([])
+    app = created.get("app")
+    if app is not None:
+        app._shutdown(timeout=2.0)
     r = created.get("root")
     if r is not None:
         try:
@@ -2800,6 +2810,7 @@ def test_main_smoke(tmp_path, monkeypatch):
     monkeypatch.setattr(link_queue, "STATE_FILE", str(tmp_path / "state.yaml"))
     created = {}
     real_tk = tk.Tk
+    real_app = link_queue.LinkQueueApp
 
     def fake_tk(*a, **k):
         root = real_tk(*a, **k)
@@ -2807,9 +2818,18 @@ def test_main_smoke(tmp_path, monkeypatch):
         created["root"] = root
         return root
 
+    def fake_app(root):
+        app = real_app(root)
+        created["app"] = app
+        return app
+
     monkeypatch.setattr(tk, "Tk", fake_tk)
+    monkeypatch.setattr(link_queue, "LinkQueueApp", fake_app)
     monkeypatch.setattr(tk.Misc, "mainloop", lambda self, *a, **k: None, raising=False)
     link_queue.main([])
+    app = created.get("app")
+    if app is not None:
+        app._shutdown(timeout=2.0)
     root = created.get("root")
     if root is not None:
         try:
