@@ -2238,11 +2238,6 @@ def parse_llm_events(text_output: str, file_path: Path, event_type: str) -> List
     return formatted_events
 
 
-def _decode_event_payload(clean_json: str) -> List[Any]:
-    decoded = _decode_event_payload_or_none(clean_json)
-    return decoded if decoded is not None else []
-
-
 def _llm_response_log_context(text: str) -> str:
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:12]
     excerpt = " ".join(text.split())[:LLM_RESPONSE_LOG_EXCERPT_CHARS]

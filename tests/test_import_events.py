@@ -367,7 +367,7 @@ def test_decode_event_payload_object_after_stray_open_bracket():
     # A non-JSON "[" appears before the real top-level object; the object must win.
     text = 'see [agenda] below: {"title": "Sync", "start": "2026-06-22"}'
 
-    parsed = import_events._decode_event_payload(text)
+    parsed = import_events._decode_event_payload_or_none(text)
 
     assert parsed == [{"title": "Sync", "start": "2026-06-22"}]
 
@@ -376,20 +376,20 @@ def test_decode_event_payload_list_before_object():
     # When a valid list precedes an object, the earliest valid payload wins.
     text = '[{"title": "A", "start": "2026-06-22"}] then {"title": "B"}'
 
-    parsed = import_events._decode_event_payload(text)
+    parsed = import_events._decode_event_payload_or_none(text)
 
     assert parsed == [{"title": "A", "start": "2026-06-22"}]
 
 
 def test_decode_event_payload_empty_on_garbage():
-    assert import_events._decode_event_payload("no json here") == []
-    assert import_events._decode_event_payload("[broken {also") == []
+    assert import_events._decode_event_payload_or_none("no json here") is None
+    assert import_events._decode_event_payload_or_none("[broken {also") is None
 
 
 def test_decode_event_payload_ignores_trailing_prose():
     text = '[{"title": "Sync", "start": "2026-06-22"}] Hope this helps! Let me know.'
 
-    assert import_events._decode_event_payload(text) == [
+    assert import_events._decode_event_payload_or_none(text) == [
         {"title": "Sync", "start": "2026-06-22"}
     ]
 
@@ -397,7 +397,7 @@ def test_decode_event_payload_ignores_trailing_prose():
 def test_decode_event_payload_nested_braces_in_title():
     text = '[{"title": "Release {v2} {final}", "start": "2026-06-22"}]'
 
-    parsed = import_events._decode_event_payload(text)
+    parsed = import_events._decode_event_payload_or_none(text)
 
     assert parsed[0]["title"] == "Release {v2} {final}"
 
@@ -406,7 +406,7 @@ def test_decode_event_payload_object_wins_when_before_list():
     # The earliest valid bracket position wins regardless of which bracket it is.
     text = '{"title": "First", "start": "2026-06-22"} [later]'
 
-    assert import_events._decode_event_payload(text) == [
+    assert import_events._decode_event_payload_or_none(text) == [
         {"title": "First", "start": "2026-06-22"}
     ]
 
@@ -415,7 +415,7 @@ def test_decode_event_payload_recovers_after_unparseable_earliest_bracket():
     # The earliest bracket fails to decode; the next one is tried.
     text = '{not json {"title": "Real", "start": "2026-06-22"}'
 
-    assert import_events._decode_event_payload(text) == [
+    assert import_events._decode_event_payload_or_none(text) == [
         {"title": "Real", "start": "2026-06-22"}
     ]
 
@@ -423,7 +423,7 @@ def test_decode_event_payload_recovers_after_unparseable_earliest_bracket():
 def test_decode_event_payload_object_with_inner_list():
     text = '{"title": "Conf", "tags": ["a", "b"], "start": "2026-06-22"}'
 
-    parsed = import_events._decode_event_payload(text)
+    parsed = import_events._decode_event_payload_or_none(text)
 
     assert parsed == [{"title": "Conf", "tags": ["a", "b"], "start": "2026-06-22"}]
 
@@ -602,7 +602,7 @@ def test_decode_event_payload_extracts_object_amid_noise(prefix, suffix, title):
     payload = json.dumps({"title": title, "start": "2026-06-22"})
     text = f"{prefix}{payload}{suffix}"
 
-    parsed = import_events._decode_event_payload(text)
+    parsed = import_events._decode_event_payload_or_none(text)
 
     assert isinstance(parsed, list)
     if "[" not in prefix and "{" not in prefix:
@@ -611,8 +611,8 @@ def test_decode_event_payload_extracts_object_amid_noise(prefix, suffix, title):
 
 @given(text=st.text(max_size=80))
 def test_decode_event_payload_never_raises(text):
-    result = import_events._decode_event_payload(text)
-    assert isinstance(result, list)
+    result = import_events._decode_event_payload_or_none(text)
+    assert result is None or isinstance(result, list)
 
 
 def test_parse_llm_events_keeps_end_and_location():

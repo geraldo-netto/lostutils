@@ -279,7 +279,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-unused-01 | open | low | import_events.py:2193 — `_decode_event_payload` has no production caller (parse_llm_events uses `_decode_event_payload_or_none`); only tests call it. Delete and point tests at the real function. | grep-proven test-only
 ie-unused-02 | open | low | import_events.py:2958 — `_ocr_image_bytes` has no production caller (OCR paths use `_ocr_image_path`/`_ocr_image_path_once`); only tests call it. Delete or wire. | grep-proven test-only
 ie-unused-03 | open | low | import_events.py:3302 — `_pdf_to_images` has no production caller; tests monkeypatch it while production renders via `_render_pdf_image_paths`, creating false coverage. Delete it and patch tests at the live seam. | dead + misleading tests
 ie-unused-04 | open | low | import_events.py:3333 — `_pdf_ocr_from_file` has no production caller because `extract_from_pdf` inlines render plus `_pdf_ocr_text_from_paths`. Delete or wire. | grep-proven dead
