@@ -93,11 +93,22 @@ def main() -> None:
         mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
 
     data = np.frombuffer(mm, dtype=np.uint8)
+    error = None
+    result = None
     try:
-        paths, file_equal, n_lines = group_duplicates(data)
+        result = group_duplicates(data)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+        error = str(exc)
+    del data
+    try:
+        mm.close()
+    finally:
+        if error is not None:
+            print(f"error: {error}", file=sys.stderr)
+            raise SystemExit(1)
+    if result is None:
+        raise RuntimeError("duplicate grouping produced no result")
+    paths, file_equal, n_lines = result
     if n_lines == 0:
         return
 

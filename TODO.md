@@ -134,7 +134,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-rel-03 | open | med | dedupl_numpy.py:21-24 — the mmap backing `np.frombuffer` is never closed, leaking a resource; an empty file also makes mmap raise. Close the array/view and mmap explicitly, and guard zero-length files. | resource; closing the original file descriptor does not invalidate the mmap
 dnv3-rel-01 | open | low | deduplicate-by-namev3.py:130-134 — word-token removal leaves whitespace artifacts (`"xxx alpha"` becomes `" alpha"`), so equivalent cleaned values become distance 1 instead of a self-collision. Normalize whitespace after removal. | normalization correctness
 hr-rel-32 | open | high | hash-recursive-ai5.py:1423-1470 — large files are declared duplicates after sampled windows only; files differing solely outside sampled bytes can be emitted as duplicates. Add a final full-file BLAKE3 confirmation or explicitly advertise approximate matches. | reproduced with equal 32-byte files except one unsampled byte
 ie-rel-13 | open | med | import_events.py:1859 — `_split_time_explicit` formats hour/minute/second without range validation, so values such as `24:99` enter table output and later disappear from ICS. Validate through `_format_normalized_time` and add adversarial boundary tests. | cross-format correctness

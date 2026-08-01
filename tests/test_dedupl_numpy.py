@@ -140,3 +140,27 @@ def test_group_duplicates_strips_crlf_record_terminator():
     assert paths == {b"/one", b"/two"}
     assert equal_files == 1
     assert record_count == 2
+
+
+def test_main_closes_mmap(monkeypatch, tmp_path, capfd):
+    source = tmp_path / "hashes.txt"
+    source.write_bytes(b"a" * 32 + b" /one\n")
+    real_mmap = dedupl_numpy.mmap.mmap
+    mappings = []
+
+    def tracked_mmap(*args, **kwargs):
+        mapping = real_mmap(*args, **kwargs)
+        mappings.append(mapping)
+        return mapping
+
+    monkeypatch.setattr(dedupl_numpy.mmap, "mmap", tracked_mmap)
+    monkeypatch.setattr(
+        dedupl_numpy.sys,
+        "argv",
+        ["dedupl_numpy.py", str(source)],
+    )
+
+    dedupl_numpy.main()
+
+    capfd.readouterr()
+    assert mappings[0].closed
