@@ -926,8 +926,9 @@ def test_expand_keys_to_paths_caps_at_alias_cap():
     aliases = {("d", i): [f"/p/{i}/{j}" for j in range(100)] for i in range(20)}
     keys = list(aliases)
     out = hr._expand_keys_to_paths(keys, aliases, cap=50)
-    # cap=50 + "+N more" sentinel = 51 entries total.
-    assert len(out) == 51
+    # The cap applies independently to each inode, preserving representatives.
+    assert len(out) == 20 * 51
+    assert hr._count_real_paths(out) == 20 * 50
     assert out[-1].startswith("+")
     assert "more" in out[-1]
 
@@ -952,15 +953,30 @@ def test_expand_keys_to_paths_extends_only_up_to_remaining_room():
     assert 10 in TrackingList.sliced_with
 
 
-def test_expand_keys_to_paths_room_zero_skips_extend():
-    # hr-scal-01: once `out` is already at the cap, later buckets contribute
-    # nothing to `out` but still count toward the total/sentinel.
+def test_expand_keys_to_paths_caps_each_inode_independently():
     aliases = {("d", 0): ["/a", "/b"], ("d", 1): ["/c", "/d", "/e"]}
     out = hr._expand_keys_to_paths([("d", 0), ("d", 1)], aliases, cap=2)
-    assert hr._count_real_paths(out) == 2
+    assert hr._count_real_paths(out) == 4
     assert out[:2] == ["/a", "/b"]
-    sentinel = next(p for p in out if isinstance(p, hr._MoreSentinel))
-    assert "3" in str(sentinel)   # 5 total - 2 cap
+    assert out[2:4] == ["/c", "/d"]
+    assert str(out[-1]) == "+1 more"
+
+
+def test_alias_cap_one_keeps_two_inode_representatives():
+    aliases = {("d", 0): ["/a", "/a2"], ("d", 1): ["/b", "/b2"]}
+    written = []
+
+    groups, paths = hr._emit_one_group(
+        "digest",
+        list(aliases),
+        aliases,
+        written.append,
+        hr.RunConfig(alias_cap=1),
+    )
+
+    assert (groups, paths) == (1, 2)
+    assert "/a\n" in written[0]
+    assert "/b\n" in written[0]
 
 
 def test_expand_keys_to_paths_under_cap_no_sentinel():

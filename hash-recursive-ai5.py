@@ -1190,12 +1190,8 @@ def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
     # no longer smuggled on `config`, so emit correctness no longer
     # silently depends on `_prepare_candidates` having mutated the config.
     out = []
-    total = 0
     for key in keys:
-        total += _append_capped_aliases(out, key, aliases, overflow, cap)
-    if total > cap:
-        _tick_alias_cap(config)
-        return out[:cap] + [_MoreSentinel(f"+{total - cap} more")]
+        out.extend(_expand_capped_aliases(key, aliases, overflow, cap, config))
     return out
 
 
@@ -1206,13 +1202,15 @@ def _expand_uncapped_aliases(keys, aliases) -> list:
     return out
 
 
-def _append_capped_aliases(out, key, aliases, overflow, cap: int) -> int:
+def _expand_capped_aliases(key, aliases, overflow, cap: int, config) -> list:
     paths = aliases.get(key, ())
-    room = cap - len(out)
-    if room > 0:
-        out.extend(paths[:room])
     elided = overflow.get(key, 0) if overflow is not None else 0
-    return len(paths) + elided
+    total = len(paths) + elided
+    out = list(paths[:cap])
+    if total > cap:
+        _tick_alias_cap(config)
+        out.append(_MoreSentinel(f"+{total - cap} more"))
+    return out
 
 
 def _tick_alias_cap(config) -> None:

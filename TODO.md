@@ -251,7 +251,6 @@ ie-api-02 | open | low | import_events.py:4154-4159 — `-o X --emit-ics X` is a
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-cli-02 | open | med | hash-recursive-ai5.py:1154-1244,1921-1926 — help says alias cap is per inode, but expansion caps the whole duplicate group; `alias_cap=1` suppresses a valid two-inode group entirely. Apply cap per inode and always retain two real representatives. | option behavior contradicts help
 rf-cli-02 | open | low | relocate_folder.py:2267-2278 — `--strict-cross-device` returns silently when source/destination stat fails, so a security-sensitive strict check fails open. Under strict mode, indeterminate device state must be an error. | fail-closed option contract
 rf-cli-03 | open | low | relocate_folder.py:2550 — `Plan.from_args(ns)` runs outside `main` error handling; invalid root-shaped source emits a raw traceback. Catch validation errors and return the documented clean CLI error. | actionable error surface
 
