@@ -137,7 +137,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
-lq-test-02 | open | low | link_queue.py:851 — `ConfigStore._coerce_bool` lacks coverage for supported boolean spellings and invalid values. | CI function coverage gate: 2/10 statements (20.00%) in run 30700525661
 lq-test-03 | open | low | link_queue.py:879 — `ConfigStore._coerce_string_scalars` lacks coverage for nested scalar coercion and invalid values. | CI function coverage gate: 8/12 statements (66.67%) in run 30700525661
 lq-test-04 | open | low | link_queue.py:2238 — `Dispatcher._taskkill_process_tree` lacks coverage for Windows taskkill failure reporting. | CI function coverage gate: 6/8 statements (75.00%) in run 30700525661
 lq-test-05 | open | low | link_queue.py:2343 — `Dispatcher._terminate_active_processes` lacks coverage for graceful termination and forced cleanup. | CI function coverage gate: 4/14 statements (28.57%) in run 30700525661

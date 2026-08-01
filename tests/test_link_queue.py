@@ -216,6 +216,21 @@ def test_yaml_roundtrip(tmp_path):
         assert link_queue._yaml_load(f) == {"a": 1, "b": ["x", "y"]}
 
 
+@pytest.mark.parametrize("value", [True, "true", " YES ", "1"])
+def test_config_store_coerce_bool_accepts_true_spellings(value):
+    assert link_queue.ConfigStore._coerce_bool("enabled", value, False)
+
+
+@pytest.mark.parametrize("value", [False, "false", " NO ", "0"])
+def test_config_store_coerce_bool_accepts_false_spellings(value):
+    assert not link_queue.ConfigStore._coerce_bool("enabled", value, True)
+
+
+def test_config_store_coerce_bool_warns_and_uses_default(capsys):
+    assert link_queue.ConfigStore._coerce_bool("enabled", "maybe", True)
+    assert "enabled='maybe' is invalid" in capsys.readouterr().err
+
+
 def test_normalize_paste_text():
     assert LinkQueueApp._normalize_paste_text("  a \n\n b \n") == "a\nb\n"
     assert LinkQueueApp._normalize_paste_text("   \n\n") == ""
