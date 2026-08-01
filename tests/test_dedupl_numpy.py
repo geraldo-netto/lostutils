@@ -83,3 +83,34 @@ def test_group_duplicates_derives_hash_width(hash_width):
     assert paths == {b"/one", b"/two"}
     assert equal_files == 1
     assert record_count == 2
+
+
+@pytest.mark.parametrize(
+    "raw,error",
+    [
+        (b"short\n", "separator"),
+        (b"\n", "separator"),
+        (b"a" * 32 + b" /one\n" + b"b" * 31 + b" /two\n", "same hash width"),
+    ],
+)
+def test_group_duplicates_rejects_invalid_record_layout(raw, error):
+    with pytest.raises(ValueError, match=error):
+        dedupl_numpy.group_duplicates(
+            dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
+        )
+
+
+def test_main_reports_invalid_record_layout(monkeypatch, tmp_path, capfd):
+    source = tmp_path / "hashes.txt"
+    source.write_bytes(b"short\n")
+    monkeypatch.setattr(
+        dedupl_numpy.sys,
+        "argv",
+        ["dedupl_numpy.py", str(source)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        dedupl_numpy.main()
+
+    assert exc.value.code == 1
+    assert "error:" in capfd.readouterr().err

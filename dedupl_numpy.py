@@ -22,20 +22,35 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _record_layout(
+    data: np.ndarray,
+    line_ends: np.ndarray,
+) -> tuple[np.ndarray, int, int]:
+    line_starts = np.empty(len(line_ends), dtype=np.int64)
+    line_starts[0] = 0
+    line_starts[1:] = line_ends[:-1] + 1
+
+    separators = np.flatnonzero(data[: line_ends[0]] == 0x20)
+    if len(separators) == 0:
+        raise ValueError("line 1 has no hash/path separator")
+    hash_width = int(separators[0])
+    path_offset = hash_width + HASH_SEPARATOR_WIDTH
+
+    line_lengths = line_ends - line_starts
+    if hash_width == 0 or np.any(line_lengths <= path_offset):
+        raise ValueError("every record must contain a hash and nonempty path")
+    if np.any(data[line_starts + hash_width] != 0x20):
+        raise ValueError("all records must use the same hash width")
+    return line_starts, hash_width, path_offset
+
+
 def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     """Return duplicate paths, redundant-file count, and record count."""
     nl = np.flatnonzero(data == 0x0A)
     if len(nl) == 0:
         return set(), 0, 0
 
-    separators = np.flatnonzero(data[: nl[0]] == 0x20)
-    hash_width = int(separators[0])
-    path_offset = hash_width + HASH_SEPARATOR_WIDTH
-
-    # Line starts: 0, then position after each newline.
-    line_starts = np.empty(len(nl), dtype=np.int64)
-    line_starts[0] = 0
-    line_starts[1:] = nl[:-1] + 1
+    line_starts, hash_width, path_offset = _record_layout(data, nl)
     n_lines = len(line_starts)
 
     # Build the hash slice via index broadcasting; view as fixed-width bytes.
@@ -68,7 +83,11 @@ def main() -> None:
         mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
 
     data = np.frombuffer(mm, dtype=np.uint8)
-    paths, file_equal, n_lines = group_duplicates(data)
+    try:
+        paths, file_equal, n_lines = group_duplicates(data)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     if n_lines == 0:
         return
 
