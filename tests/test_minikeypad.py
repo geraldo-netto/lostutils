@@ -2493,3 +2493,34 @@ def test_a_real_usb_error_is_still_reported_every_time(monkeypatch):
 
     assert len(logs) == 2
     assert all("device busy" in message for message in logs)
+
+
+# --- mkp-plat-02: named fonts are whole specs, not family names ------------
+
+
+def test_sized_named_font_keeps_the_named_font_family(app):
+    """A (family, size) tuple naming TkFixedFont asks for a family no platform
+    has, so every OS silently substitutes its own default."""
+    reference = minikeypad.tkfont.nametofont("TkFixedFont")
+    original_size = reference.cget("size")
+
+    fixed = minikeypad._sized_named_font("TkFixedFont", 9)
+
+    assert fixed.actual("family") == reference.actual("family")
+    assert fixed.actual("size") == 9
+    # Resizing a copy must not resize the named font every widget shares.
+    assert reference.cget("size") == original_size
+
+
+def test_sized_named_font_applies_weight(app):
+    bold = minikeypad._sized_named_font("TkDefaultFont", 10, "bold")
+
+    assert bold.actual("weight") == "bold"
+    assert bold.actual("size") == 10
+
+
+def test_log_pane_actually_uses_a_fixed_width_font(app):
+    got = minikeypad.tkfont.Font(font=app.log_box.cget("font"))
+    expected = minikeypad.tkfont.nametofont("TkFixedFont")
+
+    assert got.actual("family") == expected.actual("family")

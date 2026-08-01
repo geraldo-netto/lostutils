@@ -56,6 +56,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import ttk
 from tkinter import filedialog
 from tkinter import messagebox
@@ -170,6 +171,20 @@ COL_DISCONNECTED = "#c83232"
 # --------------------------------------------------------------------------- #
 #  USB / device layer (port of HidLib + the FormMain send routines)
 # --------------------------------------------------------------------------- #
+def _sized_named_font(name: str, size: int, weight: str = "normal"):
+    """A resized copy of Tk's named font `name`.
+
+    mkp-plat-02: a named font like "TkFixedFont" is a whole font spec, valid
+    only on its own. Inside a `(family, size)` tuple Tk reads it as a font
+    *family*, which no platform has, so each substitutes its own default —
+    the log pane renders proportional everywhere, in a different font per OS,
+    while looking like it asked for monospace.
+    """
+    spec = tkfont.nametofont(name).copy()
+    spec.configure(size=size, weight=weight)
+    return spec
+
+
 class KeypadDevice:
     """Thin pyusb wrapper around the keypad's HID OUT interface.
 
@@ -1174,8 +1189,9 @@ class App(tk.Tk):
         # main area then expands above it instead of squeezing the keypad.
         logf = ttk.LabelFrame(self, text="Log")
         logf.pack(fill="x", side="bottom", padx=6, pady=(0, 6))
-        self.log_box = scrolledtext.ScrolledText(logf, height=7, state="disabled",
-                                                 font=("TkFixedFont", 9))
+        self.log_box = scrolledtext.ScrolledText(
+            logf, height=7, state="disabled",
+            font=_sized_named_font("TkFixedFont", 9))
         self.log_box.pack(fill="both", expand=True, padx=4, pady=4)
 
         root = ttk.Frame(self, padding=6)
@@ -1187,7 +1203,7 @@ class App(tk.Tk):
 
         self.state_lbl = tk.Label(left, text="Not connected", width=22,
                                   bg=COL_DISCONNECTED, fg="white", relief="ridge",
-                                  font=("TkDefaultFont", 10, "bold"))
+                                  font=_sized_named_font("TkDefaultFont", 10, "bold"))
         self.state_lbl.pack(fill="x", pady=(0, 6))
 
         lf = ttk.LabelFrame(left, text="Layer")
