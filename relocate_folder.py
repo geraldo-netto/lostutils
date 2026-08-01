@@ -1000,14 +1000,6 @@ def _default_worker_count() -> int:
     return min(32, (os.cpu_count() or 1) + 4)
 
 
-# rf-conc-01: lots of small chown syscalls fan out well. The constant is
-# kept for backward compat with tests / external introspection; the live
-# value used by the pools is taken from `Plan.jobs` (defaults to
-# `_default_worker_count()`).
-_OWNERSHIP_WORKERS = _default_worker_count()
-_OWNERSHIP_INFLIGHT = _OWNERSHIP_WORKERS * 4  # bound on queued+running futures (rf-scal-03)
-
-
 def _positive_jobs(value: str) -> int:
     """argparse `type=` validator (rf-cli-01): reject `--jobs <= 0` with a clear
     CLI error instead of silently falling back to the default in _resolved_jobs
@@ -1102,8 +1094,8 @@ def _replicate_ownership(src: Path, dst: Path, *, jobs: int | None = None) -> No
 
     Pairs are streamed lazily from `_pair_walk` (rf-scal-03): on a tree with
     millions of entries we never materialise the full `(src, dst)` list, only
-    `_OWNERSHIP_INFLIGHT` pairs at a time. Unexpected exceptions are collected
-    and logged instead of being swallowed by the executor's iterator
+    `_inflight_cap(workers)` pairs at a time. Unexpected exceptions are
+    collected and logged instead of being swallowed by the executor's iterator
     (rf-conc-02); known `PermissionError` / `FileNotFoundError` paths inside
     `_chown_pair` continue to log-and-skip per-entry.
 

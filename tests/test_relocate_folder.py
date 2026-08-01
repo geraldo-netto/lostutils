@@ -498,7 +498,7 @@ def test_replicate_ownership_streams_lazily(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rf, "_pair_walk", spy_pair_walk)
     # Tight bound to force the wait-then-submit branch to be exercised.
-    monkeypatch.setattr(rf, "_OWNERSHIP_INFLIGHT", 4)
+    monkeypatch.setattr(rf, "_inflight_cap", lambda _workers: 4)
     rf._replicate_ownership(src, dst)
     assert spy["started"] == 41   # 40 files + src dir itself
 
