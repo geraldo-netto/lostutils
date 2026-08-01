@@ -45,6 +45,7 @@ import time
 import tkinter as tk
 from collections import namedtuple
 from datetime import datetime
+from functools import partial
 from tkinter import messagebox, scrolledtext, ttk
 from typing import Callable, TextIO, cast
 from urllib.parse import urlparse
@@ -214,15 +215,20 @@ def _sweep_temp_siblings(path: str) -> None:
     except OSError:
         return
     for name in names:
-        if not (name.startswith(prefix) and name.endswith(".tmp")):
-            continue
-        tmp = os.path.join(directory, name)
-        if not (os.path.isfile(tmp) or os.path.islink(tmp)):
+        tmp = _temporary_sibling_path(directory, prefix, name)
+        if tmp is None:
             continue
         try:
             os.unlink(tmp)
         except OSError:
             pass
+
+
+def _temporary_sibling_path(directory: str, prefix: str, name: str) -> "str | None":
+    if not name.startswith(prefix) or not name.endswith(".tmp"):
+        return None
+    path = os.path.join(directory, name)
+    return path if os.path.isfile(path) or os.path.islink(path) else None
 
 
 CONFIG_FILE = _resolve_state_path(CONFIG_FILE_NAME)
@@ -721,22 +727,22 @@ class ConfigStore(dict):
             return
         for k, v in user.items():
             if k == "protocols":
-                # lq-rel-01: a non-dict `protocols:` (null/list/scalar) must
-                # NOT overwrite the default protocols dict — doing so makes
-                # _normalize_config_schema crash on `cfg["protocols"].items()`
-                # at startup. Skip it so the built-in protocols survive.
-                if not isinstance(v, dict):
-                    print(
-                        f"[warn] config: ignoring non-dict 'protocols' "
-                        f"(got {type(v).__name__}); keeping defaults",
-                        file=sys.stderr,
-                    )
-                    continue
-                for name, pc in v.items():
-                    if isinstance(pc, dict):
-                        cfg["protocols"][name] = dict(pc)
-            else:
-                cfg[k] = v
+                ConfigStore._merge_protocol_config(cfg, v)
+                continue
+            cfg[k] = v
+
+    @staticmethod
+    def _merge_protocol_config(cfg: dict, protocols) -> None:
+        if not isinstance(protocols, dict):
+            print(
+                f"[warn] config: ignoring non-dict 'protocols' "
+                f"(got {type(protocols).__name__}); keeping defaults",
+                file=sys.stderr,
+            )
+            return
+        for name, protocol_config in protocols.items():
+            if isinstance(protocol_config, dict):
+                cfg["protocols"][name] = dict(protocol_config)
 
     @staticmethod
     def _normalize_protocols(cfg: dict) -> None:
@@ -1305,32 +1311,9 @@ class Dispatcher:
         out: list[QueueItem] = []
         dropped = 0
         for entry in raw:
-            if not isinstance(entry, dict):
-                dropped += 1
-                continue
-            # Decodes both plain keys and the base64 sidecars written
-            # for YAML-unsafe strings (rel-03); back-compatible with
-            # state files written before the sidecar existed.
-            url = _decode_state_field(entry, "url", "")
-            if not url:
-                dropped += 1
-                continue
-            # lq-rel-04: per-entry try/except so one malformed `extra`
-            # field doesn't discard the entire restored queue.
+            url = ""
             try:
-                extra_s = _decode_state_field(entry, "extra", "")
-                extra = ()
-                if extra_s:
-                    flat = shlex.split(extra_s)
-                    extra = tuple((flat[i], flat[i + 1])
-                                  for i in range(0, len(flat) - 1, 2))
-                out.append(QueueItem(
-                    url=url,
-                    protocol=_decode_state_field(entry, "protocol", ""),
-                    template=_decode_state_field(entry, "template", "echo {url}"),
-                    shell=bool(entry.get("shell", False)),
-                    extra=extra,
-                ))
+                item, url = cls._parse_state_entry(entry)
             except (ValueError, TypeError) as exc:
                 dropped += 1
                 print(
@@ -1338,6 +1321,11 @@ class Dispatcher:
                     f"({exc}); dropped, other entries preserved",
                     file=sys.stderr,
                 )
+                continue
+            if item is None:
+                dropped += 1
+                continue
+            out.append(item)
         if dropped:
             print(
                 f"[info] state[{key}]: dropped {dropped} unparseable "
@@ -1345,6 +1333,29 @@ class Dispatcher:
                 file=sys.stderr,
             )
         return out
+
+    @staticmethod
+    def _parse_state_entry(entry) -> "tuple[QueueItem | None, str]":
+        if not isinstance(entry, dict):
+            return None, ""
+        url = _decode_state_field(entry, "url", "")
+        if not url:
+            return None, ""
+        extra_s = _decode_state_field(entry, "extra", "")
+        extra = ()
+        if extra_s:
+            flat = shlex.split(extra_s)
+            extra = tuple(
+                (flat[index], flat[index + 1])
+                for index in range(0, len(flat) - 1, 2)
+            )
+        return QueueItem(
+            url=url,
+            protocol=_decode_state_field(entry, "protocol", ""),
+            template=_decode_state_field(entry, "template", "echo {url}"),
+            shell=bool(entry.get("shell", False)),
+            extra=extra,
+        ), url
 
     def _load_immediate_items(self, data: "dict | None" = None) -> "list[QueueItem]":
         """Read the persisted immediate-queue backlog (lq-rel-01). Returns []
@@ -1578,54 +1589,50 @@ class Dispatcher:
         while True:
             if stop_self.is_set():
                 return
-            # lq-dist-01: capture the queue object we get() from and call
-            # task_done() on that SAME object. _resize_immediate_queue_locked can
-            # swap self._immediate_q between the get and the task_done; calling
-            # task_done on the re-read (new) queue raises "task_done() called too
-            # many times" and kills the consumer.
-            # lq-conc-10: reserve the item — remove it from the queue AND publish
-            # it to _immediate_current — atomically under _immediate_lock, so
-            # _save_state's snapshot (which holds the same lock) never sees an
-            # item that is in neither the queue nor the in-flight slots. A
-            # non-blocking get_nowait keeps the lock hold short; an idle consumer
-            # waits outside the lock.
-            work_q = self._immediate_q
-            with self._immediate_lock:
-                try:
-                    item = work_q.get_nowait()
-                except queue.Empty:
-                    item = None
-                else:
-                    self._immediate_current[cid] = item
+            work_q, item = self._take_immediate_item(cid)
             if item is None:
-                if self.stop_event.is_set():
+                if self._wait_for_immediate_item(stop_self):
                     return
-                with self._immediate_cv:
-                    self._immediate_cv.wait_for(
-                        lambda: stop_self.is_set()
-                        or self.stop_event.is_set()
-                        or not self._immediate_q.empty(),
-                        timeout=0.5,
-                    )
                 continue
+            self._consume_immediate_item(cid, work_q, item)
+
+    def _take_immediate_item(self, cid: int):
+        # Capture the queue and publish its claimed item under one lock so state
+        # snapshots never observe a gap, even if a resize swaps the queue object.
+        work_q = self._immediate_q
+        with self._immediate_lock:
             try:
-                self._run_immediate_item(item)
-            except Exception as e:
-                # lq-mt-01: an exception escaping _run_immediate_item would
-                # otherwise kill this consumer thread permanently, silently
-                # shrinking the pool. Log and keep draining, like the queue
-                # worker loop.
-                # lq-mt-10: count it as a failure so a crashing immediate item
-                # stays visible in the metrics summary (it is otherwise neither a
-                # completion nor a failure).
-                self._record_metric("failures")
-                self._log(f"[immediate error] {item.protocol}: {item.url}: {e}")
-            finally:
-                with self._immediate_lock:
-                    self._immediate_current[cid] = None
-                work_q.task_done()
-                self._note_immediate_depth()
-                self._update_status()
+                item = work_q.get_nowait()
+            except queue.Empty:
+                return work_q, None
+            self._immediate_current[cid] = item
+        return work_q, item
+
+    def _wait_for_immediate_item(self, stop_self: threading.Event) -> bool:
+        if self.stop_event.is_set():
+            return True
+        with self._immediate_cv:
+            self._immediate_cv.wait_for(
+                lambda: stop_self.is_set()
+                or self.stop_event.is_set()
+                or not self._immediate_q.empty(),
+                timeout=0.5,
+            )
+        return stop_self.is_set() or self.stop_event.is_set()
+
+    def _consume_immediate_item(self, cid: int, work_q, item: QueueItem) -> None:
+        try:
+            self._run_immediate_item(item)
+        except Exception as exc:
+            # A bad item must remain visible without permanently shrinking the pool.
+            self._record_metric("failures")
+            self._log(f"[immediate error] {item.protocol}: {item.url}: {exc}")
+        finally:
+            with self._immediate_lock:
+                self._immediate_current[cid] = None
+            work_q.task_done()
+            self._note_immediate_depth()
+            self._update_status()
 
     def _ensure_immediate_pool(self) -> None:
         """Align the live consumer pool to `_immediate_pool_size` (conc-02 /
@@ -2106,44 +2113,48 @@ class Dispatcher:
         it on natural completion) or None when no timeout is configured."""
         if timeout <= 0:
             return None
-
-        def _terminate_tree() -> None:
-            try:
-                if hasattr(os, "killpg"):
-                    os.killpg(proc.pid, signal.SIGTERM)
-                else:
-                    proc.terminate()
-            except OSError:  # pragma: no cover - proc already exited
-                return
-
-        def _kill_tree() -> None:
-            try:
-                if hasattr(os, "killpg"):
-                    os.killpg(proc.pid, signal.SIGKILL)
-                else:
-                    proc.kill()
-            except OSError:  # pragma: no cover - proc already exited
-                pass
-
-        def _on_timeout() -> None:
-            setattr(proc, "_link_queue_timed_out", True)
-            self._record_metric("timeouts")
-            self._log(
-                f"[{label} timeout] {timeout}s expired, terminating  url={url}"
-            )
-            _terminate_tree()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:  # pragma: no cover - subprocess ignored SIGTERM
-                self._log(
-                    f"[{label} timeout] terminate ignored, killing  url={url}"
-                )
-                _kill_tree()
-
-        timer = threading.Timer(timeout, _on_timeout)
+        timer = threading.Timer(
+            timeout,
+            partial(self._on_command_timeout, proc, label, url, timeout),
+        )
         timer.daemon = True
         timer.start()
         return timer
+
+    @staticmethod
+    def _terminate_process_tree(proc) -> None:
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+        except OSError:  # pragma: no cover - proc already exited
+            pass
+
+    @staticmethod
+    def _kill_process_tree(proc) -> None:
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except OSError:  # pragma: no cover - proc already exited
+            pass
+
+    def _on_command_timeout(self, proc, label, url, timeout) -> None:
+        setattr(proc, "_link_queue_timed_out", True)
+        self._record_metric("timeouts")
+        self._log(
+            f"[{label} timeout] {timeout}s expired, terminating  url={url}"
+        )
+        self._terminate_process_tree(proc)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:  # pragma: no cover - subprocess ignored SIGTERM
+            self._log(
+                f"[{label} timeout] terminate ignored, killing  url={url}"
+            )
+            self._kill_process_tree(proc)
 
     def _command_log_verbosity(self) -> str:
         """Snapshot of `log_verbosity` config (lq-obs-01). Read once at
@@ -2420,27 +2431,46 @@ class Dispatcher:
         deadline = time.monotonic() + wait_seconds
         with self._dispatch_cv:
             while True:
-                if self.stop_event.is_set() or stop_self.is_set():
-                    return None
-                blocked, sleep_for = self._is_blocked()
-                if not blocked:
-                    item = self._try_claim_item(idx)
-                    if item is not None:
-                        return item
-                    # lq-perf-03: nothing claimable because every pending domain
-                    # is in failure cooldown — sleep until the soonest expiry
-                    # instead of re-polling at the 0.25s cadence for the whole
-                    # (up to 300s) cooldown. A cv notify (new item, config
-                    # change, cooldown trigger) still wakes us early.
-                    cool_wait = self._cooldown_wait_hint()
-                    if cool_wait is not None and cool_wait > 0:
-                        self._dispatch_cv.wait(timeout=cool_wait)
-                        continue
-                remaining = self._dispatch_wait_remaining(
-                    deadline, blocked, sleep_for)
-                if remaining <= 0:
-                    return None
-                self._dispatch_cv.wait(timeout=remaining)
+                item, finished = self._claim_after_wake(
+                    idx, stop_self, deadline)
+                if finished:
+                    return item
+
+    def _claim_after_wake(
+        self,
+        idx: int,
+        stop_self: threading.Event,
+        deadline: float,
+    ) -> "tuple[QueueItem | None, bool]":
+        if self.stop_event.is_set() or stop_self.is_set():
+            return None, True
+        blocked, sleep_for = self._is_blocked()
+        if not blocked:
+            item, cooldown_waited = self._claim_or_wait_for_cooldown(idx)
+            if item is not None:
+                return item, True
+            if cooldown_waited:
+                return None, False
+        remaining = self._dispatch_wait_remaining(deadline, blocked, sleep_for)
+        if remaining <= 0:
+            return None, True
+        self._dispatch_cv.wait(timeout=remaining)
+        return None, False
+
+    def _claim_or_wait_for_cooldown(
+        self,
+        idx: int,
+    ) -> "tuple[QueueItem | None, bool]":
+        item = self._try_claim_item(idx)
+        if item is not None:
+            return item, False
+        cool_wait = self._cooldown_wait_hint()
+        if cool_wait is None or cool_wait <= 0:
+            return None, False
+        # Sleep until the soonest domain cooldown expires; CV notifications for
+        # new work or config changes can still wake the dispatcher early.
+        self._dispatch_cv.wait(timeout=cool_wait)
+        return None, True
 
     def _try_claim_item(self, idx: int) -> "QueueItem | None":
         """Attempt to pop a claimable item for worker `idx`. Returns the
@@ -4409,31 +4439,37 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         reconstitutes the order without any per-row move() or full rebuild. The
         number/note is only pushed to Tcl when it differs from our cache
         (perf-06)."""
-        desired_iids = {d[0] for d in desired}
+        self._remove_stale_queue_rows(tree, {row[0] for row in desired})
+        prev_numbers = self._row_numbers
+        new_numbers: dict = {}
+        for pos, row in enumerate(desired):
+            iid, cached = self._apply_queue_row(
+                tree, pos, row, prev_numbers)
+            new_numbers[iid] = cached
+        self._row_numbers = new_numbers
+
+    @staticmethod
+    def _remove_stale_queue_rows(tree, desired_iids: set) -> None:
         for iid in tree.get_children():
             if iid not in desired_iids:
                 tree.delete(iid)
-        prev_numbers = self._row_numbers
-        new_numbers: dict = {}
-        for pos, (iid, idx_text, item, tags, note) in enumerate(desired):
-            cached = note if item is None else idx_text
-            new_numbers[iid] = cached
-            if tree.exists(iid):
-                if prev_numbers.get(iid) == cached:
-                    continue               # unchanged -> no Tcl call at all
-                if item is None:           # the "… N more" summary row
-                    tree.set(iid, "url", note)  # pragma: no cover - tree set with note text
-                else:
-                    tree.set(iid, "idx", idx_text)
-            elif item is None:
-                tree.insert("", pos, iid=iid, tags=tags,
-                            values=(idx_text, "", note, ""))
-            else:
-                tree.insert(
-                    "", pos, iid=iid, tags=tags,
-                    values=(idx_text, item.protocol, item.url,
-                            self._item_display(item)))
-        self._row_numbers = new_numbers
+
+    def _apply_queue_row(self, tree, pos: int, row, prev_numbers: dict):
+        iid, idx_text, item, tags, note = row
+        cached = note if item is None else idx_text
+        if tree.exists(iid):
+            if prev_numbers.get(iid) == cached:
+                return iid, cached
+            column, value = ("url", note) if item is None else ("idx", idx_text)
+            tree.set(iid, column, value)
+            return iid, cached
+        if item is None:
+            values = (idx_text, "", note, "")
+        else:
+            values = (
+                idx_text, item.protocol, item.url, self._item_display(item))
+        tree.insert("", pos, iid=iid, tags=tags, values=values)
+        return iid, cached
 
     def _render_limit(self) -> int:
         try:
@@ -4553,55 +4589,12 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         """
         if kind == "auto":
             kind = "text" if isinstance(widget, tk.Text) else "entry"  # pragma: no cover - widget kind detection: Text vs Entry
+        self._configure_text_selection(widget, kind)
+        do_copy = partial(self._text_edit_event, widget, "<<Copy>>")
+        do_cut = partial(self._text_edit_event, widget, "<<Cut>>")
+        do_paste = partial(self._text_edit_event, widget, "<<Paste>>")
+        do_select_all = partial(self._select_all_text, widget, kind)
 
-        # ---- Selection visibility on plain tk.Text (ttk handled at style) -
-        if kind == "text":
-            try:
-                widget.configure(
-                    selectbackground=self._tk_selection_bg,
-                    selectforeground=self._tk_selection_fg,
-                    inactiveselectbackground=self._tk_selection_bg,
-                )
-            except tk.TclError:  # pragma: no cover - Tk teardown defensive
-                pass
-
-        # ---- Helpers --------------------------------------------------------
-        def do_copy(_e=None):
-            try:
-                widget.event_generate("<<Copy>>")
-            except tk.TclError:  # pragma: no cover - Tk teardown defensive
-                pass
-            return "break"
-
-        def do_cut(_e=None):
-            try:
-                widget.event_generate("<<Cut>>")
-            except tk.TclError:  # pragma: no cover - Tk teardown defensive
-                pass
-            return "break"
-
-        def do_paste(_e=None):
-            try:
-                widget.event_generate("<<Paste>>")
-            except tk.TclError:  # pragma: no cover - Tk teardown defensive
-                pass
-            return "break"
-
-        def do_select_all(_e=None):
-            try:
-                if kind == "text":
-                    widget.tag_add("sel", "1.0", "end-1c")
-                    widget.mark_set("insert", "1.0")
-                    widget.see("insert")
-                else:
-                    entry = cast(tk.Entry, widget)  # kind != "text" => Entry/Spinbox
-                    entry.select_range(0, "end")
-                    entry.icursor("end")
-            except tk.TclError:  # pragma: no cover - Tk teardown defensive
-                pass
-            return "break"
-
-        # ---- Keyboard bindings -------------------------------------------
         # IMPORTANT: we deliberately do NOT bind <Control-Key-c|v|x>. Tk's
         # Text and Entry class bindings already handle these via the virtual
         # events <<Copy>>, <<Paste>>, <<Cut>>. Adding our own bindings on top
@@ -4626,35 +4619,79 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         menu.add_command(label="Paste",      accelerator="Ctrl+V", command=do_paste)
         menu.add_separator()
         menu.add_command(label="Select All", accelerator="Ctrl+A", command=do_select_all)
-
-        def show_menu(event):
-            # Make sure the widget gets focus so Cut/Copy/Paste have a target.
-            try:
-                widget.focus_set()
-            except tk.TclError:  # pragma: no cover - Tk teardown defensive
-                pass
-            # Disable items that can't apply right now.
-            try:
-                has_sel = bool(widget.tag_ranges("sel")) if kind == "text" \
-                    else cast(tk.Entry, widget).selection_present()
-            except (tk.TclError, AttributeError):
-                has_sel = False
-            # Read-only widgets refuse paste/cut; detect via 'state'.
-            try:
-                st = str(widget.cget("state"))
-            except tk.TclError:  # pragma: no cover - Tk teardown defensive
-                st = "normal"
-            editable = st not in ("disabled", "readonly")
-            menu.entryconfigure("Cut",   state=tk.NORMAL if (has_sel and editable) else tk.DISABLED)
-            menu.entryconfigure("Copy",  state=tk.NORMAL if has_sel else tk.DISABLED)
-            menu.entryconfigure("Paste", state=tk.NORMAL if editable else tk.DISABLED)
-            try:
-                menu.tk_popup(event.x_root, event.y_root)
-            finally:
-                menu.grab_release()
-
+        show_menu = partial(self._show_text_menu, widget, kind, menu)
         widget.bind("<Button-3>", show_menu)   # Linux/Windows right-click
         widget.bind("<Button-2>", show_menu)   # macOS right-click
+
+    def _configure_text_selection(self, widget, kind: str) -> None:
+        if kind != "text":
+            return
+        try:
+            widget.configure(
+                selectbackground=self._tk_selection_bg,
+                selectforeground=self._tk_selection_fg,
+                inactiveselectbackground=self._tk_selection_bg,
+            )
+        except tk.TclError:  # pragma: no cover - Tk teardown defensive
+            pass
+
+    @staticmethod
+    def _text_edit_event(widget, sequence: str, _event=None) -> str:
+        try:
+            widget.event_generate(sequence)
+        except tk.TclError:  # pragma: no cover - Tk teardown defensive
+            pass
+        return "break"
+
+    @staticmethod
+    def _select_all_text(widget, kind: str, _event=None) -> str:
+        try:
+            if kind == "text":
+                widget.tag_add("sel", "1.0", "end-1c")
+                widget.mark_set("insert", "1.0")
+                widget.see("insert")
+            else:
+                entry = cast(tk.Entry, widget)
+                entry.select_range(0, "end")
+                entry.icursor("end")
+        except tk.TclError:  # pragma: no cover - Tk teardown defensive
+            pass
+        return "break"
+
+    @staticmethod
+    def _text_widget_has_selection(widget, kind: str) -> bool:
+        try:
+            if kind == "text":
+                return bool(widget.tag_ranges("sel"))
+            return bool(cast(tk.Entry, widget).selection_present())
+        except (tk.TclError, AttributeError):
+            return False
+
+    @staticmethod
+    def _text_widget_editable(widget) -> bool:
+        try:
+            state = str(widget.cget("state"))
+        except tk.TclError:  # pragma: no cover - Tk teardown defensive
+            state = "normal"
+        return state not in ("disabled", "readonly")
+
+    def _show_text_menu(self, widget, kind: str, menu, event) -> None:
+        try:
+            widget.focus_set()
+        except tk.TclError:  # pragma: no cover - Tk teardown defensive
+            pass
+        has_selection = self._text_widget_has_selection(widget, kind)
+        editable = self._text_widget_editable(widget)
+        menu.entryconfigure(
+            "Cut", state=tk.NORMAL if has_selection and editable else tk.DISABLED)
+        menu.entryconfigure(
+            "Copy", state=tk.NORMAL if has_selection else tk.DISABLED)
+        menu.entryconfigure(
+            "Paste", state=tk.NORMAL if editable else tk.DISABLED)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
 
     def _make_text_readonly(self, widget) -> None:
         """Make a tk.Text behave as read-only WITHOUT setting state=DISABLED.
