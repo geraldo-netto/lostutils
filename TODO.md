@@ -249,7 +249,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-adapt-01 | open | med | dedupl_numpy.py:36 — hash width is hardcoded as `np.arange(32)` + `.view("S32")`, silently assuming 32-char MD5 hex; a SHA-1/SHA-256 hash file is mis-grouped with no error. Derive the width from the first line or expose it as a constant/flag. | magic-number / hardcoded assumption
 dnv3-adapt-01 | open | low | deduplicate-by-namev3.py:196 — output rows hardcode a literal `;` in the f-strings (also :263) instead of the `OUTPUT_DELIMITER` constant (:41) used to derive REPLACEMENTS/cleanup stripping; changing the constant would strip the new delimiter during cleanup but keep emitting `;`, desyncing input-cleaning from output format. Use `OUTPUT_DELIMITER` in both f-strings. | adaptability / code duplication — single source of truth for the delimiter
 
 ## business / design patterns / DDD

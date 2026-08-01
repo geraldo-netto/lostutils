@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Vectorized via numpy. mmap the file, find newline positions in one
-SIMD pass, build a (n_lines, 32) view of hash bytes, and call np.unique
+SIMD pass, build a fixed-width view of hash bytes, and call np.unique
 to do the grouping in C. The only per-line Python work is the final
 path extraction (variable-width slicing isn't naturally vectorizable)."""
 from __future__ import annotations
@@ -11,9 +11,7 @@ import sys
 
 import numpy as np
 
-HASH_WIDTH = 32
 HASH_SEPARATOR_WIDTH = 1
-PATH_OFFSET = HASH_WIDTH + HASH_SEPARATOR_WIDTH
 
 
 def _parse_args() -> argparse.Namespace:
@@ -30,6 +28,10 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     if len(nl) == 0:
         return set(), 0, 0
 
+    separators = np.flatnonzero(data[: nl[0]] == 0x20)
+    hash_width = int(separators[0])
+    path_offset = hash_width + HASH_SEPARATOR_WIDTH
+
     # Line starts: 0, then position after each newline.
     line_starts = np.empty(len(nl), dtype=np.int64)
     line_starts[0] = 0
@@ -37,10 +39,10 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     n_lines = len(line_starts)
 
     # Build the hash slice via index broadcasting; view as fixed-width bytes.
-    hash_idx = line_starts[:, None] + np.arange(HASH_WIDTH)
+    hash_idx = line_starts[:, None] + np.arange(hash_width)
     hashes = (
         np.ascontiguousarray(data[hash_idx])
-        .view(f"S{HASH_WIDTH}")
+        .view(f"S{hash_width}")
         .ravel()
     )
 
@@ -53,7 +55,7 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
 
     # Path extraction is variable-width → list comprehension.
     paths = {
-        bytes(data[line_starts[i] + PATH_OFFSET : nl[i]])
+        bytes(data[line_starts[i] + path_offset : nl[i]])
         for i in dup_line_indices.tolist()
     }
     return paths, file_equal, n_lines

@@ -69,3 +69,17 @@ def test_group_duplicates_is_pure():
     assert paths == {b"/one", b"/two"}
     assert equal_files == 1
     assert record_count == 2
+
+
+@pytest.mark.parametrize("hash_width", [40, 64])
+def test_group_duplicates_derives_hash_width(hash_width):
+    digest = b"a" * hash_width
+    raw = digest + b" /one\n" + digest + b" /two\n"
+
+    paths, equal_files, record_count = dedupl_numpy.group_duplicates(
+        dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
+    )
+
+    assert paths == {b"/one", b"/two"}
+    assert equal_files == 1
+    assert record_count == 2
