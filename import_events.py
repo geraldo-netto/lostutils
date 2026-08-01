@@ -1427,38 +1427,52 @@ def extract_from_ics(file_path: Path, default_tz: Optional[str] = None) -> List[
     from icalendar import Calendar
 
     events: List[Dict[str, Any]] = []
+    gcal = Calendar.from_ical(_read_ics_text(file_path))
+    for component in gcal.walk():
+        event = _event_from_ics_component(component, file_path, default_tz)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _read_ics_text(file_path: Path) -> str:
     with open(file_path, "rb") as f:
         raw = f.read(MAX_ICS_BYTES + 1)
-        if len(raw) > MAX_ICS_BYTES:
-            logger.warning("Truncating %s to %d bytes for ICS extraction.",
-                           file_path.name, MAX_ICS_BYTES)
-            raw = raw[:MAX_ICS_BYTES]
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            # Mirror icalendar's own bytes fallback so latin-1 / other
-            # non-UTF-8 ICS files are not silently dropped on a decode error.
-            text = raw.decode("iso-8859-1")
-        gcal = Calendar.from_ical(text)
-        for component in gcal.walk():
-            if component.name != "VEVENT":
-                continue
-            dtstart_obj = component.get("dtstart")
-            if not (dtstart_obj and hasattr(dtstart_obj, "dt")):
-                continue
-            summary = component.get("summary")
-            dtend_obj = component.get("dtend")
-            location = component.get("location")
-            events.append({
-                "title": str(summary) if summary else "No Title",
-                "start": normalize_event_date(_apply_default_tz(dtstart_obj.dt, default_tz)),
-                "end": (normalize_event_date(_apply_default_tz(dtend_obj.dt, default_tz))
-                        if dtend_obj and hasattr(dtend_obj, "dt") else ""),
-                "location": str(location) if location else "",
-                "source": file_path.name,
-                "type": "ICS",
-            })
-    return events
+    if len(raw) > MAX_ICS_BYTES:
+        logger.warning("Truncating %s to %d bytes for ICS extraction.",
+                       file_path.name, MAX_ICS_BYTES)
+        raw = raw[:MAX_ICS_BYTES]
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        # Mirror icalendar's fallback so non-UTF-8 files are not dropped.
+        return raw.decode("iso-8859-1")
+
+
+def _event_from_ics_component(
+    component: Any,
+    file_path: Path,
+    default_tz: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if component.name != "VEVENT":
+        return None
+    dtstart_obj = component.get("dtstart")
+    if not (dtstart_obj and hasattr(dtstart_obj, "dt")):
+        return None
+    summary = component.get("summary")
+    dtend_obj = component.get("dtend")
+    location = component.get("location")
+    end = ""
+    if dtend_obj and hasattr(dtend_obj, "dt"):
+        end = normalize_event_date(_apply_default_tz(dtend_obj.dt, default_tz))
+    return {
+        "title": str(summary) if summary else "No Title",
+        "start": normalize_event_date(_apply_default_tz(dtstart_obj.dt, default_tz)),
+        "end": end,
+        "location": str(location) if location else "",
+        "source": file_path.name,
+        "type": "ICS",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2210,14 +2224,19 @@ def _decode_event_payload_or_none(clean_json: str) -> Optional[List[Any]]:
             parsed, _end = decoder.raw_decode(clean_json[idx:])
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, list):
-            return parsed
-        if isinstance(parsed, dict):
-            events = parsed.get("events")
-            if isinstance(events, list):
-                return events
-            return [parsed]
+        events = _events_from_decoded_payload(parsed)
+        if events is not None:
+            return events
     return None
+
+
+def _events_from_decoded_payload(parsed: Any) -> Optional[List[Any]]:
+    if isinstance(parsed, list):
+        return parsed
+    if not isinstance(parsed, dict):
+        return None
+    events = parsed.get("events")
+    return events if isinstance(events, list) else [parsed]
 
 
 SYSTEM_PROMPT = "You are a professional assistant that extracts calendar events into JSON format."
@@ -2566,20 +2585,35 @@ def _merge_text_blocks(blocks: List[str], max_chars: int = MAX_CONTENT_CHARS) ->
     merged: List[str] = []
     primary_seen = False
     for block in blocks:
-        lines = [" ".join(raw_line.split()) for raw_line in block.splitlines()]
-        lines = [line for line in lines if line]
-        if not lines:
-            continue
-        if not primary_seen:
-            primary_seen = True
-            merged.extend(lines)
-            seen.update(line.casefold() for line in lines)
-            continue
-        for line in lines:
-            if line.casefold() not in seen:
-                seen.add(line.casefold())
-                merged.append(line)
+        lines = _normalized_text_lines(block)
+        primary_seen = _merge_normalized_lines(
+            lines, merged, seen, primary_seen)
     return "\n".join(merged)[:max_chars]
+
+
+def _normalized_text_lines(block: str) -> List[str]:
+    lines = [" ".join(raw_line.split()) for raw_line in block.splitlines()]
+    return [line for line in lines if line]
+
+
+def _merge_normalized_lines(
+    lines: List[str],
+    merged: List[str],
+    seen: set,
+    primary_seen: bool,
+) -> bool:
+    if not lines:
+        return primary_seen
+    if not primary_seen:
+        merged.extend(lines)
+        seen.update(line.casefold() for line in lines)
+        return True
+    for line in lines:
+        folded = line.casefold()
+        if folded not in seen:
+            seen.add(folded)
+            merged.append(line)
+    return True
 
 
 def _paddle_texts_from_dict(value: Dict[Any, Any]) -> List[str]:
@@ -3344,6 +3378,125 @@ def _pdf_ocr_from_file(
         return _pdf_ocr_text_from_paths(image_paths, config, language, language_chain, file_path.name)
 
 
+class _PdfRenderer:
+    def __init__(
+        self,
+        file_path: Path,
+        config: ModelConfig,
+        output_dir: Path,
+        stage_failures: List[Tuple[str, Exception]],
+    ) -> None:
+        self.file_path = file_path
+        self.config = config
+        self.output_dir = output_dir
+        self.stage_failures = stage_failures
+        self.image_paths: List[Path] = []
+
+    def __call__(self) -> List[Path]:
+        if not self.image_paths:
+            self.image_paths = _safe_pdf_stage(
+                self.config,
+                self.file_path,
+                "pdf_render",
+                lambda: _render_pdf_image_paths(
+                    self.file_path, self.output_dir, self.config),
+                [],
+                self.stage_failures,
+            )
+        return self.image_paths
+
+
+def _pdf_ocr_options(config: ModelConfig, ocr_chain: Tuple[str, ...]) -> Dict[str, Any]:
+    return {
+        "ocr_chain": ocr_chain,
+        "ocr_engine": config.ocr_engine,
+        "paddle_ocr_device": config.paddle_ocr_device,
+        "pdf_vision_dpi": config.pdf_vision_dpi,
+        "pdf_vision_pages": config.pdf_vision_max_pages,
+        "tesseract_path": config.tesseract_path,
+        "tesseract_psm": config.tesseract_psm,
+    }
+
+
+def _pdf_ocr_text(
+    file_path: Path,
+    pdf_text: str,
+    config: ModelConfig,
+    render_once: Callable[[], List[Path]],
+    stage_failures: List[Tuple[str, Exception]],
+) -> str:
+    if not _should_pdf_ocr(config, pdf_text):
+        logger.info("Skipping PDF OCR for %s: mode=%s, parsed text chars=%d",
+                    file_path.name, config.pdf_ocr_mode, len(pdf_text.strip()))
+        return ""
+    ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, config)
+    ocr_language = ocr_chain[0]
+    _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
+    _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, config.ocr_language_score)
+    options = _pdf_ocr_options(config, ocr_chain)
+    cached = _read_stage_cache_text(config, file_path, "pdf_ocr", options)
+    if cached is not None:
+        return cached
+    text = _safe_pdf_stage(
+        config,
+        file_path,
+        "pdf_ocr",
+        lambda: _pdf_ocr_text_from_paths(
+            render_once(), config, ocr_language, ocr_chain, file_path.name),
+        "",
+        stage_failures,
+    )
+    _write_stage_cache_text(config, file_path, "pdf_ocr", options, text)
+    return text
+
+
+def _pdf_text_events(
+    file_path: Path,
+    pdf_text: str,
+    ocr_text: str,
+    config: ModelConfig,
+    llm_client: Optional[Any],
+) -> Optional[List[Dict[str, Any]]]:
+    text_budget = config.text_budget_chars()
+    text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
+    event_type = "PDF/OCR" if ocr_text.strip() else "PDF"
+    layout_events = _layout_events_from_text(text, file_path, event_type) if text.strip() else []
+    if not (_should_use_pdf_text(config, pdf_text, ocr_text) or layout_events):
+        return None
+    language, source = _language_for_text_with_source(text, config)
+    _log_language_preanalysis(file_path, "PDF merged text", language, source)
+    prepared = _prepare_text_for_llm(text, text_budget)
+    llm_events = _run_text_llm(
+        prepared, language, file_path, event_type, llm_client, config)
+    return _merge_layout_events(llm_events, layout_events, config)
+
+
+def _pdf_vision_events(
+    file_path: Path,
+    config: ModelConfig,
+    llm_client: Optional[Any],
+    renderer: _PdfRenderer,
+    stage_failures: List[Tuple[str, Exception]],
+) -> List[Dict[str, Any]]:
+    image_paths = renderer()
+    language, source = _language_for_text_with_source("", config)
+    _log_language_preanalysis(file_path, "PDF vision", language, source)
+    events: List[Dict[str, Any]] = []
+    for image_path in image_paths:
+        events.extend(_run_llm(
+            _image_messages(image_path, language, config),
+            file_path, "PDF/Vision", llm_client, config,
+        ))
+    if not image_paths and stage_failures:
+        failed_stages = ", ".join(stage for stage, _exc in stage_failures)
+        _record_extraction_failure(
+            file_path,
+            stage_failures[0][1],
+            f"PDF recovery exhausted after stage(s) {failed_stages} for",
+        )
+    return events
+
+
 def extract_from_pdf(
     file_path: Path,
     llm_client: Optional[Any] = None,
@@ -3366,75 +3519,16 @@ def extract_from_pdf(
     language, source = _language_for_text_with_source(pdf_text, runtime_config)
     _log_language_preanalysis(file_path, "PDF text", language, source)
     with tempfile.TemporaryDirectory(prefix="import-events-pdf-") as tmp_dir:
-        image_paths: List[Path] = []
-
-        def render_once() -> List[Path]:
-            nonlocal image_paths
-            if not image_paths:
-                image_paths = _safe_pdf_stage(
-                    runtime_config, file_path, "pdf_render",
-                    lambda: _render_pdf_image_paths(file_path, Path(tmp_dir), runtime_config),
-                    [],
-                    stage_failures,
-                )
-            return image_paths
-
-        ocr_text = ""
-        if _should_pdf_ocr(runtime_config, pdf_text):
-            ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, runtime_config)
-            ocr_language = ocr_chain[0]
-            _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
-            _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, runtime_config.ocr_language_score)
-            ocr_options = {
-                "ocr_chain": ocr_chain,
-                "ocr_engine": runtime_config.ocr_engine,
-                "paddle_ocr_device": runtime_config.paddle_ocr_device,
-                "pdf_vision_dpi": runtime_config.pdf_vision_dpi,
-                "pdf_vision_pages": runtime_config.pdf_vision_max_pages,
-                "tesseract_path": runtime_config.tesseract_path,
-                "tesseract_psm": runtime_config.tesseract_psm,
-            }
-            cached_ocr = _read_stage_cache_text(runtime_config, file_path, "pdf_ocr", ocr_options)
-            if cached_ocr is not None:
-                ocr_text = cached_ocr
-            else:
-                ocr_text = _safe_pdf_stage(
-                    runtime_config, file_path, "pdf_ocr",
-                    lambda: _pdf_ocr_text_from_paths(
-                        render_once(), runtime_config, ocr_language, ocr_chain, file_path.name),
-                    "",
-                    stage_failures,
-                )
-                _write_stage_cache_text(runtime_config, file_path, "pdf_ocr", ocr_options, ocr_text)
-        else:
-            logger.info("Skipping PDF OCR for %s: mode=%s, parsed text chars=%d",
-                        file_path.name, runtime_config.pdf_ocr_mode, len(pdf_text.strip()))
-        text = _merge_text_blocks([pdf_text, ocr_text], text_budget)
-        event_type = "PDF/OCR" if ocr_text.strip() else "PDF"
-        layout_events = _layout_events_from_text(text, file_path, event_type) if text.strip() else []
-        if _should_use_pdf_text(runtime_config, pdf_text, ocr_text) or layout_events:
-            language, source = _language_for_text_with_source(text, runtime_config)
-            _log_language_preanalysis(file_path, "PDF merged text", language, source)
-            prepared = _prepare_text_for_llm(text, text_budget)
-            llm_events = _run_text_llm(prepared, language, file_path, event_type,
-                                       llm_client, runtime_config)
-            return _merge_layout_events(llm_events, layout_events, runtime_config)
-
-        events: List[Dict[str, Any]] = []
-        render_once()
-        language, source = _language_for_text_with_source("", runtime_config)
-        _log_language_preanalysis(file_path, "PDF vision", language, source)
-        for image_path in image_paths:
-            events.extend(_run_llm(_image_messages(image_path, language, runtime_config),
-                                   file_path, "PDF/Vision", llm_client, runtime_config))
-        if not image_paths and stage_failures:
-            failed_stages = ", ".join(stage for stage, _exc in stage_failures)
-            _record_extraction_failure(
-                file_path,
-                stage_failures[0][1],
-                f"PDF recovery exhausted after stage(s) {failed_stages} for",
-            )
-        return events
+        renderer = _PdfRenderer(
+            file_path, runtime_config, Path(tmp_dir), stage_failures)
+        ocr_text = _pdf_ocr_text(
+            file_path, pdf_text, runtime_config, renderer, stage_failures)
+        text_events = _pdf_text_events(
+            file_path, pdf_text, ocr_text, runtime_config, llm_client)
+        if text_events is not None:
+            return text_events
+        return _pdf_vision_events(
+            file_path, runtime_config, llm_client, renderer, stage_failures)
 
 
 # --------------------------------------------------------------------------- #
@@ -3547,20 +3641,7 @@ def _feed_file_queue(
     error: Optional[BaseException] = None
     try:
         for file in files:
-            # ie-rel-01: only count a file once its enqueue actually succeeds.
-            # Incrementing before the put (the old enumerate-based count) let a
-            # stop between increment and a successful put inflate `expected`, so
-            # the consumer's `completed < expected` loop waited forever on a
-            # result that was never produced.
-            put_ok = False
-            while not stop_event.is_set():
-                try:
-                    work_queue.put((count, file), timeout=0.1)
-                    put_ok = True
-                    break
-                except queue.Full:
-                    continue
-            if not put_ok:
+            if not _put_file_work(work_queue, stop_event, count, file):
                 break
             count += 1
     except BaseException as exc:
@@ -3568,14 +3649,44 @@ def _feed_file_queue(
         stop_event.set()
     finally:
         done_queue.put((None, count, error))
-        for _ in range(workers):
-            while True:
-                try:
-                    work_queue.put(None, timeout=0.1)
-                    break
-                except queue.Full:
-                    if stop_event.is_set():
-                        break
+        _signal_file_workers(work_queue, stop_event, workers)
+
+
+def _put_file_work(
+    work_queue: queue.Queue,
+    stop_event: threading.Event,
+    index: int,
+    file: Path,
+) -> bool:
+    while not stop_event.is_set():
+        try:
+            work_queue.put((index, file), timeout=0.1)
+            return True
+        except queue.Full:
+            continue
+    return False
+
+
+def _signal_file_workers(
+    work_queue: queue.Queue,
+    stop_event: threading.Event,
+    workers: int,
+) -> None:
+    for _ in range(workers):
+        _put_worker_sentinel(work_queue, stop_event)
+
+
+def _put_worker_sentinel(
+    work_queue: queue.Queue,
+    stop_event: threading.Event,
+) -> None:
+    while True:
+        try:
+            work_queue.put(None, timeout=0.1)
+            return
+        except queue.Full:
+            if stop_event.is_set():
+                return
 
 
 def _join_workers(
@@ -3628,31 +3739,145 @@ def _collect_file_results(
         try:
             index, events, exc = done_queue.get(timeout=1.0)
         except queue.Empty:
-            # ie-rel-10: a worker wedged in the uncancellable native LLM call
-            # never produces a result, so without this bound the loop waits
-            # forever. Once a stall is flagged and NO completion has arrived
-            # for the give-up window (live workers still draining LLM-free
-            # files keep resetting it), abandon the wedged work and return
-            # what we have.
-            if (stall_event.is_set() and
-                    time.monotonic() - last_progress > WORKER_STALL_GIVEUP_SECONDS):
-                logger.error(
-                    "LLM stall unrecoverable: %d/%s file(s) done before the "
-                    "remaining worker(s) wedged in an uncancellable native "
-                    "call; returning partial results.", completed, expected)
-                stop_event.set()
+            if _abandon_stalled_results(
+                    stall_event, stop_event, last_progress, completed, expected):
                 return
             continue
         last_progress = time.monotonic()
         if index is None:
-            expected = events
-            if exc is not None:
-                raise exc
+            expected = _feeder_result_count(events, exc)
             continue
         completed += 1
-        if exc is not None:
-            raise exc
-        results[index] = events
+        _store_file_result(results, index, events, exc)
+
+
+def _abandon_stalled_results(
+    stall_event: threading.Event,
+    stop_event: threading.Event,
+    last_progress: float,
+    completed: int,
+    expected: Optional[int],
+) -> bool:
+    elapsed = time.monotonic() - last_progress
+    if not stall_event.is_set() or elapsed <= WORKER_STALL_GIVEUP_SECONDS:
+        return False
+    logger.error(
+        "LLM stall unrecoverable: %d/%s file(s) done before the remaining "
+        "worker(s) wedged in an uncancellable native call; returning partial "
+        "results.", completed, expected)
+    stop_event.set()
+    return True
+
+
+def _feeder_result_count(events: Any, exc: Optional[BaseException]) -> int:
+    if exc is not None:
+        raise exc
+    return int(events)
+
+
+def _store_file_result(
+    results: Dict[int, List[Dict[str, Any]]],
+    index: int,
+    events: List[Dict[str, Any]],
+    exc: Optional[BaseException],
+) -> None:
+    if exc is not None:
+        raise exc
+    results[index] = events
+
+
+class _FileWorkerPool:
+    def __init__(
+        self,
+        files: Iterable[Path],
+        runtime_config: ModelConfig,
+        llm_client: Optional[Any],
+        default_tz: Optional[str],
+    ) -> None:
+        self.files = files
+        self.runtime_config = runtime_config
+        self.llm_client = llm_client
+        self.default_tz = default_tz
+        self.workers = max(1, runtime_config.workers)
+        self.work_queue: queue.Queue = queue.Queue(maxsize=max(1, self.workers * 2))
+        self.done_queue: queue.Queue = queue.Queue()
+        self.stop_event = threading.Event()
+        self.stall_event = threading.Event()
+        self.results: Dict[int, List[Dict[str, Any]]] = {}
+        self.threads: List[threading.Thread] = []
+        self.threads_lock = threading.Lock()
+        self.next_worker_id = 0
+        self.max_replacements = self.workers
+        self.feeder: Optional[threading.Thread] = None
+
+    def start_worker(self, reason: str = "") -> None:
+        if self.stop_event.is_set():
+            return
+        with self.threads_lock:
+            self.next_worker_id += 1
+            name = f"import-events-worker-{self.next_worker_id}"
+            thread = threading.Thread(
+                target=_file_worker,
+                args=(
+                    self.work_queue, self.done_queue, self.stop_event,
+                    self.runtime_config, self.llm_client, self.default_tz,
+                    self.on_llm_stall,
+                ),
+                name=name,
+                daemon=True,
+            )
+            self.threads.append(thread)
+            # Starting under the lock keeps concurrent live-worker counts exact.
+            thread.start()
+        if reason:
+            logger.warning("Started replacement file worker %s after %s.", name, reason)
+
+    def on_llm_stall(self, label: str, elapsed: float, deadline: float) -> None:
+        self.stall_event.set()
+        live_cap = self.workers + self.max_replacements
+        with self.threads_lock:
+            live = sum(1 for thread in self.threads if thread.is_alive())
+            if live >= live_cap:
+                logger.warning(
+                    "LLM stall in %s but live-worker cap (%d) reached; not "
+                    "spawning another.", label, live_cap)
+                return
+        self.start_worker(
+            f"LLM stall in {label} ({elapsed:.0f}s >= {int(deadline)}s); "
+            "the stalled extraction remains running unbounded — replacement "
+            "can only progress LLM-free files"
+        )
+
+    def start(self) -> None:
+        for _index in range(self.workers):
+            self.start_worker()
+        self.feeder = threading.Thread(
+            target=_feed_file_queue,
+            args=(
+                self.files, self.work_queue, self.done_queue,
+                self.stop_event, self.workers,
+            ),
+            name="import-events-feeder",
+            daemon=True,
+        )
+        self.feeder.start()
+
+    def abort(self) -> None:
+        self.stop_event.set()
+        _join_workers(self.threads, self.threads_lock, 0.2)
+
+    def finish(self) -> None:
+        if self.feeder is not None:
+            self.feeder.join()
+        _shutdown_workers(
+            self.threads, self.threads_lock, self.work_queue, self.workers)
+
+    def flattened_events(self) -> List[Dict[str, Any]]:
+        return [
+            event
+            for index in sorted(self.results)
+            for event in self.results[index]
+        ]
 
 
 def _run_file_workers(
@@ -3661,99 +3886,20 @@ def _run_file_workers(
     llm_client: Optional[Any],
     default_tz: Optional[str],
 ) -> List[Dict[str, Any]]:
-    workers = max(1, runtime_config.workers)
-    work_queue: queue.Queue = queue.Queue(maxsize=max(1, workers * 2))
-    done_queue: queue.Queue = queue.Queue()
-    stop_event = threading.Event()
-    results: Dict[int, List[Dict[str, Any]]] = {}
-    threads: List[threading.Thread] = []
-    threads_lock = threading.Lock()
-    next_worker_id = 0
-    # ie-robust-02: bound how many replacement workers stalls can spawn. Each
-    # stalled (uncancellable) native LLM call leaks a daemon thread, so without
-    # a ceiling repeated stalls fan out unbounded threads. Allow at most one
-    # pool's worth of replacements.
-    max_replacements = workers
-    # ie-rel-10: set when a worker stalls in the native LLM call so the result
-    # loop can give up (return partials) instead of waiting forever on a result
-    # that will never arrive.
-    stall_event = threading.Event()
-
-    def start_worker(reason: str = "") -> None:
-        nonlocal next_worker_id
-        if stop_event.is_set():
-            return
-        with threads_lock:
-            next_worker_id += 1
-            name = f"import-events-worker-{next_worker_id}"
-            thread = threading.Thread(
-                target=_file_worker,
-                args=(
-                    work_queue, done_queue, stop_event, runtime_config,
-                    llm_client, default_tz, on_llm_stall,
-                ),
-                name=name,
-                daemon=True,
-            )
-            threads.append(thread)
-            # ie-robust-10: start inside the lock so a concurrent on_llm_stall
-            # counting live workers sees this one as alive (no append-vs-start
-            # race that could overshoot the cap).
-            thread.start()
-        if reason:
-            logger.warning("Started replacement file worker %s after %s.", name, reason)
-
-    def on_llm_stall(label: str, elapsed: float, deadline: float) -> None:
-        stall_event.set()
-        # ie-robust-10: cap on CONCURRENT live workers, not cumulative spawns —
-        # a replacement that finishes (draining LLM-free files) frees its slot,
-        # so transient stalls don't permanently exhaust the budget. A worker
-        # wedged in the native call still counts as alive, bounding the fan-out.
-        with threads_lock:
-            live = sum(1 for t in threads if t.is_alive())
-            if live >= workers + max_replacements:
-                logger.warning(
-                    "LLM stall in %s but live-worker cap (%d) reached; "
-                    "not spawning another.", label, workers + max_replacements)
-                return
-        # ie-conc-10: the replacement can only drain LLM-free files — it will
-        # block on _LLM_REQUEST_LOCK (held by the wedged worker) the moment it
-        # needs the model. It does not rescue the stalled extraction; ie-rel-10
-        # bounds the wait and returns partials if no progress follows.
-        start_worker(
-            f"LLM stall in {label} ({elapsed:.0f}s >= {int(deadline)}s); "
-            "the stalled extraction remains running unbounded — replacement "
-            "can only progress LLM-free files"
-        )
-
-    for _index in range(workers):
-        start_worker()
-    feeder = threading.Thread(
-        target=_feed_file_queue,
-        args=(files, work_queue, done_queue, stop_event, workers),
-        name="import-events-feeder",
-        daemon=True,
-    )
-    feeder.start()
+    pool = _FileWorkerPool(files, runtime_config, llm_client, default_tz)
+    pool.start()
     try:
-        _collect_file_results(done_queue, stall_event, stop_event, results)
+        _collect_file_results(
+            pool.done_queue, pool.stall_event, pool.stop_event, pool.results)
     except ModelUnavailableError as model_exc:
-        # ie-robust-01: preserve the events gathered before the model failed so
-        # the caller can emit a partial result before aborting.
-        stop_event.set()
-        _join_workers(threads, threads_lock, 0.2)
-        model_exc.partial_events = [
-            event for index in sorted(results) for event in results[index]]
+        pool.abort()
+        model_exc.partial_events = pool.flattened_events()
         raise
     except BaseException:
-        # Covers KeyboardInterrupt and every other worker re-raise identically:
-        # stop the pool, briefly join, and propagate.
-        stop_event.set()
-        _join_workers(threads, threads_lock, 0.2)
+        pool.abort()
         raise
-    feeder.join()
-    _shutdown_workers(threads, threads_lock, work_queue, workers)
-    return [event for index in sorted(results) for event in results[index]]
+    pool.finish()
+    return pool.flattened_events()
 
 
 def process_folder(
@@ -3955,28 +4101,39 @@ def build_ics(events: List[Dict[str, Any]]) -> bytes:
     cal.add("prodid", "-//import_events//EN")
     cal.add("version", "2.0")
     for e in events:
-        start = _parse_iso(e.get("start", ""))
-        if start is None:
-            logger.warning("Skipping event with unparseable start %r: %s",
-                           e.get("start"), e.get("title"))
-            continue
-        ie = IcsEvent()
-        ie.add("uid", _event_uid(e))
-        ie.add("dtstamp", _event_dtstamp(start))
-        ie.add("summary", e.get("title", "No Title"))
-        ie.add("dtstart", start)
-        end = _parse_iso(e.get("end", "")) if e.get("end") else None
-        if end is not None:
-            matched_end = _match_end_to_start(start, end)
-            if _end_precedes_start(start, matched_end):
-                logger.warning("Skipping event end before start for %s: %r < %r",
-                               e.get("title"), e.get("end"), e.get("start"))
-            else:
-                ie.add("dtend", matched_end)
-        if e.get("location"):
-            ie.add("location", e["location"])
-        cal.add_component(ie)
+        component = _build_ics_component(e, IcsEvent)
+        if component is not None:
+            cal.add_component(component)
     return cal.to_ical()
+
+
+def _build_ics_component(event: Dict[str, Any], event_class: Any) -> Optional[Any]:
+    start = _parse_iso(event.get("start", ""))
+    if start is None:
+        logger.warning("Skipping event with unparseable start %r: %s",
+                       event.get("start"), event.get("title"))
+        return None
+    component = event_class()
+    component.add("uid", _event_uid(event))
+    component.add("dtstamp", _event_dtstamp(start))
+    component.add("summary", event.get("title", "No Title"))
+    component.add("dtstart", start)
+    _add_ics_end(component, event, start)
+    if event.get("location"):
+        component.add("location", event["location"])
+    return component
+
+
+def _add_ics_end(component: Any, event: Dict[str, Any], start: Any) -> None:
+    end = _parse_iso(event.get("end", "")) if event.get("end") else None
+    if end is None:
+        return
+    matched_end = _match_end_to_start(start, end)
+    if _end_precedes_start(start, matched_end):
+        logger.warning("Skipping event end before start for %s: %r < %r",
+                       event.get("title"), event.get("end"), event.get("start"))
+        return
+    component.add("dtend", matched_end)
 
 
 def write_events_ics(events: List[Dict[str, Any]], output_path: Path) -> None:
