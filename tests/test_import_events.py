@@ -1072,13 +1072,17 @@ def test_ocr_language_fallback_never_returns_auto():
 def test_ocr_language_chain_uses_default_order_without_seed_text():
     cfg = import_events.ModelConfig()
 
-    assert import_events._ocr_language_chain("", cfg) == import_events.DEFAULT_OCR_LANGUAGES
+    chain, _source = import_events._ocr_language_chain_with_source("", cfg)
+
+    assert chain == import_events.DEFAULT_OCR_LANGUAGES
 
 
 def test_ocr_language_chain_keeps_explicit_fallback_first():
     cfg = import_events.ModelConfig(ocr_fallback_language="it")
 
-    assert import_events._ocr_language_chain("", cfg)[:2] == ("it", "pt-br")
+    chain, _source = import_events._ocr_language_chain_with_source("", cfg)
+
+    assert chain[:2] == ("it", "pt-br")
 
 
 def test_merge_text_blocks_dedupes_normalized_lines():

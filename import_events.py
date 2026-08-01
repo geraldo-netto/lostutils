@@ -565,11 +565,6 @@ def _ocr_language_chain_with_source(seed_text: str, config: "ModelConfig") -> Tu
     return (DEFAULT_OCR_FALLBACK_LANGUAGE,), "ocr-default"
 
 
-def _ocr_language_chain(seed_text: str, config: "ModelConfig") -> Tuple[str, ...]:
-    chain, _source = _ocr_language_chain_with_source(seed_text, config)
-    return chain
-
-
 def _language_for_text_with_source(text: str, config: "ModelConfig") -> tuple:
     requested = _normalize_language(config.language)
     if requested != DEFAULT_LANGUAGE:
