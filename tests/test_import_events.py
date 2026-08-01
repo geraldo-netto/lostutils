@@ -4709,6 +4709,48 @@ def test_configure_logging_uses_dedicated_stderr_fd(monkeypatch):
         monkeypatch.setattr(import_events, "_APP_LOG_FILE", None)
 
 
+def test_harden_stdout_encoding_widens_a_narrow_stream(monkeypatch):
+    """ie-plat-05: a cp1252 stdout would abort the run on a non-Latin title."""
+    calls = []
+
+    class NarrowStdout:
+        def reconfigure(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(import_events.sys, "stdout", NarrowStdout())
+
+    import_events._harden_stdout_encoding()
+
+    assert calls == [{"encoding": "utf-8", "errors": "replace"}]
+
+
+def test_harden_stdout_encoding_tolerates_an_unreconfigurable_stream(monkeypatch):
+    """pytest's capture and detached buffers must not turn into a crash."""
+    class Detached:
+        def reconfigure(self, **_kwargs):
+            raise ValueError("underlying buffer has been detached")
+
+    monkeypatch.setattr(import_events.sys, "stdout", Detached())
+    import_events._harden_stdout_encoding()
+
+    monkeypatch.setattr(import_events.sys, "stdout", object())
+    import_events._harden_stdout_encoding()
+
+
+def test_print_run_output_survives_a_title_outside_the_stream_encoding(
+        tmp_path, monkeypatch):
+    """The end-to-end guarantee: a CJK title must not kill a completed run."""
+    out_path = tmp_path / "out.txt"
+    with out_path.open("w", encoding="cp1252", errors="strict") as narrow:
+        monkeypatch.setattr(import_events.sys, "stdout", narrow)
+        import_events._harden_stdout_encoding()
+        import_events._print_run_output(
+            [{"start": "2026-08-01", "title": "会議 съезд", "source": "a.pdf"}],
+            "out.json", False)
+
+    assert "会議 съезд" in out_path.read_text(encoding="utf-8")
+
+
 def test_configure_logging_wraps_the_stderr_fd_as_lenient_utf8(monkeypatch):
     """ie-plat-06: the locale default would drop non-ASCII records on Windows."""
     root = import_events.logging.getLogger()

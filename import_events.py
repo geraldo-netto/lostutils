@@ -4836,8 +4836,26 @@ def _enable_fault_tracebacks() -> None:
     logger.info("Fatal-signal tracebacks enabled for native crashes.")
 
 
+def _harden_stdout_encoding() -> None:
+    """ie-plat-05: event titles come from arbitrary imported files, and this
+    tool advertises detection for scripts no single code page covers. A
+    redirected stdout uses the locale encoding with strict errors — cp1252 on
+    Windows — so one CJK title would abort the run with UnicodeEncodeError
+    after the JSON and ICS files were already written, breaking the documented
+    0/1/2 exit contract. Nothing downstream can recover from that, so widen the
+    stream instead of guarding every print."""
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is None:
+        return
+    try:
+        reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError) as exc:
+        logger.debug("Could not widen stdout encoding: %s", exc)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     _configure_logging()
+    _harden_stdout_encoding()
     reset_ocr_warnings()
     try:
         return _run_main(argv)
