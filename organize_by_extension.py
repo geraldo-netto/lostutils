@@ -1124,6 +1124,19 @@ class BucketManager:
             )
         return bucket
 
+    def confirm(self, source: Path, bucket_dir: Path) -> None:
+        """Retire a reservation whose file is now on disk (oze-mem-01).
+
+        ``_reserved_names`` exists for one purpose: letting
+        :meth:`_restore_mutable_bucket_names` rebuild a saturated bucket's name
+        set without losing files that were planned but not yet written. A
+        landed move is found by ``bucket_file_names``, so keeping its
+        reservation only pins one string per moved file for the rest of the
+        run. Callers must not call this for a preview move — nothing was
+        written, so the reservation is still the only record of it.
+        """
+        self._release_reserved_name(bucket_dir, source.name)
+
     def release(self, source: Path, bucket_dir: Path) -> None:
         """Undo a planned reservation after a move is skipped."""
         names = self.state_cache.get(bucket_dir)
@@ -2327,6 +2340,8 @@ def _drain_move_future(
             manager.release(source, destination.parent)
         stats.skipped += 1
         return
+    if manager is not None and not preview:
+        manager.confirm(source, destination.parent)
     action = "Preview:" if preview else "Moved"
     logger.info(f"{action} {source} -> {destination}")
     stats.processed += 1

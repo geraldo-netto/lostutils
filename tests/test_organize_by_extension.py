@@ -4538,3 +4538,41 @@ def test_organize_returns_the_move_tally(tmp_path):
     stats = organize_by_extension.organize(tmp_path)
 
     assert (stats.processed, stats.skipped, stats.partial) == (1, 0, 0)
+
+
+def test_reserved_names_do_not_grow_with_moved_files(tmp_path):
+    """oze-mem-01: the reservation cache tracks in-flight moves, not history."""
+    for i in range(12):
+        (tmp_path / f"f{i}.txt").write_text("x", encoding="utf-8")
+
+    manager = organize_by_extension.BucketManager(root=tmp_path)
+    stats = organize_by_extension.organize(tmp_path, bucket_manager=manager)
+
+    assert stats.processed == 12
+    assert manager._reserved_names == {}
+
+
+def test_confirm_keeps_a_saturated_bucket_rebuildable(tmp_path):
+    """A confirmed name is on disk, so the restore path still finds it."""
+    bucket = tmp_path / "txt" / "f00000"
+    bucket.mkdir(parents=True)
+    (bucket / "landed.txt").write_text("x", encoding="utf-8")
+    manager = organize_by_extension.BucketManager(root=tmp_path, bucket_size=1)
+    manager._reserved_names[bucket] = {"landed.txt", "inflight.txt"}
+    manager.state_cache[bucket] = organize_by_extension._BUCKET_FULL
+
+    manager.confirm(Path("/src/landed.txt"), bucket)
+    names = manager._restore_mutable_bucket_names(bucket)
+
+    assert manager._reserved_names[bucket] == {"inflight.txt"}
+    assert names == {"landed.txt", "inflight.txt"}   # nothing lost
+
+
+def test_preview_keeps_reservations(tmp_path):
+    """Preview writes nothing, so its reservations are the only record."""
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    manager = organize_by_extension.BucketManager(root=tmp_path)
+
+    organize_by_extension.organize(tmp_path, preview=True, bucket_manager=manager)
+
+    assert any("a.txt" in names for names in manager._reserved_names.values())
