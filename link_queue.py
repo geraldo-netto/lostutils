@@ -175,9 +175,15 @@ def _user_config_dir() -> str:
     """lq-sec-02: per-user config directory ($XDG_CONFIG_HOME/link_queue or
     ~/.config/link_queue), created with mode 0o700 so a co-tenant on a
     shared install can't rewrite ``default_command`` to inject a shell
-    payload. Falls back to the script dir only if the user dir cannot be
-    created (read-only $HOME, etc.) so legacy single-user installs keep
-    working."""
+    payload. The property that matters is write-integrity, not secrecy:
+    nothing stored here is confidential, but the config holds command
+    templates this script executes. On Windows ``os.chmod`` only toggles
+    the read-only bit — the equivalent protection comes instead from the
+    user-profile ACL this directory inherits, which grants other standard
+    users no access. Neither mechanism covers an $XDG_CONFIG_HOME aimed at
+    a shared writable base. Falls back to the script dir only if the user
+    dir cannot be created (read-only $HOME, etc.) so legacy single-user
+    installs keep working."""
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
         os.path.expanduser("~"), ".config"
     )
