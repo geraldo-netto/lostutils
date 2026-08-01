@@ -4145,9 +4145,36 @@ def _read_lock_pid(lock_path: Path) -> Optional[int]:
     return None
 
 
+def _lock_owner_is_running_windows(pid: int) -> bool:  # pragma: no cover - win32-only
+    """Liveness via OpenProcess, the Windows stand-in for `kill(pid, 0)`."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # ERROR_ACCESS_DENIED (5) => the process exists but is not queryable.
+        return kernel32.GetLastError() == 5
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return True
+        return code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _lock_owner_is_running(pid: int) -> bool:
     if pid <= 0:
         return False
+    # ie-plat-01: `os.kill(pid, 0)` is the POSIX no-op liveness probe, but on
+    # Windows os.kill maps to TerminateProcess for any signal that is not a
+    # console control event — so the probe would kill the very run it is
+    # asking about, and this lock exists to protect a concurrent run.
+    if sys.platform == "win32":  # pragma: no cover - win32-only
+        return _lock_owner_is_running_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

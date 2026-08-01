@@ -5801,6 +5801,23 @@ def test_lock_owner_is_running_classifies_kill_probe_errors(
     assert import_events._lock_owner_is_running(4242) is expected
 
 
+def test_lock_owner_is_running_never_calls_kill_on_windows(monkeypatch):
+    """ie-plat-01: os.kill on Windows terminates the target, so the liveness
+    probe must not reach it — it would kill the run it is asking about."""
+    def forbidden(*_args, **_kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("os.kill must not be used as a probe on Windows")
+
+    monkeypatch.setattr(import_events.sys, "platform", "win32")
+    monkeypatch.setattr(import_events.os, "kill", forbidden)
+    monkeypatch.setattr(
+        import_events, "_lock_owner_is_running_windows", lambda pid: pid == 4242)
+
+    assert import_events._lock_owner_is_running(4242) is True
+    assert import_events._lock_owner_is_running(99) is False
+    # The pid guard still short-circuits before any platform branch.
+    assert import_events._lock_owner_is_running(0) is False
+
+
 def test_create_lock_file_reclaims_even_if_the_unlink_fails(tmp_path, monkeypatch):
     lock = tmp_path / "a.lock"
     lock.write_text(f"pid={_dead_pid()}\n")
