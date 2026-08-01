@@ -2297,10 +2297,20 @@ def _check_cross_device(plan: Plan, *,
             probe = _nearest_existing_dir(plan.target.parent)
             watchdog.touch("cross-device target probe")
             if probe is None:
+                if plan.strict_cross_device:
+                    raise RuntimeError(
+                        "could not determine destination device under "
+                        "--strict-cross-device"
+                    )
                 return
             dst_dev = probe_stat(probe).st_dev
             watchdog.touch("cross-device target stat")
-        except OSError:
+        except OSError as exc:
+            if plan.strict_cross_device:
+                raise RuntimeError(
+                    "could not determine source/destination device under "
+                    "--strict-cross-device"
+                ) from exc
             return
         if src_dev != dst_dev:
             return

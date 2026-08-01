@@ -2824,6 +2824,20 @@ def test_check_cross_device_stat_fn_oserror_silent(tmp_path):
     rf._check_cross_device(plan, stat_fn=boom)   # silent, must not raise
 
 
+def test_check_cross_device_strict_stat_failure_is_error(tmp_path):
+    src = tmp_path / "src"; src.mkdir()
+    plan = rf.Plan(
+        source=src,
+        target=tmp_path / "dst" / "src",
+        strict_cross_device=True,
+    )
+
+    with pytest.raises(RuntimeError, match="could not determine.*device"):
+        rf._check_cross_device(
+            plan, stat_fn=lambda _path: (_ for _ in ()).throw(OSError("nope"))
+        )
+
+
 def test_main_handles_shutil_error(monkeypatch, tmp_path):
     src = tmp_path / "src"; src.mkdir()
     (src / "f").write_text("x")
