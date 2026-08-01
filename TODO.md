@@ -279,7 +279,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rdv3-unused-01 | open | low | remove-deduplv3.py:188-189 — `if not to_remove: continue` is unreachable after distinct-path dedup and the `len(paths) < 2` guard. Delete the branch. | unused/dead-code — logic-proven unreachable
 
 ## unused functions/methods
 

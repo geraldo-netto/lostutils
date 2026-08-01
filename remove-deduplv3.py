@@ -190,8 +190,6 @@ def _emit_remove_commands(groups, out):
             continue
         keep = _survivor(paths)
         to_remove = [p for p in paths if p != keep]
-        if not to_remove:
-            continue
         groups_with_dups += 1
         files_to_remove += len(to_remove)
         out(_("# duplicates: {hash}\n# saving: {path}\n").format(hash=h, path=keep))
