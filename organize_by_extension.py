@@ -1975,6 +1975,15 @@ class PlanSpoolError(RuntimeError):
     """The disk-backed planning spool could not be used (oze-dep-50)."""
 
 
+class MoveStallError(RuntimeError):
+    """The move-stage watchdog gave up waiting for a worker (oze-obs-50).
+
+    Subclasses `RuntimeError` so the bare-``RuntimeError`` callers that predate
+    it keep working, while :func:`main` can tell a designed watchdog abort from
+    a genuine bug and report it as a message instead of a traceback.
+    """
+
+
 _SPOOL_HINT = (
     "set TMPDIR (or SQLITE_TMPDIR) to a writable filesystem with free space"
 )
@@ -2277,7 +2286,7 @@ def _wait_for_move_futures(
         if elapsed >= max_stall_seconds:
             for future in futures:
                 future.cancel()
-            raise RuntimeError(
+            raise MoveStallError(
                 "move stage aborted after "
                 f"{elapsed:.0f}s with no completed worker "
                 f"({len(futures)} in flight)"
@@ -2590,7 +2599,11 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             'Planning spools one row per file into a temporary on-disk SQLite '
             'database, so TMPDIR (or SQLITE_TMPDIR) must be writable and have '
-            'room for the file list.'
+            'room for the file list.\n'
+            '\n'
+            'Exit codes: 0 the run completed, 1 the run could not complete '
+            '(unusable root or planning spool, stalled move stage, interrupt), '
+            '2 command-line error.'
         ),
     )
     parser.add_argument(
@@ -2736,9 +2749,12 @@ def main() -> None:
             bucket_size=args.bucket_size,
             prune_empty=args.prune_empty,
         )
-    except PlanSpoolError as exc:
+    except (PlanSpoolError, MoveStallError) as exc:
         # oze-dep-50: a full / read-only TMPDIR is an environment problem, not
         # a bug — report it the way the other setup failures are reported.
+        # oze-obs-50: same for the move-stage watchdog. Its abort is a designed
+        # failure mode, so it must reach the user as a message and a non-zero
+        # exit, not as an unhandled traceback.
         raise SystemExit(f"error: {exc}") from exc
     except KeyboardInterrupt:
         # oze-obs-05: a Ctrl+C during the scan / plan / prune stages reaches

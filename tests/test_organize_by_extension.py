@@ -4457,3 +4457,36 @@ def test_help_documents_the_temp_database_requirement(capsys):
     parser = organize_by_extension.build_parser()
     parser.print_help()
     assert "SQLITE_TMPDIR" in capsys.readouterr().out
+
+
+def test_main_reports_a_stalled_move_stage_cleanly(tmp_path, monkeypatch, capsys):
+    """oze-obs-50: the watchdog abort is a designed failure mode, so it must
+    reach the user as a message, not an unhandled traceback."""
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        sys, "argv", ["organize_by_extension.py", str(tmp_path)])
+    clock = [0.0]
+
+    def never_completes(futures, timeout, return_when):
+        clock[0] += organize_by_extension.MOVE_MAX_STALL_SECONDS
+        return set(), set(futures)
+
+    monkeypatch.setattr(organize_by_extension, "wait", never_completes)
+    monkeypatch.setattr(organize_by_extension.time, "monotonic", lambda: clock[0])
+
+    with pytest.raises(SystemExit) as exc:
+        organize_by_extension.main()
+
+    assert "move stage aborted" in str(exc.value)
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_move_stall_error_stays_a_runtime_error():
+    """Subclassing keeps the pre-existing bare-RuntimeError callers working."""
+    assert issubclass(organize_by_extension.MoveStallError, RuntimeError)
+
+
+def test_help_documents_the_exit_codes(capsys):
+    parser = organize_by_extension.build_parser()
+    parser.print_help()
+    assert "Exit codes:" in capsys.readouterr().out
