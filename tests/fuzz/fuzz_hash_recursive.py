@@ -147,6 +147,50 @@ class FindDuplicatesFuzz(unittest.TestCase):
                               [(len(payload), k) for k in keys]) for _ in keys}
                 self.assertEqual(len(sizes), 1)
 
+    @settings(parent=FUZZ, max_examples=80)
+    @given(
+        payload=st.binary(min_size=32, max_size=256),
+        replacement=st.integers(min_value=0, max_value=255),
+    )
+    def test_sample_collision_never_emits_byte_distinct_group(
+        self,
+        payload,
+        replacement,
+    ):
+        if payload[5] == replacement:
+            return
+        changed = bytearray(payload)
+        changed[5] = replacement
+        config = hr.RunConfig(block_size=4, sample_size=1)
+        with TemporaryDirectory() as directory:
+            files = []
+            for name, content in (("a.bin", payload), ("b.bin", changed)):
+                path = Path(directory) / name
+                path.write_bytes(content)
+                stat_result = path.stat()
+                files.append(
+                    (
+                        str(path),
+                        stat_result.st_size,
+                        stat_result.st_dev,
+                        stat_result.st_ino,
+                    )
+                )
+            self.assertEqual(
+                hr.hash_tail_and_samples(files[0][0], len(payload), config=config),
+                hr.hash_tail_and_samples(files[1][0], len(payload), config=config),
+            )
+
+            result = hr.find_duplicate_groups(files, jobs=1, config=config)
+
+            for keys in result.groups.values():
+                contents = {
+                    Path(path).read_bytes()
+                    for key in keys
+                    for path in result.aliases[key]
+                }
+                self.assertEqual(len(contents), 1)
+
 
 # --- emit_groups never writes single-alias groups -------------------------
 

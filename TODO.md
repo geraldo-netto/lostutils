@@ -163,7 +163,6 @@ hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage 
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-fuzz-01 | open | med | hash-recursive-ai5.py:1423-1470 — fuzzing never asserts that every emitted duplicate group is byte-identical, so same-window/different-gap false positives pass. Add an adversarial property. | content-integrity property
 
 ## ruff (lint)
 
