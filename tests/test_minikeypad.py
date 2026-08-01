@@ -2524,3 +2524,45 @@ def test_log_pane_actually_uses_a_fixed_width_font(app):
     expected = minikeypad.tkfont.nametofont("TkFixedFont")
 
     assert got.actual("family") == expected.actual("family")
+
+
+# --- mkp-plat-03: key state must show through a channel Aqua renders -------
+
+
+def test_key_state_ring_tracks_selection(app):
+    """macOS renders neither bg nor relief on a tk.Button face, so without the
+    ring a selected key is indistinguishable from an idle one there."""
+    idle_id, other_id = (kid for _label, kid in minikeypad.PHYS_KEYS[:2])
+
+    app._select_key(idle_id)
+
+    selected = app._phys_buttons[idle_id]
+    unselected = app._phys_buttons[other_id]
+    assert selected.cget("highlightbackground") == minikeypad.COL_KEY_SEL
+    assert unselected.cget("highlightbackground") == minikeypad.COL_KEY_IDLE
+
+    app._select_key(other_id)
+    assert selected.cget("highlightbackground") == minikeypad.COL_KEY_IDLE
+    assert app._phys_buttons[other_id].cget(
+        "highlightbackground") == minikeypad.COL_KEY_SEL
+
+
+def test_key_state_ring_marks_a_mapped_key(app):
+    kid = minikeypad.PHYS_KEYS[0][1]
+    app._assignments[(app.kp.KEY_Cur_Layer, kid)] = {"desc": "mapped"}
+
+    app._refresh_key_map()
+
+    assert app._phys_buttons[kid].cget(
+        "highlightbackground") == minikeypad.COL_KEY_MAPPED
+
+
+def test_key_state_ring_thickness_never_changes(app):
+    """A varying thickness would reflow the grid on every selection."""
+    kid = minikeypad.PHYS_KEYS[0][1]
+    before = app._phys_buttons[kid].cget("highlightthickness")
+
+    app._select_key(kid)
+
+    assert int(app._phys_buttons[kid].cget("highlightthickness")) == int(before)
+    assert int(before) == minikeypad.KEY_STATE_RING_PX

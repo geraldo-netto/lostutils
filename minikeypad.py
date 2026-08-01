@@ -158,6 +158,14 @@ WINDOW_MIN_SIZE = (1024, 768)
 COL_KEY_IDLE = "#98fb98"   # 152,251,152  pale green
 COL_KEY_SEL = "#ff3030"    # 255,48,48    selected red
 COL_KEY_MAPPED = "#add8e6"  # light blue: written this session on the cur. layer
+# mkp-plat-03: native Aqua renders neither `bg` nor `relief` on a tk.Button
+# face, so on macOS the colours above are invisible and a selected key looks
+# exactly like an idle one — with nothing else to go on, since selection is the
+# only state that has no text of its own. `highlightbackground` IS rendered
+# there, so every key also carries a ring in its current state colour. The
+# thickness never changes, so reserving it costs no reflow, and on Linux and
+# Windows the ring simply reads as a border around the matching fill.
+KEY_STATE_RING_PX = 3
 PROFILE_VERSION = 1
 # mkp-input-01: the device model has 3 layers, key ids 1..18 (12 keys + 2
 # knobs × 3), and 176 for the LED. A profile entry outside these is invalid.
@@ -1233,6 +1241,8 @@ class App(tk.Tk):
         for idx, (label, kid) in enumerate(PHYS_KEYS):
             r, c = divmod(idx, 4)
             b = tk.Button(grid, text=label, width=7, height=2, bg=COL_KEY_IDLE,
+                          highlightbackground=COL_KEY_IDLE,
+                          highlightthickness=KEY_STATE_RING_PX,
                           command=lambda k=kid: self._select_key(k))
             b.grid(row=r, column=c, padx=3, pady=3)
             self._phys_buttons[kid] = b
@@ -1245,6 +1255,8 @@ class App(tk.Tk):
             row.pack(padx=4, pady=4)
             for label, kid in knob:
                 b = tk.Button(row, text=label, width=6, height=2, bg=COL_KEY_IDLE,
+                              highlightbackground=COL_KEY_IDLE,
+                              highlightthickness=KEY_STATE_RING_PX,
                               command=lambda k=kid: self._select_key(k))
                 b.pack(side="left", padx=3)
                 self._phys_buttons[kid] = b
@@ -1513,13 +1525,15 @@ class App(tk.Tk):
                 btn.configure(
                     text="%s\n%s" % (base, rec["desc"][:8]),
                     bg=COL_KEY_MAPPED,
+                    highlightbackground=COL_KEY_MAPPED,
                     relief="ridge",
                 )
             else:
-                btn.configure(text=base, bg=COL_KEY_IDLE, relief="raised")
+                btn.configure(text=base, bg=COL_KEY_IDLE,
+                              highlightbackground=COL_KEY_IDLE, relief="raised")
         if self._selected_id is not None:
             self._phys_buttons[self._selected_id].configure(
-                bg=COL_KEY_SEL, relief="sunken"
+                bg=COL_KEY_SEL, highlightbackground=COL_KEY_SEL, relief="sunken"
             )
 
     def _select_key(self, key_id):
