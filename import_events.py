@@ -4366,7 +4366,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                               "when met, remaining OCR languages are skipped "
                               f"(default: {DEFAULT_OCR_LANGUAGE_SCORE:.2f})."))
     parser.add_argument("--ocr-timeout", type=int, default=defaults.ocr_timeout_seconds,
-                        help=f"Seconds before one OCR engine call times out (default: {OCR_TIMEOUT_SECONDS}).")
+                        help=("Seconds before one Tesseract subprocess times out; "
+                              "PaddleOCR runs in-process and cannot be interrupted "
+                              f"(default: {OCR_TIMEOUT_SECONDS})."))
     parser.add_argument("--tesseract-psm", default=defaults.tesseract_psm,
                         help=f"Tesseract page segmentation mode (default: {DEFAULT_TESSERACT_PSM}).")
     parser.add_argument("--tesseract-path", default=defaults.tesseract_path,

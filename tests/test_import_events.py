@@ -5128,6 +5128,16 @@ def test_cli_reports_invalid_output_parent(tmp_path, caplog):
     assert "Could not prepare output directory" in caplog.text
 
 
+def test_cli_help_scopes_ocr_timeout_to_tesseract(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        import_events.parse_args(["--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "Tesseract subprocess" in help_text
+    assert "PaddleOCR runs in-process" in help_text
+
+
 def test_close_paddle_engine_surfaces_close_failure(caplog):
     class Engine:
         def close(self):

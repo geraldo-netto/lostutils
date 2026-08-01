@@ -162,6 +162,8 @@ Language handling:
 
 Useful runtime knobs include `--llm-context`, `--max-content-chars`, `--llm-max-tokens`, `--llm-gpu-layers`, `--llm-main-gpu`, `--mlock`, `--ocr-engine`, `--ocr-languages`, `--ocr-language-score`, `--ocr-timeout`, `--tesseract-psm`, `--tesseract-path`, `--pdf-ocr-mode`, `--pdf-vision-pages`, `--pdf-vision-dpi`, `--stage-cache`, `--workers`, `--deterministic-order`, and `--summary-only`.
 
+`--ocr-timeout` applies to the killable Tesseract subprocess only. PaddleOCR runs in-process and cannot be interrupted safely, so choose `--ocr-engine tesseract` when a hard per-call OCR deadline is required.
+
 When `--max-content-chars` is omitted, the text budget is computed from the selected LLM context size. The default `--llm-context 0` lets llama.cpp use the model-native context window. The default `--llm-gpu-layers 0` uses CPU; pass a positive layer count or `-1` to opt into llama.cpp GPU offload. `--mlock` is opt-in and is skipped automatically when the model plus projector files would exceed 70% of the memory limit visible to the process.
 
 ## Tests and CI

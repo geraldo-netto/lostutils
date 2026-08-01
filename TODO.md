@@ -175,7 +175,6 @@ oze-obs-11 | open | low | organize_by_extension.py:1646-1653,1800-1803 — sourc
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-watch-01 | open | high | import_events.py:2778-2798 — `--ocr-timeout` claims one-engine-call coverage, but only Tesseract subprocesses use it; Paddle runs in-process without timeout/heartbeat and can wedge every worker behind `_PADDLE_RUN_LOCK`. Document Tesseract-only scope or isolate Paddle in a killable timed process. | watchdog timeout contract
 oze-watch-01 | open | med | organize_by_extension.py:2030-2037,2123-2129 — abort cancels futures but running filesystem workers cannot be cancelled; executor shutdown uses `wait=False`, a RuntimeError escapes, and mutations can continue during traceback/exit. Add cooperative cancellation and deterministic join, or explicitly wait for non-abortable workers. | watchdog abort semantics / thread lifecycle
 
 ## time & scheduling correctness
