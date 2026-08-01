@@ -27,6 +27,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from itertools import pairwise
 from pathlib import Path
 import shutil
@@ -482,6 +483,17 @@ def resolve_real_extension(
     detected = detect_type_by_header(path, head_cache=ctx.head_cache)
     if detected is None:
         return declared
+    return _resolve_detected_extension(
+        path, declared, detected, ctx, log_mismatch)
+
+
+def _resolve_detected_extension(
+    path: Path,
+    declared: str,
+    detected: str,
+    ctx: SniffContext,
+    log_mismatch: bool,
+) -> str:
     declared_canon = EXTENSION_ALIASES.get(declared, declared)
     if declared_canon == detected:
         return declared
@@ -688,25 +700,10 @@ def list_files(
             # smaller-but-slow tree (header sniff opens each file) shows live
             # progress before the 10k-file INFO heartbeat would ever fire.
             logger.debug("scan: %s", path)
-            if scanned % PROGRESS_EVERY == 0:
-                logger.info(
-                    "scanning: %d files seen (%d to move, %d already bucketed)",
-                    scanned, len(files), already_bucketed,
-                )
-            scan_monitor.begin(path)
-            try:
-                bucketed = is_bucketed_file(root, path, ctx=ctx)
-            finally:
-                scan_monitor.end(path)
-            if bucketed:
+            _log_scan_progress(scanned, len(files), already_bucketed)
+            if _scan_path_is_bucketed(root, path, ctx, scan_monitor):
                 already_bucketed += 1
-                # oze-scal-02: an already-bucketed file is dropped from the plan, so
-                # its head-bytes are never re-read in planning. Evict the scan-phase
-                # cache entry now instead of leaving it pinned for the whole run —
-                # peak head_cache no longer holds one HeadBytes per *scanned* file,
-                # only per file still pending a move (drained as moves complete).
-                if ctx.head_cache is not None:
-                    ctx.head_cache.pop(path, None)
+                _evict_sniff_head(ctx, path)
                 continue
             files.append(path)
     finally:
@@ -714,6 +711,32 @@ def list_files(
     if verbose: # Use logger.info for verbose output
         logger.info(f"Scanning complete. Found {len(files)} files to organize ({already_bucketed} already bucketed).")
     return files
+
+
+def _log_scan_progress(scanned: int, pending: int, already_bucketed: int) -> None:
+    if scanned % PROGRESS_EVERY == 0:
+        logger.info(
+            "scanning: %d files seen (%d to move, %d already bucketed)",
+            scanned, pending, already_bucketed,
+        )
+
+
+def _scan_path_is_bucketed(
+    root: Path,
+    path: Path,
+    ctx: SniffContext,
+    scan_monitor: _ScanStallMonitor,
+) -> bool:
+    scan_monitor.begin(path)
+    try:
+        return is_bucketed_file(root, path, ctx=ctx)
+    finally:
+        scan_monitor.end(path)
+
+
+def _evict_sniff_head(ctx: SniffContext, path: Path) -> None:
+    if ctx.head_cache is not None:
+        ctx.head_cache.pop(path, None)
 
 
 def _warn_if_symlink_escapes_root(
@@ -871,24 +894,37 @@ def _find_reusable_bucket(
             continue
         if index > next_expected:
             break                           # first gap: caller fills it
-        bucket_path = ext_dir / bucket_name(prefix, index)
-        names = state_cache.get(bucket_path)
-        if names is _BUCKET_FULL:
+        bucket_path, full = _reusable_bucket_at_index(
+            ext_dir, prefix, filename, state_cache, index, bucket_size)
+        if full:
             next_expected = index + 1
             first_non_full = index + 1
             continue
-        if names is None:
-            names = bucket_file_names(bucket_path)
-            state_cache[bucket_path] = names
-        if len(names) >= bucket_size:
-            state_cache[bucket_path] = _BUCKET_FULL
-            next_expected = index + 1
-            first_non_full = index + 1
-            continue
-        if filename not in names:
+        if bucket_path is not None:
             return BucketChoice(bucket_path, next_expected, first_non_full)
         next_expected = index + 1
     return BucketChoice(None, next_expected, first_non_full)
+
+
+def _reusable_bucket_at_index(
+    ext_dir: Path,
+    prefix: str,
+    filename: str,
+    state_cache: dict[Path, Set[str] | frozenset[str]],
+    index: int,
+    bucket_size: int,
+) -> tuple[Path | None, bool]:
+    bucket_path = ext_dir / bucket_name(prefix, index)
+    names = state_cache.get(bucket_path)
+    if names is _BUCKET_FULL:
+        return None, True
+    if names is None:
+        names = bucket_file_names(bucket_path)
+        state_cache[bucket_path] = names
+    if len(names) >= bucket_size:
+        state_cache[bucket_path] = _BUCKET_FULL
+        return None, True
+    return (bucket_path if filename not in names else None), False
 
 
 def _allocate_new_bucket(
@@ -1096,24 +1132,37 @@ class BucketManager:
         if names is None:
             return
         if names is _BUCKET_FULL:
-            names = bucket_file_names(bucket_dir)
-            names.update(self._reserved_names.get(bucket_dir, set()))
-            self.state_cache[bucket_dir] = names
+            names = self._restore_mutable_bucket_names(bucket_dir)
         if (bucket_dir / source.name).exists():
             return
-        if isinstance(names, set):
-            names.discard(source.name)
-            match = BUCKET_NAME_PATTERN.match(bucket_dir.name)
-            if match is not None:
-                key = (bucket_dir.parent, match.group(1))
-                index = int(match.group(2))
-                self._first_non_full[key] = min(
-                    self._first_non_full.get(key, index), index)
-            reserved = self._reserved_names.get(bucket_dir)
-            if reserved is not None:
-                reserved.discard(source.name)
-                if not reserved:
-                    self._reserved_names.pop(bucket_dir, None)
+        if not isinstance(names, set):
+            return
+        names.discard(source.name)
+        self._mark_bucket_non_full(bucket_dir)
+        self._release_reserved_name(bucket_dir, source.name)
+
+    def _restore_mutable_bucket_names(self, bucket_dir: Path) -> Set[str]:
+        names = bucket_file_names(bucket_dir)
+        names.update(self._reserved_names.get(bucket_dir, set()))
+        self.state_cache[bucket_dir] = names
+        return names
+
+    def _mark_bucket_non_full(self, bucket_dir: Path) -> None:
+        match = BUCKET_NAME_PATTERN.match(bucket_dir.name)
+        if match is None:
+            return
+        key = (bucket_dir.parent, match.group(1))
+        index = int(match.group(2))
+        self._first_non_full[key] = min(
+            self._first_non_full.get(key, index), index)
+
+    def _release_reserved_name(self, bucket_dir: Path, name: str) -> None:
+        reserved = self._reserved_names.get(bucket_dir)
+        if reserved is None:
+            return
+        reserved.discard(name)
+        if not reserved:
+            self._reserved_names.pop(bucket_dir, None)
 
 
 def ensure_directory(path: Path) -> None:
@@ -1264,21 +1313,8 @@ def _resolve_source_collision(source: Path, destination: Path) -> Path:
         blocker = _find_destination_blocker(destination)
         if blocker is None:
             return source
-        try:
-            # oze-rel-19: atomic free-slot reservation closes the
-            # TOCTOU window between `exists()` and `rename`.
-            candidate = _atomic_rename_to_free_slot(blocker)
-        except FileNotFoundError:
-            continue   # sibling worker already moved/renamed the blocker
-        except OSError as exc:
-            # oze-rel-17: distinguish transient (race) from permanent
-            # (EACCES / EROFS / EISDIR / EBUSY). Transients already
-            # handled by FileNotFoundError above; everything else here is
-            # a real reason the bucket can't be created and the caller
-            # needs to know rather than burning retry budget.
-            if exc.errno in (errno.EACCES, errno.EPERM, errno.EROFS,
-                              errno.EISDIR, errno.EBUSY):
-                raise
+        candidate = _rename_destination_blocker(blocker)
+        if candidate is None:
             continue
         if blocker == source:
             logger.warning(
@@ -1303,6 +1339,20 @@ def _resolve_source_collision(source: Path, destination: Path) -> Path:
         source, destination,
     )
     return source
+
+
+def _rename_destination_blocker(blocker: Path) -> Path | None:
+    try:
+        return _atomic_rename_to_free_slot(blocker)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        permanent_errnos = {
+            errno.EACCES, errno.EPERM, errno.EROFS, errno.EISDIR, errno.EBUSY,
+        }
+        if exc.errno in permanent_errnos:
+            raise
+        return None
 
 
 def _find_destination_blocker(destination: Path) -> "Path | None":
@@ -1442,31 +1492,44 @@ def _atomic_rename_to_free_slot(source: Path) -> Path:
     last_exc: OSError | None = None
     for n in range(1, _COLLISION_RETRY_CAP + 1):
         candidate = source.with_name(f"{source.name}.collision{n}")
-        try:
-            os.link(source, candidate)
-        except FileExistsError as exc:
-            last_exc = exc
+        reserved, linked, last_exc = _reserve_collision_candidate(
+            source, candidate, last_exc)
+        if reserved is None:
             continue
-        except OSError as exc:
-            if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
-                return _reserve_slot_via_rename(source)
-            raise
-        try:
-            _unlink_source_or_rollback_candidate(source, candidate)
-        except BaseException:
-            # oze-robust-02: a late interrupt (e.g. KeyboardInterrupt) between
-            # the link and the source unlink would otherwise leave the file at
-            # both <name> and <name>.collisionN — a leaked hardlink. If the
-            # source is still present the unlink didn't happen, so roll back the
-            # candidate; if it's gone the candidate IS the moved file — keep it.
-            if source.exists():
-                try:
-                    os.unlink(candidate)
-                except OSError:
-                    pass
-            raise
-        return candidate
+        if not linked:
+            return reserved
+        _finish_linked_collision_move(source, candidate)
+        return reserved
     _raise_collision_exhausted(source, last_exc)
+
+
+def _reserve_collision_candidate(
+    source: Path,
+    candidate: Path,
+    last_exc: OSError | None,
+) -> tuple[Path | None, bool, OSError | None]:
+    try:
+        os.link(source, candidate)
+    except FileExistsError as exc:
+        return None, False, exc
+    except OSError as exc:
+        if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
+            return _reserve_slot_via_rename(source), False, last_exc
+        raise
+    return candidate, True, last_exc
+
+
+def _finish_linked_collision_move(source: Path, candidate: Path) -> None:
+    try:
+        _unlink_source_or_rollback_candidate(source, candidate)
+    except BaseException:
+        # A late interrupt after link but before unlink must not leak a hardlink.
+        if source.exists():
+            try:
+                os.unlink(candidate)
+            except OSError:
+                pass
+        raise
 
 
 _TRANSIENT_LINK_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.EAGAIN})
@@ -1586,29 +1649,8 @@ def _move_cross_device(source: Path, target: Path) -> None:
     endlessly re-suffixing ``.collision<n>``. A target with *different* content
     is a real name collision and still raises.
     """
-    try:
-        _reserve_target(target)
-    except FileExistsError:
-        if _same_file_content(source, target):
-            os.unlink(source)
-            return
-        # oze-robust-10: a 0-byte target with a non-empty source is a stranded
-        # O_EXCL reservation from a move killed before os.replace; the move must
-        # self-heal on re-run instead of raising a phantom collision forever.
-        # oze-robust-20: do NOT unlink+re-reserve (that opened a TOCTOU window
-        # where another process could write real content into the gap, then have
-        # it destroyed). Fall through to the atomic os.replace below, which
-        # overwrites the 0-byte reservation in a single rename with no window.
-        if not _is_stranded_reservation(source, target):
-            raise
-        # oze-di-20: a 0-byte target is indistinguishable from a user's
-        # intentional empty file, so don't reclaim it silently — warn that it is
-        # being overwritten (as a presumed stranded reservation) before the
-        # atomic os.replace below replaces it.
-        logger.warning(
-            "overwriting 0-byte target %s with %s — treating it as a stranded "
-            "reservation from an interrupted move; an intentional empty file at "
-            "this path would be replaced", target, source)
+    if _prepare_cross_device_target(source, target):
+        return
     # oze-sec-01: replace the PID-based suffix with cryptographically
     # random bytes. The previous `.{name}.{pid}.tmp` pattern was
     # predictable: an attacker with write access to the bucket dir
@@ -1616,6 +1658,28 @@ def _move_cross_device(source: Path, target: Path) -> None:
     # race `shutil.copy2` into clobbering the wrong target. 8 bytes
     # of `secrets.token_hex` collapse that race to ~2^-64 odds.
     tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+    _copy_cross_device_target(source, target, tmp)
+    _unlink_cross_device_source(source, target)
+
+
+def _prepare_cross_device_target(source: Path, target: Path) -> bool:
+    try:
+        _reserve_target(target)
+        return False
+    except FileExistsError:
+        if _same_file_content(source, target):
+            os.unlink(source)
+            return True
+        if not _is_stranded_reservation(source, target):
+            raise
+        logger.warning(
+            "overwriting 0-byte target %s with %s — treating it as a stranded "
+            "reservation from an interrupted move; an intentional empty file at "
+            "this path would be replaced", target, source)
+        return False
+
+
+def _copy_cross_device_target(source: Path, target: Path, tmp: Path) -> None:
     replaced = False
     try:
         shutil.copy2(source, tmp)
@@ -1637,6 +1701,9 @@ def _move_cross_device(source: Path, target: Path) -> None:
                     leftover, unlink_exc,
                 )
         raise
+
+
+def _unlink_cross_device_source(source: Path, target: Path) -> None:
     # oze-robust-01: the copy is committed at `target`; source removal has no
     # rollback (cross-fs target is an independent copy, not a hardlink). If the
     # unlink fails the file exists at BOTH paths as full copies — surface it
@@ -1666,34 +1733,50 @@ def _walk_prunable_dirs(
     ``os.walk(topdown=False)`` order, invoking ``visit(current)`` for each.
     Returns False when the root is unusable (caller returns 0).
     """
+    root_resolved = _resolved_prunable_root(root, label)
+    if root_resolved is None:
+        return False
+    for dirpath, _dirnames, _filenames in os.walk(
+        root_resolved,
+        topdown=False,
+        followlinks=False,
+        onerror=partial(_log_prunable_walk_error, label),
+    ):
+        current = _prunable_walk_path(dirpath, root_resolved, label)
+        if current is not None:
+            visit(current)
+    return True
+
+
+def _resolved_prunable_root(root: Path, label: str) -> Path | None:
     try:
-        root_resolved = Path(root).resolve(strict=True)
+        resolved = Path(root).resolve(strict=True)
     except OSError as exc:
         logger.debug("%s: cannot resolve root %s: %s", label, root, exc)
-        return False
-    if root_resolved.is_symlink() or not root_resolved.is_dir():
-        return False
+        return None
+    return resolved if not resolved.is_symlink() and resolved.is_dir() else None
 
-    def _on_error(exc: OSError) -> None:
-        logger.debug("%s: walk error: %s", label, exc)
 
-    for dirpath, _dirnames, _filenames in os.walk(
-        root_resolved, topdown=False, followlinks=False, onerror=_on_error
-    ):
-        try:
-            current = Path(dirpath)
-        except (ValueError, OSError) as exc:
-            logger.debug("%s: skip unparseable path %r: %s", label, dirpath, exc)
-            continue
-        if current == root_resolved:
-            continue
-        try:
-            if current.is_symlink():
-                continue
-        except OSError:
-            continue
-        visit(current)
-    return True
+def _log_prunable_walk_error(label: str, exc: OSError) -> None:
+    logger.debug("%s: walk error: %s", label, exc)
+
+
+def _prunable_walk_path(
+    dirpath: str,
+    root_resolved: Path,
+    label: str,
+) -> Path | None:
+    try:
+        current = Path(dirpath)
+    except (ValueError, OSError) as exc:
+        logger.debug("%s: skip unparseable path %r: %s", label, dirpath, exc)
+        return None
+    if current == root_resolved:
+        return None
+    try:
+        return None if current.is_symlink() else current
+    except OSError:
+        return None
 
 
 def prune_empty_dirs(root: Path, verbose: bool = False) -> int:
@@ -1908,18 +1991,44 @@ def _preplan_resolve_collisions(
     # captured so the pre-pass does NOT prime head_cache for the whole tree —
     # that restores the bounded per-window cache the drain-side pop assumes and
     # keeps peak RSS off the file count.
+    pairs = _resolved_plan_pairs(root, files, ctx)
+    needed_dirs = _needed_plan_dirs(root, pairs)
+    rename_map = _planning_collision_renames(pairs, needed_dirs, ctx, preview)
+    return [(rename_map.get(src, src), ext_dir) for src, ext_dir in pairs]
+
+
+def _resolved_plan_pairs(
+    root: Path,
+    files: list[Path],
+    ctx: SniffContext,
+) -> list[tuple[Path, Path]]:
     pairs: list[tuple[Path, Path]] = []
-    for f in files:
-        ext_dir = root / resolve_real_extension(f, ctx=ctx)
-        pairs.append((f, ext_dir))
-        if ctx.head_cache is not None:
-            ctx.head_cache.pop(f, None)
-    needed_dirs: set[Path] = set()
+    for source in files:
+        ext_dir = root / resolve_real_extension(source, ctx=ctx)
+        pairs.append((source, ext_dir))
+        _evict_sniff_head(ctx, source)
+    return pairs
+
+
+def _needed_plan_dirs(
+    root: Path,
+    pairs: list[tuple[Path, Path]],
+) -> set[Path]:
+    needed: set[Path] = set()
     for _, ext_dir in pairs:
-        cur = ext_dir
-        while cur != cur.parent and cur != root:
-            needed_dirs.add(cur)
-            cur = cur.parent
+        current = ext_dir
+        while current != current.parent and current != root:
+            needed.add(current)
+            current = current.parent
+    return needed
+
+
+def _planning_collision_renames(
+    pairs: list[tuple[Path, Path]],
+    needed_dirs: set[Path],
+    ctx: SniffContext,
+    preview: bool,
+) -> dict[Path, Path]:
     rename_map: dict[Path, Path] = {}
     for source, _ext_dir in pairs:
         if not _blocks_a_needed_dir(source, needed_dirs):
@@ -1927,7 +2036,7 @@ def _preplan_resolve_collisions(
         candidate = _resolve_one_planning_collision(source, ctx, preview)
         if candidate is not None:
             rename_map[source] = candidate
-    return [(rename_map.get(src, src), ext_dir) for src, ext_dir in pairs]
+    return rename_map
 
 
 def _blocks_a_needed_dir(source: Path, needed_dirs: set[Path]) -> bool:
@@ -2020,12 +2129,25 @@ def _drain_futures(
 ) -> None:
     """Block until at least one future completes, then log results and prune
     the head_cache for finished sources (oze-conc-03 / oze-scal-05)."""
+    done = _wait_for_move_futures(
+        futures, wait_timeout, max_stall_seconds, now_fn)
+    for future in done:
+        _drain_move_future(
+            future, futures, stats, preview, head_cache, manager)
+
+
+def _wait_for_move_futures(
+    futures: dict[Future, Path],
+    wait_timeout: float,
+    max_stall_seconds: float,
+    now_fn: Callable[[], float],
+) -> set[Future]:
     stalled_since = now_fn()
     while True:
         done, _ = wait(
             futures, timeout=wait_timeout, return_when=FIRST_COMPLETED)
         if done:
-            break
+            return done
         elapsed = now_fn() - stalled_since
         if elapsed >= max_stall_seconds:
             for future in futures:
@@ -2040,30 +2162,33 @@ def _drain_futures(
             "(%d in flight)",
             elapsed, len(futures),
         )
-    for fut in done:
-        source = futures.pop(fut)
-        head_cache.pop(source, None)
-        try:
-            _, destination, error = fut.result()
-        except Exception as exc:
-            # oze-obs-02: _move_worker only traps OSError/RuntimeError/ValueError;
-            # an unexpected class (KeyError, MemoryError, ...) would otherwise
-            # re-raise here, escape _run_moves, and abort the whole batch with no
-            # summary, losing all in-flight progress. Treat it as a per-file skip
-            # so one rogue file can't kill every move. BaseException
-            # (KeyboardInterrupt/SystemExit) still propagates for prompt cancel.
-            logger.warning("Skipped %s: unexpected worker error: %s", source, exc)
-            stats.skipped += 1
-            continue
-        if error:
-            logger.warning(f"Skipped {source}: {error}")
-            if manager is not None:
-                manager.release(source, destination.parent)
-            stats.skipped += 1
-        else:
-            action = "Preview:" if preview else "Moved"
-            logger.info(f"{action} {source} -> {destination}")
-            stats.processed += 1
+
+
+def _drain_move_future(
+    future: Future,
+    futures: dict[Future, Path],
+    stats: _RunStats,
+    preview: bool,
+    head_cache: dict[Path, HeadBytes],
+    manager: BucketManager | None,
+) -> None:
+    source = futures.pop(future)
+    head_cache.pop(source, None)
+    try:
+        _, destination, error = future.result()
+    except Exception as exc:
+        logger.warning("Skipped %s: unexpected worker error: %s", source, exc)
+        stats.skipped += 1
+        return
+    if error:
+        logger.warning(f"Skipped {source}: {error}")
+        if manager is not None:
+            manager.release(source, destination.parent)
+        stats.skipped += 1
+        return
+    action = "Preview:" if preview else "Moved"
+    logger.info(f"{action} {source} -> {destination}")
+    stats.processed += 1
 
 
 def _maybe_log_progress(

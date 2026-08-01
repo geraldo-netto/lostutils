@@ -107,16 +107,6 @@ dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no Bro
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-cmplx-01 | open | med | organize_by_extension.py:460 — `resolve_real_extension` cognitive complexity 11 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-02 | open | med | organize_by_extension.py:649 — `list_files` cognitive complexity 13 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-03 | open | med | organize_by_extension.py:844 — `_find_reusable_bucket` cognitive complexity 13 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-04 | open | med | organize_by_extension.py:1093 — `BucketManager::release` cognitive complexity 11 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-05 | open | med | organize_by_extension.py:1241 — `_resolve_source_collision` cognitive complexity 12 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-06 | open | med | organize_by_extension.py:1420 — `_atomic_rename_to_free_slot` cognitive complexity 17 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-07 | open | med | organize_by_extension.py:1574 — `_move_cross_device` cognitive complexity 14 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-08 | open | med | organize_by_extension.py:1656 — `_walk_prunable_dirs` cognitive complexity 12 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-09 | open | med | organize_by_extension.py:1880 — `_preplan_resolve_collisions` cognitive complexity 13 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
-oze-cmplx-10 | open | med | organize_by_extension.py:2011 — `_drain_futures` cognitive complexity 20 exceeds project limit 10. Extract cohesive branch groups into named helpers until score is ≤10, retaining focused tests. | complexipy 6.2.0 with ignored markers disabled; cognitive complexity
 
 ## code duplication
 
