@@ -4969,6 +4969,19 @@ def test_put_file_work_stops_after_full_queue_shutdown():
     )
 
 
+def test_put_worker_sentinel_stops_when_full_queue_is_shutting_down():
+    stop = threading.Event()
+
+    class FullQueue:
+        def put(self, item, timeout):
+            assert item is None
+            assert timeout == 0.1
+            stop.set()
+            raise queue.Full
+
+    import_events._put_worker_sentinel(FullQueue(), stop)
+
+
 def test_shutdown_workers_does_not_block_on_full_queue(monkeypatch):
     work_queue = queue.Queue(maxsize=1)
     work_queue.put((0, Path("pending")))
