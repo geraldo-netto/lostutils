@@ -6,7 +6,7 @@ Proposed corrections / improvements. One table per review category. Format:
 
 Scan scope = root-directory `.py`/`.sh` files only (per AGENTS.md); cache/build paths are excluded. Tables sorted by `description` (each starts with `file:line`). Scripts are standalone — dedup findings are within-file only, never cross-file module extraction.
 
-Latest full rescan: 2026-08-01 — 10 root scripts / 21,311 lines; pinned lint and type gates clean; Python 3.12 suite 1,929 passed, 1 skipped; total coverage 97.25%; 1,205 functions/methods meet the 80% function gate.
+Latest full rescan: 2026-08-01 — 10 root scripts / 22,397 lines; pinned lint and type gates clean; default-discovery Python 3.12 suite 1,981 passed, 1 skipped; total coverage 96.51%; 1,279 of 1,302 functions/methods meet the 80% function gate.
 
 id prefix | file name
 --- | ---
