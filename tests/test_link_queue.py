@@ -231,6 +231,27 @@ def test_config_store_coerce_bool_warns_and_uses_default(capsys):
     assert "enabled='maybe' is invalid" in capsys.readouterr().err
 
 
+def test_config_store_coerces_string_and_enum_scalars(capsys):
+    config = {
+        "log_file": 17,
+        "output_folder": "/downloads",
+        "log_verbosity": "VERBOSE",
+        "default_mode": ["queue"],
+    }
+
+    link_queue.ConfigStore._coerce_string_scalars(config)
+
+    assert config == {
+        "log_file": "",
+        "output_folder": "/downloads",
+        "log_verbosity": "verbose",
+        "default_mode": "queue",
+    }
+    warnings = capsys.readouterr().err
+    assert "log_file=17 is invalid" in warnings
+    assert "default_mode=['queue'] is invalid" in warnings
+
+
 def test_normalize_paste_text():
     assert LinkQueueApp._normalize_paste_text("  a \n\n b \n") == "a\nb\n"
     assert LinkQueueApp._normalize_paste_text("   \n\n") == ""
