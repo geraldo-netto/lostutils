@@ -4358,6 +4358,17 @@ def _outputs_are_distinct(args: argparse.Namespace) -> bool:
     return json_target != ics_target
 
 
+def _prepare_output_parents(args: argparse.Namespace) -> None:
+    targets = [args.output]
+    if args.emit_ics:
+        targets.append(args.emit_ics)
+    for target in targets:
+        parent = Path(target).expanduser().resolve().parent
+        parent.mkdir(parents=True, exist_ok=True)
+        if not parent.is_dir():
+            raise NotADirectoryError(f"output parent is not a directory: {parent}")
+
+
 def _run_main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     if not _outputs_are_distinct(args):
@@ -4379,6 +4390,11 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
         return 0
     if not folder.is_dir():
         logger.error("Input path is not a directory: %s", folder)
+        return 2
+    try:
+        _prepare_output_parents(args)
+    except OSError as exc:
+        logger.error("Could not prepare output directory: %s", exc)
         return 2
 
     try:

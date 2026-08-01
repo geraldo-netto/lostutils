@@ -131,7 +131,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-rob-02 | open | low | import_events.py:3794-3838 — output parent is not created or validated; a missing parent raises a raw traceback during lock creation. Validate/create the parent and convert OSError to concise stderr plus nonzero exit. | actionable CLI recovery
 oze-rob-01 | open | med | organize_by_extension.py:1618-1647 — cross-filesystem move replaces target and deletes source without fsyncing temp or directories; power loss can remove the original before destination durability. Fsync temp, destination directory, then source directory in ordered phases. | power-loss durability
 rf-rob-01 | open | low | relocate_folder.py:367-380 — `_create_missing_dirs` can create outer ancestors then fail before returning its cleanup list, leaving partial directories. Track successful creations and clean them inside the helper on BaseException. | partial-state recovery
 rf-rob-02 | open | low | relocate_folder.py:835-846,2345-2349 — cleanup covers `copytree` but not later ownership replication, and `_copy_and_verify` invokes `copy_tree` before its cleanup try; interruption can leave a full target blocking retry. Enclose ownership and the copy call in BaseException cleanup. | kill safety

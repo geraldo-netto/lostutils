@@ -5031,6 +5031,19 @@ def test_cli_rejects_file_input_without_writing_output(tmp_path, caplog):
     assert "not a directory" in caplog.text
 
 
+def test_cli_reports_invalid_output_parent(tmp_path, caplog):
+    source = tmp_path / "events"
+    source.mkdir()
+    parent = tmp_path / "blocked"
+    parent.write_text("not a directory", encoding="utf-8")
+    output = parent / "events.json"
+
+    rc = import_events._run_main([str(source), "--output", str(output)])
+
+    assert rc == 2
+    assert "Could not prepare output directory" in caplog.text
+
+
 def test_close_paddle_engine_surfaces_close_failure(caplog):
     class Engine:
         def close(self):
