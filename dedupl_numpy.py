@@ -44,6 +44,10 @@ def _record_layout(
     return line_starts, hash_width, path_offset
 
 
+def _line_content_end(data: np.ndarray, line_end: int) -> int:
+    return line_end - int(line_end > 0 and data[line_end - 1] == 0x0D)
+
+
 def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     """Return duplicate paths, redundant-file count, and record count."""
     nl = np.flatnonzero(data == 0x0A)
@@ -72,7 +76,11 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
 
     # Path extraction is variable-width → list comprehension.
     paths = {
-        bytes(data[line_starts[i] + path_offset : nl[i]])
+        bytes(
+            data[
+                line_starts[i] + path_offset : _line_content_end(data, int(nl[i]))
+            ]
+        )
         for i in dup_line_indices.tolist()
     }
     return paths, file_equal, n_lines

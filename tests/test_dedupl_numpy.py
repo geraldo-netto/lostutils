@@ -127,3 +127,16 @@ def test_group_duplicates_includes_final_unterminated_record():
     assert paths == {b"/one", b"/two"}
     assert equal_files == 1
     assert record_count == 2
+
+
+def test_group_duplicates_strips_crlf_record_terminator():
+    digest = b"a" * 32
+    raw = digest + b" /one\r\n" + digest + b" /two\r\n"
+
+    paths, equal_files, record_count = dedupl_numpy.group_duplicates(
+        dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
+    )
+
+    assert paths == {b"/one", b"/two"}
+    assert equal_files == 1
+    assert record_count == 2
