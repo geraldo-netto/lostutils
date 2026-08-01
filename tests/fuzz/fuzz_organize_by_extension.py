@@ -389,7 +389,6 @@ class OrganizeIntegrationFuzz(unittest.TestCase):
     def test_organize_layout_invariants(self, files):
         with TemporaryDirectory() as d:
             root = Path(d)
-            staged: list[Path] = []
             for stem, suffix, head in files:
                 safe_stem = stem.strip(".").strip() or "x"
                 name = f"{safe_stem}.{suffix}" if suffix.strip() else safe_stem
@@ -399,13 +398,9 @@ class OrganizeIntegrationFuzz(unittest.TestCase):
                     if p.exists():
                         continue
                     p.write_bytes(head)
-                    staged.append(p)
                 except (OSError, ValueError):
                     continue
-            try:
-                oze.organize(root, verbose=False)
-            except OSError:
-                return  # platform-specific FS quirks should not fail the fuzz
+            oze.organize(root, verbose=False)
             # Every MOVED file must live under <ext>/<bucket>/<name>. Files
             # that organize had to skip (e.g. source name collides with the
             # bucket dir it would have landed in — "avi" with an AVI header
