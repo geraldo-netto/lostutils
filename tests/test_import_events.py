@@ -4955,6 +4955,20 @@ def test_feed_file_queue_count_excludes_unqueued_on_early_stop():
     assert all(x is None for x in drained)
 
 
+def test_put_file_work_stops_after_full_queue_shutdown():
+    stop = threading.Event()
+
+    class FullQueue:
+        def put(self, _item, timeout):
+            assert timeout == 0.1
+            stop.set()
+            raise queue.Full
+
+    assert not import_events._put_file_work(
+        FullQueue(), stop, 3, Path("pending.txt")
+    )
+
+
 def test_shutdown_workers_does_not_block_on_full_queue(monkeypatch):
     work_queue = queue.Queue(maxsize=1)
     work_queue.put((0, Path("pending")))
