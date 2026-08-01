@@ -1915,17 +1915,20 @@ def test_probe_done_clears_busy(app):
     assert app._io_busy is False
 
 
-def test_probe_timeout_keeps_worker_inflight_and_logs(app):
+def test_probe_timeout_abandons_worker_generation_and_logs(app):
     app._io_busy = True
     app._probe_token = 7
     app._monitor.probe_thread = object()
+    old_device = app.dev
 
     app._probe_timeout(7, "Connect")
     _wait_drain(app)
 
-    assert app._io_busy is True
-    assert app._monitor.probe_thread is not None
+    assert app._io_busy is False
+    assert app._monitor.probe_thread is None
+    assert app._probe_token == 8
     assert app._monitor.unresponsive is True
+    assert app.dev is not old_device
     assert app.state_lbl.cget("text") == "USB unresponsive"
     assert "probe stalled" in app.log_box.get("1.0", "end").lower()
 
@@ -2086,9 +2089,10 @@ def test_connection_monitor_probe_alive_handles_device_failure():
     assert not monitor.io_busy
 
 
-def test_connection_monitor_timeout_blocks_replacement_until_late_done():
+def test_connection_monitor_timeout_allows_fresh_generation():
     scheduled = []
     states = []
+    recoveries = []
     monitor = minikeypad.ConnectionMonitor(
         lambda: types.SimpleNamespace(connected=False),
         lambda _message: None,
@@ -2096,30 +2100,27 @@ def test_connection_monitor_timeout_blocks_replacement_until_late_done():
         lambda callback: callback(),
         lambda: states.append(True),
         lambda: None,
+        lambda: recoveries.append(True),
     )
     monitor.token = 4
     monitor.io_busy = True
     monitor.probe_thread = object()
 
     monitor.probe_timeout(4, "Connect")
-    monitor.poll()
 
     assert monitor.unresponsive
-    assert monitor.io_busy
-    assert monitor.probe_thread is not None
-    assert len(scheduled) == 1
-
-    monitor.probe_done(True, token=3)
-    assert monitor.unresponsive
-    assert monitor.io_busy
-
-    monitor.connect_done(True, token=4)
-
-    assert not monitor.unresponsive
     assert not monitor.io_busy
     assert monitor.probe_thread is None
     assert monitor.token == 5
-    assert len(states) == 3
+    assert recoveries == [True]
+    assert scheduled == []
+
+    monitor.probe_done(True, token=4)
+    assert monitor.unresponsive
+    assert not monitor.io_busy
+    assert monitor.probe_thread is None
+    assert monitor.token == 5
+    assert len(states) == 1
 
 
 def test_trim_log_lines_ignores_invalid_widget_index():

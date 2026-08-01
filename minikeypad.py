@@ -928,13 +928,23 @@ class ConnectionMonitor:
     callable because the owner may swap the device instance at runtime.
     """
 
-    def __init__(self, dev, log, schedule, post, on_state, on_connected):
+    def __init__(
+        self,
+        dev,
+        log,
+        schedule,
+        post,
+        on_state,
+        on_connected,
+        on_stall=lambda: None,
+    ):
         self._dev = dev            # () -> current KeypadDevice
         self._log = log
         self._schedule = schedule  # (delay_ms, fn): run fn on the UI thread later
         self._post = post          # (fn): marshal fn onto the UI thread
         self._on_state = on_state
         self._on_connected = on_connected
+        self._on_stall = on_stall
         self.io_busy = False
         self.token = 0
         self.probe_thread = None
@@ -978,8 +988,15 @@ class ConnectionMonitor:
     def probe_timeout(self, token, label):
         if token != self.token or self.probe_thread is None:
             return
+        self.token += 1
+        self.probe_thread = None
+        self.io_busy = False
         self.unresponsive = True
-        self._log("%s probe stalled; USB call did not finish" % label)
+        self._on_stall()
+        self._log(
+            "%s probe stalled; abandoned the USB handle and will reconnect"
+            % label
+        )
         self._on_state()
 
     def probe_alive(self, token=None):
@@ -1043,7 +1060,8 @@ class App(tk.Tk):
         self._monitor = ConnectionMonitor(
             dev=lambda: self.dev, log=self.log, schedule=self.after,
             post=self._ui_q.put, on_state=self._update_state,
-            on_connected=self._version_check)
+            on_connected=self._version_check,
+            on_stall=self._replace_stalled_device)
         self._profiles = ProfileStore()
         self._phys_buttons = {}     # key_id -> Button
         self._phys_base = {}        # key_id -> base button label
@@ -1541,6 +1559,9 @@ class App(tk.Tk):
 
     def _probe_timeout(self, token, label):
         self._monitor.probe_timeout(token, label)
+
+    def _replace_stalled_device(self):
+        self.dev = KeypadDevice(log=self.log)
 
     def _probe_alive(self, token=None):
         self._monitor.probe_alive(token)
