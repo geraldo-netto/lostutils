@@ -850,6 +850,7 @@ def copy_tree(src: Path, dst: Path, *,
                 copy_function=copy_function,
                 ignore=_make_ignore_specials(skipped, cache),
             )
+        _replicate_ownership(src, dst, jobs=jobs)
     except BaseException:
         # rf-robust-02: catch BaseException (not just Exception) so a
         # KeyboardInterrupt mid-copy also cleans the half-written `dst` instead
@@ -860,7 +861,6 @@ def copy_tree(src: Path, dst: Path, *,
         # raised — the warning is informational.
         _rmtree_logging(dst, "failed copy")
         raise
-    _replicate_ownership(src, dst, jobs=jobs)
     return skipped
 
 
@@ -2380,11 +2380,11 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
     mode_cache: dict[Path, int] = {}
     if plan.strict:
         _refuse_specials_before_copy(plan.source, mode_cache)
-    skipped = copy_tree(plan.source, plan.target, mode_cache=mode_cache,
-                        jobs=plan.jobs, check_space=plan.check_space)
-    if on_state is not None:
-        on_state(MigrationState.COPIED)  # rf-ddd-02: data on disk, pre-verify
     try:
+        skipped = copy_tree(plan.source, plan.target, mode_cache=mode_cache,
+                            jobs=plan.jobs, check_space=plan.check_space)
+        if on_state is not None:
+            on_state(MigrationState.COPIED)  # rf-ddd-02: data on disk, pre-verify
         _report_skipped(skipped, plan.strict, mode_cache=mode_cache)
         if plan.verify:
             verify_copy(plan.source, plan.target, plan.checksum,
@@ -2409,7 +2409,7 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
         # silently wipes a half-good target with no audit trail. The operator
         # needs to know the partial copy is being removed before re-running.
         _log().warning(
-            "removing target %s after verification failed; the source is "
+            "removing target %s after verification failed or copy failed; the source is "
             "untouched — re-run to retry", plan.target,
         )
         # rf-obs-02: record rmtree failures (like the copy_tree cleanup) instead

@@ -4088,6 +4088,21 @@ def test_copy_tree_cleans_partial_target_on_keyboardinterrupt(tmp_path, monkeypa
     assert not dst.exists(), "partial target not cleaned on KeyboardInterrupt"
 
 
+def test_copy_tree_cleans_target_on_ownership_interrupt(tmp_path, monkeypatch):
+    src = tmp_path / "src"; _make_tree(src)
+    dst = tmp_path / "dst"
+    monkeypatch.setattr(
+        rf,
+        "_replicate_ownership",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        rf.copy_tree(src, dst, check_space=False)
+
+    assert not dst.exists()
+
+
 def test_copy_and_verify_cleans_target_on_keyboardinterrupt(tmp_path, monkeypatch):
     """rf-robust-02: a Ctrl+C during verification also removes the partial
     target (the cleanup catches BaseException)."""
