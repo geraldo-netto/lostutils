@@ -1074,6 +1074,22 @@ class BucketManagerTests(unittest.TestCase):
 
             self.assertNotIn("a.txt", mgr.state_cache[bucket.path])
 
+    def test_release_handles_unknown_and_empty_bucket_reservations(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            manager = BucketManager(root=root)
+            source = root / "a.txt"
+            bucket = root / "txt" / "a00000"
+
+            manager.release(source, bucket)
+
+            manager.state_cache[bucket] = set()
+            manager._reserved_names[bucket] = {source.name}
+            manager.release(source, bucket)
+
+            self.assertEqual(manager.state_cache[bucket], set())
+            self.assertNotIn(bucket, manager._reserved_names)
+
     def test_release_rescans_full_bucket_before_releasing(self):
         with TemporaryDirectory() as d:
             root = Path(d)
