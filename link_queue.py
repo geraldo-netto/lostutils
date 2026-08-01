@@ -4403,14 +4403,44 @@ class LinkQueueApp(metaclass=_FacadeMeta):
     def _get_int_setting(self, var, key, default, clamp_min=None) -> int:
         """Shared body for the spinbox getters (dup-01): parse the var as an
         int (via float, so "5.0" works), clamp to `clamp_min` when given, and
-        fall back to the stored config value on any parse error."""
+        fall back to the stored config value on any parse error.
+
+        lq-mt-50: `var.get()` is a Tcl call, so this is UI-THREAD ONLY. It
+        exists to read what the user just typed, which only the on-change
+        handlers need. Anything a worker reads must go through
+        :meth:`_config_int`."""
         try:
             value = int(float(var.get()))
         except Exception:
             return int(self.config.get(key, default))
         return max(clamp_min, value) if clamp_min is not None else value
 
+    def _config_int(self, key, default, clamp_min=None) -> int:
+        """Thread-safe read of an integer config knob (lq-mt-50).
+
+        Workers used to reach `sleep_between_items` / `failure_sleep_seconds`
+        through their Tk StringVars — a Tcl call from a non-main thread, the
+        exact thing `_safe_after` exists to prevent, repeated every 0.25s per
+        worker by `_maybe_inter_item_sleep`. The `except Exception` fallback
+        hid the resulting RuntimeError, but a Tcl build without thread support
+        blocks rather than raising.
+
+        The config is already LIVE-shared with the dispatcher (see its class
+        docstring), and every on-change handler writes the committed value
+        there, so reading it here keeps edits taking effect immediately with no
+        Tk involvement."""
+        try:
+            value = int(float(self.config.get(key, default)))
+        except (TypeError, ValueError):
+            value = int(default)
+        return max(clamp_min, value) if clamp_min is not None else value
+
     def _get_sleep(self) -> int:
+        """Inter-item sleep, as read by queue workers (lq-mt-50)."""
+        return self._config_int("sleep_between_items", 5)
+
+    def _read_sleep_var(self) -> int:
+        """The Sleep spinbox's current text — UI thread only."""
         return self._get_int_setting(self.sleep_var, "sleep_between_items", 5)
 
     def _persist_if_changed(
@@ -4445,16 +4475,21 @@ class LinkQueueApp(metaclass=_FacadeMeta):
 
     def _on_sleep_changed(self) -> None:
         self._apply_int_setting(
-            self.sleep_var, self._get_sleep, "sleep_between_items", 5,
+            self.sleep_var, self._read_sleep_var, "sleep_between_items", 5,
             lambda v: f"[config] sleep set to {v}s")
 
     def _get_failure_sleep(self) -> int:
+        """Post-failure domain cooldown, as read by queue workers (lq-mt-50)."""
+        return self._config_int("failure_sleep_seconds", 300, clamp_min=0)
+
+    def _read_failure_sleep_var(self) -> int:
+        """The Cooldown spinbox's current text — UI thread only."""
         return self._get_int_setting(
             self.cooldown_var, "failure_sleep_seconds", 300, clamp_min=0)
 
     def _on_cooldown_changed(self) -> None:
         self._apply_int_setting(
-            self.cooldown_var, self._get_failure_sleep,
+            self.cooldown_var, self._read_failure_sleep_var,
             "failure_sleep_seconds", 300,
             lambda v: f"[config] failure cooldown set to {self._format_duration(v)}")
 

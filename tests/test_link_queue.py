@@ -1391,22 +1391,24 @@ def test_worker_loop_cleanup_path(app):
 
 
 def test_maybe_inter_item_sleep(app):
-    app.sleep_var.set("0")
+    # lq-mt-50: workers read the committed config value, not the widget, so
+    # each edit goes through the on-change handler like a real user edit.
+    app.sleep_var.set("0"); app._on_sleep_changed()
     app._maybe_inter_item_sleep(threading.Event(), other_free=0)  # early return
-    app.sleep_var.set("1")
+    app.sleep_var.set("1"); app._on_sleep_changed()
     ev = threading.Event()
     t0 = time.time()
     app._maybe_inter_item_sleep(ev, other_free=0)  # sleeps ~1s
     assert time.time() - t0 >= 0.8
-    app.sleep_var.set("5")
+    app.sleep_var.set("5"); app._on_sleep_changed()
     app._maybe_inter_item_sleep(ev, other_free=2)  # other free -> no sleep
 
 
 def test_failure_cooldown(app):
-    app.cooldown_var.set("0")
+    app.cooldown_var.set("0"); app._on_cooldown_changed()
     app._trigger_failure_cooldown(1, q("http://host/x"), 7)  # fail_s<=0 -> no-op
     assert app._cooldown_until == {}
-    app.cooldown_var.set("300")
+    app.cooldown_var.set("300"); app._on_cooldown_changed()
     item = q("http://host/x")
     app._trigger_failure_cooldown(1, item, 7)
     domain = app._domain_of(item)
@@ -4993,3 +4995,63 @@ def test_main_reports_state_lock_error(monkeypatch, capsys):
 
     assert exc.value.code == 1
     assert "locked" in capsys.readouterr().err
+
+
+class _TkVarTouched(BaseException):
+    """Not an Exception, so _get_int_setting's `except Exception` can't hide it."""
+
+
+def test_worker_knobs_never_read_a_tk_var(app, monkeypatch):
+    """lq-mt-50: _get_sleep/_get_failure_sleep run on worker threads, so they
+    must not make Tcl calls."""
+    def boom():
+        raise _TkVarTouched("worker read a Tk StringVar")
+
+    monkeypatch.setattr(app.sleep_var, "get", boom)
+    monkeypatch.setattr(app.cooldown_var, "get", boom)
+    app.config["sleep_between_items"] = 7
+    app.config["failure_sleep_seconds"] = 42
+
+    assert app._get_sleep() == 7
+    assert app._get_failure_sleep() == 42
+
+
+def test_worker_knobs_are_readable_off_the_main_thread(app):
+    app.config["sleep_between_items"] = 3
+    app.config["failure_sleep_seconds"] = 9
+    seen = {}
+
+    def worker():
+        seen["sleep"] = app._get_sleep()
+        seen["cooldown"] = app._get_failure_sleep()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(5.0)
+
+    assert seen == {"sleep": 3, "cooldown": 9}
+
+
+def test_config_int_falls_back_and_clamps(app):
+    app.config["sleep_between_items"] = "not-a-number"
+    assert app._config_int("sleep_between_items", 5) == 5
+    app.config["failure_sleep_seconds"] = -30
+    assert app._config_int("failure_sleep_seconds", 300, clamp_min=0) == 0
+    app.config["sleep_between_items"] = "8.0"
+    assert app._config_int("sleep_between_items", 5) == 8
+    assert app._config_int("never_set_key", 11) == 11
+
+
+def test_spinbox_handlers_still_read_the_widget(app):
+    """The on-change handlers run on the Tk thread and must pick up what the
+    user just typed, not the previous committed value."""
+    app.sleep_var.set("13")
+    assert app._read_sleep_var() == 13
+    app._on_sleep_changed()
+    assert int(app.config["sleep_between_items"]) == 13
+    assert app._get_sleep() == 13          # committed value reaches workers
+
+    app.cooldown_var.set("77")
+    assert app._read_failure_sleep_var() == 77
+    app._on_cooldown_changed()
+    assert app._get_failure_sleep() == 77
