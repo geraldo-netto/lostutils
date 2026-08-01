@@ -5818,6 +5818,77 @@ def test_lock_owner_is_running_never_calls_kill_on_windows(monkeypatch):
     assert import_events._lock_owner_is_running(0) is False
 
 
+def _fake_windows_kernel(monkeypatch, *, handle, exit_code=None, last_error=0):
+    """Install a fake kernel32 so the win32 probe can be driven from any host."""
+    import ctypes
+
+    calls = {"closed": []}
+
+    class Kernel32:
+        @staticmethod
+        def OpenProcess(access, inherit, pid):
+            calls["opened"] = (access, inherit, pid)
+            return handle
+
+        @staticmethod
+        def GetExitCodeProcess(_handle, out):
+            if exit_code is None:
+                return 0
+            out._obj.value = exit_code
+            return 1
+
+        @staticmethod
+        def CloseHandle(closing):
+            calls["closed"].append(closing)
+            return 1
+
+        @staticmethod
+        def GetLastError():
+            raise AssertionError("LastError must come from ctypes.get_last_error")
+
+    def win_dll(name, **kwargs):
+        calls["windll"] = (name, kwargs)
+        return Kernel32
+
+    monkeypatch.setattr(ctypes, "WinDLL", win_dll, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: last_error, raising=False)
+    return calls
+
+
+def test_lock_probe_reads_last_error_through_the_ctypes_capture(monkeypatch):
+    """ie-plat-03: an ACCESS_DENIED misread would reclaim a live owner's lock."""
+    calls = _fake_windows_kernel(monkeypatch, handle=0, last_error=5)
+
+    assert import_events._lock_owner_is_running_windows(4242) is True
+    assert calls["windll"] == ("kernel32", {"use_last_error": True})
+
+
+def test_lock_probe_treats_other_open_failures_as_a_dead_owner(monkeypatch):
+    _fake_windows_kernel(monkeypatch, handle=0, last_error=87)
+
+    assert import_events._lock_owner_is_running_windows(4242) is False
+
+
+def test_lock_probe_reports_a_live_owner_and_closes_the_handle(monkeypatch):
+    calls = _fake_windows_kernel(monkeypatch, handle=7, exit_code=259)
+
+    assert import_events._lock_owner_is_running_windows(4242) is True
+    assert calls["closed"] == [7]
+
+
+def test_lock_probe_reports_an_exited_owner(monkeypatch):
+    _fake_windows_kernel(monkeypatch, handle=7, exit_code=0)
+
+    assert import_events._lock_owner_is_running_windows(4242) is False
+
+
+def test_lock_probe_assumes_alive_when_the_exit_code_is_unreadable(monkeypatch):
+    calls = _fake_windows_kernel(monkeypatch, handle=7, exit_code=None)
+
+    assert import_events._lock_owner_is_running_windows(4242) is True
+    assert calls["closed"] == [7]
+
+
 def test_create_lock_file_reclaims_even_if_the_unlink_fails(tmp_path, monkeypatch):
     lock = tmp_path / "a.lock"
     lock.write_text(f"pid={_dead_pid()}\n")

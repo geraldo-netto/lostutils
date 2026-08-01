@@ -4145,18 +4145,26 @@ def _read_lock_pid(lock_path: Path) -> Optional[int]:
     return None
 
 
-def _lock_owner_is_running_windows(pid: int) -> bool:  # pragma: no cover - win32-only
-    """Liveness via OpenProcess, the Windows stand-in for `kill(pid, 0)`."""
+def _lock_owner_is_running_windows(pid: int) -> bool:
+    """Liveness via OpenProcess, the Windows stand-in for `kill(pid, 0)`.
+
+    ie-plat-03: use_last_error routes the error code through ctypes' own
+    per-call capture. Reading kernel32.GetLastError() as a second FFI call can
+    return a value already clobbered in between, and misreading an
+    ACCESS_DENIED from a live owner lets this run reclaim the lock and write
+    the same output concurrently.
+    """
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    kernel32 = ctypes.WinDLL(  # type: ignore[attr-defined]
+        "kernel32", use_last_error=True)
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         # ERROR_ACCESS_DENIED (5) => the process exists but is not queryable.
-        return kernel32.GetLastError() == 5
+        return ctypes.get_last_error() == 5  # type: ignore[attr-defined]
     try:
         code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
