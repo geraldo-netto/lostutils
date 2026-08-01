@@ -166,7 +166,6 @@ hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage 
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-fuzz-01 | open | med | bookmark-tidy.py:519-535 — LZ4 fuzzing covers only valid match-copy inputs, not malformed literal/match lengths or decoded-size limits. Add truncation and expansion-bound properties. | adversarial parser coverage
 hr-fuzz-01 | open | med | hash-recursive-ai5.py:1423-1470 — fuzzing never asserts that every emitted duplicate group is byte-identical, so same-window/different-gap false positives pass. Add an adversarial property. | content-integrity property
 
 ## ruff (lint)

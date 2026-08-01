@@ -6,6 +6,7 @@ import string
 import types
 from pathlib import Path
 
+import pytest
 from hypothesis import assume, given, settings, strategies as st
 
 
@@ -153,6 +154,43 @@ def test_copy_lz4_match_grows_by_requested_length(seed, offset, length):
 
     assert len(output) == len(seed) + length
     assert bytes(output[:len(seed)]) == seed
+
+
+@given(
+    data=st.binary(max_size=64),
+    output_limit=st.integers(min_value=0, max_value=128),
+)
+@FUZZ
+def test_lz4_decoder_never_exceeds_output_limit(data, output_limit):
+    try:
+        decoded = bookmark_tidy._decode_lz4_block(
+            data,
+            max_input_size=len(data),
+            max_output_size=output_limit,
+        )
+    except bookmark_tidy.UserError:
+        return
+    assert len(decoded) <= output_limit
+
+
+@given(
+    literal_len=st.integers(min_value=1, max_value=14),
+    payload=st.binary(max_size=13),
+)
+@FUZZ
+def test_lz4_decoder_rejects_truncated_literal_runs(literal_len, payload):
+    assume(len(payload) < literal_len)
+    block = bytes([literal_len << 4]) + payload
+
+    with pytest.raises(bookmark_tidy.UserError, match="truncated.*literal"):
+        bookmark_tidy._decode_lz4_block(block)
+
+
+@given(extension=st.integers(min_value=1, max_value=32).map(lambda size: b"\xff" * size))
+@FUZZ
+def test_lz4_decoder_rejects_truncated_extended_lengths(extension):
+    with pytest.raises(bookmark_tidy.UserError, match="truncated.*length"):
+        bookmark_tidy._decode_lz4_block(b"\xf0" + extension)
 
 
 @given(host=st.text(alphabet=string.ascii_letters + string.digits + ":-.", min_size=1, max_size=40))
