@@ -93,6 +93,14 @@ _RECORD_PATHS = st.one_of(
         st.sampled_from(("line\nbreak", "line\rbreak", "@lostutils-json:")),
         st.text(alphabet=_SAFE_PATH_CHARS, max_size=8),
     ),
+    # hr-api-50: paths whose own first/last character is whitespace. A
+    # whitespace-splitting reader re-trims these unless they are escaped.
+    st.builds(
+        lambda lead, body, trail: lead + body + trail,
+        st.sampled_from(("", " ", "\t", "  ")),
+        st.text(alphabet=_SAFE_PATH_CHARS, min_size=1, max_size=8),
+        st.sampled_from(("", " ", "\t")),
+    ),
 )
 
 
@@ -246,7 +254,11 @@ class EmitGroupsFuzz(unittest.TestCase):
         for chunk in written:
             self.assertTrue(chunk.endswith("\n"))
             for line in chunk.splitlines():
-                label, encoded_path = line.split(" ", 1)
+                # hr-api-50: decode exactly the way remove-deduplv3.py does —
+                # `split(None, 1)`, which collapses the digest/path separator
+                # AND any leading whitespace of the path. Splitting on a single
+                # space here would hide a path the real consumer mangles.
+                label, encoded_path = line.split(None, 1)
                 if encoded_path.startswith(hr._ESCAPED_PATH_PREFIX):
                     encoded_path = json.loads(
                         encoded_path[len(hr._ESCAPED_PATH_PREFIX):]

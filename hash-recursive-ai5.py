@@ -1229,11 +1229,22 @@ def _count_real_paths(expanded) -> int:
 
 
 def _encode_record_path(path: str) -> str:
-    """Keep one physical line per record for every legal filesystem path."""
+    """Keep one physical line per record AND keep the path recoverable by a
+    whitespace-splitting reader, for every legal filesystem path.
+
+    hr-api-50: the record format is ``<digest> <path>``, so consumers separate
+    the two with `str.split(None, 1)` (remove-deduplv3.py does exactly that).
+    That parse silently re-trims a path whose own first or last character is
+    whitespace, and the consumer then builds `rm -f --` for a DIFFERENT path
+    than the one that was hashed. An empty path is escaped for the same
+    reason — it would disappear into the field separator.
+    """
     if (
-        path.startswith(_ESCAPED_PATH_PREFIX)
+        not path
+        or path.startswith(_ESCAPED_PATH_PREFIX)
         or "\n" in path
         or "\r" in path
+        or path.strip() != path
     ):
         return _ESCAPED_PATH_PREFIX + json.dumps(path, ensure_ascii=True)
     return path

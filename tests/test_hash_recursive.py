@@ -2584,6 +2584,25 @@ def test_emit_groups_newline_path_cannot_inject_record_boundary(tmp_path):
     assert json.loads(payload) == "/with\nnewline"
 
 
+@pytest.mark.parametrize(
+    "path",
+    [" leading", "trailing ", "\tboth\t", "   ", "", "mid space"],
+)
+def test_encode_record_path_survives_a_whitespace_splitting_reader(path):
+    """hr-api-50: remove-deduplv3.py parses records with `split(None, 1)`, which
+    re-trims a whitespace-edged path unless the emitter escaped it."""
+    line = f"abc {hr._encode_record_path(path)}"
+    _label, field = line.split(None, 1)
+    if field.startswith(hr._ESCAPED_PATH_PREFIX):
+        field = json.loads(field[len(hr._ESCAPED_PATH_PREFIX):])
+    assert field == path
+
+
+def test_encode_record_path_leaves_ordinary_paths_readable():
+    assert hr._encode_record_path("/tmp/plain.txt") == "/tmp/plain.txt"
+    assert hr._encode_record_path("/tmp/with space.txt") == "/tmp/with space.txt"
+
+
 # --- hr-test-15: _fmt_count boundaries -------------------------------------
 
 def test_fmt_count_zero():

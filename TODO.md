@@ -50,7 +50,6 @@ lq-gov-50 | open | low | link_queue.py:5654-5665 — `build_parser` puts the res
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-api-50 | open | med | hash-recursive-ai5.py:1231-1239 — `_encode_record_path` escapes only `\n`, `\r`, and the `@lostutils-json:` prefix, so a path with leading/trailing whitespace is emitted bare. remove-deduplv3.py:132 parses with `line.split(None, 1)`, which strips it, so the emitted `rm -f --` names a DIFFERENT path than the real file. Extend the JSON tagging to whitespace-edged paths. | verified: record `abc  leading-space.txt` → remove-deduplv3 nominates the nonexistent `leading-space.txt` as survivor and emits `rm -f -- plain.txt`; dedupl_numpy (fixed-offset parse) reads it correctly, so the two consumers disagree
 mkp-di-50 | open | low | minikeypad.py:1844-1847 — `_write_all_done` sets `ambiguous=True` on a failed key but never clears it, so a key that later writes successfully via Write-all stays flagged forever. The single-key path clears it only incidentally, because `_record_pending_assignment` replaces the whole record. Clear the flag on an `ok` outcome. | data integrity — derived UI state not invalidated on the success path
 
 ## performance
