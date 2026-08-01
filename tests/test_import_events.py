@@ -1019,7 +1019,7 @@ def test_language_detection_handles_portuguese_text():
     cfg = import_events.ModelConfig()
     text = "Festa de São João no Porto com música e evento cultural"
 
-    assert import_events._language_for_text(text, cfg) == "pt"
+    assert import_events._language_for_text_with_source(text, cfg)[0] == "pt"
 
 
 @pytest.mark.parametrize(
@@ -1036,7 +1036,7 @@ def test_language_detection_handles_portuguese_text():
 def test_language_detection_handles_non_latin_scripts(text, language, paddle_lang, tess_lang):
     cfg = import_events.ModelConfig()
 
-    assert import_events._language_for_text(text, cfg) == language
+    assert import_events._language_for_text_with_source(text, cfg)[0] == language
     assert import_events._paddle_language(language) == paddle_lang
     assert import_events._tesseract_language(language) == tess_lang
 
@@ -1059,7 +1059,9 @@ def test_ocr_language_match_score_prefers_target_language():
 def test_language_config_override_skips_detection():
     cfg = import_events.ModelConfig(language="fr")
 
-    assert import_events._language_for_text("the event is in English", cfg) == "fr"
+    assert import_events._language_for_text_with_source(
+        "the event is in English", cfg
+    )[0] == "fr"
     assert import_events._language_for_ocr("", cfg) == "fr"
 
 
