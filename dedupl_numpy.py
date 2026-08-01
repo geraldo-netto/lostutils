@@ -47,8 +47,10 @@ def _record_layout(
 def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     """Return duplicate paths, redundant-file count, and record count."""
     nl = np.flatnonzero(data == 0x0A)
-    if len(nl) == 0:
+    if len(data) == 0:
         return set(), 0, 0
+    if data[-1] != 0x0A:
+        nl = np.append(nl, len(data))
 
     line_starts, hash_width, path_offset = _record_layout(data, nl)
     n_lines = len(line_starts)

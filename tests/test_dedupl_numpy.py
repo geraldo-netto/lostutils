@@ -114,3 +114,16 @@ def test_main_reports_invalid_record_layout(monkeypatch, tmp_path, capfd):
 
     assert exc.value.code == 1
     assert "error:" in capfd.readouterr().err
+
+
+def test_group_duplicates_includes_final_unterminated_record():
+    digest = b"a" * 32
+    raw = digest + b" /one\n" + digest + b" /two"
+
+    paths, equal_files, record_count = dedupl_numpy.group_duplicates(
+        dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
+    )
+
+    assert paths == {b"/one", b"/two"}
+    assert equal_files == 1
+    assert record_count == 2
