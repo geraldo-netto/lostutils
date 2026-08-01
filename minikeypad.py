@@ -1057,6 +1057,11 @@ class App(tk.Tk):
 
         self.kp = KeyParam()
         self.dev = KeypadDevice(log=self.log)
+        # mkp-rob-50: devices abandoned by a stalled probe, waiting for their
+        # orphan thread to leave libusb so the handle can be released.
+        self._stalled_devices: queue.SimpleQueue = queue.SimpleQueue()
+        self._reaper_lock = threading.Lock()
+        self._device_reaper = None
         self._monitor = ConnectionMonitor(
             dev=lambda: self.dev, log=self.log, schedule=self.after,
             post=self._ui_q.put, on_state=self._update_state,
@@ -1561,7 +1566,52 @@ class App(tk.Tk):
         self._monitor.probe_timeout(token, label)
 
     def _replace_stalled_device(self):
-        self.dev = KeypadDevice(log=self.log)
+        """Install a fresh device and hand the abandoned one to the reaper
+        (mkp-rob-50).
+
+        The stalled probe thread may still be inside libusb holding the old
+        device's lock, so closing it here would freeze the Tk thread. Queue it
+        instead: a single daemon reaper drains the queue and each close() waits
+        on that lock, releasing the handle (and re-attaching usbhid) the moment
+        the orphan returns. Previously nothing ever released it, so every stall
+        leaked one libusb handle for the life of the process.
+        """
+        stalled, self.dev = self.dev, KeypadDevice(log=self.log)
+        self._stalled_devices.put(stalled)
+        self._ensure_device_reaper()
+
+    def _ensure_device_reaper(self):
+        with self._reaper_lock:
+            if self._device_reaper is not None and self._device_reaper.is_alive():
+                return
+            try:
+                self._device_reaper = threading.Thread(
+                    target=self._reap_stalled_devices,
+                    name="device-reaper", daemon=True)
+                self._device_reaper.start()
+            except Exception as e:
+                LOG.exception("stalled-device reaper failed to start")
+                self._device_reaper = None
+                self.log("Device cleanup error: %s" % e)
+
+    def _reap_stalled_devices(self):
+        """Close abandoned devices, blocking on each one's lock until its
+        orphan probe leaves libusb. Exits once the queue is drained; the
+        re-check under `_reaper_lock` closes the race with a producer that
+        enqueued just as this thread was giving up."""
+        while True:
+            try:
+                device = self._stalled_devices.get_nowait()
+            except queue.Empty:
+                with self._reaper_lock:
+                    if self._stalled_devices.empty():
+                        self._device_reaper = None
+                        return
+                continue
+            try:
+                device.close()
+            except Exception as e:
+                LOG.debug("could not release stalled device: %s", e)
 
     def _probe_alive(self, token=None):
         self._monitor.probe_alive(token)

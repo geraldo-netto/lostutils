@@ -133,7 +133,6 @@ rf-rel-50 | open | med | relocate_folder.py:1309-1314 — `_assert_complete_inve
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-rob-50 | open | med | minikeypad.py:988-1000,1563-1564 — `probe_timeout` abandons the stalled probe thread and `_replace_stalled_device` installs a fresh `KeypadDevice`. The old device's libusb handle is never disposed and the orphan thread is never joined, so each stall leaks one thread plus one USB handle with no ceiling. Track abandoned devices and dispose them once their probe returns. | robustness / watchdog — the abandonment is deliberate and logged, but its resource cost is unbounded
 rf-rob-50 | open | med | relocate_folder.py:1739-1753 — `_fsync_tree` (the first statement of `atomic_swap`) has no error handling, so one `os.open`/`os.fsync` failure propagates. By then `_copy_and_verify` has returned, so its cleanup no longer applies, and `_execute_migration`'s except only runs `_cleanup_created_dirs` (rmdir, stops at the first non-empty). The fully-copied, fully-verified target survives, and the next run dies in `copy_tree` (827-832) with "target already exists … may be a stale partial target" — which it is not. Guard the fsync walk and/or make the message distinguish complete from partial targets. | robustness — post-verify failure leaves an unrecoverable-looking state
 
 ## state machine integrity

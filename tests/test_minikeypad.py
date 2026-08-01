@@ -11,6 +11,7 @@ import logging
 import os
 import random
 import sys
+import threading
 import time
 import types
 
@@ -2217,3 +2218,85 @@ def test_trim_log_lines_ignores_invalid_widget_index():
     )
 
     app._trim_log_lines()
+
+
+def test_replace_stalled_device_releases_the_abandoned_handle(app):
+    """mkp-rob-50: the old device must actually be closed, not just dropped."""
+    class SlowDevice:
+        def __init__(self):
+            self.released = threading.Event()
+            self.gate = threading.Event()
+
+        def close(self):
+            self.gate.wait(5.0)      # stand in for the orphan probe's lock
+            self.released.set()
+
+    stalled = SlowDevice()
+    app.dev = stalled
+
+    app._replace_stalled_device()
+
+    assert app.dev is not stalled            # a fresh device took over at once
+    assert not stalled.released.is_set()     # and the UI thread did not block
+    stalled.gate.set()
+    assert stalled.released.wait(5.0)
+
+
+def test_stalled_device_reaper_drains_a_backlog_with_one_thread(app):
+    released = []
+    threads = set()
+
+    class Device:
+        def __init__(self, idx):
+            self.idx = idx
+
+        def close(self):
+            threads.add(threading.current_thread().name)
+            released.append(self.idx)
+
+    for i in range(5):
+        app.dev = Device(i)
+        app._replace_stalled_device()
+
+    deadline = time.monotonic() + 5.0
+    while len(released) < 5 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert sorted(released) == [0, 1, 2, 3, 4]
+    assert threads == {"device-reaper"}
+
+
+def test_reaper_close_failure_does_not_stop_the_drain(app):
+    released = []
+
+    class Boom:
+        def close(self):
+            raise RuntimeError("libusb exploded")
+
+    class Fine:
+        def close(self):
+            released.append(True)
+
+    app._stalled_devices.put(Boom())
+    app._stalled_devices.put(Fine())
+    app._ensure_device_reaper()
+
+    deadline = time.monotonic() + 5.0
+    while not released and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert released == [True]
+
+
+def test_ensure_device_reaper_survives_a_thread_start_failure(app, monkeypatch):
+    def refuse(*_a, **_k):
+        raise RuntimeError("no threads")
+
+    monkeypatch.setattr(minikeypad.threading, "Thread", refuse)
+    app._stalled_devices.put(object())
+
+    app._ensure_device_reaper()
+    _wait_drain(app)
+
+    assert app._device_reaper is None
+    assert "Device cleanup error" in app.log_box.get("1.0", "end")
