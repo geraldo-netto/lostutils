@@ -230,7 +230,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-ux-50 | open | low | link_queue.py:4551-4560 — "Clear Queue" discards every pending item and rewrites the state file with no confirmation, while deleting a single protocol or mapping (4748) does prompt via `messagebox.askyesno`. Add the same confirmation, scaled to the item count. | UI / UX — Jakob's Law: users carry the expectation set by this same app's other destructive action (and by every other queue UI) that bulk destruction confirms
 
 ## accessibility
 

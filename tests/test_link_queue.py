@@ -39,6 +39,7 @@ from pathlib import Path
 
 import pytest
 import tkinter as tk
+from tkinter import messagebox
 from tkinter import ttk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -5055,3 +5056,65 @@ def test_spinbox_handlers_still_read_the_widget(app):
     assert app._read_failure_sleep_var() == 77
     app._on_cooldown_changed()
     assert app._get_failure_sleep() == 77
+
+
+def test_clear_queue_asks_before_discarding(app, monkeypatch):
+    """lq-ux-50: bulk destruction must confirm, like deleting a protocol does."""
+    stop_bg_workers(app)
+    prompts = []
+    monkeypatch.setattr(
+        messagebox, "askyesno",
+        lambda title, message, **kwargs: prompts.append((message, kwargs)) or True)
+    with app._dispatch_cv:
+        app.queue_items[:] = [q("http://a/1"), q("http://b/2")]
+
+    app._on_clear_queue()
+
+    assert app.queue_items == []
+    assert len(prompts) == 1
+    message, kwargs = prompts[0]
+    assert "2 pending items" in message
+    assert kwargs["default"] == "no"        # the safe answer is preselected
+
+
+def test_clear_queue_cancelled_keeps_every_item(app, monkeypatch):
+    stop_bg_workers(app)
+    monkeypatch.setattr(messagebox, "askyesno", lambda *a, **k: False)
+    with app._dispatch_cv:
+        app.queue_items[:] = [q("http://a/1"), q("http://b/2")]
+
+    app._on_clear_queue()
+    pump(app, 0.2)
+
+    assert [it.url for it in app.queue_items] == ["http://a/1", "http://b/2"]
+    assert "clear cancelled" in app.log_text.get("1.0", "end-1c")
+
+
+def test_clear_queue_does_not_ask_when_empty(app, monkeypatch):
+    """Nothing pending means nothing to lose — a prompt would be friction."""
+    stop_bg_workers(app)
+
+    def refuse(*_a, **_k):
+        raise AssertionError("must not prompt for an empty queue")
+
+    monkeypatch.setattr(messagebox, "askyesno", refuse)
+    with app._dispatch_cv:
+        app.queue_items[:] = []
+
+    app._on_clear_queue()
+
+    assert app.queue_items == []
+
+
+def test_clear_queue_prompt_uses_the_singular_for_one_item(app, monkeypatch):
+    stop_bg_workers(app)
+    prompts = []
+    monkeypatch.setattr(
+        messagebox, "askyesno",
+        lambda title, message, **kwargs: prompts.append(message) or True)
+    with app._dispatch_cv:
+        app.queue_items[:] = [q("http://a/1")]
+
+    app._on_clear_queue()
+
+    assert "1 pending item?" in prompts[0]

@@ -4583,7 +4583,31 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             self._dispatch_cv.notify_all()
         self._update_status()
 
+    def _confirm_clear_queue(self, pending: int) -> bool:
+        """Confirm discarding every pending item (lq-ux-50).
+
+        Deleting a single protocol or mapping already prompts, and this is the
+        larger destruction: unrecoverable, and it rewrites the state file.
+        Jakob's Law — the expectation is set by this same app's other
+        destructive action, and by every other queue UI. An empty queue has
+        nothing to lose, so it is cleared without asking.
+        """
+        if pending <= 0:
+            return True
+        noun = "item" if pending == 1 else "items"
+        return messagebox.askyesno(
+            "Clear queue",
+            f"Discard {pending} pending {noun}? This cannot be undone.",
+            default="no")
+
     def _on_clear_queue(self) -> None:
+        with self._dispatch_cv:
+            pending = len(self.queue_items)
+        # The count can go stale while the prompt is up (a worker may claim an
+        # item); it drives the wording only, never what gets removed.
+        if not self._confirm_clear_queue(pending):
+            self._log("[queue] clear cancelled")
+            return
         with self._dispatch_cv:
             n = len(self.queue_items)
             self.queue_items.clear()
