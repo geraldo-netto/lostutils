@@ -39,7 +39,6 @@ rf-sec-04 | open | high | relocate_folder.py:2150-2161 — source fd pins the or
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rdv3-cmd-01 | open | low | remove-deduplv3.py:193-194 — emitted `rm -f {paths}` lacks `--`; an attacker-controlled path such as `-r` becomes an rm option and can recursively delete the next operand. Emit `rm -f -- {quoted}` and include the prefix in the byte budget. | STRIDE Tampering/Elevation of privilege; OWASP ASVS input boundary; attack tree: crafted row, option injection, recursive deletion
 
 ## data governance
 

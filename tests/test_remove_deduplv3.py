@@ -136,7 +136,7 @@ def test_no_duplicate_path_in_rm_line(monkeypatch, tmp_path):
     rm_lines = [ln for ln in out.splitlines() if ln.startswith("rm -f")]
     assert rm_lines
     for ln in rm_lines:
-        targets = ln[len("rm -f "):].split()
+        targets = ln[len(rd.RM_COMMAND_PREFIX) + 1:].split()
         assert len(targets) == len(set(targets)), f"duplicate path in: {ln}"
 
 
@@ -177,7 +177,22 @@ def test_emit_remove_commands_shell_quotes_paths():
     assert removed == 2
     assert rd.shlex.quote("/tmp/has spaces.txt") in text
     assert rd.shlex.quote("/tmp/quote'and;$dollar.txt") in text
-    assert "rm -f " in text
+    assert f"{rd.RM_COMMAND_PREFIX} " in text
+
+
+def test_emit_remove_commands_terminates_rm_options():
+    out = []
+
+    rd._emit_remove_commands(
+        {"h": ["-r", "keep-this-longer-survivor-name"]},
+        out.append,
+    )
+
+    rm_line = next(
+        line for line in "".join(out).splitlines()
+        if line.startswith(rd.RM_COMMAND_PREFIX)
+    )
+    assert rd.shlex.split(rm_line) == ["rm", "-f", "--", "-r"]
 
 
 def test_emit_remove_commands_chunks_large_group():
@@ -191,11 +206,18 @@ def test_emit_remove_commands_chunks_large_group():
 
     assert groups == 1
     assert removed == 2000
-    rm_lines = [ln for ln in "".join(out).splitlines() if ln.startswith("rm -f ")]
+    rm_lines = [
+        line for line in "".join(out).splitlines()
+        if line.startswith(f"{rd.RM_COMMAND_PREFIX} ")
+    ]
     assert len(rm_lines) > 1
     for ln in rm_lines:
-        assert len(ln.encode("utf-8")) <= rd.RM_ARGV_BYTE_LIMIT + len("rm -f ")
-    targets = [t for ln in rm_lines for t in ln[len("rm -f "):].split()]
+        assert len(ln.encode("utf-8")) <= rd.RM_ARGV_BYTE_LIMIT
+    targets = [
+        target
+        for line in rm_lines
+        for target in line[len(rd.RM_COMMAND_PREFIX) + 1:].split()
+    ]
     assert len(targets) == 2000
     assert survivor not in targets
 
@@ -216,7 +238,7 @@ def test_emit_remove_commands_uses_translation_hook(monkeypatch):
     text = "".join(out)
     assert text.startswith("BANNER\n")
     assert "DUP h\nKEEP /tmp/keep-longer-name\n" in text
-    assert "rm -f /tmp/remove" in text
+    assert f"{rd.RM_COMMAND_PREFIX} /tmp/remove" in text
 
 
 def test_summary_and_error_use_translation_hook(monkeypatch, capsys):

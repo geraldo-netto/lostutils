@@ -55,6 +55,7 @@ SAFETY_BANNER_TEMPLATE = (
 # Per-`rm` argv byte budget. Linux ARG_MAX is typically ~2 MiB but is shared
 # with the environment; 128 KiB keeps each emitted command safely below it.
 RM_ARGV_BYTE_LIMIT = 128 * 1024
+RM_COMMAND_PREFIX = "rm -f --"
 
 
 class _InputDecodeError(Exception):
@@ -159,13 +160,14 @@ def _survivor(paths):
 def _chunked_quoted(paths, limit=RM_ARGV_BYTE_LIMIT):
     # rdv3-scal-01: split a group's removals across several `rm -f` lines so
     # one huge hash group can't exceed ARG_MAX when the output is piped to sh.
-    chunk, size = [], 0
+    prefix_size = len(RM_COMMAND_PREFIX.encode("ascii"))
+    chunk, size = [], prefix_size
     for p in paths:
         q = shlex.quote(p)
         cost = len(q.encode("utf-8", "surrogateescape")) + 1  # +1 separator
         if chunk and size + cost > limit:
             yield " ".join(chunk)
-            chunk, size = [], 0
+            chunk, size = [], prefix_size
         chunk.append(q)
         size += cost
     if chunk:
@@ -191,7 +193,7 @@ def _emit_remove_commands(groups, out):
         files_to_remove += len(to_remove)
         out(_("# duplicates: {hash}\n# saving: {path}\n").format(hash=h, path=keep))
         for quoted in _chunked_quoted(to_remove):
-            out(f"rm -f {quoted}\n")
+            out(f"{RM_COMMAND_PREFIX} {quoted}\n")
         out("\n")
     return groups_with_dups, files_to_remove
 
