@@ -12,6 +12,7 @@ Run:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -83,6 +84,15 @@ class IndexInodesFuzz(unittest.TestCase):
 _SAFE_PATH_CHARS = st.characters(
     min_codepoint=0x21, max_codepoint=0x7E,
     blacklist_characters="/\x00",
+)
+
+_RECORD_PATHS = st.one_of(
+    st.text(alphabet=_SAFE_PATH_CHARS, min_size=1, max_size=8),
+    st.builds(
+        lambda marker, tail: marker + tail,
+        st.sampled_from(("line\nbreak", "line\rbreak", "@lostutils-json:")),
+        st.text(alphabet=_SAFE_PATH_CHARS, max_size=8),
+    ),
 )
 
 
@@ -197,7 +207,7 @@ class FindDuplicatesFuzz(unittest.TestCase):
 class EmitGroupsFuzz(unittest.TestCase):
     @settings(parent=FUZZ)
     @given(st.data())
-    def test_emit_skips_single_path_groups(self, data):
+    def test_emit_round_trips_one_record_per_path(self, data):
         # Build coherent inputs: every key in final_groups MUST have a
         # matching entry in aliases — that's the pipeline contract.
         keys = data.draw(st.lists(
@@ -206,7 +216,7 @@ class EmitGroupsFuzz(unittest.TestCase):
         ))
         aliases = {
             k: data.draw(st.lists(
-                st.text(alphabet=_SAFE_PATH_CHARS, min_size=1, max_size=8),
+                _RECORD_PATHS,
                 min_size=1, max_size=4,
             ))
             for k in keys
@@ -222,12 +232,30 @@ class EmitGroupsFuzz(unittest.TestCase):
 
         written: list[str] = []
         dup_groups, dup_paths = hr.emit_groups(final_groups, aliases, written.append)
-        # dup_paths is the sum of group sizes for emitted groups.
-        if dup_paths > 0:
-            self.assertGreater(dup_groups, 0)
+
+        expected: list[tuple[str, str]] = []
+        expected_groups = 0
+        for digest, group_keys in final_groups.items():
+            paths = [path for key in group_keys for path in aliases[key]]
+            if len(paths) <= 1:
+                continue
+            expected_groups += 1
+            expected.extend((hr._format_digest(digest), path) for path in paths)
+
+        records: list[tuple[str, str]] = []
         for chunk in written:
+            self.assertTrue(chunk.endswith("\n"))
             for line in chunk.splitlines():
-                self.assertTrue(line.count(" ") >= 1)
+                label, encoded_path = line.split(" ", 1)
+                if encoded_path.startswith(hr._ESCAPED_PATH_PREFIX):
+                    encoded_path = json.loads(
+                        encoded_path[len(hr._ESCAPED_PATH_PREFIX):]
+                    )
+                records.append((label, encoded_path))
+
+        self.assertEqual(dup_groups, expected_groups)
+        self.assertEqual(dup_paths, len(expected))
+        self.assertEqual(records, expected)
 
 
 # --- threaded iterator on a real synthetic tree -----------------------------
