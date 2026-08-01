@@ -3,9 +3,13 @@
 import builtins
 import io
 import json
+import logging
 import os
 import queue
+import subprocess
+import sys
 import threading
+import time
 import types
 from collections import OrderedDict
 from pathlib import Path
@@ -2446,9 +2450,11 @@ def test_write_events_json_roundtrips(tmp_path):
 def test_write_events_json_refuses_when_output_locked(tmp_path):
     out = tmp_path / "events.json"
     lock = tmp_path / "events.json.lock"
-    lock.write_text("pid=999\n")  # simulate a concurrent run holding the lock
+    # A live owner: this very process. ie-dist-01 reclaims dead owners, so the
+    # pid has to be one that provably exists.
+    lock.write_text(f"pid={os.getpid()}\n")
 
-    with pytest.raises(FileExistsError, match="Another run is already writing"):
+    with pytest.raises(FileExistsError, match="is already writing"):
         import_events.write_events_json([{"title": "X"}], out)
 
     assert not out.exists()  # locked run did not clobber output
@@ -5563,3 +5569,62 @@ def test_enable_fault_tracebacks_surfaces_dup_failure(monkeypatch, caplog):
 
     assert not import_events._FAULT_TRACEBACKS_ENABLED
     assert "dup failed" in caplog.text
+
+
+def _dead_pid():
+    """A pid that provably no longer exists (ie-dist-01 tests)."""
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
+
+
+def test_output_lock_reclaims_a_dead_owners_lock(tmp_path, caplog):
+    out = tmp_path / "events.json"
+    lock = tmp_path / "events.json.lock"
+    lock.write_text(f"pid={_dead_pid()}\n")
+    caplog.set_level(logging.WARNING)
+
+    import_events.write_events_json([{"title": "X", "start": "2026-06-22"}], out)
+
+    assert out.exists()
+    assert not lock.exists()
+    assert "Reclaiming stale lock" in caplog.text
+
+
+def test_output_lock_keeps_a_pidless_lock_until_the_grace_window(tmp_path):
+    """A lock written but not yet stamped belongs to a live run mid-acquire."""
+    out = tmp_path / "events.json"
+    lock = tmp_path / "events.json.lock"
+    lock.write_text("")
+
+    with pytest.raises(FileExistsError, match="unknown process"):
+        import_events.write_events_json([{"title": "X"}], out)
+
+    old = time.time() - import_events.LOCK_INVALID_GRACE_SECONDS - 1
+    os.utime(lock, (old, old))
+    import_events.write_events_json([{"title": "X", "start": "2026-06-22"}], out)
+    assert out.exists()
+
+
+def test_lock_is_stale_never_steals_from_a_live_or_unknown_owner(tmp_path):
+    lock = tmp_path / "a.lock"
+    lock.write_text(f"pid={os.getpid()}\n")
+    assert import_events._lock_is_stale(lock) is False
+    lock.write_text("pid=not-a-number\n")
+    assert import_events._lock_is_stale(lock) is False   # inside the grace window
+    lock.write_text(f"pid={_dead_pid()}\n")
+    assert import_events._lock_is_stale(lock) is True
+    assert import_events._lock_is_stale(tmp_path / "missing.lock") is False
+
+
+def test_lock_owner_is_running_rejects_nonpositive_pids():
+    assert import_events._lock_owner_is_running(0) is False
+    assert import_events._lock_owner_is_running(-1) is False
+    assert import_events._lock_owner_is_running(os.getpid()) is True
+
+
+def test_read_lock_pid_tolerates_unreadable_and_pidless_files(tmp_path):
+    assert import_events._read_lock_pid(tmp_path / "nope.lock") is None
+    empty = tmp_path / "empty.lock"
+    empty.write_text("host=x\n")
+    assert import_events._read_lock_pid(empty) is None

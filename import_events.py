@@ -56,6 +56,9 @@ DOWNLOAD_STALL_SECONDS = 300
 # A required model that won't download/verify is retried this many times before
 # the run aborts with a partial result (ie-robust-01).
 MODEL_DOWNLOAD_ATTEMPTS = 3
+# ie-dist-01: a lock file with no readable pid is only reclaimed once it is
+# this old — the owner may be between the O_EXCL create and the pid write.
+LOCK_INVALID_GRACE_SECONDS = 5.0
 OCR_TIMEOUT_SECONDS = 120
 # Heartbeat cadence for a blocking create_chat_completion call. The native
 # llama_cpp call cannot be cancelled from Python without killing the process,
@@ -3987,25 +3990,98 @@ def dedupe_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # Output
 # --------------------------------------------------------------------------- #
-@contextlib.contextmanager
-def _output_lock(output_path: Path):
-    """Advisory cross-process lock guarding a single output path.
-
-    _atomic_write_bytes makes one writer atomic, but two concurrent runs
-    targeting the same output silently last-writer-wins. Reserve a sibling
-    <output>.lock via O_CREAT|O_EXCL so a second run refuses instead of
-    racing; the lock is always unlinked in finally so a crash leaves a
-    removable, self-describing file rather than a wedged run.
-    """
-    lock_path = output_path.with_name(f"{output_path.name}.lock")
+def _read_lock_pid(lock_path: Path) -> Optional[int]:
+    """The pid recorded in a lock file, or None when it is absent, unreadable,
+    or malformed (ie-dist-01)."""
     try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        text = lock_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    for line in text.splitlines():
+        if line.startswith("pid="):
+            try:
+                return int(line[len("pid="):].strip())
+            except ValueError:
+                return None
+    return None
+
+
+def _lock_owner_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # alive, just owned by another user
+    except OSError:
+        return True          # unknown -> assume alive, never steal a live lock
+    return True
+
+
+def _lock_is_stale(lock_path: Path) -> bool:
+    """True when the lock's owner is provably gone (ie-dist-01).
+
+    A lock with no readable pid is only reclaimed after
+    LOCK_INVALID_GRACE_SECONDS: the owner may simply be between the O_EXCL
+    create and the pid write, and stealing the lock in that window would let
+    two runs write the same output.
+    """
+    pid = _read_lock_pid(lock_path)
+    if pid is not None:
+        return pid != os.getpid() and not _lock_owner_is_running(pid)
+    try:
+        age = time.time() - lock_path.stat().st_mtime
+    except OSError:
+        return False
+    return age >= LOCK_INVALID_GRACE_SECONDS
+
+
+def _lock_busy_message(lock_path: Path, description: str) -> str:
+    pid = _read_lock_pid(lock_path)
+    owner = f"pid {pid}" if pid is not None else "an unknown process"
+    return (
+        f"Another run ({owner}) is already writing {description} "
+        f"(lock {lock_path}). Wait for it to finish, or remove the lock "
+        f"file if it is stale."
+    )
+
+
+def _create_lock_file(lock_path: Path, description: str) -> int:
+    """Reserve `lock_path` with O_CREAT|O_EXCL, reclaiming it once when the
+    recorded owner is gone (ie-dist-01). Raises FileExistsError when a live
+    run holds it."""
+    try:
+        return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError as exc:
-        raise FileExistsError(
-            f"Another run is already writing {output_path} "
-            f"(lock {lock_path}). Wait for it to finish, or remove the lock "
-            f"file if it is stale."
-        ) from exc
+        if not _lock_is_stale(lock_path):
+            raise FileExistsError(_lock_busy_message(lock_path, description)) from exc
+        logger.warning(
+            "Reclaiming stale lock %s (owner pid %s is gone).",
+            _display_path(str(lock_path)), _read_lock_pid(lock_path))
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+        try:
+            return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError as retry_exc:
+            raise FileExistsError(
+                _lock_busy_message(lock_path, description)) from retry_exc
+
+
+@contextlib.contextmanager
+def _exclusive_lock(lock_path: Path, description: str):
+    """Advisory cross-process lock recording the owning pid (ie-dist-01).
+
+    Reserving with O_CREAT|O_EXCL makes a second run refuse instead of racing,
+    but the pid was previously written and never read: a hard kill skipped the
+    unlink and every later run failed forever until someone removed the file by
+    hand. The pid is now consulted, and a lock whose owner is gone is reclaimed
+    once, with a warning.
+    """
+    fd = _create_lock_file(lock_path, description)
     try:
         try:
             os.write(fd, f"pid={os.getpid()}\n".encode("utf-8"))
@@ -4017,6 +4093,16 @@ def _output_lock(output_path: Path):
             lock_path.unlink()
         except OSError:
             pass
+
+
+def _output_lock(output_path: Path):
+    """Advisory cross-process lock guarding a single output path.
+
+    _atomic_write_bytes makes one writer atomic, but two concurrent runs
+    targeting the same output silently last-writer-wins.
+    """
+    return _exclusive_lock(
+        output_path.with_name(f"{output_path.name}.lock"), str(output_path))
 
 
 def _atomic_write_bytes(output_path: Path, data: bytes) -> None:
