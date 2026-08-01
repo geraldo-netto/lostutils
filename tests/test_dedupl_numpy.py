@@ -1,6 +1,9 @@
 """Focused tests for the legacy NumPy duplicate extractor."""
 
+import builtins
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -237,3 +240,72 @@ def test_write_paths_handles_broken_pipe():
             raise AssertionError("flush must not follow a failed write")
 
     assert not dedupl_numpy._write_paths({b"/one"}, ClosedPipe())
+
+
+def test_broken_pipe_silences_stdout(monkeypatch, tmp_path):
+    """dnp-rob-50: a handled BrokenPipeError must also redirect fd 1."""
+    f = tmp_path / "hashes.txt"
+    f.write_text("aaa /x\naaa /y\n", encoding="utf-8")
+    monkeypatch.setattr(dedupl_numpy.sys, "argv", ["dedupl_numpy.py", str(f)])
+    monkeypatch.setattr(dedupl_numpy, "_write_paths", lambda _paths, _out: False)
+    silenced = []
+    monkeypatch.setattr(
+        dedupl_numpy, "_silence_stdout_after_broken_pipe",
+        lambda: silenced.append(True))
+
+    dedupl_numpy.main()
+
+    assert silenced == [True]
+
+
+def test_silence_stdout_after_broken_pipe_redirects_fd(monkeypatch):
+    class FakeStdout:
+        def fileno(self):
+            return 7
+
+    replacement = object()
+    opened, duped, closed = [], [], []
+    monkeypatch.setattr(dedupl_numpy.sys, "stdout", FakeStdout())
+    monkeypatch.setattr(
+        dedupl_numpy.os, "open", lambda path, flags: opened.append((path, flags)) or 99)
+    monkeypatch.setattr(dedupl_numpy.os, "dup2", lambda src, dst: duped.append((src, dst)))
+    monkeypatch.setattr(dedupl_numpy.os, "close", closed.append)
+    monkeypatch.setattr(builtins, "open", lambda *a, **k: replacement)
+
+    dedupl_numpy._silence_stdout_after_broken_pipe()
+
+    assert opened == [(dedupl_numpy.os.devnull, dedupl_numpy.os.O_WRONLY)]
+    assert duped == [(99, 7)]
+    assert closed == [99]
+    assert dedupl_numpy.sys.stdout is replacement
+
+
+def test_silence_stdout_tolerates_a_devnull_open_failure(monkeypatch):
+    def refuse(_path, _flags):
+        raise OSError("no devnull")
+
+    monkeypatch.setattr(dedupl_numpy.os, "open", refuse)
+    dedupl_numpy._silence_stdout_after_broken_pipe()   # must not raise
+
+
+def test_piping_into_a_short_reader_exits_cleanly(tmp_path):
+    """dnp-rob-50 end to end: no 'Exception ignored' noise, no exit 120."""
+    hashes = tmp_path / "big.txt"
+    hashes.write_text(
+        "".join(f"{i % 5000:064x} /path/{i}\n" for i in range(40000)),
+        encoding="utf-8",
+    )
+    producer = subprocess.Popen(
+        [sys.executable, str(SCRIPT), str(hashes)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert producer.stdout is not None
+    producer.stdout.readline()
+    producer.stdout.close()
+    stderr = producer.stderr.read() if producer.stderr else b""
+    if producer.stderr is not None:
+        producer.stderr.close()
+
+    assert producer.wait(timeout=60) == 0
+    assert b"BrokenPipeError" not in stderr
+    assert b"Exception ignored" not in stderr

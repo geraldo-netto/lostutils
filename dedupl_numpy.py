@@ -6,6 +6,7 @@ path extraction (variable-width slicing isn't naturally vectorizable)."""
 from __future__ import annotations
 
 import argparse
+import io
 import mmap
 import os
 import sys
@@ -103,6 +104,40 @@ def _write_paths(paths: set[bytes], out: BinaryIO) -> bool:
     return True
 
 
+def _silence_stdout_after_broken_pipe() -> None:
+    """Point fd 1 at /dev/null after a handled BrokenPipeError (dnp-rob-50).
+
+    Catching the exception in :func:`_write_paths` is not enough: the
+    interpreter still flushes stdout at shutdown, that flush re-raises, and
+    `dedupl_numpy.py hashes.txt | head` ends with
+    ``Exception ignored in: <_io.TextIOWrapper name='<stdout>'>
+    BrokenPipeError`` and exit status 120 — noise for what is the expected
+    result of the reader closing the pipe early. Redirecting the descriptor
+    (not just rebinding ``sys.stdout``) is what makes the shutdown flush
+    succeed. Mirrors remove-deduplv3.py, duplicated in-file because every
+    script here is standalone.
+    """
+    devnull_fd = None
+    try:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    except OSError:
+        return
+    try:
+        try:
+            os.dup2(devnull_fd, sys.stdout.fileno())
+        except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+            pass
+        try:
+            sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        except OSError:
+            pass
+    finally:
+        try:
+            os.close(devnull_fd)
+        except OSError:
+            pass
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -135,6 +170,7 @@ def main() -> None:
         return
 
     if not _write_paths(paths, sys.stdout.buffer):
+        _silence_stdout_after_broken_pipe()
         return
     print(f"equal files: {file_equal} / {n_lines}", file=sys.stderr)
 
