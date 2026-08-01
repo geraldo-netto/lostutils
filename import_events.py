@@ -3770,7 +3770,14 @@ def _shutdown_workers(
         extra_workers = max(0, len(threads) - workers)
         running_threads = list(threads)
     for _index in range(extra_workers):
-        work_queue.put(None)
+        try:
+            work_queue.put_nowait(None)
+        except queue.Full:
+            logger.warning(
+                "Worker queue is full during shutdown; abandoning a replacement "
+                "worker as a daemon instead of blocking on its sentinel."
+            )
+            break
     for thread in running_threads:
         # ie-conc-01: bounded join — a worker wedged in a native LLM call must
         # not hang shutdown; its result is already collected and it is a daemon.

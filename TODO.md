@@ -71,7 +71,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-conc-11 | open | high | import_events.py:3593-3608 — `_shutdown_workers` uses blocking `work_queue.put(None)`; if every worker is wedged and the bounded queue is full, the partial-result shutdown path hangs forever. Use nonblocking/timed sentinel delivery respecting stop, or bounded-join daemon/process workers. | watchdog shutdown deadlock
 rf-conc-06 | open | med | relocate_folder.py:1226-1234,1296-1319,2159-2161 — verification walks source only and assumes destination-only entries cannot appear; concurrent destination injection or late source mutation can pass before the swap deletes the original. Keep staging inaccessible and compare complete source/destination inventories immediately before swap, or enforce quiescence. | concurrency integrity
 
 ## multithreading

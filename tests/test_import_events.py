@@ -4943,6 +4943,31 @@ def test_feed_file_queue_count_excludes_unqueued_on_early_stop():
     assert all(x is None for x in drained)
 
 
+def test_shutdown_workers_does_not_block_on_full_queue(monkeypatch):
+    work_queue = queue.Queue(maxsize=1)
+    work_queue.put((0, Path("pending")))
+
+    class WedgedThread:
+        name = "wedged"
+
+        @staticmethod
+        def join(timeout=None):
+            assert timeout == import_events.WORKER_FINAL_JOIN_SECONDS
+
+        @staticmethod
+        def is_alive():
+            return True
+
+    threads = [WedgedThread(), WedgedThread()]
+    monkeypatch.setattr(import_events, "WORKER_FINAL_JOIN_SECONDS", 0.01)
+
+    import_events._shutdown_workers(
+        threads, threading.Lock(), work_queue, workers=1
+    )
+
+    assert work_queue.full()
+
+
 def test_process_folder_caps_replacement_workers_on_repeated_stall(tmp_path, monkeypatch):
     """Repeated stall callbacks must not fan out unbounded workers; with
     workers=1 the replacement cap is 1, so at most 2 threads ever run even if
