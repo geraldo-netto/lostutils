@@ -1358,6 +1358,16 @@ def test_verify_copy_parallel_detects_corruption(tmp_path):
         rf.verify_copy(src, dst, checksum=True)
 
 
+def test_verify_copy_rejects_destination_only_injection(tmp_path):
+    src = tmp_path / "src"; _make_tree(src)
+    dst = tmp_path / "dst"
+    rf.copy_tree(src, dst)
+    (dst / "injected.txt").write_text("unexpected", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="inventory mismatch"):
+        rf.verify_copy(src, dst, checksum=False)
+
+
 def test_verify_copy_parallel_propagates_size_mismatch(tmp_path):
     src = tmp_path / "s"; src.mkdir()
     for i in range(5):

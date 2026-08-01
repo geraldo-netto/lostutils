@@ -69,7 +69,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-conc-06 | open | med | relocate_folder.py:1226-1234,1296-1319,2159-2161 — verification walks source only and assumes destination-only entries cannot appear; concurrent destination injection or late source mutation can pass before the swap deletes the original. Keep staging inaccessible and compare complete source/destination inventories immediately before swap, or enforce quiescence. | concurrency integrity
 
 ## multithreading
 

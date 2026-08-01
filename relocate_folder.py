@@ -37,6 +37,7 @@ import hashlib
 import logging
 import os
 import shutil
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -1287,8 +1288,55 @@ def verify_copy(src: Path, dst: Path, checksum: bool = False,
             for task in tasks:
                 task()
                 watchdog.touch("verify_copy")
-            return
-        _run_verify_pool(tasks, jobs=jobs, watchdog=watchdog)
+        else:
+            _run_verify_pool(tasks, jobs=jobs, watchdog=watchdog)
+        _assert_complete_inventory_match(src, dst)
+        watchdog.touch("complete inventory comparison")
+
+
+def _inventory_kind(mode: int) -> int:
+    if stat.S_ISDIR(mode):
+        return 1
+    if stat.S_ISREG(mode):
+        return 2
+    if stat.S_ISLNK(mode):
+        return 3
+    return 4
+
+
+def _load_inventory(
+    database: sqlite3.Connection, table: str, root: Path, *, source: bool
+) -> None:
+    for path in _walk_entries(root):
+        mode = os.lstat(path).st_mode
+        kind = _inventory_kind(mode)
+        if source and kind == 4:
+            continue
+        database.execute(
+            f"INSERT INTO {table} VALUES (?, ?)",
+            (os.fsencode(path.relative_to(root)), kind),
+        )
+
+
+def _assert_complete_inventory_match(src: Path, dst: Path) -> None:
+    database = sqlite3.connect("")
+    try:
+        database.execute("CREATE TABLE source_entries (path BLOB, kind INTEGER)")
+        database.execute("CREATE TABLE target_entries (path BLOB, kind INTEGER)")
+        _load_inventory(database, "source_entries", src, source=True)
+        _load_inventory(database, "target_entries", dst, source=False)
+        mismatch = database.execute(
+            "SELECT path, kind FROM source_entries "
+            "EXCEPT SELECT path, kind FROM target_entries "
+            "UNION ALL SELECT path, kind FROM target_entries "
+            "EXCEPT SELECT path, kind FROM source_entries LIMIT 1"
+        ).fetchone()
+    finally:
+        database.close()
+    if mismatch is not None:
+        raise RuntimeError(
+            "source/destination inventory mismatch immediately before swap"
+        )
 
 
 def _kind_verify_task(full: Path, counterpart: Path, rel: Path,
