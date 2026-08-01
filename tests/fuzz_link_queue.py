@@ -13,9 +13,9 @@ on-disk state-file loading. Each fuzz target asserts:
     empty str, etc.).
 
 Run:
-    python3 -m pytest fuzz_link_queue.py -v
+    python3 -m pytest tests/fuzz_link_queue.py -v
 or:
-    python3 fuzz_link_queue.py
+    python3 tests/fuzz_link_queue.py
 """
 
 from __future__ import annotations
@@ -28,10 +28,10 @@ from pathlib import Path
 
 from hypothesis import HealthCheck, given, settings, strategies as st
 
-# Make sure we import the file under test from this directory.
-HERE = os.path.dirname(os.path.abspath(__file__))
-if HERE not in sys.path:
-    sys.path.insert(0, HERE)
+# Make sure standalone execution imports the file under test from the repo root.
+REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 
 import link_queue  # noqa: E402
 from link_queue import LinkQueueApp, QueueItem  # noqa: E402
