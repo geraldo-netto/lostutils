@@ -136,7 +136,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-test-02 | open | med | dedupl_numpy.py:1-62 — focused valid-input and CLI-usage coverage now exists in `tests/test_dedupl_numpy.py`, raising `main` above the ≥80% function gate. Add no-newline/CRLF/short-line cases after the corresponding open correctness findings are fixed so tests assert the intended contract rather than preserving known bugs. | test coverage — partial: valid grouping, path emission, summary, and missing-argument behavior shipped; edge cases deferred behind dnp-rel-01/04/05
 dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves the array-bounds path (dnp-rel-01) untested; add fixtures with short lines, single line, and md5-vs-sha256 widths to lock behavior. | coverage
 dnv3-test-01 | open | low | deduplicate-by-namev3.py:130-136 — add focused end-to-end coverage that token removal collapses equivalent cleaned inputs into one self-collision. | test coverage — unit expectations were normalized with dnv3-rel-01; end-to-end provenance coverage remains deferred to the test-coverage category
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
