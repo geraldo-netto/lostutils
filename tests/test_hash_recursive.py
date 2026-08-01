@@ -2,6 +2,7 @@
 (jobs clamp, readable-alias representative) and the functions they touch."""
 import importlib.util
 import io
+import json
 import os
 import re
 from pathlib import Path
@@ -2586,6 +2587,9 @@ def test_emit_groups_newline_path_cannot_inject_record_boundary(tmp_path):
     assert len(lines) == 2
     assert all(line.startswith("abc ") for line in lines)
     assert "@lostutils-json:" in lines[1]
+    encoded_path = lines[1].split(" ", 1)[1]
+    payload = encoded_path.removeprefix(hr._ESCAPED_PATH_PREFIX)
+    assert json.loads(payload) == "/with\nnewline"
 
 
 # --- hr-test-15: _fmt_count boundaries -------------------------------------

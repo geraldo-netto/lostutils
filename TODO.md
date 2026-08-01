@@ -135,7 +135,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
 
 ## test / fuzz coverage
 
