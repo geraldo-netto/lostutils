@@ -704,6 +704,7 @@ class ModelConfig:
     benchmark: bool = False
     workers: int = DEFAULT_WORKERS
     deterministic_order: bool = DEFAULT_DETERMINISTIC_ORDER
+    max_ics_bytes: int = 4 * 1024 * 1024
 
     @staticmethod
     def _resolve_paths_and_digests(
@@ -768,6 +769,7 @@ class ModelConfig:
             benchmark=args.benchmark,
             workers=max(1, args.workers),
             deterministic_order=args.deterministic_order,
+            max_ics_bytes=args.max_ics_bytes,
         )
 
     def text_budget_chars(self) -> int:
@@ -795,7 +797,7 @@ PDF_EXTENSIONS = {".pdf"}
 # file cannot blow the context window.
 MAX_CONTENT_CHARS = _text_budget_from_context(DEFAULT_LLM_CONTEXT_SIZE,
                                               DEFAULT_LLM_MAX_TOKENS)
-MAX_ICS_BYTES = MAX_CONTENT_CHARS * 4
+MAX_ICS_BYTES = 4 * 1024 * 1024
 
 # Scanned-PDF vision fallback: 0 pages means no page cap. 150 DPI is legible
 # enough for vision OCR without the memory blow-up of full-resolution pixmaps.
@@ -1446,12 +1448,16 @@ def _apply_default_tz(value: Any, default_tz: Optional[str] = None) -> Any:
 # --------------------------------------------------------------------------- #
 # iCalendar extraction
 # --------------------------------------------------------------------------- #
-def extract_from_ics(file_path: Path, default_tz: Optional[str] = None) -> List[Dict[str, Any]]:
+def extract_from_ics(
+    file_path: Path,
+    default_tz: Optional[str] = None,
+    max_ics_bytes: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """Extracts events from standard iCalendar files."""
     from icalendar import Calendar
 
     events: List[Dict[str, Any]] = []
-    gcal = Calendar.from_ical(_read_ics_text(file_path))
+    gcal = Calendar.from_ical(_read_ics_text(file_path, max_ics_bytes))
     for component in gcal.walk():
         event = _event_from_ics_component(component, file_path, default_tz)
         if event is not None:
@@ -1459,13 +1465,14 @@ def extract_from_ics(file_path: Path, default_tz: Optional[str] = None) -> List[
     return events
 
 
-def _read_ics_text(file_path: Path) -> str:
+def _read_ics_text(file_path: Path, max_ics_bytes: Optional[int] = None) -> str:
+    limit = MAX_ICS_BYTES if max_ics_bytes is None else max_ics_bytes
     with open(file_path, "rb") as f:
-        raw = f.read(MAX_ICS_BYTES + 1)
-    if len(raw) > MAX_ICS_BYTES:
-        logger.warning("Truncating %s to %d bytes for ICS extraction.",
-                       file_path.name, MAX_ICS_BYTES)
-        raw = raw[:MAX_ICS_BYTES]
+        raw = f.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError(
+            f"ICS file {file_path.name} exceeds --max-ics-bytes={limit}"
+        )
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -3615,7 +3622,12 @@ def extract_from_file(
     suffix = file.suffix.lower()
     try:
         if suffix in CALENDAR_EXTENSIONS:
-            return extract_from_ics(file, default_tz=default_tz)
+            runtime_config = model_config or ModelConfig()
+            return extract_from_ics(
+                file,
+                default_tz=default_tz,
+                max_ics_bytes=runtime_config.max_ics_bytes,
+            )
         if suffix in TEXT_EXTENSIONS:
             return extract_with_llm(file, is_image=False, llm_client=llm_client,
                                     model_config=model_config)
@@ -4201,6 +4213,13 @@ def _iana_timezone(value: str) -> str:
     return value
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return parsed
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract calendar events from a directory of .ics, image, PDF and text files.",
@@ -4211,6 +4230,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help="JSON file to write extracted events to (default: events.json).")
     parser.add_argument("--emit-ics", default=None,
                         help="Also write a combined importable .ics file to this path.")
+    parser.add_argument(
+        "--max-ics-bytes",
+        type=_positive_int,
+        default=MAX_ICS_BYTES,
+        help=("Reject an iCalendar input larger than this many bytes "
+              f"(default: {MAX_ICS_BYTES})."),
+    )
     parser.add_argument("-r", "--recursive", action="store_true",
                         help="Scan subdirectories recursively.")
     parser.add_argument("--no-dedup", action="store_true",
