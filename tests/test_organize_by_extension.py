@@ -4199,6 +4199,40 @@ def test_cross_device_fsyncs_destination_before_source_directory(
     ]
 
 
+def test_fsync_directory_tolerates_unsupported_open_and_fsync(monkeypatch):
+    class UnsupportedOpen:
+        O_RDONLY = os.O_RDONLY
+
+        @staticmethod
+        def open(_path, _flags):
+            raise OSError("directory descriptors unsupported")
+
+    monkeypatch.setattr(oze, "os", UnsupportedOpen())
+    oze._fsync_directory(Path("/unsupported"))
+
+    closed = []
+
+    class UnsupportedFsync:
+        O_RDONLY = os.O_RDONLY
+
+        @staticmethod
+        def open(_path, _flags):
+            return 17
+
+        @staticmethod
+        def fsync(_fd):
+            raise OSError("directory fsync unsupported")
+
+        @staticmethod
+        def close(fd):
+            closed.append(fd)
+
+    monkeypatch.setattr(oze, "os", UnsupportedFsync())
+    oze._fsync_directory(Path("/unsupported"))
+
+    assert closed == [17]
+
+
 def test_cross_device_empty_source_zero_target_is_recovery(tmp_path):
     """An empty source onto an empty target is a completed move (same content),
     so the source is removed — not misread as a stranded collision."""
