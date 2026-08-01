@@ -2077,10 +2077,17 @@ class Dispatcher:
         """Mapped pairs as a shell-quoted suffix (sec-02): the flag is split
         into words and each re-quoted so a config flag carrying shell
         metacharacters can't be smuggled into the /bin/sh -c string; the value
-        is shell-quoted as one argument."""
+        is shell-quoted as one argument.
+
+        lq-plat-07: split with the host's own path rules, the way the exec
+        path already does. POSIX-mode splitting treats a backslash as an
+        escape, which eats the separators out of a Windows path before the
+        command line is ever built.
+        """
         parts: list[str] = []
         for flag, value in extra:
-            parts.extend(shlex.quote(tok) for tok in shlex.split(flag))
+            parts.extend(
+                shlex.quote(tok) for tok in _split_command_template(flag))
             parts.append(shlex.quote(value))
         return " ".join(parts)
 

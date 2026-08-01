@@ -2303,6 +2303,19 @@ def test_split_command_template_still_raises_on_unbalanced_quotes(monkeypatch):
         link_queue._split_command_template('"C:\\a.exe {url}')
 
 
+def test_extra_shell_keeps_a_windows_path_in_a_mapped_flag(monkeypatch):
+    """lq-plat-07: the shell path lexed POSIX-style, so `--paths C:\\dl` lost
+    its separators before the command line was built."""
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+
+    assert LinkQueueApp._extra_shell(((r"--paths C:\dl", "v"),)) == (
+        r"--paths 'C:\dl' v")
+
+
+def test_extra_shell_still_splits_a_multi_word_flag_here():
+    assert LinkQueueApp._extra_shell((("-x --fmt", "v"),)) == "-x --fmt v"
+
+
 def test_build_argv_keeps_a_windows_executable_path_intact(monkeypatch):
     monkeypatch.setattr(link_queue.os, "name", "nt")
     argv = LinkQueueApp._build_argv(r"C:\Tools\viewer.exe {url}", "http://x", "http")
