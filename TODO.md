@@ -39,7 +39,6 @@ rf-sec-04 | open | high | relocate_folder.py:2150-2161 — source fd pins the or
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-cmd-01 | open | low | link_queue.py:1320-1332 — state `extra` parsing silently discards an odd final shlex token, changing the restored command. Require an even token count and surface/drop malformed entries. | untrusted state-file boundary
 rf-cmd-01 | open | low | relocate_folder.py:254-263 — `Plan.from_args` rejects only exact `source == target`; a target nested under source is accepted and `copytree` can recursively copy its own output until path/disk exhaustion. Canonicalize parents and reject ancestor/descendant overlap. | STRIDE Denial of service; adversarial CLI path
 rdv3-cmd-01 | open | low | remove-deduplv3.py:193-194 — emitted `rm -f {paths}` lacks `--`; an attacker-controlled path such as `-r` becomes an rm option and can recursively delete the next operand. Emit `rm -f -- {quoted}` and include the prefix in the byte budget. | STRIDE Tampering/Elevation of privilege; OWASP ASVS input boundary; attack tree: crafted row, option injection, recursive deletion
 

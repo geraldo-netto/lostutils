@@ -1345,9 +1345,13 @@ class Dispatcher:
         extra = ()
         if extra_s:
             flat = shlex.split(extra_s)
+            if len(flat) % 2:
+                raise ValueError(
+                    "extra must contain complete flag/value pairs"
+                )
             extra = tuple(
                 (flat[index], flat[index + 1])
-                for index in range(0, len(flat) - 1, 2)
+                for index in range(0, len(flat), 2)
             )
         return QueueItem(
             url=url,

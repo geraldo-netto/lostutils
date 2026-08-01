@@ -3505,6 +3505,9 @@ def test_load_state_items_per_entry_tolerance(tmp_path, monkeypatch, app, capsys
             {"url": "http://bad/2", "protocol": "http",
              "template": "echo {url}", "shell": False,
              "extra": "unmatched 'quote"},   # shlex.split raises ValueError
+            {"url": "http://odd/3", "protocol": "http",
+             "template": "echo {url}", "shell": False,
+             "extra": "--output file.mp4 --orphaned"},
         ],
         "in_flight": [],
     }
@@ -3516,7 +3519,9 @@ def test_load_state_items_per_entry_tolerance(tmp_path, monkeypatch, app, capsys
     urls = [it.url for it in pending]
     assert "http://good/1" in urls    # good entry preserved
     assert "http://bad/2" not in urls  # bad entry dropped
+    assert "http://odd/3" not in urls  # incomplete pair dropped
     err = capsys.readouterr().err
+    assert "complete flag/value pairs" in err
     assert "dropped" in err           # warning surfaced
 
 
