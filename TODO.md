@@ -284,7 +284,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-unused-05 | open | low | import_events.py:587,592 — `_language_for_ocr_with_source` and `_language_for_ocr` have no production callers; production calls `_ocr_language_chain_with_source` directly. Delete the pair or wire. | grep-proven test-only chain
 oze-unf-02 | open | low | organize_by_extension.py:2439 — `parse_args()` has no production caller; main calls `build_parser().parse_args()` directly at 2446-2447. Keep as documented API or inline. | grep-proven test-only
 
 ## legacy / deprecation

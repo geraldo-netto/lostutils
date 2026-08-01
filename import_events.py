@@ -575,16 +575,6 @@ def _language_for_text_with_source(text: str, config: "ModelConfig") -> tuple:
     return DEFAULT_LANGUAGE, "llm-auto"
 
 
-def _language_for_ocr_with_source(seed_text: str, config: "ModelConfig") -> tuple:
-    chain, source = _ocr_language_chain_with_source(seed_text, config)
-    return chain[0], source
-
-
-def _language_for_ocr(seed_text: str, config: "ModelConfig") -> str:
-    language, _source = _language_for_ocr_with_source(seed_text, config)
-    return language
-
-
 def _log_language_preanalysis(file_path: Path, stage: str, language: str, source: str) -> None:
     if language == DEFAULT_LANGUAGE:
         logger.info("Language pre-analysis for %s [%s]: LLM auto-detect (%s)",

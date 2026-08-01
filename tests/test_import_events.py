@@ -1062,13 +1062,16 @@ def test_language_config_override_skips_detection():
     assert import_events._language_for_text_with_source(
         "the event is in English", cfg
     )[0] == "fr"
-    assert import_events._language_for_ocr("", cfg) == "fr"
+    chain, source = import_events._ocr_language_chain_with_source("", cfg)
+    assert chain[0] == "fr"
+    assert source == "configured"
 
 
 def test_ocr_language_fallback_never_returns_auto():
     cfg = import_events.ModelConfig(language="auto", ocr_fallback_language="auto")
 
-    assert import_events._language_for_ocr("", cfg) == import_events.DEFAULT_OCR_LANGUAGES[0]
+    chain, _source = import_events._ocr_language_chain_with_source("", cfg)
+    assert chain[0] == import_events.DEFAULT_OCR_LANGUAGES[0]
 
 
 def test_ocr_language_chain_uses_default_order_without_seed_text():
