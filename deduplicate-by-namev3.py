@@ -131,7 +131,9 @@ def cleanup(entry, replacements, word_re):
     s = entry.strip().lower()
     for tok in replacements:
         s = s.replace(tok, "")
-    return word_re.sub("", s) if word_re is not None else s
+    if word_re is not None:
+        s = word_re.sub("", s)
+    return " ".join(s.split())
 
 
 def configure_stdout():

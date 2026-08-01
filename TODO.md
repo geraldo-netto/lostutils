@@ -132,7 +132,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-rel-01 | open | low | deduplicate-by-namev3.py:130-134 — word-token removal leaves whitespace artifacts (`"xxx alpha"` becomes `" alpha"`), so equivalent cleaned values become distance 1 instead of a self-collision. Normalize whitespace after removal. | normalization correctness
 hr-rel-32 | open | high | hash-recursive-ai5.py:1423-1470 — large files are declared duplicates after sampled windows only; files differing solely outside sampled bytes can be emitted as duplicates. Add a final full-file BLAKE3 confirmation or explicitly advertise approximate matches. | reproduced with equal 32-byte files except one unsampled byte
 ie-rel-13 | open | med | import_events.py:1859 — `_split_time_explicit` formats hour/minute/second without range validation, so values such as `24:99` enter table output and later disappear from ICS. Validate through `_format_normalized_time` and add adversarial boundary tests. | cross-format correctness
 
@@ -166,7 +165,7 @@ id | status | effort | description | notes
 --- | --- | --- | --- | ---
 dnp-test-02 | open | med | dedupl_numpy.py:1-62 — focused valid-input and CLI-usage coverage now exists in `tests/test_dedupl_numpy.py`, raising `main` above the ≥80% function gate. Add no-newline/CRLF/short-line cases after the corresponding open correctness findings are fixed so tests assert the intended contract rather than preserving known bugs. | test coverage — partial: valid grouping, path emission, summary, and missing-argument behavior shipped; edge cases deferred behind dnp-rel-01/04/05
 dnp-test-01 | open | med | dedupl_numpy.py:16-62 — no input validation leaves the array-bounds path (dnp-rel-01) untested; add fixtures with short lines, single line, and md5-vs-sha256 widths to lock behavior. | coverage
-dnv3-test-01 | open | low | deduplicate-by-namev3.py:130-134 — tests preserve token-removal whitespace residue instead of asserting normalized equivalence. Replace with expected normalized self-collision coverage when dnv3-rel-01 is fixed. | test coverage
+dnv3-test-01 | open | low | deduplicate-by-namev3.py:130-136 — add focused end-to-end coverage that token removal collapses equivalent cleaned inputs into one self-collision. | test coverage — unit expectations were normalized with dnv3-rel-01; end-to-end provenance coverage remains deferred to the test-coverage category
 hr-test-01 | open | low | hash-recursive-ai5.py:1223-1244 — existing coverage explicitly preserves newline-corrupted records. Replace it with a safe filename round-trip assertion after the output format is fixed. | test coverage
 
 ## test / fuzz coverage

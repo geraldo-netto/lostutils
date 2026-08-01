@@ -144,7 +144,7 @@ def test_load_cleaned_lines_keeps_line_numbers_as_source_of_truth(tmp_path):
 # --- dnv3-rel-02: cleanup strips only standalone "xxx"/"monography" ---------
 
 def test_cleanup_strips_standalone_tokens():
-    assert _cleanup_with_tokens("xxx monography") == " "
+    assert _cleanup_with_tokens("xxx monography") == ""
 
 
 def test_cleanup_keeps_words_containing_tokens():
@@ -154,7 +154,7 @@ def test_cleanup_keeps_words_containing_tokens():
 
 
 def test_cleanup_strips_token_among_words():
-    assert _cleanup_with_tokens("my xxx file") == "my  file"
+    assert _cleanup_with_tokens("my xxx file") == "my file"
 
 
 def test_cleanup_basic_replacements_and_case():
@@ -164,7 +164,7 @@ def test_cleanup_basic_replacements_and_case():
 def test_cleanup_accepts_custom_replacements_and_word_tokens():
     word_re = dn.compile_word_re(("skip",))
 
-    assert dn.cleanup("Foo# skip", ("#",), word_re) == "foo "
+    assert dn.cleanup("Foo# skip", ("#",), word_re) == "foo"
 
 
 def test_parse_word_tokens_trims_and_drops_empty_items():
@@ -501,7 +501,7 @@ def test_main_cleanup_flags_override_defaults(monkeypatch, tmp_path, capsys):
     dn.main()
 
     out = capsys.readouterr().out
-    assert "a ;a;1" in out
+    assert "a;a;0" in out
 
 
 def test_configure_stdout_ignores_reconfigure_value_error(monkeypatch):
