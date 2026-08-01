@@ -4758,6 +4758,50 @@ def test_taskkill_process_tree_reports_launch_failures(monkeypatch, failure):
     )
 
 
+def test_terminate_active_processes_handles_graceful_and_forced_cleanup(
+    headless_dispatcher, monkeypatch
+):
+    class Proc:
+        def __init__(self, timeouts):
+            self.timeouts = timeouts
+
+        def wait(self, timeout):
+            assert timeout >= 0
+            if self.timeouts:
+                self.timeouts -= 1
+                raise link_queue.subprocess.TimeoutExpired("child", timeout)
+
+    graceful = Proc(0)
+    forced = Proc(1)
+    stubborn = Proc(2)
+    terminated = []
+    killed = []
+    logs = []
+    with headless_dispatcher._active_processes_lock:
+        headless_dispatcher._active_processes.update(
+            {graceful, forced, stubborn}
+        )
+    monkeypatch.setattr(
+        headless_dispatcher,
+        "_terminate_process_tree",
+        lambda proc: terminated.append(proc),
+    )
+    monkeypatch.setattr(
+        headless_dispatcher,
+        "_kill_process_tree",
+        lambda proc: killed.append(proc),
+    )
+    monkeypatch.setattr(headless_dispatcher, "_log", logs.append)
+
+    headless_dispatcher._terminate_active_processes(time.monotonic() + 1)
+
+    with headless_dispatcher._active_processes_lock:
+        headless_dispatcher._active_processes.clear()
+    assert set(terminated) == {graceful, forced, stubborn}
+    assert set(killed) == {forced, stubborn}
+    assert logs == ["[shutdown] child remained alive after forced kill"]
+
+
 def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monkeypatch):
     class Proc:
         stdout = ()
