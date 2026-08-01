@@ -30,6 +30,10 @@ An unparseable value falls back to the default in all three cases.
 
 Caveats
 -------
+- POSIX-only, by design: ownership preservation (os.chown), the symlink swap,
+  the O_NOFOLLOW|O_DIRECTORY anti-race open, and the /proc open-file precheck
+  have no Windows equivalent. On a host without them the script refuses to run
+  and exits 2 rather than failing partway through a migration.
 - Processes that already have files open from <source> keep using the old
   inodes via their open file handles (standard unix semantics). New opens
   use the new location through the symlink. Stop the affected programs
@@ -2814,9 +2818,34 @@ def _log_level(ns: argparse.Namespace) -> int:
     return logging.INFO
 
 
+# rf-plat-01: the migration is built on POSIX primitives with no Windows
+# equivalent — `os.chown` carries uid/gid across the copy, and the source is
+# opened `O_NOFOLLOW|O_DIRECTORY` so the swap cannot be raced through a
+# substituted symlink. Both are already `getattr`-guarded at their call sites,
+# which on a non-POSIX host would silently downgrade the anti-race open instead
+# of failing. Probe the capabilities themselves rather than `os.name` so an
+# unusual-but-capable runtime is not refused for its label.
+POSIX_REQUIRED_OS_ATTRS = ("chown", "O_NOFOLLOW", "O_DIRECTORY")
+
+
+def _posix_capability_gaps() -> list[str]:
+    """Return the `os` names this script needs that the host does not provide."""
+    return [name for name in POSIX_REQUIRED_OS_ATTRS if not hasattr(os, name)]
+
+
 def main(argv: list[str] | None = None) -> int:
     ns = parse_namespace(argv)
     logging.basicConfig(level=_log_level(ns), format="%(levelname)s %(message)s")
+    gaps = _posix_capability_gaps()
+    if gaps:
+        _log().error(
+            "FAILED: relocate_folder is POSIX-only and this platform (%s) is "
+            "missing %s. It preserves uid/gid with os.chown and opens the "
+            "source with O_NOFOLLOW|O_DIRECTORY to keep the symlink swap safe "
+            "from a substitution race; neither has a Windows equivalent.",
+            sys.platform, ", ".join("os." + name for name in gaps),
+        )
+        return 2
     if getattr(ns, "recover", False):
         return _run_recover(ns)
     if ns.dest_root is None:

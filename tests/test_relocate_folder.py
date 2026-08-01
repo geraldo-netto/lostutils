@@ -3827,6 +3827,38 @@ def test_main_missing_dest_root_without_recover(tmp_path):
     assert rf.main([str(tmp_path / "src")]) == 2
 
 
+# --- rf-plat-01: refuse a host without the POSIX primitives ---------------
+
+def test_posix_capability_gaps_is_empty_on_this_host():
+    assert rf._posix_capability_gaps() == []
+
+
+def test_posix_capability_gaps_names_every_missing_attribute(monkeypatch):
+    monkeypatch.delattr(rf.os, "chown", raising=False)
+    monkeypatch.delattr(rf.os, "O_NOFOLLOW", raising=False)
+    assert rf._posix_capability_gaps() == ["chown", "O_NOFOLLOW"]
+
+
+def test_main_refuses_a_host_without_chown(tmp_path, monkeypatch, caplog):
+    monkeypatch.delattr(rf.os, "chown", raising=False)
+    source = tmp_path / "src"
+    source.mkdir()
+
+    with caplog.at_level(logging.ERROR):
+        code = rf.main([str(source), str(tmp_path / "dest")])
+
+    assert code == 2
+    assert "POSIX-only" in caplog.text
+    assert "os.chown" in caplog.text
+    # Refused before planning: nothing was created at the destination.
+    assert not (tmp_path / "dest").exists()
+
+
+def test_main_refuses_recover_on_a_host_without_chown(tmp_path, monkeypatch):
+    monkeypatch.delattr(rf.os, "chown", raising=False)
+    assert rf.main(["--recover", str(tmp_path / "src")]) == 2
+
+
 def test_parser_dest_root_optional_with_recover():
     ns = rf.parse_namespace(["--recover", "/some/src"])
     assert ns.recover is True

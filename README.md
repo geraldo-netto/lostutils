@@ -90,7 +90,7 @@ Exit codes: `0` every planned file was placed, `1` the run could not complete (u
 
 ### `relocate_folder.py`
 
-Copies a directory to `<dest_root>/<source-basename>`, verifies the copy, then atomically replaces the original source directory with a symlink:
+Copies a directory to `<dest_root>/<source-basename>`, verifies the copy, then atomically replaces the original source directory with a symlink. POSIX-only: it preserves uid/gid through `os.chown` and opens the source `O_NOFOLLOW|O_DIRECTORY` to keep the swap safe from a symlink-substitution race, so on a host without those it refuses to start and exits `2`.
 
 ```bash
 python3 relocate_folder.py ~/.cache /mnt/large-disk/apps --dry-run
