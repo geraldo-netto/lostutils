@@ -263,7 +263,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-prod-01 | open | low | import_events.py:3767-3773,4162-4193 — an existing non-directory input logs ERROR but returns `[]`; CLI writes `[]` and exits 0. Validate `folder.is_dir()` in `_run_main` and return nonzero without a misleading artifact. | shipped-default error behavior
 
 ## design thinking
 

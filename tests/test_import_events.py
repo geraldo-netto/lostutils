@@ -5019,6 +5019,18 @@ def test_cli_rejects_same_json_and_ics_target(tmp_path, caplog):
     assert "must name different files" in caplog.text
 
 
+def test_cli_rejects_file_input_without_writing_output(tmp_path, caplog):
+    source = tmp_path / "not-a-directory.txt"
+    source.write_text("event", encoding="utf-8")
+    output = tmp_path / "events.json"
+
+    rc = import_events._run_main([str(source), "--output", str(output)])
+
+    assert rc == 2
+    assert not output.exists()
+    assert "not a directory" in caplog.text
+
+
 def test_close_paddle_engine_surfaces_close_failure(caplog):
     class Engine:
         def close(self):

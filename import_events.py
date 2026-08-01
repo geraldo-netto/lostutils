@@ -4377,6 +4377,9 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
         folder.mkdir(parents=True, exist_ok=True)
         print(f"Created {folder}. Place your files there and run again.")
         return 0
+    if not folder.is_dir():
+        logger.error("Input path is not a directory: %s", folder)
+        return 2
 
     try:
         events = process_folder(str(folder), recursive=args.recursive,
