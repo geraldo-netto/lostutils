@@ -86,7 +86,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-dep-50 | open | med | organize_by_extension.py:1981 — `sqlite3.connect("")` opens an on-disk temporary database (TMPDIR / SQLITE_TMPDIR), not `:memory:`, and neither `_spooled_plan_pairs`, `organize`, nor `main` catches `sqlite3.Error`. A full or read-only temp filesystem aborts the run with a raw `sqlite3.OperationalError` traceback; a duplicate source path handed to the public `plan_moves` raises `IntegrityError` the same way (`source BLOB PRIMARY KEY`). Catch and degrade, and document the temp-disk requirement in `--help`/README. | dependability — hard failure on an undeclared external dependency
 rf-dep-50 | open | low | relocate_folder.py:1303 — `_assert_complete_inventory_match` uses the same `sqlite3.connect("")` on-disk temp database with no `except sqlite3.Error`. It runs at the very end of verify, so a full temp filesystem converts a fully-copied, fully-verified migration into a traceback (and, per rf-rob-50, strands the target). | dependability — same shape as oze-dep-50; fix both or neither
 
 ## code complexity

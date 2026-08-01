@@ -11,8 +11,10 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 from contextlib import redirect_stdout
 
+import pytest
 from hypothesis import given, settings, strategies as st
 
+import organize_by_extension
 from organize_by_extension import (
     ROOT_MAX_LENGTH,
     bucket_name,
@@ -4390,3 +4392,68 @@ def test_content_and_reservation_helpers_fail_closed_on_missing_paths(tmp_path):
     target = tmp_path / "target"
 
     assert not _oze._same_file_content(missing, target)
+
+
+def test_plan_spool_reports_an_unusable_temp_database(monkeypatch):
+    """oze-dep-50: a full / read-only TMPDIR must not surface as a traceback."""
+    def refuse(_path):
+        raise organize_by_extension.sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(organize_by_extension.sqlite3, "connect", refuse)
+
+    with pytest.raises(organize_by_extension.PlanSpoolError, match="TMPDIR"):
+        with organize_by_extension._plan_spool():
+            pass
+
+
+def test_plan_spool_wraps_a_mid_use_sqlite_failure():
+    with pytest.raises(organize_by_extension.PlanSpoolError, match="SQLITE_TMPDIR"):
+        with organize_by_extension._plan_spool() as db:
+            db.execute("SELECT * FROM does_not_exist")
+
+
+def test_plan_spool_closes_the_connection_on_success():
+    with organize_by_extension._plan_spool() as db:
+        db.execute("CREATE TABLE t (x INTEGER)")
+    with pytest.raises(organize_by_extension.sqlite3.ProgrammingError):
+        db.execute("SELECT 1")
+
+
+def test_plan_moves_tolerates_a_duplicate_source_path(tmp_path, caplog):
+    """oze-dep-50: plan_moves is public; a repeated path used to abort the run
+    on the spool's PRIMARY KEY."""
+    root = tmp_path
+    src = root / "a.txt"
+    src.write_text("x", encoding="utf-8")
+    manager = organize_by_extension.BucketManager(root=root)
+    caplog.set_level(logging.WARNING)
+
+    plan = list(organize_by_extension.plan_moves(
+        root, [src, src], manager,
+        ctx=organize_by_extension.SniffContext(sniff=False)))
+
+    assert [source for source, _bucket in plan] == [src]
+    assert "duplicate source path" in caplog.text
+
+
+def test_main_reports_a_plan_spool_failure_cleanly(tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        sys, "argv", ["organize_by_extension.py", str(tmp_path)])
+
+    def refuse(_path):
+        raise organize_by_extension.sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(organize_by_extension.sqlite3, "connect", refuse)
+
+    with pytest.raises(SystemExit) as exc:
+        organize_by_extension.main()
+
+    assert "TMPDIR" in str(exc.value)
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_help_documents_the_temp_database_requirement(capsys):
+    parser = organize_by_extension.build_parser()
+    parser.print_help()
+    assert "SQLITE_TMPDIR" in capsys.readouterr().out

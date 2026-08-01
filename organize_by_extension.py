@@ -1971,27 +1971,52 @@ def plan_moves(
         yield source, bucket.path
 
 
+class PlanSpoolError(RuntimeError):
+    """The disk-backed planning spool could not be used (oze-dep-50)."""
+
+
+_SPOOL_HINT = (
+    "set TMPDIR (or SQLITE_TMPDIR) to a writable filesystem with free space"
+)
+
+
+@contextmanager
+def _plan_spool() -> Iterator[sqlite3.Connection]:
+    """Open the disk-backed planning database (oze-dep-50).
+
+    ``sqlite3.connect("")`` opens a private temporary database ON DISK — under
+    TMPDIR / SQLITE_TMPDIR, not in memory — which is what lets the planner hold
+    one row per source without a Python object per file. That makes a full or
+    read-only temp filesystem a hard dependency, so translate the raw
+    ``sqlite3.Error`` into a typed, actionable failure instead of letting an
+    ``OperationalError`` traceback escape from inside a generator.
+    """
+    try:
+        database = sqlite3.connect("")
+    except sqlite3.Error as exc:
+        raise PlanSpoolError(
+            f"could not open the temporary planning database ({exc}); "
+            f"{_SPOOL_HINT}"
+        ) from exc
+    try:
+        yield database
+    except sqlite3.Error as exc:
+        raise PlanSpoolError(
+            f"the temporary planning database failed ({exc}); {_SPOOL_HINT}"
+        ) from exc
+    finally:
+        database.close()
+
+
 def _spooled_plan_pairs(
     root: Path,
     files: Iterable[Path],
     ctx: SniffContext,
     preview: bool,
 ) -> Iterator[tuple[Path, Path]]:
-    needed_dirs: set[Path] = set()
-    database = sqlite3.connect("")
-    try:
+    with _plan_spool() as database:
         database.execute("CREATE TABLE pairs (source BLOB PRIMARY KEY, ext_dir BLOB)")
-        for source in files:
-            ext_dir = root / resolve_real_extension(source, ctx=ctx)
-            database.execute(
-                "INSERT INTO pairs VALUES (?, ?)",
-                (os.fsencode(source), os.fsencode(ext_dir)),
-            )
-            _evict_sniff_head(ctx, source)
-            current = ext_dir
-            while current != current.parent and current != root:
-                needed_dirs.add(current)
-                current = current.parent
+        needed_dirs = _fill_plan_spool(database, root, files, ctx)
         database.commit()
         rename_map = _spooled_collision_renames(
             database, needed_dirs, ctx, preview
@@ -2001,8 +2026,44 @@ def _spooled_plan_pairs(
         ):
             source = Path(os.fsdecode(source_raw))
             yield rename_map.get(source, source), Path(os.fsdecode(ext_raw))
-    finally:
-        database.close()
+
+
+def _fill_plan_spool(
+    database: sqlite3.Connection,
+    root: Path,
+    files: Iterable[Path],
+    ctx: SniffContext,
+) -> set[Path]:
+    """Resolve every source's extension into the spool and collect the bucket
+    ancestors the plan needs. Returns the needed-directory set."""
+    needed_dirs: set[Path] = set()
+    seen = 0
+    for source in files:
+        ext_dir = root / resolve_real_extension(source, ctx=ctx)
+        # oze-dep-50: `plan_moves` is public and a caller may repeat a path; a
+        # bare INSERT would abort the entire run on the PRIMARY KEY instead of
+        # planning that file once.
+        database.execute(
+            "INSERT OR IGNORE INTO pairs VALUES (?, ?)",
+            (os.fsencode(source), os.fsencode(ext_dir)),
+        )
+        seen += 1
+        _evict_sniff_head(ctx, source)
+        current = ext_dir
+        while current != current.parent and current != root:
+            needed_dirs.add(current)
+            current = current.parent
+    _warn_duplicate_sources(database, seen)
+    return needed_dirs
+
+
+def _warn_duplicate_sources(database: sqlite3.Connection, seen: int) -> None:
+    stored = database.execute("SELECT COUNT(*) FROM pairs").fetchone()[0]
+    if stored < seen:
+        logger.warning(
+            "Ignored %d duplicate source path(s) in the move plan; "
+            "each file is planned once.", seen - stored,
+        )
 
 
 def _spooled_collision_renames(
@@ -2525,7 +2586,12 @@ def _positive_int(value: str) -> int:
 def build_parser() -> argparse.ArgumentParser:
     """Return the argument parser used by the script."""
     parser = argparse.ArgumentParser(
-        description='Organize files by extension into bucketed subdirectories.'
+        description='Organize files by extension into bucketed subdirectories.',
+        epilog=(
+            'Planning spools one row per file into a temporary on-disk SQLite '
+            'database, so TMPDIR (or SQLITE_TMPDIR) must be writable and have '
+            'room for the file list.'
+        ),
     )
     parser.add_argument(
         'root',
@@ -2670,6 +2736,10 @@ def main() -> None:
             bucket_size=args.bucket_size,
             prune_empty=args.prune_empty,
         )
+    except PlanSpoolError as exc:
+        # oze-dep-50: a full / read-only TMPDIR is an environment problem, not
+        # a bug — report it the way the other setup failures are reported.
+        raise SystemExit(f"error: {exc}") from exc
     except KeyboardInterrupt:
         # oze-obs-05: a Ctrl+C during the scan / plan / prune stages reaches
         # here (the move stage prints its own summary and exits non-zero via
