@@ -4623,6 +4623,17 @@ def test_sweep_orphaned_staging_dirs_surfaces_scan_failure(caplog):
     assert "scan failed" in caplog.text
 
 
+def test_is_orphaned_staging_dir_ignores_entry_vanished_during_stat():
+    class VanishedEntry:
+        name = f"{rf.STAGING_PREFIX}malformed"
+
+        @staticmethod
+        def lstat():
+            raise OSError("entry vanished")
+
+    assert not rf._is_orphaned_staging_dir(VanishedEntry())
+
+
 def test_rename_noreplace_falls_back_when_libc_has_no_symbol(
     tmp_path,
     monkeypatch,
