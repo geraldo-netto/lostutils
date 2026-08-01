@@ -2310,10 +2310,27 @@ def test_main_emits_sigint_cancel_warning(tmp_path, monkeypatch, capsys):
         ev.set()
         return None
     monkeypatch.setattr(hr, "_install_sigint_cancel", fake_install)
-    monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
-    hr.main()
+    monkeypatch.setattr(hr.sys, "argv", ["hr", "--quiet", str(tmp_path)])
+    exit_code = hr.main()
     err = capsys.readouterr().err
+    assert exit_code == 130
     assert "cancelled by SIGINT" in err
+
+
+def test_run_exit_code_reports_operational_failures():
+    config = hr.RunConfig()
+    walk_stats = {"dir_errors": 0, "entry_errors": 0, "worker_failures": 1}
+    info = {"stage1_errors": 0, "stage2_errors": 0, "stage3_errors": 0}
+
+    assert hr._run_exit_code(hr.threading.Event(), walk_stats, info, config) == 1
+
+
+def test_run_exit_code_reports_hash_failures():
+    config = hr.RunConfig()
+    walk_stats = {"dir_errors": 0, "entry_errors": 0, "worker_failures": 0}
+    info = {"stage1_errors": 1, "stage2_errors": 0, "stage3_errors": 0}
+
+    assert hr._run_exit_code(hr.threading.Event(), walk_stats, info, config) == 1
 
 
 def test_main_immediate_cancel_still_reports_timing(tmp_path, monkeypatch, capsys):

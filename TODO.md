@@ -180,7 +180,6 @@ _clean — `pyright==1.1.411 --pythonpath /usr/bin/python3.12 *.py` reports 0 er
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-obs-11 | open | med | hash-recursive-ai5.py:1951-1969,2243-2281 — SIGINT, walk/worker/hash failures still exit 0, and `--quiet` hides cancellation/error summaries. Return 130 for cancellation and nonzero for incomplete operational runs. | silent-failure audit
 oze-obs-11 | open | low | organize_by_extension.py:1646-1653,1800-1803 — source-unlink failure after committed cross-device copy logs a warning but returns success, so workers report `Moved` and increment processed while a duplicate remains. Return a typed partial-move outcome and expose it in final totals. | silent-failure audit
 
 ## watchdog

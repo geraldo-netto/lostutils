@@ -2069,6 +2069,8 @@ def _emit_run_warnings(config, cancel_event, quiet) -> None:
     """One-shot end-of-run warnings: alias-cap truncation (hr-scal-04),
     suppressed hash errors (hr-obs-03), and partial results after a SIGINT
     cancel (hr-conc-05). All are gated on ``not quiet``."""
+    if cancel_event.is_set():
+        _log_line("WARNING: cancelled by SIGINT; results are partial.", False)
     if quiet:
         return
     if config.alias_cap_hits > 0:
@@ -2082,8 +2084,38 @@ def _emit_run_warnings(config, cancel_event, quiet) -> None:
             f"hash error(s) suppressed (showed first "
             f"{config.hash_error_logged}); rerun with a larger "
             "--hash-error-verbose-cap to see more.", False)
+
+
+def _real_hash_error_count(info, config) -> int:
+    total = (
+        info["stage1_errors"]
+        + info["stage2_errors"]
+        + info.get("stage3_errors", 0)
+    )
+    return max(
+        0,
+        total - config.hash_skipped_vanished - config.hash_skipped_shrank,
+    )
+
+
+def _run_exit_code(cancel_event, walk_stats, info, config) -> int:
     if cancel_event.is_set():
-        _log_line("WARNING: cancelled by SIGINT; results are partial.", False)
+        return 130
+    failures = (
+        walk_stats.get("dir_errors", 0)
+        + walk_stats.get("entry_errors", 0)
+        + walk_stats.get("worker_failures", 0)
+        + _real_hash_error_count(info, config)
+    )
+    return 1 if failures else 0
+
+
+def _emit_incomplete_run_error(exit_code) -> None:
+    if exit_code == 1:
+        _log_line(
+            "ERROR: run incomplete because walk, worker, or hash failures occurred.",
+            False,
+        )
 
 
 def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
@@ -2095,17 +2127,7 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
     skips. Subtract those subsets so the printed ``hash_errors`` is the count of
     REAL failures worth investigating, matching the counter's contract."""
     f = _fmt_count
-    total_hash_errors = (
-        info["stage1_errors"]
-        + info["stage2_errors"]
-        + info.get("stage3_errors", 0)
-    )
-    real_hash_errors = max(
-        0,
-        total_hash_errors
-        - config.hash_skipped_vanished
-        - config.hash_skipped_shrank,
-    )
+    real_hash_errors = _real_hash_error_count(info, config)
     worker_failure_suffix = ""
     worker_failures = walk_stats.get("worker_failures", 0)
     if worker_failures:
@@ -2381,11 +2403,14 @@ def main():
 
         # hr-scal-04 / hr-obs-03 / hr-conc-05: one-shot end-of-run warnings.
         _emit_run_warnings(config, cancel_event, args.quiet)
+        exit_code = _run_exit_code(cancel_event, walk_stats, info, config)
+        _emit_incomplete_run_error(exit_code)
 
         # ---- Summary on stderr (the user's safety net) ----
         if not args.quiet:
             _print_run_summary(walk_stats, info, config, dup_groups,
                                dup_paths, walk_seconds, hash_seconds)
+        return exit_code
     finally:
         # hr-log-02 / hr-log-03 / hr-rel-20: flush + close the dump and restore
         # the SIGINT handler on every exit path (normal return AND second
@@ -2417,4 +2442,4 @@ def _fmt_count(n: int) -> str:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    raise SystemExit(main())
