@@ -2936,6 +2936,13 @@ def _ocr_with_tesseract(
              "-l", tess_lang, "--psm", runtime_config.tesseract_psm],
             capture_output=True,
             text=True,
+            # ie-rel-50: Tesseract writes UTF-8, but `text=True` alone decodes
+            # with the locale codec and errors="strict". Under a C/POSIX locale
+            # a single non-ASCII glyph then raised UnicodeDecodeError, which is
+            # outside the caught set below and escaped as a whole-file
+            # extraction failure instead of a recoverable OCR miss.
+            encoding="utf-8",
+            errors="replace",
             timeout=runtime_config.ocr_timeout_seconds,
             check=False,
         )

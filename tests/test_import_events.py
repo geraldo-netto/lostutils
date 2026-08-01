@@ -5680,3 +5680,39 @@ def test_custom_model_path_takes_no_lock(tmp_path):
     import_events._ensure_one_model(str(model), "https://x/m", None, managed=False)
 
     assert not (tmp_path / ".custom.gguf.lock").exists()
+
+
+def test_tesseract_output_decodes_non_ascii_under_any_locale(tmp_path, monkeypatch):
+    """ie-rel-50: a non-UTF-8-decodable byte must not fail the whole file."""
+    captured = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return types.SimpleNamespace(returncode=0, stdout="reunião�", stderr="")
+
+    monkeypatch.setattr(import_events, "_resolve_tesseract_path", lambda _c: "/usr/bin/tesseract")
+    monkeypatch.setattr(import_events.subprocess, "run", fake_run)
+
+    text = import_events._ocr_with_tesseract(tmp_path / "page.png", "pt-br")
+
+    assert text == "reunião�"
+    assert captured["encoding"] == "utf-8"
+    assert captured["errors"] == "replace"
+
+
+def test_tesseract_decode_of_undecodable_bytes_does_not_raise(tmp_path, monkeypatch):
+    real_run = import_events.subprocess.run
+
+    def fake_run(argv, **kwargs):
+        # Exercise the real decode path with bytes that are invalid UTF-8.
+        return real_run(
+            [sys.executable, "-c",
+             "import sys; sys.stdout.buffer.write(b'caf\\xe9 bar')"],
+            **kwargs)
+
+    monkeypatch.setattr(import_events, "_resolve_tesseract_path", lambda _c: "/usr/bin/tesseract")
+    monkeypatch.setattr(import_events.subprocess, "run", fake_run)
+
+    text = import_events._ocr_with_tesseract(tmp_path / "page.png", "en")
+
+    assert "bar" in text          # decoded lossily instead of raising
