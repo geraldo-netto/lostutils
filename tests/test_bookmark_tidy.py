@@ -663,8 +663,20 @@ def test_normalize_url_option_edges():
     assert key == display
     assert display == "https://User:pw@Example.test:443/a/?utm_source=x#frag"
     assert bookmark_tidy.normalize_url("/relative#x", bookmark_tidy.NormalizeOptions()) == ("/relative", "/relative")
-    assert bookmark_tidy.normalize_url("http://example.test:bad/a", bookmark_tidy.NormalizeOptions())[1] == "http://example.test/a"
+    assert bookmark_tidy.normalize_url(
+        "http://example.test:bad/a",
+        bookmark_tidy.NormalizeOptions(),
+    )[1] == "http://example.test:bad/a"
     assert bookmark_tidy.normalize_url("https://[::1]:443/a", bookmark_tidy.NormalizeOptions())[1] == "https://[::1]/a"
+
+
+def test_invalid_port_does_not_collide_with_no_port_url():
+    options = bookmark_tidy.NormalizeOptions()
+
+    malformed = bookmark_tidy.normalize_url("http://example.test:bad/a", options)
+    valid = bookmark_tidy.normalize_url("http://example.test/a", options)
+
+    assert malformed[0] != valid[0]
 
 
 def test_raw_host_part_handles_brackets_auth_and_ipv6_text():

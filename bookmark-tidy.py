@@ -769,6 +769,7 @@ def normalize_url(url: str, options: NormalizeOptions) -> tuple[str, str]:
     raw = url.strip()
     try:
         parsed = urlsplit(raw)
+        parsed.port
     except ValueError:
         return _normalize_opaque_url(raw, options)
     if not parsed.scheme or not parsed.netloc:
@@ -821,10 +822,7 @@ def _raw_host_part(parsed: Any) -> str:
 
 
 def _normalized_port(parsed: Any, options: NormalizeOptions) -> str:
-    try:
-        port = parsed.port
-    except ValueError:
-        return ""
+    port = parsed.port
     if port is None:
         return ""
     if options.strip_default_port and (parsed.scheme.casefold(), port) in {("http", 80), ("https", 443)}:

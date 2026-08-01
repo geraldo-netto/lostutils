@@ -50,7 +50,6 @@ bt-gov-01 | open | low | bookmark-tidy.py:902 — verbose duplicate logging prin
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-int-02 | open | low | bookmark-tidy.py:817-826 — invalid ports are silently discarded, so malformed `http://example.com:bad/path` normalizes like the valid no-port URL and may merge incorrectly. Preserve malformed netloc or reject the URL. | canonicalization collision
 hr-int-01 | open | med | hash-recursive-ai5.py:1808-1829,2084-2103 — hash dump writes provisional head digests before stage 2; failed/cancelled entries remain indistinguishable from complete hashes and can create false downstream groups. Tag provisional records or publish only final digests. | derived-state integrity
 ie-int-01 | open | high | import_events.py:706-720,1023-1040 — digest mismatch unconditionally deletes the file; custom `--model-path`/`--clip-path` can therefore delete a user-owned model and redownload the default into that custom path. Track managed-cache ownership; custom paths must exist and must never be unlinked/replaced. | destructive custom-path contract
 lq-int-01 | open | low | link_queue.py:544-557 — `_PendingQueue.append` refreshes duplicate keys in `urls` but leaves `by_domain` pointing to the old `QueueItem`, so restored duplicate entries can execute stale payload and indexes diverge. Update every index atomically or reject duplicates consistently. | in-memory index invariant
