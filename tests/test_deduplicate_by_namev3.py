@@ -288,15 +288,19 @@ def _run_main_isolated(tmp_path_factory, lines, threshold):
     f = d / "in.txt"
     f.write_text("\n".join(lines) + "\n", encoding="utf-8")
     argv = ["prog", str(f), "-t", str(threshold), "-w", "1"]
-    buf = io.StringIO()
+    raw_output = io.BytesIO()
+    buf = io.TextIOWrapper(raw_output, encoding="utf-8")
     old_argv = dn.sys.argv
     dn.sys.argv = argv
     try:
         with contextlib.redirect_stdout(buf):
             dn.main()
+            buf.flush()
     finally:
         dn.sys.argv = old_argv
-    return buf.getvalue()
+    output = raw_output.getvalue().decode("utf-8")
+    buf.detach()
+    return output
 
 
 @given(st.lists(st.text(alphabet="abcde", min_size=1, max_size=6),
@@ -547,7 +551,7 @@ def test_main_cleanup_flags_override_defaults(monkeypatch, tmp_path, capsys):
     assert "a;a;0" in out
 
 
-def test_configure_stdout_ignores_reconfigure_value_error(monkeypatch):
+def test_configure_stdout_wraps_buffer_after_reconfigure_error(monkeypatch):
     class RefusingStream(io.TextIOWrapper):
         def reconfigure(self, **_kwargs):
             raise ValueError("already detached")
@@ -556,3 +560,14 @@ def test_configure_stdout_ignores_reconfigure_value_error(monkeypatch):
     monkeypatch.setattr(dn.sys, "stdout", stream)
 
     dn.configure_stdout()
+
+    assert dn.sys.stdout.encoding == "utf-8"
+    assert dn.sys.stdout.errors == "surrogateescape"
+    dn.sys.stdout.detach()
+
+
+def test_configure_stdout_rejects_stream_without_binary_buffer(monkeypatch):
+    monkeypatch.setattr(dn.sys, "stdout", io.StringIO())
+
+    with pytest.raises(RuntimeError, match="binary buffer"):
+        dn.configure_stdout()

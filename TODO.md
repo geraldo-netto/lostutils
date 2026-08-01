@@ -139,7 +139,6 @@ ie-rel-13 | open | med | import_events.py:1859 — `_split_time_explicit` format
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-rob-03 | open | low | deduplicate-by-namev3.py:137-143 — `configure_stdout()` silently no-ops when `reconfigure` raises ValueError (`except ValueError: pass`) or stdout is not a TextIOWrapper, so the surrogateescape encoder is never applied and a later `sys.stdout.write` of surrogate-escaped bytes raises UnicodeEncodeError; fall back to wrapping the binary buffer or fail loudly. | robustness / silent-failure audit — breaks documented lossless round-trip
 ie-rob-01 | open | low | import_events.py:2520-2538 — `_read_stage_cache_text` catches OSError/JSONDecodeError but not UnicodeDecodeError; invalid-UTF-8 cache content aborts extraction instead of becoming a cache miss. Catch UnicodeError, validate object schema, and regenerate/remove corrupt entries. | corrupt-cache recovery
 ie-rob-02 | open | low | import_events.py:3794-3838 — output parent is not created or validated; a missing parent raises a raw traceback during lock creation. Validate/create the parent and convert OSError to concise stderr plus nonzero exit. | actionable CLI recovery
 lq-rob-02 | open | med | link_queue.py:273-287,360-371 — Windows pidfile acquisition records ownership before metadata write; write/fsync failure leaves an empty/invalid lock that is never considered stale. Close and unlink on metadata failure, then safely recover invalid locks. | distributed lock recovery

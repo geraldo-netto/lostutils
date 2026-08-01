@@ -137,11 +137,26 @@ def cleanup(entry, replacements, word_re):
 
 
 def configure_stdout():
-    if isinstance(sys.stdout, io.TextIOWrapper):
+    stream = sys.stdout
+    if isinstance(stream, io.TextIOWrapper):
         try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
+            stream.reconfigure(encoding="utf-8", errors="surrogateescape")
+            return
         except ValueError:
-            pass
+            try:
+                buffer = stream.detach()
+            except (AttributeError, ValueError) as exc:
+                raise RuntimeError("stdout has no usable binary buffer") from exc
+    else:
+        buffer = getattr(stream, "buffer", None)
+        if buffer is None:
+            raise RuntimeError("stdout has no usable binary buffer")
+    sys.stdout = io.TextIOWrapper(
+        buffer,
+        encoding="utf-8",
+        errors="surrogateescape",
+        write_through=True,
+    )
 
 
 def _build_parser():
@@ -219,7 +234,11 @@ def _emit_results(line_nums, cleaned_strs, threshold, args, write):
 def main():
     args = _build_parser().parse_args()
 
-    configure_stdout()
+    try:
+        configure_stdout()
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
     replacements = effective_replacements(args.strip_chars)
     word_re = compile_word_re(args.word_tokens)
