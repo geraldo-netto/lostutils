@@ -79,7 +79,6 @@ hr-conc-50 | open | med | hash-recursive-ai5.py:1414-1420 — `_stage2_tail` cal
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-mt-01 | open | low | bookmark-tidy.py:1047-1048 — `LlamaCategorizer` explicitly selects the `fork` multiprocessing context on POSIX even when the parent process is multithreaded, which Python 3.12 warns can deadlock. Use `spawn` or `forkserver` and retain the existing startup/abort lifecycle tests. | multithreading — background-process lifecycle / fork safety; full CI-equivalent run emits `DeprecationWarning: This process is multi-threaded, use of fork() may lead to deadlocks in the child`
 lq-mt-50 | open | med | link_queue.py:2922,2957,2965 — `_trigger_failure_cooldown` and `_maybe_inter_item_sleep` run on worker threads and call the injected `_get_failure_sleep` / `_get_sleep`, which reach `LinkQueueApp._get_int_setting` (4403-4411) and read a `tk.StringVar` via `var.get()` — a Tcl call from a non-main thread, exactly what `_safe_after` (4951-4982) exists to prevent. `_maybe_inter_item_sleep` repeats it every 0.25s per worker. The `except Exception` fallback absorbs a `RuntimeError`, but a Tcl build without thread support can block instead of raising. Read these knobs from `self.config` (already live-shared) instead of the widget vars. | multithreading — cross-thread Tk access contradicting the file's own documented concurrency contract
 
 ## distributed systems

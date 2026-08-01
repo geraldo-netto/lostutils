@@ -33,6 +33,12 @@ LLAMA_INSTALL_TIMEOUT_SECONDS = 300
 LLAMA_INFERENCE_TIMEOUT_SECONDS = 120
 LLAMA_MODEL_LOAD_TIMEOUT_SECONDS = 300
 LLAMA_PROCESS_STOP_SECONDS = 1
+# bt-mt-01: never `fork`. CPython 3.12 warns that forking a multithreaded
+# parent can deadlock the child, and 3.14 drops fork as the POSIX default.
+# `spawn` re-imports this file in the child; multiprocessing's __main__ fixup
+# covers that for a script entry point, and the model load is now deferred
+# (bt-perf-50) so the extra startup cost is only paid when a batch needs it.
+LLAMA_START_METHOD = "spawn"
 LLM_CONSECUTIVE_FAILURE_LIMIT = 3
 FORMAT_SNIFF_CHARS = 4096
 MOZLZ4_MAGIC = b"mozLz40\x00"
@@ -1075,9 +1081,16 @@ class LlamaCategorizer:
         context: int,
         gpu_layers: int,
         max_tokens: int,
+        mp_context: Any = None,
     ) -> None:
-        context_name = "spawn" if os.name == "nt" else "fork"
-        process_context = multiprocessing.get_context(context_name)
+        # bt-mt-01: `mp_context` is an injection seam — tests that need the
+        # child to inherit an in-process fake `llama_cpp` pass a fork context
+        # explicitly. Production always takes the LLAMA_START_METHOD default.
+        process_context = (
+            multiprocessing.get_context(LLAMA_START_METHOD)
+            if mp_context is None
+            else mp_context
+        )
         parent, child = process_context.Pipe()
         self._connection = parent
         self._process = process_context.Process(

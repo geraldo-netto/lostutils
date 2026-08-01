@@ -4,6 +4,7 @@ import builtins
 import importlib.util
 import json
 import logging
+import multiprocessing
 import sqlite3
 import sys
 import types
@@ -137,6 +138,31 @@ def _install_fake_llama(monkeypatch, llama_cls):
     module = types.ModuleType("llama_cpp")
     module.Llama = llama_cls
     monkeypatch.setitem(sys.modules, "llama_cpp", module)
+
+
+# bt-mt-01: production uses `spawn`. The tests below drive a REAL worker
+# process against the in-process fake `llama_cpp` installed above, which only
+# `fork` can inherit — so they inject a fork context explicitly. The
+# DeprecationWarning they trigger is about fork, which production no longer
+# uses; it is suppressed per-test rather than globally.
+_FORK_CONTEXT = (
+    multiprocessing.get_context("fork")
+    if "fork" in multiprocessing.get_all_start_methods()
+    else None
+)
+_forking_worker = pytest.mark.filterwarnings("ignore::DeprecationWarning")
+
+
+def _fork_categorizer(*args, **kwargs):
+    if _FORK_CONTEXT is None:  # pragma: no cover - non-POSIX
+        pytest.skip("fork start method unavailable on this platform")
+    return bookmark_tidy.LlamaCategorizer(*args, mp_context=_FORK_CONTEXT, **kwargs)
+
+
+def test_llama_start_method_is_not_fork():
+    """bt-mt-01: forking a multithreaded parent can deadlock the child."""
+    assert bookmark_tidy.LLAMA_START_METHOD == "spawn"
+    assert bookmark_tidy.LLAMA_START_METHOD in multiprocessing.get_all_start_methods()
 
 
 def test_main_reports_missing_bookmark_file(capsys):
@@ -782,15 +808,16 @@ def test_loads_json_object_rejects_non_mapping_response(monkeypatch):
         bookmark_tidy._loads_json_object("{}")
 
 
+@_forking_worker
 def test_llama_categorizer_chat_and_text_paths(monkeypatch, tmp_path):
     _install_fake_llama(monkeypatch, FakeLlamaChat)
-    chat = bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
+    chat = _fork_categorizer(tmp_path / "model.gguf", False, 128, 0, 64)
 
     assert chat([_sample_bookmark()]) == {0: ("AI", "Docs")}
     chat.close()
 
     _install_fake_llama(monkeypatch, FakeLlamaText)
-    text = bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 1, 64)
+    text = _fork_categorizer(tmp_path / "model.gguf", False, 128, 1, 64)
 
     assert text([_sample_bookmark()]) == {0: ("Reference", "Docs")}
     text.close()
@@ -830,6 +857,7 @@ def test_llama_process_worker_reports_startup_failure(monkeypatch):
     assert connection.closed
 
 
+@_forking_worker
 def test_llama_categorizer_wraps_model_load_failure(monkeypatch, tmp_path):
     class BrokenLlama:
         def __init__(self, **kwargs):
@@ -838,7 +866,7 @@ def test_llama_categorizer_wraps_model_load_failure(monkeypatch, tmp_path):
     _install_fake_llama(monkeypatch, BrokenLlama)
 
     with pytest.raises(bookmark_tidy.UserError, match="could not load model .*bad magic"):
-        bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
+        _fork_categorizer(tmp_path / "model.gguf", False, 128, 0, 64)
 
 
 def test_llama_categorizer_wraps_worker_start_failure(monkeypatch, tmp_path):
@@ -878,21 +906,21 @@ def test_llama_categorizer_wraps_model_load_timeout(monkeypatch, tmp_path):
     assert child.closed
 
 
+@_forking_worker
 def test_llama_categorizer_inference_timeout(monkeypatch, tmp_path):
     _install_fake_llama(monkeypatch, HangingLlama)
     monkeypatch.setattr(bookmark_tidy, "LLAMA_INFERENCE_TIMEOUT_SECONDS", 0.01)
-    chat = bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
+    chat = _fork_categorizer(tmp_path / "model.gguf", False, 128, 0, 64)
 
     with pytest.raises(bookmark_tidy.UserError, match="LLM inference timed out"):
         chat._complete("prompt")
     assert not chat._process.is_alive()
 
 
+@_forking_worker
 def test_llama_categorizer_surfaces_worker_failure(monkeypatch, tmp_path):
     _install_fake_llama(monkeypatch, BrokenInferenceLlama)
-    chat = bookmark_tidy.LlamaCategorizer(
-        tmp_path / "model.gguf", False, 128, 0, 64
-    )
+    chat = _fork_categorizer(tmp_path / "model.gguf", False, 128, 0, 64)
 
     with pytest.raises(bookmark_tidy.UserError, match="worker failed"):
         chat._complete("prompt")
