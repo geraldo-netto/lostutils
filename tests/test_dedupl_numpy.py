@@ -66,6 +66,6 @@ def test_group_duplicates_is_pure():
         dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
     )
 
-    assert paths == {b"aaaaaa /one", b"aaaaaa /two"}
+    assert paths == {b"/one", b"/two"}
     assert equal_files == 1
     assert record_count == 2

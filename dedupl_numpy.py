@@ -11,7 +11,9 @@ import sys
 
 import numpy as np
 
-PATH_OFFSET = 26  # preserved from v1's slice index
+HASH_WIDTH = 32
+HASH_SEPARATOR_WIDTH = 1
+PATH_OFFSET = HASH_WIDTH + HASH_SEPARATOR_WIDTH
 
 
 def _parse_args() -> argparse.Namespace:
@@ -34,11 +36,11 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     line_starts[1:] = nl[:-1] + 1
     n_lines = len(line_starts)
 
-    # Build (n_lines, 32) hash slice via index broadcasting; view as S32.
-    hash_idx = line_starts[:, None] + np.arange(32)
+    # Build the hash slice via index broadcasting; view as fixed-width bytes.
+    hash_idx = line_starts[:, None] + np.arange(HASH_WIDTH)
     hashes = (
         np.ascontiguousarray(data[hash_idx])
-        .view("S32")
+        .view(f"S{HASH_WIDTH}")
         .ravel()
     )
 
