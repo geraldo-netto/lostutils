@@ -6055,3 +6055,45 @@ def test_help_documents_the_exit_codes(capsys):
         import_events.parse_args(["--help"])
 
     assert "Exit codes:" in capsys.readouterr().out
+
+
+def test_run_main_refuses_a_named_directory_that_does_not_exist(
+        tmp_path, monkeypatch, caplog):
+    """ie-ux-50: a mistyped path used to be created, hiding the typo."""
+    missing = tmp_path / "evnets_data"      # typo, on purpose
+    caplog.set_level(logging.ERROR)
+
+    code = import_events._run_main(
+        [str(missing), "-o", str(tmp_path / "events.json")])
+
+    assert code == 2
+    assert not missing.exists()
+    assert "does not exist" in caplog.text
+
+
+def test_run_main_creates_only_the_defaulted_directory(tmp_path, monkeypatch, capsys):
+    """With no directory named, first-run onboarding still creates the default."""
+    monkeypatch.chdir(tmp_path)
+
+    code = import_events._run_main(["-o", str(tmp_path / "events.json")])
+
+    assert code == 0
+    assert (tmp_path / import_events.DEFAULT_INPUT_DIR).is_dir()
+    assert "Place your files there" in capsys.readouterr().out
+
+
+def test_directory_defaults_to_none_so_the_two_cases_are_distinguishable():
+    assert import_events.parse_args([]).directory is None
+    assert import_events.parse_args(["/some/dir"]).directory == "/some/dir"
+
+
+def test_run_main_still_rejects_a_non_directory_input(tmp_path, caplog):
+    a_file = tmp_path / "not-a-dir.txt"
+    a_file.write_text("x", encoding="utf-8")
+    caplog.set_level(logging.ERROR)
+
+    code = import_events._run_main(
+        [str(a_file), "-o", str(tmp_path / "events.json")])
+
+    assert code == 2
+    assert "not a directory" in caplog.text

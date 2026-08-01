@@ -235,7 +235,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-ux-50 | open | low | import_events.py:4419-4423 — `_run_main` creates a missing input `directory` with `mkdir(parents=True)` and returns 0, so a mistyped path silently creates an empty tree instead of reporting the typo. Create only when the path was defaulted, or require an explicit opt-in. | product engineering / design thinking — the recovery path for "no input" masks the far more likely "wrong input"
 lq-ux-50 | open | low | link_queue.py:4551-4560 — "Clear Queue" discards every pending item and rewrites the state file with no confirmation, while deleting a single protocol or mapping (4748) does prompt via `messagebox.askyesno`. Add the same confirmation, scaled to the item count. | UI / UX — Jakob's Law: users carry the expectation set by this same app's other destructive action (and by every other queue UI) that bulk destruction confirms
 
 ## accessibility

@@ -112,6 +112,7 @@ LLM_CONTEXT_MIN = 512
 # window is four times the character budget.
 MAX_IMAGE_BYTES = 128 * 1024 * 1024
 MAX_TEXT_BYTES = 128 * 1024 * 1024
+DEFAULT_INPUT_DIR = "./events_data"
 PDF_RENDER_MAX_PIXELS = 40_000_000
 # ie-scal-50: total temp-disk budget for one document's rendered pages. The
 # per-page pixel cap above bounds a single page, but PDF_VISION_MAX_PAGES
@@ -4479,8 +4480,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                 "cover every file (command-line or setup error, model "
                 "unavailable, or workers abandoned mid-run)."),
     )
-    parser.add_argument("directory", nargs="?", default="./events_data",
-                        help="Directory to scan (default: ./events_data).")
+    # ie-ux-50: None distinguishes "the user named a directory" from "the user
+    # named none", which is what decides whether a missing path is a typo or a
+    # first run. _run_main substitutes DEFAULT_INPUT_DIR.
+    parser.add_argument("directory", nargs="?", default=None,
+                        help=(f"Directory to scan (default: {DEFAULT_INPUT_DIR}, "
+                              "created on first run). A named directory must "
+                              "already exist."))
     parser.add_argument("-o", "--output", default="events.json",
                         help="JSON file to write extracted events to (default: events.json).")
     parser.add_argument("--emit-ics", default=None,
@@ -4683,6 +4689,32 @@ def _prepare_output_parents(args: argparse.Namespace) -> None:
             raise NotADirectoryError(f"output parent is not a directory: {parent}")
 
 
+def _resolve_input_directory(
+    args: argparse.Namespace,
+) -> Tuple[Optional[Path], int]:
+    """Resolve the directory to scan (ie-ux-50).
+
+    Returns ``(folder, 0)`` when the run may proceed, or ``(None, exit_code)``
+    when it must stop. A missing path is only created when the user named no
+    directory at all — that is the documented first-run onboarding step. A
+    named path that does not exist is far more likely a typo than a request to
+    build a tree, and creating it turned the typo into an empty result and a
+    clean exit, with nothing for the user to notice.
+    """
+    folder = Path(DEFAULT_INPUT_DIR if args.directory is None else args.directory)
+    if not folder.exists():
+        if args.directory is not None:
+            logger.error("Input directory does not exist: %s", folder)
+            return None, 2
+        folder.mkdir(parents=True, exist_ok=True)
+        print(f"Created {folder}. Place your files there and run again.")
+        return None, 0
+    if not folder.is_dir():
+        logger.error("Input path is not a directory: %s", folder)
+        return None, 2
+    return folder, 0
+
+
 def _run_main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     if not _outputs_are_distinct(args):
@@ -4697,14 +4729,9 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
         logger.info("Reset stage cache: removed %d entr%s.",
                     removed, "y" if removed == 1 else "ies")
 
-    folder = Path(args.directory)
-    if not folder.exists():
-        folder.mkdir(parents=True, exist_ok=True)
-        print(f"Created {folder}. Place your files there and run again.")
-        return 0
-    if not folder.is_dir():
-        logger.error("Input path is not a directory: %s", folder)
-        return 2
+    folder, stop_code = _resolve_input_directory(args)
+    if folder is None:
+        return stop_code
     try:
         _prepare_output_parents(args)
     except OSError as exc:
