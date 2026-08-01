@@ -1001,25 +1001,9 @@ class Bucket:
     members: Set[str] | frozenset[str] = field(default_factory=set)
     capacity: int = BUCKET_SIZE
 
-    @property
-    def name(self) -> str:
-        return self.path.name
-
     def is_full(self) -> bool:
         """True once the bucket has reached its capacity (oze-scal-02)."""
         return self.members is _BUCKET_FULL or len(self.members) >= self.capacity
-
-    def reserve(self, filename: str) -> None:
-        """Record ``filename`` as taken in this bucket. Caller must check
-        :meth:`is_full` first — `BucketManager.choose` enforces that contract.
-
-        Mutates the shared `members` set in place (the underlying object is
-        still mutable even though the dataclass is frozen). The frozen flag
-        only blocks rebinding the field, which is the bug we wanted to
-        prevent (oze-cx-06)."""
-        if isinstance(self.members, frozenset):  # _BUCKET_FULL is frozenset
-            raise RuntimeError(f"reserve on full bucket {self.path}")
-        self.members.add(filename)
 
 
 @dataclass

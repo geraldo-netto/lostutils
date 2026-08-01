@@ -1004,7 +1004,7 @@ class BucketManagerTests(unittest.TestCase):
             src = root / "a.txt"
             src.write_bytes(b"x")
             bucket = mgr.choose(src, root / "txt", "a")
-            self.assertEqual(bucket.name, "a00000")
+            self.assertEqual(bucket.path.name, "a00000")
             self.assertEqual(bucket.prefix, "a")
             self.assertEqual(bucket.index, 0)
             self.assertIn("a.txt", bucket.members)
@@ -1682,13 +1682,6 @@ class BucketValueObjectTests(unittest.TestCase):
                    members={f"f{i}" for i in range(BUCKET_SIZE)})
         self.assertTrue(b.is_full())
 
-    def test_bucket_reserve_rejects_when_full(self):
-        b = Bucket(path=Path("/x/a00000"), prefix="a", index=0,
-                   members=_BUCKET_FULL)
-        with self.assertRaises(RuntimeError):
-            b.reserve("new.txt")
-
-
 class StreamingExecutorTests(unittest.TestCase):
     """oze-scal-04 + oze-conc-03 + oze-scal-05."""
 
@@ -2315,26 +2308,6 @@ class OrganizeWithPruneTests(unittest.TestCase):
 # --- coverage-finishing tests ----------------------------------------------
 
 import organize_by_extension as _oze
-
-
-class BucketReserveOnFullRaises(unittest.TestCase):
-    """Cover Bucket.reserve refusing to mutate a frozen members set."""
-
-    def test_reserve_raises_when_members_is_bucket_full(self):
-        bucket = _oze.Bucket(
-            path=Path("/tmp/bucket"), prefix="a", index=0,
-            members=_oze._BUCKET_FULL,
-        )
-        with self.assertRaisesRegex(RuntimeError, "reserve on full bucket"):
-            bucket.reserve("anything.txt")
-
-    def test_reserve_records_name_when_members_mutable(self):
-        bucket = _oze.Bucket(
-            path=Path("/tmp/bucket"), prefix="a", index=0,
-            members=set(),
-        )
-        bucket.reserve("x.txt")
-        self.assertIn("x.txt", bucket.members)
 
 
 class BucketManagerChooseDefensiveBranches(unittest.TestCase):
