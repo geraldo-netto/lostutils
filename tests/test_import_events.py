@@ -5781,3 +5781,59 @@ def test_pdf_render_skips_an_oversized_page_without_consuming_its_index(
 
     assert [p.name for p in paths] == ["page-000001.png"]
     assert paths[0].read_bytes() == b"ok"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (ProcessLookupError(), False),
+        (PermissionError(), True),
+        (OSError("EPERM-ish"), True),
+    ],
+)
+def test_lock_owner_is_running_classifies_kill_probe_errors(
+        monkeypatch, error, expected):
+    """ie-dist-01: only a provably-absent process may lose its lock."""
+    def probe(_pid, _sig):
+        raise error
+
+    monkeypatch.setattr(import_events.os, "kill", probe)
+    assert import_events._lock_owner_is_running(4242) is expected
+
+
+def test_create_lock_file_reclaims_even_if_the_unlink_fails(tmp_path, monkeypatch):
+    lock = tmp_path / "a.lock"
+    lock.write_text(f"pid={_dead_pid()}\n")
+    real_unlink = Path.unlink
+
+    def flaky_unlink(self, *args, **kwargs):
+        if self == lock:
+            lock.write_text("")          # simulate the owner's file vanishing
+            real_unlink(self, *args, **kwargs)
+            raise OSError("unlink reported a failure")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    fd = import_events._create_lock_file(lock, "the output")
+    os.close(fd)
+    assert lock.exists()
+
+
+def test_create_lock_file_gives_up_when_the_slot_is_retaken(tmp_path, monkeypatch):
+    lock = tmp_path / "a.lock"
+    lock.write_text(f"pid={_dead_pid()}\n")
+    real_open = import_events.os.open
+    calls = []
+
+    def racing_open(path, flags, *args):
+        calls.append(path)
+        if len(calls) > 1:
+            # A third process grabbed the slot between our unlink and retry.
+            raise FileExistsError(17, "File exists")
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(import_events.os, "open", racing_open)
+
+    with pytest.raises(FileExistsError, match="is already writing"):
+        import_events._create_lock_file(lock, "the output")

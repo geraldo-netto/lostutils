@@ -309,3 +309,36 @@ def test_piping_into_a_short_reader_exits_cleanly(tmp_path):
     assert producer.wait(timeout=60) == 0
     assert b"BrokenPipeError" not in stderr
     assert b"Exception ignored" not in stderr
+
+
+def test_silence_stdout_survives_a_bad_stdout_descriptor(monkeypatch):
+    """dup2 onto an invalid descriptor is tolerated: fd 1 is already gone."""
+    class BadFileno:
+        def fileno(self):
+            return -1        # real os.dup2 raises EBADF
+
+    monkeypatch.setattr(dedupl_numpy.sys, "stdout", BadFileno())
+
+    dedupl_numpy._silence_stdout_after_broken_pipe()   # must not raise
+
+    assert not isinstance(dedupl_numpy.sys.stdout, BadFileno)   # devnull took over
+
+
+def test_silence_stdout_survives_a_devnull_open_failure(monkeypatch, tmp_path):
+    """Every step is best-effort; a devnull that will not open is not fatal."""
+    os_mod = dedupl_numpy.os
+    spare = os_mod.open(str(tmp_path / "spare"), os_mod.O_WRONLY | os_mod.O_CREAT)
+
+    class SpareStdout:
+        def fileno(self):
+            return spare     # dup2 lands on our own fd, not pytest's
+
+    monkeypatch.setattr(dedupl_numpy.sys, "stdout", SpareStdout())
+    monkeypatch.setattr(
+        builtins, "open",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("no devnull")))
+    try:
+        dedupl_numpy._silence_stdout_after_broken_pipe()   # must not raise
+    finally:
+        monkeypatch.undo()
+        os_mod.close(spare)
