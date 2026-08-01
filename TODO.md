@@ -8,7 +8,9 @@ Scan scope = root-directory `.py`/`.sh` files only (per AGENTS.md); cache/build 
 
 Latest full rescan: 2026-08-01 — 10 root scripts / 22,430 lines (no `.sh` files in root); cache/build paths (`__pycache__`, `.ruff_cache`, `.pytest_cache`, `.complexipy_cache`, `.hypothesis`, `coverage.json`, `.coverage`) excluded. Neither lint tool is on `PATH` in this workspace — invoke via `uvx ruff@0.15.22` / `uvx pyright@1.1.411`.
 
-Latest verification (after the data-integrity → state-machine-integrity fix batch): `ruff@0.15.22 check *.py` → all checks passed; `pyright@1.1.411 --pythonpath /usr/bin/python3.12 *.py` → 0 errors/warnings/informations; `lizard -l python -C 11 *.py` → 0 warnings; CI-equivalent suite 2,096 passed / 1 skipped / 6 subtests plus 103 explicitly collected fuzz cases; total coverage 97.53%; all 1,340 functions/methods meet the 80% function gate. The Python 3.12 POSIX-fork warning is gone — `bt-mt-01` shipped, and the only remaining `fork` use is an explicit, locally-suppressed test seam.
+Latest verification (after the wiring/CLI/observability/UX fix batch): `ruff@0.15.22 check *.py` → all checks passed; `pyright@1.1.411 --pythonpath /usr/bin/python3.12 *.py` → 0 errors/warnings/informations; `lizard -l python -C 11 *.py` → 0 warnings; CI-equivalent suite 2,204 passed / 1 skipped / 6 subtests plus 103 explicitly collected fuzz cases; total coverage 97.60%; all 1,352 functions/methods meet the 80% function gate. The Python 3.12 POSIX-fork warning is gone — `bt-mt-01` shipped, and the only remaining `fork` use is an explicit, locally-suppressed test seam.
+
+Exit codes are now documented for the three scripts whose contract changed: `organize_by_extension.py` (0/1/2/3), `import_events.py` (0/1/2), and `dedupl_numpy.py` gained `--print0`. Each is stated in both the parser epilog and README.
 
 id prefix | file name
 --- | ---
