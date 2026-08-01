@@ -36,13 +36,11 @@ import organize_by_extension as oze  # noqa: E402
 from organize_by_extension import (  # noqa: E402
     BUCKET_NAME_PATTERN,
     BUCKET_SIZE,
-    EXTENSION_ALIASES,
-    GZIP_FAMILY,
-    ISO_BMFF_FAMILY,
-    MAGIC_SIGNATURES,
-    MP3_FAMILY,
-    OLE2_FAMILY,
-    ZIP_FAMILY,
+    SIGNATURES,
+    IsoBmffSignature,
+    MagicSignature,
+    RiffSignature,
+    SniffContext,
     _find_reusable_bucket,
     bucket_name,
     detect_type_by_header,
@@ -58,11 +56,31 @@ FUZZ = settings(
     suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large, HealthCheck.function_scoped_fixture],
 )
 
-# Labels the sniffer is allowed to return. Built from the static table plus
-# the offset-dependent containers handled in _detect_iso_bmff_or_riff.
+def _registry_header_seeds() -> tuple[bytes, ...]:
+    seeds = []
+    for signature in SIGNATURES:
+        if isinstance(signature, MagicSignature):
+            seeds.append(b"\x00" * signature.offset + signature.sig)
+        elif isinstance(signature, IsoBmffSignature):
+            seeds.append(b"\x00\x00\x00\x18ftypisom")
+        elif isinstance(signature, RiffSignature):
+            seeds.extend(
+                b"RIFF\x00\x00\x00\x00" + subtype
+                for subtype in (b"WAVE", b"AVI ", b"WEBP")
+            )
+        else:
+            raise AssertionError(
+                f"fuzz seed missing for signature type {type(signature).__name__}"
+            )
+    return tuple(seeds)
+
+
+REGISTRY_HEADER_SEEDS = _registry_header_seeds()
 KNOWN_LABELS: frozenset[str] = frozenset(
-    {label for _sig, _off, label in MAGIC_SIGNATURES}
-    | {"mp4", "wav", "avi", "webp"}
+    label
+    for head in REGISTRY_HEADER_SEEDS
+    for signature in SIGNATURES
+    if (label := signature.matches(head)) is not None
 )
 
 # Strategies ----------------------------------------------------------------
@@ -74,8 +92,8 @@ random_bytes = st.binary(min_size=0, max_size=64)
 # Signature strategy that prefixes a real magic value, possibly with trailing
 # random bytes — flushes out off-by-one in offset arithmetic.
 signature_bytes = st.builds(
-    lambda sig_tuple, tail: sig_tuple[0] + tail,
-    st.sampled_from(MAGIC_SIGNATURES),
+    lambda seed, tail: seed + tail,
+    st.sampled_from(REGISTRY_HEADER_SEEDS),
     st.binary(min_size=0, max_size=32),
 )
 
@@ -166,7 +184,7 @@ class ResolveRealExtensionFuzz(unittest.TestCase):
                 p = _write_with_head(Path(d), name, head)
             except (OSError, ValueError):
                 return
-            ext = resolve_real_extension(p, sniff=sniff)
+            ext = resolve_real_extension(p, ctx=SniffContext(sniff=sniff))
             self.assertIsInstance(ext, str)
             self.assertNotEqual(ext, "")
             # Bucket directory name must not contain path separators or NUL.
@@ -184,7 +202,7 @@ class ResolveRealExtensionFuzz(unittest.TestCase):
             except (OSError, ValueError):
                 return
             self.assertEqual(
-                resolve_real_extension(p, sniff=False),
+                resolve_real_extension(p, ctx=SniffContext(sniff=False)),
                 normalize_extension(p),
             )
 
@@ -314,14 +332,15 @@ class FindReusableBucketFuzz(unittest.TestCase):
                 state_cache[bucket_path] = oze._BUCKET_FULL
             else:
                 state_cache[bucket_path] = {f"existing_{i}" for i in range(fill)}
-        reusable, next_expected = _find_reusable_bucket(
+        choice = _find_reusable_bucket(
             ext_dir, prefix, filename, state_cache, list(seen)
         )
-        self.assertIsInstance(next_expected, int)
-        self.assertGreaterEqual(next_expected, 0)
-        if reusable is not None:
-            self.assertIsInstance(reusable, Path)
-            self.assertRegex(reusable.name, r"^.\d{5}$")
+        self.assertIsInstance(choice.next_index, int)
+        self.assertGreaterEqual(choice.next_index, 0)
+        self.assertGreaterEqual(choice.first_non_full, 0)
+        if choice.bucket is not None:
+            self.assertIsInstance(choice.bucket, Path)
+            self.assertRegex(choice.bucket.name, r"^.\d{5}$")
 
 
 class IsBucketedFileFuzz(unittest.TestCase):
@@ -346,7 +365,9 @@ class IsBucketedFileFuzz(unittest.TestCase):
                 target.write_bytes(b"%PDF-1.4\n")
             except (OSError, ValueError):
                 return
-            result = is_bucketed_file(root, target, sniff=sniff)
+            result = is_bucketed_file(
+                root, target, ctx=SniffContext(sniff=sniff)
+            )
             self.assertIsInstance(result, bool)
 
 
@@ -613,12 +634,9 @@ class ExtraZipFamilyFuzz(unittest.TestCase):
         with TemporaryDirectory() as d:
             path = Path(d) / f"file.{ext}"
             path.write_bytes(b"PK\x03\x04rest")
-            ctx = oze.PlanContext(
-                extra_zip_family=frozenset({ext}),
-                head_cache=None, mode_cache=None,
-            ) if hasattr(oze, "PlanContext") else None
             resolved = oze.resolve_real_extension(
-                path, extra_zip_family=frozenset({ext})
+                path,
+                ctx=oze.SniffContext(extra_zip_family=frozenset({ext})),
             )
             self.assertEqual(resolved, ext)
 
@@ -656,7 +674,9 @@ class HeadCacheSharedFuzz(unittest.TestCase):
             builtins.open = counting_open
             try:
                 for f in files:
-                    oze.resolve_real_extension(f, head_cache=cache)
+                    oze.resolve_real_extension(
+                        f, ctx=oze.SniffContext(head_cache=cache)
+                    )
             finally:
                 builtins.open = real_builtin_open
             # With seeded cache, no fresh `open` was needed.

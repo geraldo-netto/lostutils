@@ -140,7 +140,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-fuzz-01 | open | low | tests/fuzz/fuzz_organize_by_extension.py:34-48 — the fuzz harness imports seven archive/signature constants removed from `organize_by_extension.py`, so explicit collection fails before any property runs. Retarget its strategies and invariants to the current signature registry and extension resolver. | test/fuzz coverage — `pytest -q tests/fuzz/fuzz_organize_by_extension.py` fails during collection
 
 ## ruff (lint)
 
