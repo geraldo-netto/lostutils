@@ -4490,3 +4490,51 @@ def test_help_documents_the_exit_codes(capsys):
     parser = organize_by_extension.build_parser()
     parser.print_help()
     assert "Exit codes:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "skipped, partial, expected",
+    [(0, 0, 0), (1, 0, 3), (0, 1, 3), (2, 3, 3)],
+)
+def test_run_exit_code_reports_an_incomplete_run(skipped, partial, expected):
+    """oze-cli-50: a skip or a partial move must be visible to a caller."""
+    stats = organize_by_extension._RunStats(skipped=skipped, partial=partial)
+    assert organize_by_extension._run_exit_code(stats) == expected
+
+
+def test_main_exits_nonzero_when_a_file_is_skipped(tmp_path, monkeypatch, caplog):
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        sys, "argv", ["organize_by_extension.py", str(tmp_path)])
+
+    def refuse(_source, _bucket_dir):
+        raise OSError("device busy")
+
+    monkeypatch.setattr(
+        organize_by_extension, "make_worker", lambda _preview: refuse)
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(SystemExit) as exc:
+        organize_by_extension.main()
+
+    assert exc.value.code == organize_by_extension.EXIT_INCOMPLETE
+    # The tally that explains the exit code shows without --verbose.
+    assert "skipped 1 file(s)" in caplog.text
+
+
+def test_main_exits_zero_on_a_fully_applied_run(tmp_path, monkeypatch):
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        sys, "argv", ["organize_by_extension.py", str(tmp_path)])
+
+    organize_by_extension.main()   # no SystemExit is the assertion
+
+    assert (tmp_path / "txt").is_dir()
+
+
+def test_organize_returns_the_move_tally(tmp_path):
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+
+    stats = organize_by_extension.organize(tmp_path)
+
+    assert (stats.processed, stats.skipped, stats.partial) == (1, 0, 0)

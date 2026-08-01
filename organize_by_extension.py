@@ -60,6 +60,9 @@ HEADER_SNIFF_BYTES = 32
 SCAN_STALL_WARN_SECONDS = 60.0
 MOVE_STALL_WARN_SECONDS = 60.0
 MOVE_MAX_STALL_SECONDS = 300.0
+# oze-cli-50: the run reached the end but did not place every planned file.
+# Distinct from 1 (the run could not complete) and from argparse's 2.
+EXIT_INCOMPLETE = 3
 # oze-rel-05/oze-rel-08: refuse to treat out-of-range bucket indices as the
 # floor for new allocations. Matches the regex contract exactly: 5 digits → 0..99999.
 BUCKET_INDEX_MAX = 99_999
@@ -2429,9 +2432,12 @@ def _run_move_stage(root: Path, files: Iterable[Path], ctx: SniffContext, *,
                     preview: bool, verbose: bool, num_threads: int,
                     bucket_size: int,
                     bucket_manager: BucketManager | None,
-                    head_cache: dict[Path, HeadBytes]) -> None:
+                    head_cache: dict[Path, HeadBytes]) -> _RunStats:
     """Plan then execute the moves for the scanned `files` (oze-arch pipeline
-    stage): plan_moves over a BucketManager, run the pool, and log run stats."""
+    stage): plan_moves over a BucketManager, run the pool, and log run stats.
+
+    Returns the tally so the caller can turn it into an exit code
+    (oze-cli-50)."""
     manager = (
         bucket_manager
         if bucket_manager is not None
@@ -2447,14 +2453,20 @@ def _run_move_stage(root: Path, files: Iterable[Path], ctx: SniffContext, *,
         head_cache=head_cache,
         manager=manager,
     )
-    if verbose or preview or stats.processed > 0 or stats.skipped > 0 or stats.partial > 0:
-        logger.info(
-            f"Finished. Processed {stats.processed} file(s), "
-            f"skipped {stats.skipped} file(s), partial {stats.partial}."
-        )
+    summary = (
+        f"Finished. Processed {stats.processed} file(s), "
+        f"skipped {stats.skipped} file(s), partial {stats.partial}."
+    )
+    if stats.skipped or stats.partial:
+        # oze-cli-50: the run is about to exit non-zero, so the tally that
+        # explains why has to be visible without --verbose.
+        logger.warning(summary)
+    elif verbose or preview or stats.processed > 0:
+        logger.info(summary)
     if stats.planned == 0 and (preview or verbose):
         logger.info(f"No files to organize under {root} (already bucketed or empty).")
     _log_run_stats(head_cache, manager)
+    return stats
 
 
 def _run_prune_stage(root: Path, *, preview: bool, verbose: bool) -> None:
@@ -2483,7 +2495,7 @@ def organize(
     bucket_manager: BucketManager | None = None,
     head_cache: dict[Path, HeadBytes] | None = None,
     prune_empty: bool = False,
-) -> None:
+) -> _RunStats:
     """Organize files under the root path into extension-based buckets.
 
     If ``preview`` is True, the script prints move actions without performing them.
@@ -2499,6 +2511,9 @@ def organize(
     (``plan_moves`` over a :class:`BucketManager`) → *execute* (closures
     returned by :func:`make_worker` submitted to a thread pool). The pipeline
     stays streaming: plans are issued one at a time, never buffered.
+
+    Returns the move-stage :class:`_RunStats` (oze-cli-50) so a caller can tell
+    a fully applied run from one that skipped files or left a duplicate behind.
     """
     num_threads = _clamp_num_threads(num_threads)
     if (not isinstance(bucket_size, int) or isinstance(bucket_size, bool)
@@ -2523,7 +2538,7 @@ def organize(
         ctx=ctx,
     )
 
-    _run_move_stage(
+    stats = _run_move_stage(
         root, files, ctx,
         preview=preview, verbose=verbose, num_threads=num_threads,
         bucket_size=bucket_size,
@@ -2532,6 +2547,7 @@ def organize(
 
     if prune_empty:
         _run_prune_stage(root, preview=preview, verbose=verbose)
+    return stats
 
 
 def _count_prunable_dirs(root: Path) -> int:
@@ -2601,9 +2617,10 @@ def build_parser() -> argparse.ArgumentParser:
             'database, so TMPDIR (or SQLITE_TMPDIR) must be writable and have '
             'room for the file list.\n'
             '\n'
-            'Exit codes: 0 the run completed, 1 the run could not complete '
-            '(unusable root or planning spool, stalled move stage, interrupt), '
-            '2 command-line error.'
+            'Exit codes: 0 every planned file was placed, 1 the run could not '
+            'complete (unusable root or planning spool, stalled move stage, '
+            'interrupt), 2 command-line error, 3 the run finished but skipped '
+            'files or left a duplicate behind after a partial move.'
         ),
     )
     parser.add_argument(
@@ -2708,6 +2725,19 @@ def _parse_extra_zip_family(raw: str) -> frozenset[str]:
     return frozenset(out)
 
 
+def _run_exit_code(stats: _RunStats) -> int:
+    """Map the move-stage tally to a process exit code (oze-cli-50).
+
+    A skipped file or a partial move means the run finished without placing
+    everything it planned. That is visible in the log but was invisible to a
+    scripted caller, which saw the same 0 as a fully applied run. Mirrors
+    hash-recursive-ai5.py's `_run_exit_code`.
+    """
+    if stats.skipped or stats.partial:
+        return EXIT_INCOMPLETE
+    return 0
+
+
 def main() -> None:
     """Entry point for script execution."""
     parser = build_parser()
@@ -2739,7 +2769,7 @@ def main() -> None:
     except (ValueError, TypeError, FileNotFoundError) as exc:
         raise SystemExit(str(exc)) from exc
     try:
-        organize(
+        stats = organize(
             root,
             preview=args.preview,
             verbose=bool(args.verbose),
@@ -2765,6 +2795,9 @@ def main() -> None:
         # non-zero like the move stage so callers can detect interruption.
         logger.warning("Interrupted.")
         raise SystemExit(1) from None
+    exit_code = _run_exit_code(stats)
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 if __name__ == '__main__':  # pragma: no cover

@@ -86,6 +86,8 @@ python3 organize_by_extension.py /path/to/root --threads 3
 
 Bucket paths are shaped as `<extension>/<first-letter>00000/<filename>`, with up to 500 files per bucket. Header sniffing is enabled by default so files can be bucketed by detected type rather than by a misleading extension; pass `--no-sniff` to use filename extensions only. `--extra-zip-family` keeps declared ZIP-container extensions such as `usdz` or `xpi` from being bucketed as plain `zip`. `--prune-empty-dirs` removes empty directories left under the root after moves.
 
+Exit codes: `0` every planned file was placed, `1` the run could not complete (unusable root or planning spool, stalled move stage, interrupt), `2` command-line error, `3` the run finished but skipped files or left a duplicate behind after a partial move.
+
 ### `relocate_folder.py`
 
 Copies a directory to `<dest_root>/<source-basename>`, verifies the copy, then atomically replaces the original source directory with a symlink:
