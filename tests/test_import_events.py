@@ -2024,6 +2024,29 @@ def test_cached_text_stage_reuses_file_hash_cache(tmp_path):
     assert calls == ["called"]
 
 
+def test_stage_cache_invalid_utf8_is_removed_and_regenerated(tmp_path):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"input")
+    cfg = import_events.ModelConfig(
+        stage_cache="on", stage_cache_dir=str(tmp_path / "cache")
+    )
+    options = {"x": 1}
+    key = import_events._stage_cache_key(source, "pdf_text", options)
+    assert key is not None
+    cache_path = import_events._stage_cache_path(cfg, key)
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_bytes(b"\xff\xfe")
+
+    result = import_events._cached_text_stage(
+        cfg, source, "pdf_text", options, lambda: "regenerated"
+    )
+
+    assert result == "regenerated"
+    assert json.loads(cache_path.read_text(encoding="utf-8")) == {
+        "text": "regenerated"
+    }
+
+
 def test_stage_cache_key_memoizes_file_digest_until_file_changes(tmp_path, monkeypatch):
     source = tmp_path / "source.pdf"
     source.write_text("input", encoding="utf-8")

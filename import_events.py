@@ -2569,16 +2569,24 @@ def _read_stage_cache_text(config: ModelConfig, file_path: Path, stage: str,
     cache_key = _stage_cache_key(file_path, stage, options)
     if cache_key is None:
         return None
+    cache_path = _stage_cache_path(config, cache_key)
     try:
-        cache_path = _stage_cache_path(config, cache_key)
         data = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        try:
+            cache_path.unlink()
+        except OSError:
+            pass
         return None
     text = data.get("text") if isinstance(data, dict) else None
     if isinstance(text, str):
         _touch_stage_cache_entry(cache_path)
         logger.info("Stage cache hit for %s [%s]", file_path.name, stage)
         return text
+    try:
+        cache_path.unlink()
+    except OSError:
+        pass
     return None
 
 
