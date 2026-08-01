@@ -4825,6 +4825,28 @@ def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monke
     assert "unresponsive" in logs[0]
 
 
+def test_read_subprocess_output_handles_success_and_read_failure(
+    headless_dispatcher, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        headless_dispatcher,
+        "_stream_subprocess_output",
+        lambda *args: calls.append(args),
+    )
+
+    headless_dispatcher._read_subprocess_output("stdout", "job", "summary")
+
+    monkeypatch.setattr(
+        headless_dispatcher,
+        "_stream_subprocess_output",
+        lambda *_args: (_ for _ in ()).throw(OSError("read timed out")),
+    )
+    headless_dispatcher._read_subprocess_output("stdout", "job", "summary")
+
+    assert calls == [("stdout", "job", "summary")]
+
+
 def test_stream_deadline_closes_inherited_output_pipe(
         headless_dispatcher, monkeypatch):
     joins = []
