@@ -247,7 +247,7 @@ def test_broken_pipe_silences_stdout(monkeypatch, tmp_path):
     f = tmp_path / "hashes.txt"
     f.write_text("aaa /x\naaa /y\n", encoding="utf-8")
     monkeypatch.setattr(dedupl_numpy.sys, "argv", ["dedupl_numpy.py", str(f)])
-    monkeypatch.setattr(dedupl_numpy, "_write_paths", lambda _paths, _out: False)
+    monkeypatch.setattr(dedupl_numpy, "_write_paths", lambda *_args: False)
     silenced = []
     monkeypatch.setattr(
         dedupl_numpy, "_silence_stdout_after_broken_pipe",
@@ -342,3 +342,118 @@ def test_silence_stdout_survives_a_devnull_open_failure(monkeypatch, tmp_path):
     finally:
         monkeypatch.undo()
         os_mod.close(spare)
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        (b"/tmp/plain", b"/tmp/plain"),
+        (b'@lostutils-json:"  /tmp/edged  "', b"  /tmp/edged  "),
+        (b'@lostutils-json:"/tmp/a\\nb"', b"/tmp/a\nb"),
+        (b'@lostutils-json:""', b""),
+        (b'@lostutils-json:"/tmp/caf\\u00e9"', "/tmp/café".encode()),
+        (b'@lostutils-json:"\\udcff"', b"\xff"),          # non-UTF-8 filename
+        (b"@lostutils-json:not-json", None),
+        (b'@lostutils-json:42', None),                     # not a string
+        (b'@lostutils-json:"\xff"', None),                 # payload not UTF-8
+    ],
+)
+def test_decode_record_path_round_trips_every_escape(raw, expected):
+    """dnp-api-50: the escaped form is a path, not a literal token."""
+    assert dedupl_numpy._decode_record_path(raw) == expected
+
+
+def test_decode_record_path_matches_the_producer(monkeypatch):
+    """The decoder is the inverse of hash-recursive-ai5.py's encoder."""
+    hr_path = Path(__file__).resolve().parent.parent / "hash-recursive-ai5.py"
+    spec = importlib.util.spec_from_file_location("hr_for_dnp", hr_path)
+    hr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hr)
+
+    for original in ["/tmp/plain", "  /tmp/edged  ", "/tmp/a\nb", "/tmp/café", ""]:
+        encoded = hr._encode_record_path(original).encode()
+        assert dedupl_numpy._decode_record_path(encoded) == original.encode()
+
+
+def test_decode_paths_holds_back_newlines_in_line_mode():
+    escaped = b'@lostutils-json:"/tmp/a\\nb"'
+    paths, unreadable, unprintable = dedupl_numpy._decode_paths(
+        {escaped, b'@lostutils-json:"  x  "', b"@lostutils-json:junk"}, True)
+
+    assert paths == {escaped, b"  x  "}    # the newline path stays escaped
+    assert (unreadable, unprintable) == (1, 1)
+
+
+def test_decode_paths_emits_newlines_when_not_line_oriented():
+    paths, unreadable, unprintable = dedupl_numpy._decode_paths(
+        {b'@lostutils-json:"/tmp/a\\nb"'}, False)
+
+    assert paths == {b"/tmp/a\nb"}
+    assert (unreadable, unprintable) == (0, 0)
+
+
+@pytest.mark.parametrize(
+    "unreadable, unprintable, expected",
+    [
+        (0, 0, []),
+        (2, 0, ["could not be decoded"]),
+        (0, 3, ["--print0"]),
+        (1, 1, ["could not be decoded", "--print0"]),
+    ],
+)
+def test_report_decode_warnings(capsys, unreadable, unprintable, expected):
+    dedupl_numpy._report_decode_warnings(unreadable, unprintable)
+
+    err = capsys.readouterr().err
+    assert [fragment for fragment in expected if fragment in err] == expected
+    assert bool(err.strip()) == bool(expected)
+
+
+def test_write_paths_honours_a_nul_separator():
+    class Sink:
+        def __init__(self):
+            self.chunks = []
+
+        def write(self, data):
+            self.chunks.append(data)
+
+        def flush(self):
+            pass
+
+    sink = Sink()
+    assert dedupl_numpy._write_paths({b"/b", b"/a"}, sink, b"\0")
+    assert sink.chunks == [b"/a\0", b"/b\0"]
+
+
+def _hash_file(tmp_path):
+    f = tmp_path / "hashes.txt"
+    f.write_bytes(
+        b'a' * 32 + b' @lostutils-json:"/tmp/a\\nb"\n'
+        + b'a' * 32 + b' @lostutils-json:"  edged  "\n'
+    )
+    return f
+
+
+def test_main_decodes_escaped_paths(monkeypatch, tmp_path, capsysbinary):
+    monkeypatch.setattr(
+        dedupl_numpy.sys, "argv", ["dedupl_numpy.py", str(_hash_file(tmp_path))])
+
+    dedupl_numpy.main()
+
+    captured = capsysbinary.readouterr()
+    assert b"  edged  \n" in captured.out                    # decoded
+    assert b'@lostutils-json:"/tmp/a\\nb"\n' in captured.out  # held back
+    assert b"--print0" in captured.err
+
+
+def test_main_print0_emits_newline_paths_literally(
+        monkeypatch, tmp_path, capsysbinary):
+    monkeypatch.setattr(
+        dedupl_numpy.sys, "argv",
+        ["dedupl_numpy.py", "--print0", str(_hash_file(tmp_path))])
+
+    dedupl_numpy.main()
+
+    captured = capsysbinary.readouterr()
+    assert captured.out == b"  edged  \0/tmp/a\nb\0"
+    assert b"--print0" not in captured.err

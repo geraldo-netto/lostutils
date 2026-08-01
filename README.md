@@ -2,7 +2,7 @@
 
 Standalone Python CLI and Tk utilities for local file, link, hardware, and calendar-event workflows. Each root script is self-contained: scripts do not import helpers from sibling files in this repository.
 
-There is no repository-wide requirements file. Install only the third-party packages needed by the script you run. Most CLI scripts support `--help`; `dedupl_numpy.py` expects a hash file as its only argument, and `link_queue.py` opens its GUI immediately.
+There is no repository-wide requirements file. Install only the third-party packages needed by the script you run. Most CLI scripts support `--help`; `link_queue.py` opens its GUI immediately.
 
 ## Quick reference
 
@@ -55,7 +55,13 @@ Processes a legacy hash file in a vectorized NumPy pass:
 python3 dedupl_numpy.py hashes.txt
 ```
 
-It groups records by a 32-byte hash at the start of each line, prints duplicate paths, then prints an `equal files:` summary. This script has no argparse help and expects the hash file path as its only argument.
+It groups records by a 32-byte hash at the start of each line, prints duplicate paths, then prints an `equal files:` summary.
+
+Paths written in the tagged JSON form `@lostutils-json:<json>` (what `hash-recursive-ai5.py` emits for a filename that would not survive the `<hash> <path>` split) are decoded back to the real path, the same way `remove-deduplv3.py` decodes them. A path containing a newline cannot be written into a newline-separated stream, so it stays escaped and is reported on stderr; `--print0` (`-0`) separates records with NUL instead and emits those paths literally:
+
+```bash
+python3 dedupl_numpy.py --print0 hashes.txt | xargs -0 rm -f --
+```
 
 ### `remove-deduplv3.py`
 

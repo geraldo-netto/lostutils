@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import mmap
 import os
 import sys
@@ -15,6 +16,7 @@ from typing import BinaryIO
 import numpy as np
 
 HASH_SEPARATOR_WIDTH = 1
+_ESCAPED_PATH_PREFIX = b"@lostutils-json:"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -22,6 +24,12 @@ def _parse_args() -> argparse.Namespace:
         description="Print paths belonging to duplicate hash groups.",
     )
     parser.add_argument("hash_file", help="file containing hash/path records")
+    parser.add_argument(
+        "-0", "--print0", action="store_true",
+        help="separate paths with NUL instead of newline, so that paths "
+             "containing a newline are emitted literally instead of staying "
+             "in their escaped form",
+    )
     return parser.parse_args()
 
 
@@ -94,10 +102,84 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     return paths, file_equal, n_lines
 
 
-def _write_paths(paths: set[bytes], out: BinaryIO) -> bool:
+def _decode_record_path(path: bytes) -> bytes | None:
+    """Recover the real path from hash-recursive-ai5.py's tagged JSON form.
+
+    The record format is ``<digest> <path>``, so a path that would not survive
+    that parse — one holding a newline, edged with whitespace, or empty — is
+    written as ``@lostutils-json:<json>`` instead. Emitting that token verbatim
+    hands the caller a string that is not a path (dnp-api-50). Mirrors
+    remove-deduplv3.py's decoder, duplicated in-file because every script here
+    is standalone.
+
+    ``json.loads`` raises `UnicodeDecodeError` on non-UTF-8 bytes and
+    `JSONDecodeError` on a malformed payload; both derive from `ValueError`.
+    Returns ``None`` for a record whose escape cannot be read back.
+    """
+    if not path.startswith(_ESCAPED_PATH_PREFIX):
+        return path
+    try:
+        decoded = json.loads(path[len(_ESCAPED_PATH_PREFIX):])
+    except ValueError:
+        return None
+    if not isinstance(decoded, str):
+        return None
+    # hash-recursive-ai5.py escapes with ensure_ascii=True, so a filename that
+    # is not valid UTF-8 arrives as the surrogates os.fsdecode produced;
+    # os.fsencode is what turns them back into the original bytes.
+    return os.fsencode(decoded)
+
+
+def _decode_paths(
+    paths: set[bytes],
+    line_oriented: bool,
+) -> tuple[set[bytes], int, int]:
+    """Decode escaped record paths. Returns the paths plus the number that
+    were unreadable and the number held back as unsafe to print.
+
+    A path containing a newline cannot be written into a newline-separated
+    stream without splitting into two records, so in that mode it stays in its
+    escaped form — still lossless, and still decodable by a reader that knows
+    the format. ``--print0`` lifts the restriction.
+    """
+    decoded_paths: set[bytes] = set()
+    unreadable = 0
+    unprintable = 0
+    for raw in paths:
+        path = _decode_record_path(raw)
+        if path is None:
+            unreadable += 1
+            continue
+        if line_oriented and (b"\n" in path or b"\r" in path):
+            unprintable += 1
+            path = raw
+        decoded_paths.add(path)
+    return decoded_paths, unreadable, unprintable
+
+
+def _report_decode_warnings(unreadable: int, unprintable: int) -> None:
+    if unreadable:
+        print(
+            f"warning: {unreadable} escaped path(s) could not be decoded "
+            "and were dropped",
+            file=sys.stderr,
+        )
+    if unprintable:
+        print(
+            f"warning: {unprintable} path(s) contain a newline and were left "
+            "escaped; re-run with --print0 to emit them literally",
+            file=sys.stderr,
+        )
+
+
+def _write_paths(
+    paths: set[bytes],
+    out: BinaryIO,
+    separator: bytes = b"\n",
+) -> bool:
     try:
         for path in sorted(paths):
-            out.write(path + b"\n")
+            out.write(path + separator)
         out.flush()
     except BrokenPipeError:
         return False
@@ -169,9 +251,12 @@ def main() -> None:
     if n_lines == 0:
         return
 
-    if not _write_paths(paths, sys.stdout.buffer):
+    paths, unreadable, unprintable = _decode_paths(paths, not args.print0)
+    separator = b"\0" if args.print0 else b"\n"
+    if not _write_paths(paths, sys.stdout.buffer, separator):
         _silence_stdout_after_broken_pipe()
         return
+    _report_decode_warnings(unreadable, unprintable)
     print(f"equal files: {file_equal} / {n_lines}", file=sys.stderr)
 
 

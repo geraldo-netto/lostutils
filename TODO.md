@@ -217,7 +217,6 @@ rf-cfg-50 | open | low | relocate_folder.py:671-686,876-888,1683-1696 — three 
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-api-50 | open | med | dedupl_numpy.py:85-92 — the path slice is emitted verbatim, so the `@lostutils-json:<json>` escaping that hash-recursive-ai5.py:1238 produces for line-breaking paths (and remove-deduplv3.py:77-84 decodes) is printed as a literal token instead of a path. Decode the prefix like remove-deduplv3 does. | verified: `dedupl_numpy.py` prints `@lostutils-json:"/tmp/a\nb"` where remove-deduplv3 emits `rm -f -- '/tmp/a<newline>b'`; the two consumers of one format disagree
 
 ## CLI / option integrity
 
