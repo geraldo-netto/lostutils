@@ -207,7 +207,15 @@ def main():
 
     replacements = effective_replacements(args.strip_chars)
     word_re = compile_word_re(args.word_tokens)
-    line_nums, dropped_empty = _load_cleaned_lines(args.file, replacements, word_re)
+    try:
+        line_nums, dropped_empty = _load_cleaned_lines(
+            args.file,
+            replacements,
+            word_re,
+        )
+    except OSError as exc:
+        print(f"error: cannot read {args.file}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     if dropped_empty:
         print(f"dropped {dropped_empty} empty cleaned line(s)", file=sys.stderr)
 

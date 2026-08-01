@@ -98,6 +98,22 @@ def test_main_empty_file_noop(monkeypatch, tmp_path):
     assert out == ""
 
 
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_main_reports_input_open_error(monkeypatch, tmp_path, capsys, kind):
+    source = tmp_path / kind
+    if kind == "directory":
+        source.mkdir()
+    monkeypatch.setattr(dn.sys, "argv", ["prog", str(source)])
+
+    with pytest.raises(SystemExit) as exc:
+        dn.main()
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert f"error: cannot read {source}" in captured.err
+
+
 def test_main_reports_cleaned_empty_lines(monkeypatch, tmp_path, capsys):
     f = tmp_path / "in.txt"
     f.write_text("\nxxx\nalpha\n", encoding="utf-8")
