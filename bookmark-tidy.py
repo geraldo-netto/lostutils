@@ -978,17 +978,26 @@ def _assign_categories(
     result: list[Bookmark] = []
     failures = 0
     for batch in _chunks(bookmarks, max(1, batch_size)):
-        categories: Mapping[int, Sequence[str] | str] = {}
-        if categorizer is not None and failures < LLM_CONSECUTIVE_FAILURE_LIMIT:
-            categories, failed = _categorize_batch(categorizer, batch)
-            failures = failures + 1 if failed else 0
-            if failures == LLM_CONSECUTIVE_FAILURE_LIMIT:
-                LOGGER.warning(
-                    "LLM categorization aborted after %d consecutive batch failures; remaining bookmarks use the fallback category",
-                    LLM_CONSECUTIVE_FAILURE_LIMIT,
-                )
+        categories, failures = _categorize_if_available(categorizer, batch, failures)
         result.extend(_apply_category_batch(batch, categories, fallback))
     return result
+
+
+def _categorize_if_available(
+    categorizer: CategoryProvider | None,
+    batch: Sequence[Bookmark],
+    failures: int,
+) -> tuple[Mapping[int, Sequence[str] | str], int]:
+    if categorizer is None or failures >= LLM_CONSECUTIVE_FAILURE_LIMIT:
+        return {}, failures
+    categories, failed = _categorize_batch(categorizer, batch)
+    failures = failures + 1 if failed else 0
+    if failures == LLM_CONSECUTIVE_FAILURE_LIMIT:
+        LOGGER.warning(
+            "LLM categorization aborted after %d consecutive batch failures; remaining bookmarks use the fallback category",
+            LLM_CONSECUTIVE_FAILURE_LIMIT,
+        )
+    return categories, failures
 
 
 def _categorize_batch(
