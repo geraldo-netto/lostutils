@@ -135,7 +135,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-test-02 | open | low | tests/test_hash_recursive.py:1215,2459 — clean-run coverage is framed around a removed summary field and a second test only guards the absence of a deleted internal constant. Retarget the useful summary assertion to the live contract and remove the internal-symbol tombstone. | Stale-test audit: deleted implementation details are not compatibility contracts; the stage-2 failure test already proves the obsolete field stays absent on the relevant path
 ie-test-02 | open | low | tests/test_import_events.py:343 — `test_encode_image_dead_code_removed` only asserts that a previously deleted private helper remains absent. Remove the stale tombstone test. | Stale-test audit: no supported API or runtime behavior is exercised
 rf-test-05 | open | low | tests/test_relocate_folder.py:1406,3385 — two tests only assert that previously deleted private implementation symbols remain absent. Remove the stale tombstones while retaining coverage of their live replacements. | Stale-test audit: `_collect_chown_error` and `STAGING_PREFIX` already have behavioral coverage immediately beside these tombstones
 

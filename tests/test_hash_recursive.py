@@ -1212,14 +1212,12 @@ def test_main_summary_surfaces_walk_worker_failure(
     assert "RuntimeError('walk exploded')" in err
 
 
-def test_main_summary_omits_removed_stage2_skipped_field(
+def test_main_summary_reports_zero_hash_errors_on_clean_run(
         tmp_path, monkeypatch, capsys):
-    # hr-obs-01: the removed field never appears, even on a clean run.
     (tmp_path / "a.bin").write_bytes(b"x")
     monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
     hr.main()
     err = capsys.readouterr().err
-    assert "hashed_stage2_skipped" not in err
     assert "hash_errors=0 " in err
 
 
@@ -2455,12 +2453,6 @@ def test_runconfig_negative_hash_error_cap_clamps_to_zero():
 
 
 # --- hr-cx-01: alias_cap_active property -----------------------------------
-
-def test_no_cap_constant_removed():
-    # hr-cmplx-01: the dead `NO_CAP = None` back-compat alias was removed;
-    # the disabled state is detected via `alias_cap is not None`.
-    assert not hasattr(hr, "NO_CAP")
-
 
 def test_legitimate_cap_of_two_pow_31_is_honored():
     # hr-cmplx-01 regression: a cap of exactly 2**31 must be a REAL cap,
