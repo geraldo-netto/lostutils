@@ -183,3 +183,23 @@ def test_main_accepts_empty_input(monkeypatch, tmp_path, capfd):
     captured = capfd.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_main_reports_unreadable_input(monkeypatch, tmp_path, capfd, kind):
+    source = tmp_path / kind
+    if kind == "directory":
+        source.mkdir()
+    monkeypatch.setattr(
+        dedupl_numpy.sys,
+        "argv",
+        ["dedupl_numpy.py", str(source)],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        dedupl_numpy.main()
+
+    assert exc.value.code == 1
+    captured = capfd.readouterr()
+    assert captured.out == ""
+    assert f"error: cannot read {source}" in captured.err

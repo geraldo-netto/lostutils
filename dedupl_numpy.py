@@ -49,6 +49,13 @@ def _line_content_end(data: np.ndarray, line_end: int) -> int:
     return line_end - int(line_end > 0 and data[line_end - 1] == 0x0D)
 
 
+def _open_input(path: str) -> mmap.mmap | None:
+    with open(path, "rb") as source:
+        if os.fstat(source.fileno()).st_size == 0:
+            return None
+        return mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
+
+
 def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     """Return duplicate paths, redundant-file count, and record count."""
     nl = np.flatnonzero(data == 0x0A)
@@ -90,10 +97,13 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
 def main() -> None:
     args = _parse_args()
 
-    with open(args.hash_file, "rb") as f:
-        if os.fstat(f.fileno()).st_size == 0:
-            return
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    try:
+        mm = _open_input(args.hash_file)
+    except OSError as exc:
+        print(f"error: cannot read {args.hash_file}: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    if mm is None:
+        return
 
     data = np.frombuffer(mm, dtype=np.uint8)
     error = None
