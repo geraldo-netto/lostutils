@@ -5318,21 +5318,13 @@ def test_pdf_helpers_cover_invalid_geometry_and_ocr_pipeline(tmp_path, monkeypat
     config = import_events.ModelConfig()
     monkeypatch.setattr(
         import_events,
-        "_render_pdf_image_paths",
-        lambda *_args: [image],
-    )
-    monkeypatch.setattr(
-        import_events,
-        "_timed_stage",
-        lambda _config, _subject, _stage, work: work(),
-    )
-    monkeypatch.setattr(
-        import_events,
-        "_pdf_ocr_text_from_paths",
-        lambda paths, *_args: "text" if paths == [image] else "",
+        "_ocr_image_path_once",
+        lambda path, *_args: "text" if path == image else "",
     )
 
-    assert import_events._pdf_ocr_from_file(source, config, "en", ("en",)) == "text"
+    assert import_events._pdf_ocr_text_from_paths(
+        [image], config, "en", ("en",), source.name
+    ) == "text"
 
 
 def test_feed_file_queue_surfaces_generator_failure():

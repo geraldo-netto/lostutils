@@ -3409,20 +3409,6 @@ def _pdf_ocr_text_from_paths(
     )
 
 
-def _pdf_ocr_from_file(
-    file_path: Path,
-    config: ModelConfig,
-    language: str,
-    language_chain: Tuple[str, ...],
-) -> str:
-    with tempfile.TemporaryDirectory(prefix="import-events-pdf-") as tmp_dir:
-        image_paths = _timed_stage(
-            config, file_path, "pdf_render",
-            lambda: _render_pdf_image_paths(file_path, Path(tmp_dir), config),
-        )
-        return _pdf_ocr_text_from_paths(image_paths, config, language, language_chain, file_path.name)
-
-
 class _PdfRenderer:
     def __init__(
         self,
