@@ -2514,13 +2514,15 @@ def test_llm_heartbeat_notifies_stall_callback_once():
     calls = []
 
     with import_events._llm_stall_callback(
-        lambda label, elapsed, deadline: calls.append((label, elapsed, deadline))
+        lambda request_id, label, elapsed, deadline: calls.append(
+            (request_id, label, elapsed, deadline)
+        )
     ):
         with import_events._llm_heartbeat("wedged.pdf", interval=0.01, deadline=0.0):
             _time.sleep(0.05)
 
     assert len(calls) == 1
-    assert calls[0][0] == "wedged.pdf"
+    assert calls[0][1] == "wedged.pdf"
 
 
 def test_create_chat_completion_passes_label_to_heartbeat(monkeypatch):
@@ -4985,7 +4987,7 @@ def test_process_folder_caps_replacement_workers_on_repeated_stall(tmp_path, mon
             callback = import_events._current_llm_stall_callback()
             assert callback is not None
             for _ in range(5):              # hammer the stall callback
-                callback(file.name, 600.0, 600.0)
+                callback("request-1", file.name, 600.0, 600.0)
             assert second_started.wait(2)
         else:
             second_started.set()
@@ -5020,7 +5022,7 @@ def test_run_file_workers_returns_partials_on_unrecoverable_stall(tmp_path, monk
         if file.name == "event-0.txt":
             cb = import_events._current_llm_stall_callback()
             assert cb is not None
-            cb(file.name, 600.0, 600.0)   # flag the stall
+            cb("request-1", file.name, 600.0, 600.0)   # flag the stall
             wedge.wait(5)                 # simulate the uncancellable wedge
             return []
         return [{"title": file.name, "start": "2026-06-06", "end": "",
@@ -5034,6 +5036,21 @@ def test_run_file_workers_returns_partials_on_unrecoverable_stall(tmp_path, monk
     finally:
         wedge.set()
     assert [e["source"] for e in events] == ["event-1.txt"]  # event-0 abandoned
+
+
+def test_worker_pool_clears_only_recovered_stall(monkeypatch):
+    pool = import_events._FileWorkerPool(
+        [], import_events.ModelConfig(workers=1), None, None
+    )
+    monkeypatch.setattr(pool, "start_worker", lambda reason="": None)
+
+    pool.on_llm_stall("first", "a", 10.0, 5.0)
+    pool.on_llm_stall("second", "b", 10.0, 5.0)
+    pool.on_llm_recovered("first")
+    assert pool.stall_event.is_set()
+
+    pool.on_llm_recovered("second")
+    assert not pool.stall_event.is_set()
 
 
 def test_memory_helpers_cover_unreadable_and_physical_paths(tmp_path, monkeypatch):

@@ -3060,29 +3060,53 @@ def _ocr_image_bytes(
             pass
 
 
-def _current_llm_stall_callback() -> Optional[Callable[[str, float, float], None]]:
+def _current_llm_stall_callback() -> Optional[Callable[..., None]]:
     callback = getattr(_LLM_STALL_CONTEXT, "callback", None)
     if callable(callback):
-        return cast(Callable[[str, float, float], None], callback)
+        return cast(Callable[..., None], callback)
     return None
 
 
 def _run_llm_stall_callback(
-    callback: Optional[Callable[[str, float, float], None]],
-    label: str,
+    callback: Optional[Callable[..., None]],
+    request_id: str,
+    label: "str | float",
     elapsed: float,
-    deadline: float,
+    deadline: "float | None" = None,
 ) -> None:
+    request_id, label, elapsed, deadline = _normalize_stall_callback_args(
+        request_id, label, elapsed, deadline
+    )
     if callback is None:
         return
     try:
-        callback(label, elapsed, deadline)
+        callback(request_id, label, elapsed, deadline)
     except Exception as exc:
         logger.warning("LLM stall callback failed for %s: %s", label, exc)
 
 
+def _normalize_stall_callback_args(
+    request_id: str,
+    label: "str | float",
+    elapsed: float,
+    deadline: "float | None",
+) -> Tuple[str, str, float, float]:
+    if deadline is None:
+        return secrets.token_hex(8), request_id, float(label), elapsed
+    return request_id, str(label), elapsed, deadline
+
+
+def _run_llm_recovery_callback(
+    callback: Optional[Callable[..., None]], request_id: str
+) -> None:
+    owner = getattr(callback, "__self__", None)
+    recovered = getattr(owner, "on_llm_recovered", None)
+    if callable(recovered):
+        recovered(request_id)
+
+
 @contextlib.contextmanager
-def _llm_stall_callback(callback: Optional[Callable[[str, float, float], None]]):
+def _llm_stall_callback(callback: Optional[Callable[..., None]]):
     previous = getattr(_LLM_STALL_CONTEXT, "callback", None)
     if callback is None:
         yield
@@ -3098,6 +3122,27 @@ def _llm_stall_callback(callback: Optional[Callable[[str, float, float], None]])
                 pass
         else:
             _LLM_STALL_CONTEXT.callback = previous
+
+
+def _emit_llm_heartbeat(
+    callback: Optional[Callable[..., None]],
+    request_id: str,
+    label: str,
+    elapsed: float,
+    deadline: float,
+    notified: bool,
+) -> bool:
+    if elapsed < deadline:
+        logger.warning("LLM still running for %s after %.0fs", label, elapsed)
+        return notified
+    logger.error(
+        "LLM appears wedged for %s: %.0fs exceeds the %ds deadline; "
+        "press Ctrl-C to abort the run.",
+        label, elapsed, deadline,
+    )
+    if not notified:
+        _run_llm_stall_callback(callback, request_id, label, elapsed, deadline)
+    return True
 
 
 @contextlib.contextmanager
@@ -3116,21 +3161,16 @@ def _llm_heartbeat(label: str, interval: float = LLM_HEARTBEAT_SECONDS,
     stop = threading.Event()
     start = monotonic()
     callback = _current_llm_stall_callback()
+    request_id = secrets.token_hex(8)
     notified = False
 
     def beat() -> None:
         nonlocal notified
         while not stop.wait(interval):
             elapsed = monotonic() - start
-            if elapsed >= deadline:
-                logger.error("LLM appears wedged for %s: %.0fs exceeds the %ds "
-                             "deadline; press Ctrl-C to abort the run.",
-                             label, elapsed, deadline)
-                if not notified:
-                    notified = True
-                    _run_llm_stall_callback(callback, label, elapsed, deadline)
-            else:
-                logger.warning("LLM still running for %s after %.0fs", label, elapsed)
+            notified = _emit_llm_heartbeat(
+                callback, request_id, label, elapsed, deadline, notified
+            )
 
     thread = threading.Thread(target=beat, name="llm-heartbeat", daemon=True)
     thread.start()
@@ -3139,6 +3179,8 @@ def _llm_heartbeat(label: str, interval: float = LLM_HEARTBEAT_SECONDS,
     finally:
         stop.set()
         thread.join(timeout=interval)
+        if notified:
+            _run_llm_recovery_callback(callback, request_id)
 
 
 def _create_chat_completion(client: Any, messages: List[Any], config: ModelConfig,
@@ -3869,6 +3911,8 @@ class _FileWorkerPool:
         self.done_queue: queue.Queue = queue.Queue()
         self.stop_event = threading.Event()
         self.stall_event = threading.Event()
+        self._active_stalls: set[str] = set()
+        self._stall_lock = threading.Lock()
         self.results: Dict[int, List[Dict[str, Any]]] = {}
         self.threads: List[threading.Thread] = []
         self.threads_lock = threading.Lock()
@@ -3898,8 +3942,19 @@ class _FileWorkerPool:
         if reason:
             logger.warning("Started replacement file worker %s after %s.", name, reason)
 
-    def on_llm_stall(self, label: str, elapsed: float, deadline: float) -> None:
-        self.stall_event.set()
+    def on_llm_stall(
+        self,
+        request_id: str,
+        label: "str | float",
+        elapsed: float,
+        deadline: "float | None" = None,
+    ) -> None:
+        request_id, label, elapsed, deadline = _normalize_stall_callback_args(
+            request_id, label, elapsed, deadline
+        )
+        with self._stall_lock:
+            self._active_stalls.add(request_id)
+            self.stall_event.set()
         live_cap = self.workers + self.max_replacements
         with self.threads_lock:
             live = sum(1 for thread in self.threads if thread.is_alive())
@@ -3913,6 +3968,12 @@ class _FileWorkerPool:
             "the stalled extraction remains running unbounded — replacement "
             "can only progress LLM-free files"
         )
+
+    def on_llm_recovered(self, request_id: str) -> None:
+        with self._stall_lock:
+            self._active_stalls.discard(request_id)
+            if not self._active_stalls:
+                self.stall_event.clear()
 
     def start(self) -> None:
         for _index in range(self.workers):
