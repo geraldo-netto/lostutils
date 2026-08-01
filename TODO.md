@@ -82,7 +82,6 @@ lq-mt-50 | open | med | link_queue.py:2922,2957,2965 — `_trigger_failure_coold
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-dist-02 | open | med | import_events.py:1158-1189 — shared model downloads use one stable `.<name>.part` without a process lock; concurrent runs can truncate, append, or rename the same partial. Add a per-model cross-process lock around resume/download/verify/publish with stale-lock recovery. | distributed systems — shared-resource coordination
 
 ## dependability
 

@@ -5628,3 +5628,55 @@ def test_read_lock_pid_tolerates_unreadable_and_pidless_files(tmp_path):
     empty = tmp_path / "empty.lock"
     empty.write_text("host=x\n")
     assert import_events._read_lock_pid(empty) is None
+
+
+def test_model_download_is_serialized_by_a_per_model_lock(tmp_path, monkeypatch):
+    """ie-dist-02: a second run must not interleave writes into the same .part."""
+    model = tmp_path / "m.gguf"
+    held = tmp_path / ".m.gguf.lock"
+    seen = []
+
+    def fake_download(_url, path_str):
+        seen.append(held.exists())      # the lock is held across the download
+        Path(path_str).write_bytes(b"payload")
+
+    monkeypatch.setattr(import_events, "_download_to_cache", fake_download)
+    monkeypatch.setattr(import_events, "_verify_sha256", lambda *a, **k: None)
+
+    import_events._ensure_one_model(str(model), "https://x/m", None)
+
+    assert seen == [True]
+    assert not held.exists()            # released afterwards
+
+
+def test_model_download_refuses_while_another_run_holds_the_lock(tmp_path, monkeypatch):
+    model = tmp_path / "m.gguf"
+    (tmp_path / ".m.gguf.lock").write_text(f"pid={os.getpid()}\n")
+    monkeypatch.setattr(
+        import_events, "_download_to_cache",
+        lambda *_a: pytest.fail("download ran while the model was locked"))
+
+    with pytest.raises(import_events.ModelUnavailableError, match="is already writing"):
+        import_events._ensure_one_model(str(model), "https://x/m", None)
+
+
+def test_model_download_reclaims_a_dead_owners_lock(tmp_path, monkeypatch):
+    model = tmp_path / "m.gguf"
+    (tmp_path / ".m.gguf.lock").write_text(f"pid={_dead_pid()}\n")
+    monkeypatch.setattr(
+        import_events, "_download_to_cache",
+        lambda _url, path_str: Path(path_str).write_bytes(b"payload"))
+    monkeypatch.setattr(import_events, "_verify_sha256", lambda *a, **k: None)
+
+    import_events._ensure_one_model(str(model), "https://x/m", None)
+
+    assert model.read_bytes() == b"payload"
+
+
+def test_custom_model_path_takes_no_lock(tmp_path):
+    model = tmp_path / "custom.gguf"
+    model.write_bytes(b"payload")
+
+    import_events._ensure_one_model(str(model), "https://x/m", None, managed=False)
+
+    assert not (tmp_path / ".custom.gguf.lock").exists()

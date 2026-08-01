@@ -1215,19 +1215,46 @@ def _ensure_one_model(
     MODEL_DOWNLOAD_ATTEMPTS exhausted failures the model is treated as
     unavailable — raise ModelUnavailableError so the run aborts with a partial
     result rather than looping forever (ie-robust-01).
+
+    ie-dist-02: the managed path holds a per-model cross-process lock across
+    resume/download/verify/publish. The `.part` file has one stable name, so
+    without it two concurrent runs interleave writes to the same partial —
+    truncating it, double-appending, or racing the publish rename. A second
+    run refuses instead of waiting; a lock whose owner died is reclaimed
+    automatically (ie-dist-01).
     """
     if not managed:
-        if not Path(path_str).is_file():
-            raise ModelUnavailableError(
-                f"custom model {_display_path(path_str)} must already exist"
-            )
-        try:
-            _verify_sha256(path_str, expected, delete_on_mismatch=False)
-        except (OSError, ValueError) as exc:
-            raise ModelUnavailableError(
-                f"custom model {_display_path(path_str)} is invalid: {exc}"
-            ) from exc
+        _verify_custom_model(path_str, expected)
         return
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.ExitStack() as stack:
+        try:
+            stack.enter_context(_exclusive_lock(
+                path.with_name(f".{path.name}.lock"),
+                f"model {_display_path(path_str)}"))
+        except FileExistsError as exc:
+            raise ModelUnavailableError(str(exc)) from exc
+        _download_and_verify_model(path_str, url, expected)
+
+
+def _verify_custom_model(path_str: str, expected: Optional[str]) -> None:
+    if not Path(path_str).is_file():
+        raise ModelUnavailableError(
+            f"custom model {_display_path(path_str)} must already exist"
+        )
+    try:
+        _verify_sha256(path_str, expected, delete_on_mismatch=False)
+    except (OSError, ValueError) as exc:
+        raise ModelUnavailableError(
+            f"custom model {_display_path(path_str)} is invalid: {exc}"
+        ) from exc
+
+
+def _download_and_verify_model(
+    path_str: str, url: str, expected: Optional[str]
+) -> None:
+    """Download-then-verify with retries. Caller holds the per-model lock."""
     last_exc: Optional[Exception] = None
     for attempt in range(1, MODEL_DOWNLOAD_ATTEMPTS + 1):
         try:
