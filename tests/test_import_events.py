@@ -2019,6 +2019,37 @@ def test_stage_cache_invalid_utf8_is_removed_and_regenerated(tmp_path):
     }
 
 
+def test_read_stage_cache_rejects_invalid_payload_when_cleanup_fails(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"input")
+    config = import_events.ModelConfig(
+        stage_cache="on", stage_cache_dir=str(tmp_path / "cache")
+    )
+    options = {"x": 1}
+    key = import_events._stage_cache_key(source, "pdf_text", options)
+    assert key is not None
+    cache_path = import_events._stage_cache_path(config, key)
+    cache_path.parent.mkdir(parents=True)
+    cache_path.write_text("[]", encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def fail_cache_unlink(path, *args, **kwargs):
+        if path == cache_path:
+            raise OSError("cache is read-only")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_cache_unlink)
+
+    assert (
+        import_events._read_stage_cache_text(
+            config, source, "pdf_text", options
+        )
+        is None
+    )
+
+
 def test_stage_cache_key_memoizes_file_digest_until_file_changes(tmp_path, monkeypatch):
     source = tmp_path / "source.pdf"
     source.write_text("input", encoding="utf-8")
