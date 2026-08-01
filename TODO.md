@@ -179,7 +179,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-plat-02 | open | med | link_queue.py:175-189 — `_config_dir` creates the config directory with `mode=0o700` and `os.chmod(target, 0o700)`, and the docstring states a co-tenant on a shared host cannot read the stored config; on Windows `os.chmod` only toggles the read-only bit, so that guarantee silently does not hold. Either narrow the promise in the docstring or set a real DACL there. | platform: a security guarantee that degrades silently off POSIX. Parked — an `icacls`/`pywin32` DACL fix cannot be verified without a Windows host, and the wrong fix is worse than a documented limitation
-lq-plat-01 | open | med | link_queue.py:2023 — `_build_argv` lexes every exec template with `shlex.split(template, posix=True)`; POSIX mode treats `\` as an escape, so on Windows a template like `C:\Tools\viewer.exe {url}` collapses to `C:Toolsviewer.exe` and the launch fails with FileNotFoundError. Lex with the rules of the host platform. | platform: POSIX-only lexing on the default (shell=False) dispatch path
 
 ## caching strategy
 

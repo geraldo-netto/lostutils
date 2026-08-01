@@ -401,6 +401,32 @@ class StateFileLock:
 
 _PLACEHOLDER_RE = re.compile(r"\{(url_quoted|protocol|url)\}")
 
+_TEMPLATE_QUOTE_CHARS = "\"'"
+
+
+def _split_command_template(template: str) -> list[str]:
+    """Lex an exec-mode command template into argv words (lq-plat-01).
+
+    ``shlex`` in POSIX mode treats a backslash as an escape, so a Windows
+    template like ``C:\\Tools\\viewer.exe {url}`` lexes to
+    ``C:Toolsviewer.exe`` and the launch dies with FileNotFoundError. Windows
+    therefore gets non-POSIX lexing, which keeps backslashes literal but leaves
+    the quotes attached to each word; strip one matched surrounding pair so a
+    quoted path with spaces still arrives as the bare value the user typed.
+
+    Raises ``ValueError`` on unbalanced quotes, same as ``shlex.split``, so
+    every caller keeps its existing error handling.
+    """
+    if os.name != "nt":
+        return shlex.split(template, posix=True)
+    words = []
+    for word in shlex.split(template, posix=False):
+        if (len(word) >= 2 and word[0] == word[-1]
+                and word[0] in _TEMPLATE_QUOTE_CHARS):
+            word = word[1:-1]
+        words.append(word)
+    return words
+
 
 def _queue_iid_for_url(url: str) -> str:
     """Stable, Tk-safe Treeview iid for a pending queue row keyed by URL
@@ -2020,7 +2046,7 @@ class Dispatcher:
         argument list is structurally impossible regardless of what special
         characters the URL contains.
         """
-        parts = shlex.split(template, posix=True)
+        parts = _split_command_template(template)
         return [cls._resolve_command(p, url, protocol) for p in parts]
 
     @staticmethod
@@ -2030,7 +2056,7 @@ class Dispatcher:
         a filename with spaces stays one arg and can't inject."""
         out: list[str] = []
         for flag, value in extra:
-            out.extend(shlex.split(flag))
+            out.extend(_split_command_template(flag))
             out.append(value)
         return out
 
@@ -5604,7 +5630,9 @@ class ProtocolEditor(_FormDialog):
         probe = command or "echo {url}"
         if not shell:
             try:
-                shlex.split(probe)
+                # Same lexer the dispatcher will use, so the editor never
+                # accepts a template that the run cannot parse (lq-plat-01).
+                _split_command_template(probe)
             except ValueError as e:
                 messagebox.showerror(
                     "Invalid template",

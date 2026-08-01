@@ -2276,6 +2276,46 @@ def test_extra_argv_and_shell():
     assert LinkQueueApp._extra_shell((("-o", "a b.mp4"),)) == "-o 'a b.mp4'"
 
 
+# --- lq-plat-01: lex exec templates with the host's own path rules --------
+
+def test_split_command_template_uses_posix_rules_here():
+    assert link_queue._split_command_template("mpv --no-video {url}") == [
+        "mpv", "--no-video", "{url}"]
+    assert link_queue._split_command_template("'a b' c") == ["a b", "c"]
+
+
+def test_split_command_template_keeps_windows_backslashes(monkeypatch):
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    assert link_queue._split_command_template(r"C:\Tools\viewer.exe {url}") == [
+        r"C:\Tools\viewer.exe", "{url}"]
+
+
+def test_split_command_template_unquotes_a_windows_path_with_spaces(monkeypatch):
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    assert link_queue._split_command_template(
+        r'"C:\Program Files\vlc\vlc.exe" --fullscreen {url}') == [
+        r"C:\Program Files\vlc\vlc.exe", "--fullscreen", "{url}"]
+
+
+def test_split_command_template_still_raises_on_unbalanced_quotes(monkeypatch):
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    with pytest.raises(ValueError):
+        link_queue._split_command_template('"C:\\a.exe {url}')
+
+
+def test_build_argv_keeps_a_windows_executable_path_intact(monkeypatch):
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    argv = LinkQueueApp._build_argv(r"C:\Tools\viewer.exe {url}", "http://x", "http")
+    assert argv == [r"C:\Tools\viewer.exe", "http://x"]
+
+
+def test_extra_argv_keeps_a_windows_flag_path_intact(monkeypatch):
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    assert LinkQueueApp._extra_argv(
+        ((r"--config C:\etc\app.ini", "v"),)) == [
+        "--config", r"C:\etc\app.ini", "v"]
+
+
 def test_process_link_carries_extra(app):
     app.pause_event.set()
     assert app._process_link("http://x", (("-o", "c.mp4"),)) == "queue"
