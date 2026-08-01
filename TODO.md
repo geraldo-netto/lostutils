@@ -160,7 +160,6 @@ _clean — `pyright==1.1.411 --pythonpath /usr/bin/python3.12 *.py` reports 0 er
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-obs-50 | open | low | minikeypad.py:74-85 — `_pip_install` sends pip's stdout/stderr to `DEVNULL` and swallows every exception, so the only signal a user gets is "Automatic install failed. Install manually: …". Capture and surface the last few lines of pip output. | observability — the actionable diagnostic is discarded at the point of failure
 
 ## watchdog
 

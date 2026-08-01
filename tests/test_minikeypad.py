@@ -10,6 +10,7 @@ none is available.
 import logging
 import os
 import random
+import subprocess
 import sys
 import threading
 import time
@@ -435,32 +436,63 @@ def test_fuzz_keyparam_operations_stay_in_bounds():
 # ===========================================================================
 #  install helpers (mocked: never touch the network)
 # ===========================================================================
+def _fake_pip(monkeypatch, calls, returncode=0, output="", exc=None):
+    def fake_run(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if exc is not None:
+            raise exc
+        return subprocess.CompletedProcess(cmd, returncode, output)
+
+    monkeypatch.setattr(minikeypad.subprocess, "run", fake_run)
+
+
 def test_pip_install_uses_argv_list_no_shell(monkeypatch):
-    seen = {}
+    calls = []
+    _fake_pip(monkeypatch, calls)
 
-    def fake_check_call(cmd, **kwargs):
-        seen["cmd"] = cmd
-        seen["shell"] = kwargs.get("shell", False)
-        return 0
+    assert minikeypad._pip_install("pyusb") == (True, "")
 
-    monkeypatch.setattr(minikeypad.subprocess, "check_call", fake_check_call)
-    assert minikeypad._pip_install("pyusb") is True
-    assert isinstance(seen["cmd"], list)        # argv, not a string
-    assert seen["cmd"][-1] == "pyusb"
-    assert "-m" in seen["cmd"] and "pip" in seen["cmd"]
-    assert seen["shell"] is False
+    cmd, kwargs = calls[0]
+    assert isinstance(cmd, list)                # argv, not a string
+    assert cmd[-1] == "pyusb"
+    assert "-m" in cmd and "pip" in cmd
+    assert kwargs.get("shell", False) is False
 
 
 def test_pip_install_falls_back_to_user_then_reports_failure(monkeypatch):
     calls = []
+    _fake_pip(monkeypatch, calls, returncode=1,
+              output="ERROR: externally-managed-environment")
 
-    def always_fail(cmd, **kwargs):
-        calls.append(cmd)
-        raise minikeypad.subprocess.CalledProcessError(1, cmd)
+    ok, transcript = minikeypad._pip_install("pyusb")
 
-    monkeypatch.setattr(minikeypad.subprocess, "check_call", always_fail)
-    assert minikeypad._pip_install("pyusb") is False
-    assert any("--user" in c for c in calls)    # tried the --user fallback
+    assert ok is False
+    assert any("--user" in cmd for cmd, _kwargs in calls)   # tried the fallback
+    # mkp-obs-50: both attempts' output is kept, not discarded.
+    assert transcript.count("externally-managed-environment") == 2
+
+
+def test_pip_install_keeps_output_when_pip_cannot_be_launched(monkeypatch):
+    calls = []
+    _fake_pip(monkeypatch, calls, exc=OSError("no pip"))
+
+    ok, transcript = minikeypad._pip_install("pyusb")
+
+    assert ok is False
+    assert "no pip" in transcript
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("", ""),
+        (None, ""),
+        ("a\n\n  \nb", "a\nb"),
+        ("\n".join(str(i) for i in range(20)), "\n".join(str(i) for i in range(12, 20))),
+    ],
+)
+def test_tail_lines_keeps_the_end_where_pip_puts_the_cause(text, expected):
+    assert minikeypad._tail_lines(text) == expected
 
 
 def test_ensure_pyusb_short_circuits_when_already_loaded(monkeypatch):
@@ -475,16 +507,28 @@ def test_ensure_pyusb_short_circuits_when_already_loaded(monkeypatch):
 
 def test_ensure_pyusb_returns_false_when_install_fails(monkeypatch, caplog):
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
-    monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: False)
+    monkeypatch.setattr(minikeypad, "_pip_install",
+                        lambda _pkg: (False, "ERROR: no network"))
     assert minikeypad._ensure_pyusb() is False
     assert "Automatic install failed" in caplog.text
+    # mkp-obs-50: the actionable diagnostic reaches the user, not just DEVNULL.
+    assert "ERROR: no network" in caplog.text
+
+
+def test_ensure_pyusb_omits_the_pip_report_when_there_is_none(monkeypatch, caplog):
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: (False, ""))
+
+    assert minikeypad._ensure_pyusb() is False
+    assert "pip reported" not in caplog.text
 
 
 def test_ensure_pyusb_installs_pinned_requirement(monkeypatch):
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
     monkeypatch.setattr(minikeypad, "_USB_ERR", "missing")
     calls = []
-    monkeypatch.setattr(minikeypad, "_pip_install", lambda pkg: calls.append(pkg) or False)
+    monkeypatch.setattr(minikeypad, "_pip_install",
+                        lambda pkg: (calls.append(pkg), (False, ""))[1])
 
     assert minikeypad._ensure_pyusb() is False
     assert calls == [minikeypad.PYUSB_REQUIREMENT]
@@ -496,7 +540,7 @@ def test_ensure_pyusb_success_reimports(monkeypatch):
     # restores the real module and background poll threads stay happy.
     monkeypatch.setattr(minikeypad, "usb", getattr(minikeypad, "usb", None),
                         raising=False)
-    monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: True)
+    monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: (True, ""))
     monkeypatch.setitem(sys.modules, "usb", types.ModuleType("usb"))
     monkeypatch.setitem(sys.modules, "usb.core", types.ModuleType("usb.core"))
     monkeypatch.setitem(sys.modules, "usb.util", types.ModuleType("usb.util"))
@@ -506,7 +550,7 @@ def test_ensure_pyusb_success_reimports(monkeypatch):
 
 def test_ensure_pyusb_install_then_import_fails(monkeypatch):
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
-    monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: True)
+    monkeypatch.setattr(minikeypad, "_pip_install", lambda _pkg: (True, ""))
     monkeypatch.setitem(sys.modules, "usb", None)   # forces ImportError
     assert minikeypad._ensure_pyusb() is False
 

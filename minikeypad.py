@@ -71,18 +71,38 @@ except Exception as e:  # pragma: no cover - import guard
 PYUSB_REQUIREMENT = "pyusb==1.3.1"
 
 
+PIP_OUTPUT_TAIL_LINES = 8
+
+
 def _pip_install(pkg):
-    """Install pkg into the current interpreter. argv list, never a shell."""
+    """Install pkg into the current interpreter. argv list, never a shell.
+
+    Returns ``(ok, transcript)``. mkp-obs-50: pip's own output is the only
+    thing that says WHY an install failed -- no network, no compiler,
+    externally-managed environment -- and sending it to DEVNULL left the user
+    with "Automatic install failed" and nothing to act on.
+    """
     base = [sys.executable, "-m", "pip", "install"]
+    transcript = []
     for extra in ([], ["--user"]):     # --user fallback for system pythons
+        argv = base + extra + [pkg]
         try:
-            subprocess.check_call(base + extra + [pkg],
-                                  stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.STDOUT)
-            return True
-        except Exception:
+            completed = subprocess.run(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                encoding="utf-8", errors="replace", check=False)
+        except Exception as exc:       # pip itself missing, exec failure, ...
+            transcript.append(f"$ {' '.join(argv)}\n{exc!r}")
             continue
-    return False
+        if completed.returncode == 0:
+            return True, ""
+        transcript.append(f"$ {' '.join(argv)}\n{completed.stdout or ''}")
+    return False, "\n".join(transcript)
+
+
+def _tail_lines(text, limit=PIP_OUTPUT_TAIL_LINES):
+    """Last `limit` non-blank lines -- pip puts the actual cause at the end."""
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    return "\n".join(lines[-limit:])
 
 
 def _ensure_pyusb():
@@ -91,7 +111,11 @@ def _ensure_pyusb():
     if _USB_OK:
         return True
     LOG.warning("pyusb not found; installing pinned dependency (%s)...", PYUSB_REQUIREMENT)
-    if not _pip_install(PYUSB_REQUIREMENT):
+    installed, transcript = _pip_install(PYUSB_REQUIREMENT)
+    if not installed:
+        tail = _tail_lines(transcript)
+        if tail:
+            LOG.error("pip reported:\n%s", tail)
         LOG.error("Automatic install failed. Install manually: pip install %s", PYUSB_REQUIREMENT)
         return False
     try:
