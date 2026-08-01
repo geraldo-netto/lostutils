@@ -3387,6 +3387,25 @@ def test_atomic_swap_still_performs_swap(tmp_path):
     assert not rf._path_taken(source.with_name(source.name + rf.BACKUP_SUFFIX))
 
 
+def test_atomic_swap_fsyncs_target_before_source_parent(tmp_path, monkeypatch):
+    source = tmp_path / "src"
+    source.mkdir()
+    (source / "f.txt").write_text("source", encoding="utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "f.txt").write_text("copy", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(rf, "_fsync_tree", lambda path: calls.append(("tree", path)))
+    monkeypatch.setattr(
+        rf, "_fsync_directory", lambda path: calls.append(("dir", path))
+    )
+
+    rf.atomic_swap(source, target)
+
+    assert calls[0] == ("tree", target)
+    assert calls.count(("dir", source.parent)) >= 3
+
+
 # --- rf-rel-04: already_migrated requires a non-empty target dir ------------
 
 def test_already_migrated_false_when_target_missing(tmp_path):

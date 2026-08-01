@@ -126,7 +126,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-rob-03 | open | high | relocate_folder.py:1769-1771,2345-2361 — verified destination and parent swap are never fsynced before backup deletion; power loss can leave neither durable destination data nor durable source binding. Add file/directory durability barriers before swap and fsync the source parent around rename/symlink lifecycle. | power-loss durability
 
 ## state machine integrity
 

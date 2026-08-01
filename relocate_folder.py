@@ -1744,6 +1744,33 @@ def _hash_once_strict(path: Path) -> str:
 
 # --- atomic swap ------------------------------------------------------------
 
+def _fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, getattr(errno, "ENOTSUP", errno.EINVAL)}:
+            raise
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
+        directory = Path(dirpath)
+        for name in filenames:
+            path = directory / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        _fsync_directory(directory)
+    _fsync_directory(root.parent)
+
 @contextmanager
 def _backup_target(target: Path) -> Iterator[Path]:
     """Move `target` aside to a sibling `<name>.relocate-backup`, yield the
@@ -1771,6 +1798,7 @@ def _backup_target(target: Path) -> Iterator[Path]:
     backup_st = os.lstat(backup)
     backup_id = (backup_st.st_dev, backup_st.st_ino)
     try:
+        _fsync_directory(target.parent)
         yield backup
     except BaseException:
         # rf-robust-03: BaseException (not just Exception) so a KeyboardInterrupt
@@ -1787,6 +1815,7 @@ def _backup_target(target: Path) -> Iterator[Path]:
             raise
         try:
             os.rename(backup, target)
+            _fsync_directory(target.parent)
         except OSError as restore_exc:
             _log().error(
                 "atomic_swap failed AND rollback failed: %s is gone and the "
@@ -1803,6 +1832,8 @@ def _backup_target(target: Path) -> Iterator[Path]:
         )
         return
     _swallow_or_warn(f"remove backup {backup}", shutil.rmtree, backup)
+    if not _path_taken(backup):
+        _fsync_directory(target.parent)
 
 
 def _backup_identity_ok(backup: Path, expected: tuple[int, int]) -> bool:
@@ -1842,9 +1873,11 @@ def atomic_swap(source: Path, target: Path) -> None:
     replacement symlink can be lchown'd to the original owner. When run as root
     migrating a user-owned dir this keeps the symlink owned by the user instead
     of root."""
+    _fsync_tree(target)
     src_st = os.lstat(source)
     with _backup_target(source):
         _create_symlink(source, target, owner=(src_st.st_uid, src_st.st_gid))
+        _fsync_directory(source.parent)
 
 
 def _create_symlink(link: Path, target: Path, *,
