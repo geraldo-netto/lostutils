@@ -51,11 +51,12 @@ def test_main_groups_duplicate_hashes(monkeypatch, tmp_path, capfd):
 
     dedupl_numpy.main()
 
-    output = capfd.readouterr().out
-    assert "first.bin" in output
-    assert "second.bin" in output
-    assert "unique.bin" not in output
-    assert "equal files: 1 / 3" in output
+    captured = capfd.readouterr()
+    assert "first.bin" in captured.out
+    assert "second.bin" in captured.out
+    assert "unique.bin" not in captured.out
+    assert "equal files:" not in captured.out
+    assert "equal files: 1 / 3" in captured.err
 
 
 def test_group_duplicates_is_pure():

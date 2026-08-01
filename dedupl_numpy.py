@@ -126,7 +126,7 @@ def main() -> None:
     out = sys.stdout.buffer
     for p in sorted(paths):
         out.write(p + b"\n")
-    print(f"equal files: {file_equal} / {n_lines}")
+    print(f"equal files: {file_equal} / {n_lines}", file=sys.stderr)
 
 
 if __name__ == "__main__":
