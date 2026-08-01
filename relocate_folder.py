@@ -241,6 +241,7 @@ class Plan:
     strict_cross_device: bool = False  # rf-sec-03: refuse same-fs migrations (default warn)
     jobs: int | None = None  # rf-scal-02: pool width override; None = _default_worker_count()
     check_space: bool = True  # rf-perf-02: pre-copy disk-space walk; False skips it
+    progress: bool = False
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "Plan":
@@ -280,6 +281,7 @@ class Plan:
             strict_cross_device=getattr(args, "strict_cross_device", False),
             jobs=getattr(args, "jobs", None),
             check_space=not getattr(args, "no_space_check", False),
+            progress=getattr(args, "progress", False),
         )
 
 
@@ -2382,7 +2384,9 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
         _refuse_specials_before_copy(plan.source, mode_cache)
     try:
         skipped = copy_tree(plan.source, plan.target, mode_cache=mode_cache,
-                            jobs=plan.jobs, check_space=plan.check_space)
+                            jobs=plan.jobs, check_space=plan.check_space,
+                            progress_cb=(_copy_progress_callback()
+                                         if plan.progress else None))
         if on_state is not None:
             on_state(MigrationState.COPIED)  # rf-ddd-02: data on disk, pre-verify
         _report_skipped(skipped, plan.strict, mode_cache=mode_cache)
@@ -2417,6 +2421,20 @@ def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | No
         # a deletion that may not have happened.
         _rmtree_logging(plan.target, "verify failure")
         raise
+
+
+def _copy_progress_callback() -> Callable[[int, int], None]:
+    last = [-5]
+
+    def report(done: int, total: int) -> None:
+        percent = 100 if total <= 0 else min(100, int(done * 100 / total))
+        milestone = percent // 5 * 5
+        if milestone <= last[0]:
+            return
+        last[0] = milestone
+        _log().info("copy progress: %d%% (%d/%d bytes)", percent, done, total)
+
+    return report
 
 
 def _report_skipped(skipped: list[Path], strict: bool, *,
@@ -2531,6 +2549,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="rf-perf-02: skip the pre-copy disk-space walk (saves "
                         "a full tree lstat on very large trees; an ENOSPC "
                         "mid-copy is still handled with cleanup)")
+    p.add_argument("--progress", action="store_true",
+                   help="report copy progress in 5%% milestones")
     verbosity = p.add_mutually_exclusive_group()
     verbosity.add_argument("-v", "--verbose", action="store_true",
                            help="rf-cfg-01: DEBUG-level logging")

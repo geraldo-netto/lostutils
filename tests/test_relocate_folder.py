@@ -1629,6 +1629,32 @@ def test_parse_args_strict_cross_device_flag():
     assert plan.strict_cross_device is True
 
 
+def test_parse_args_progress_flag():
+    plan = rf.parse_args(["/x", "/y", "--progress"])
+    assert plan.progress is True
+
+
+def test_copy_and_verify_wires_progress_callback(tmp_path, monkeypatch, caplog):
+    src = tmp_path / "src"; src.mkdir()
+    captured = {}
+
+    def fake_copy(_src, _dst, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(rf, "copy_tree", fake_copy)
+    plan = rf.Plan(
+        source=src, target=tmp_path / "dst", verify=False, progress=True
+    )
+
+    caplog.set_level("INFO", logger="relocate")
+    rf._copy_and_verify(plan)
+    captured["progress_cb"](50, 100)
+
+    assert callable(captured["progress_cb"])
+    assert "copy progress: 50%" in caplog.text
+
+
 # --- rf-cfg-01: verbosity flag ----------------------------------------------
 
 def test_log_level_default_is_info():

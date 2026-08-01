@@ -276,7 +276,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-wire-01 | open | med | relocate_folder.py:2345-2346 — `_copy_and_verify` calls `copy_tree` without `progress_cb`, and no CLI flag supplies one, leaving `tracking_copy2` progress accounting unreachable outside tests. Wire a `--progress` option through `Plan`/`execute` or delete the dead machinery. | shipped-but-unwired
 
 ## unused code
 
