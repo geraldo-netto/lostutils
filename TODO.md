@@ -135,11 +135,20 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+hr-test-02 | open | low | tests/test_hash_recursive.py:1215,2459 — clean-run coverage is framed around a removed summary field and a second test only guards the absence of a deleted internal constant. Retarget the useful summary assertion to the live contract and remove the internal-symbol tombstone. | Stale-test audit: deleted implementation details are not compatibility contracts; the stage-2 failure test already proves the obsolete field stays absent on the relevant path
+ie-test-02 | open | low | tests/test_import_events.py:343 — `test_encode_image_dead_code_removed` only asserts that a previously deleted private helper remains absent. Remove the stale tombstone test. | Stale-test audit: no supported API or runtime behavior is exercised
+rf-test-05 | open | low | tests/test_relocate_folder.py:1406,3385 — two tests only assert that previously deleted private implementation symbols remain absent. Remove the stale tombstones while retaining coverage of their live replacements. | Stale-test audit: `_collect_chown_error` and `STAGING_PREFIX` already have behavioral coverage immediately beside these tombstones
 
 ## test / fuzz coverage
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+hr-fuzz-01 | open | low | tests/fuzz/fuzz_hash_recursive.py:132-148 — the identical-file property accepts an empty group result and its size assertion is tautological, so it passes if duplicate detection stops returning the generated files. Assert the exact group and alias membership. | Property-test audit: the generated payload is at least 10 bytes and every file is a distinct inode, so an empty result is not a valid edge case
+hr-fuzz-02 | open | low | tests/fuzz/fuzz_hash_recursive.py:200-230 — the emitter property excludes line-breaking and reserved-prefix paths introduced by the escaped-record contract, then checks only that physical lines contain a space. Generate those paths and round-trip every emitted record. | Property-test audit: current assertions would miss record splitting or an undecodable `@lostutils-json:` payload
+oze-fuzz-01 | open | low | tests/fuzz/fuzz_organize_by_extension.py:389-421 — the end-to-end organizer property swallows every `OSError` after inputs were successfully staged, allowing production filesystem regressions to pass as platform quirks. Let unexpected organizer errors fail the property. | Property-test audit: illegal generated names are already filtered at the staging boundary
+oze-fuzz-02 | open | low | tests/fuzz/fuzz_organize_by_extension.py:493-575 — prune preservation checks are conditional on a file still existing and never assert that the symlink itself survives, so deletion regressions satisfy both properties. Assert unconditional file and symlink preservation. | Property-test audit: `prune_empty_dirs` promises to remove directories only and never follow or remove symlinks
+lq-fuzz-01 | open | low | tests/fuzz_link_queue.py:18-36 — the advertised standalone invocation cannot import the root `link_queue.py` because the harness adds `tests/` rather than the repository root to `sys.path`; fix the path and command examples. | Wiring audit: `/tmp/lostutils-batch.3VTa0h/venv/bin/python tests/fuzz_link_queue.py --help` fails with `ModuleNotFoundError: link_queue`
+lq-fuzz-02 | open | low | tests/fuzz_link_queue.py:233-254,829-909 — helper properties swallow exceptions that are impossible for their fixed valid inputs, and the command-substitution branch contains only `pass`. Remove those escape paths and assert the live single-pass substitution contract. | Property-test audit: `QueueItem` construction and `echo {url}` template parsing are total for the generated strings
 
 ## ruff (lint)
 
