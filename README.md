@@ -150,6 +150,8 @@ python3 import_events.py ./events_data -o events.json --emit-ics events.ics --re
 
 By default it downloads and uses `ggml-org/Qwen2.5-VL-7B-Instruct-GGUF` with `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf` and `mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf`. The model cache is selected from `IMPORT_EVENTS_CACHE_DIR`, then `$XDG_CACHE_HOME`, then `~/.cache/lostutils/import_events`.
 
+Exit codes: `0` every file was processed, `1` some files failed extraction but the run covered them all, `2` the run did not cover every file (command-line or setup error, model unavailable, or workers abandoned mid-run). Codes `1` and `2` both still write whatever output was extracted.
+
 Optional runtime dependencies enable richer extraction:
 
 - `llama-cpp-python` loads the local GGUF language/vision models.

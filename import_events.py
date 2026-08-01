@@ -856,15 +856,35 @@ logger = logging.getLogger(__name__)
 _extraction_failures = 0
 
 
+# ie-obs-50: set when the result collector gives up on wedged workers. Those
+# files never raise, so they never reach _extraction_failures — without this the
+# truncated event list is written and the process exits 0, indistinguishable
+# from a complete run. Guarded by the same lock as the failure counter.
+_run_truncated = False
+
+
 def reset_extraction_failures() -> None:
-    global _extraction_failures
+    global _extraction_failures, _run_truncated
     with _EXTRACTION_FAILURE_LOCK:
         _extraction_failures = 0
+        _run_truncated = False
 
 
 def extraction_failure_count() -> int:
     with _EXTRACTION_FAILURE_LOCK:
         return _extraction_failures
+
+
+def _record_run_truncated() -> None:
+    global _run_truncated
+    with _EXTRACTION_FAILURE_LOCK:
+        _run_truncated = True
+
+
+def run_was_truncated() -> bool:
+    """True when this run abandoned work it never completed (ie-obs-50)."""
+    with _EXTRACTION_FAILURE_LOCK:
+        return _run_truncated
 
 
 def _record_extraction_failure(file_path: Path, exc: Exception, action: str) -> None:
@@ -3914,6 +3934,10 @@ def _abandon_stalled_results(
         "LLM stall unrecoverable: %d/%s file(s) done before the remaining "
         "worker(s) wedged in an uncancellable native call; returning partial "
         "results.", completed, expected)
+    # ie-obs-50: a wedged worker never raises, so nothing here increments the
+    # extraction-failure counter. Flag the truncation explicitly or the caller
+    # writes the short event list and exits 0.
+    _record_run_truncated()
     stop_event.set()
     return True
 
@@ -4450,6 +4474,10 @@ def _unit_interval(value: str) -> float:
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Extract calendar events from a directory of .ics, image, PDF and text files.",
+        epilog=("Exit codes: 0 every file was processed, 1 some files failed "
+                "extraction but the run covered them all, 2 the run did not "
+                "cover every file (command-line or setup error, model "
+                "unavailable, or workers abandoned mid-run)."),
     )
     parser.add_argument("directory", nargs="?", default="./events_data",
                         help="Directory to scan (default: ./events_data).")
@@ -4693,6 +4721,13 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
 
     _write_and_print_run_outputs(events, args)
 
+    if run_was_truncated():
+        # ie-obs-50: same class of result as _handle_model_unavailable — output
+        # was written but the run did not cover every file — so the same code.
+        logger.error(
+            "Run TRUNCATED: output covers only the files that completed "
+            "before the stalled worker(s) were abandoned.")
+        return 2
     failures = extraction_failure_count()
     if failures:
         logger.error("%d file(s) failed extraction; results may be incomplete.", failures)

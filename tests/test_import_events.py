@@ -5985,3 +5985,73 @@ def test_size_limit_flags_reject_nonpositive_values(flag, capsys):
 
     assert exc.value.code == 2
     assert flag in capsys.readouterr().err
+
+
+def test_abandoned_stall_flags_the_run_as_truncated(monkeypatch):
+    """ie-obs-50: a wedged worker never raises, so nothing else records it."""
+    import_events.reset_extraction_failures()
+    monkeypatch.setattr(import_events, "WORKER_STALL_GIVEUP_SECONDS", 0.0)
+    stall_event = threading.Event()
+    stall_event.set()
+    stop_event = threading.Event()
+
+    abandoned = import_events._abandon_stalled_results(
+        stall_event, stop_event, time.monotonic() - 10.0, 1, 3)
+
+    assert abandoned
+    assert stop_event.is_set()
+    assert import_events.run_was_truncated()
+    assert import_events.extraction_failure_count() == 0   # nothing raised
+
+
+def test_run_not_truncated_when_the_collector_keeps_progressing(monkeypatch):
+    import_events.reset_extraction_failures()
+    monkeypatch.setattr(import_events, "WORKER_STALL_GIVEUP_SECONDS", 600.0)
+    stall_event = threading.Event()
+    stall_event.set()
+
+    assert not import_events._abandon_stalled_results(
+        stall_event, threading.Event(), time.monotonic(), 1, 3)
+    assert not import_events.run_was_truncated()
+
+
+def test_reset_extraction_failures_clears_the_truncation_flag():
+    import_events._record_run_truncated()
+    assert import_events.run_was_truncated()
+
+    import_events.reset_extraction_failures()
+
+    assert not import_events.run_was_truncated()
+
+
+def test_run_main_exits_two_when_the_run_was_truncated(tmp_path, monkeypatch):
+    """A truncated run wrote real output, so it must not look like a clean run."""
+    (tmp_path / "note.txt").write_text("Launch", encoding="utf-8")
+    out = tmp_path / "events.json"
+    monkeypatch.setattr(
+        import_events, "process_folder",
+        lambda *_a, **_k: (import_events._record_run_truncated(), [])[1])
+
+    code = import_events._run_main(
+        [str(tmp_path), "-o", str(out), "--stage-cache", "off"])
+
+    assert code == 2
+    assert out.exists()          # the partial output is still written
+
+
+def test_run_main_exits_zero_on_a_complete_run(tmp_path, monkeypatch):
+    (tmp_path / "note.txt").write_text("Launch", encoding="utf-8")
+    out = tmp_path / "events.json"
+    monkeypatch.setattr(import_events, "process_folder", lambda *_a, **_k: [])
+
+    code = import_events._run_main(
+        [str(tmp_path), "-o", str(out), "--stage-cache", "off"])
+
+    assert code == 0
+
+
+def test_help_documents_the_exit_codes(capsys):
+    with pytest.raises(SystemExit):
+        import_events.parse_args(["--help"])
+
+    assert "Exit codes:" in capsys.readouterr().out

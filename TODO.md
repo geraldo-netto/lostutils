@@ -160,7 +160,6 @@ _clean — `pyright==1.1.411 --pythonpath /usr/bin/python3.12 *.py` reports 0 er
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-obs-50 | open | med | import_events.py:3786-3801 — `_abandon_stalled_results` logs an ERROR, sets `stop_event`, and returns; `_run_file_workers` (3952) then returns the PARTIAL event list and `_run_main` writes it and returns 0, because a wedged (never-raised) LLM call never increments `extraction_failure_count()`. A truncated run is indistinguishable from a complete one by exit code. `_handle_model_unavailable` (4365-4375) already returns 2 for the same class of partial result — mirror it. | observability — silent-failure audit: the documented give-up path has no user-visible symptom outside the log
 mkp-obs-50 | open | low | minikeypad.py:74-85 — `_pip_install` sends pip's stdout/stderr to `DEVNULL` and swallows every exception, so the only signal a user gets is "Automatic install failed. Install manually: …". Capture and surface the last few lines of pip output. | observability — the actionable diagnostic is discarded at the point of failure
 
 ## watchdog
