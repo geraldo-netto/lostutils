@@ -470,6 +470,13 @@ def test_block_knobs_parse_from_cli():
     assert args.block_rows == 3
 
 
+def test_help_documents_output_record_and_comment_contract():
+    help_text = " ".join(dn._build_parser().format_help().split())
+
+    assert "VALUE;VALUE;DISTANCE" in help_text
+    assert "ignore lines beginning with '#'" in help_text
+
+
 @pytest.mark.parametrize("bad", ["-1", "x", "1.5"])
 def test_valid_block_threshold_rejects_negative_and_garbage(bad):
     import argparse

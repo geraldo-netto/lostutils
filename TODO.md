@@ -276,7 +276,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnv3-ux-01 | open | low | deduplicate-by-namev3.py:188-196 — `_emit_self_collisions` interleaves `# source lines: …` comment lines with `a;b;dist` data lines, while cross-pair output carries no comments/provenance; a consumer splitting every line on `;` breaks on the comment lines, and the two record shapes are asymmetric with no documented/`--format` contract. Document the `#` comment convention or make provenance consistent. | UI/UX — Jakob's Law (predictable line format) + API contract
 
 ## accessibility
 

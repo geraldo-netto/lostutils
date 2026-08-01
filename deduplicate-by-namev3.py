@@ -161,7 +161,13 @@ def configure_stdout():
 
 def _build_parser():
     ap = argparse.ArgumentParser(
-        description="Find near-duplicate strings via batched Levenshtein.")
+        description="Find near-duplicate strings via batched Levenshtein.",
+        epilog=(
+            f"Output records use VALUE{OUTPUT_DELIMITER}VALUE{OUTPUT_DELIMITER}DISTANCE. "
+            "Self-collision records are preceded by a '# source lines:' comment; "
+            "machine consumers must ignore lines beginning with '#'."
+        ),
+    )
     ap.add_argument("file", help="text file, one string per line")
     ap.add_argument("-t", "--threshold", type=valid_threshold, default=DEFAULT_THRESHOLD,
                     help=f"max distance to report (default {DEFAULT_THRESHOLD})")
