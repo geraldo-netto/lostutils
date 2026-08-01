@@ -276,7 +276,6 @@ rdv3-api-01 | open | low | remove-deduplv3.py:78,102,146 — documented exit-cod
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-cli-01 | open | low | dedupl_numpy.py:18 — usage text is printed to stdout (should be stderr) on the error path, and the script hand-rolls arg handling with no `--help`; migrate to argparse for a consistent CLI surface. | error output on wrong stream
 hr-cli-02 | open | med | hash-recursive-ai5.py:1154-1244,1921-1926 — help says alias cap is per inode, but expansion caps the whole duplicate group; `alias_cap=1` suppresses a valid two-inode group entirely. Apply cap per inode and always retain two real representatives. | option behavior contradicts help
 rf-cli-02 | open | low | relocate_folder.py:2267-2278 — `--strict-cross-device` returns silently when source/destination stat fails, so a security-sensitive strict check fails open. Under strict mode, indeterminate device state must be an error. | fail-closed option contract
 rf-cli-03 | open | low | relocate_folder.py:2550 — `Plan.from_args(ns)` runs outside `main` error handling; invalid root-shaped source emits a raw traceback. Catch validation errors and return the documented clean CLI error. | actionable error surface

@@ -19,8 +19,20 @@ def test_main_requires_hash_file(monkeypatch, capsys):
     with pytest.raises(SystemExit) as exc:
         dedupl_numpy.main()
 
-    assert exc.value.code == 1
-    assert "Usage:" in capsys.readouterr().out
+    assert exc.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "usage:" in captured.err
+
+
+def test_main_supports_help(monkeypatch, capsys):
+    monkeypatch.setattr(dedupl_numpy.sys, "argv", ["dedupl_numpy.py", "--help"])
+
+    with pytest.raises(SystemExit) as exc:
+        dedupl_numpy.main()
+
+    assert exc.value.code == 0
+    assert "hash_file" in capsys.readouterr().out
 
 
 def test_main_groups_duplicate_hashes(monkeypatch, tmp_path, capfd):

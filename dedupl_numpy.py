@@ -5,6 +5,7 @@ to do the grouping in C. The only per-line Python work is the final
 path extraction (variable-width slicing isn't naturally vectorizable)."""
 from __future__ import annotations
 
+import argparse
 import mmap
 import sys
 
@@ -13,12 +14,18 @@ import numpy as np
 PATH_OFFSET = 26  # preserved from v1's slice index
 
 
-def main() -> None:
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <hash-file>")
-        sys.exit(1)
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Print paths belonging to duplicate hash groups.",
+    )
+    parser.add_argument("hash_file", help="file containing hash/path records")
+    return parser.parse_args()
 
-    with open(sys.argv[1], "rb") as f:
+
+def main() -> None:
+    args = _parse_args()
+
+    with open(args.hash_file, "rb") as f:
         mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
 
     data = np.frombuffer(mm, dtype=np.uint8)
