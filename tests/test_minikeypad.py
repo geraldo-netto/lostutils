@@ -2520,10 +2520,22 @@ def test_sized_named_font_applies_weight(app):
 
 
 def test_log_pane_actually_uses_a_fixed_width_font(app):
-    got = minikeypad.tkfont.Font(font=app.log_box.cget("font"))
     expected = minikeypad.tkfont.nametofont("TkFixedFont")
 
-    assert got.actual("family") == expected.actual("family")
+    assert app.log_box.cget("font") == str(app._log_font)
+    assert app._log_font.actual("family") == expected.actual("family")
+
+
+def test_widget_fonts_outlive_a_garbage_collection_pass(app):
+    """Tk deletes the underlying named font when the last Python reference is
+    collected, silently dropping the widget back to the default family."""
+    import gc
+
+    expected = minikeypad.tkfont.nametofont("TkFixedFont").actual("family")
+    gc.collect()
+
+    resolved = minikeypad.tkfont.Font(font=app.log_box.cget("font"))
+    assert resolved.actual("family") == expected
 
 
 # --- mkp-plat-03: key state must show through a channel Aqua renders -------

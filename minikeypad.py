@@ -61,7 +61,7 @@ from tkinter import ttk
 from tkinter import filedialog
 from tkinter import messagebox
 from tkinter import scrolledtext
-from typing import Any
+from typing import Any, Literal
 
 try:  # pragma: no cover - import guard (env-dependent: pyusb present)
     import usb.core
@@ -179,7 +179,8 @@ COL_DISCONNECTED = "#c83232"
 # --------------------------------------------------------------------------- #
 #  USB / device layer (port of HidLib + the FormMain send routines)
 # --------------------------------------------------------------------------- #
-def _sized_named_font(name: str, size: int, weight: str = "normal"):
+def _sized_named_font(name: str, size: int,
+                      weight: Literal["normal", "bold"] = "normal"):
     """A resized copy of Tk's named font `name`.
 
     mkp-plat-02: a named font like "TkFixedFont" is a whole font spec, valid
@@ -187,6 +188,12 @@ def _sized_named_font(name: str, size: int, weight: str = "normal"):
     *family*, which no platform has, so each substitutes its own default —
     the log pane renders proportional everywhere, in a different font per OS,
     while looking like it asked for monospace.
+
+    The caller must keep the returned object alive for as long as the widget:
+    a widget stores only the font's name, and Tk deletes the underlying named
+    font when the last Python reference is collected, which silently drops the
+    widget back to the default family. Fonts are per-interpreter, so they
+    cannot be cached across Tk roots either.
     """
     spec = tkfont.nametofont(name).copy()
     spec.configure(size=size, weight=weight)
@@ -1197,9 +1204,11 @@ class App(tk.Tk):
         # main area then expands above it instead of squeezing the keypad.
         logf = ttk.LabelFrame(self, text="Log")
         logf.pack(fill="x", side="bottom", padx=6, pady=(0, 6))
+        # Held on the instance for their lifetime — see _sized_named_font.
+        self._log_font = _sized_named_font("TkFixedFont", 9)
+        self._state_font = _sized_named_font("TkDefaultFont", 10, "bold")
         self.log_box = scrolledtext.ScrolledText(
-            logf, height=7, state="disabled",
-            font=_sized_named_font("TkFixedFont", 9))
+            logf, height=7, state="disabled", font=self._log_font)
         self.log_box.pack(fill="both", expand=True, padx=4, pady=4)
 
         root = ttk.Frame(self, padding=6)
@@ -1211,7 +1220,7 @@ class App(tk.Tk):
 
         self.state_lbl = tk.Label(left, text="Not connected", width=22,
                                   bg=COL_DISCONNECTED, fg="white", relief="ridge",
-                                  font=_sized_named_font("TkDefaultFont", 10, "bold"))
+                                  font=self._state_font)
         self.state_lbl.pack(fill="x", pady=(0, 6))
 
         lf = ttk.LabelFrame(left, text="Layer")
