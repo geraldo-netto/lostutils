@@ -1728,6 +1728,40 @@ def test_resolve_tesseract_path_caches_shutil_lookup(monkeypatch):
     assert calls == ["tesseract"]
 
 
+def test_resolve_tesseract_executable_prefers_the_exact_path(tmp_path, monkeypatch):
+    tool = tmp_path / "tesseract"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setattr(
+        import_events.shutil, "which",
+        lambda name: pytest.fail(f"should not fall back for {name}"))
+
+    assert import_events._resolve_tesseract_executable(str(tool)) == str(tool)
+
+
+def test_resolve_tesseract_executable_falls_back_to_which_for_a_path(
+        tmp_path, monkeypatch):
+    """ie-plat-02: on Windows the natural spelling omits .exe, and which()
+    applies PATHEXT to a command that has a directory part."""
+    asked = []
+    requested = tmp_path / "Tesseract-OCR" / "tesseract"
+    monkeypatch.setattr(
+        import_events.shutil, "which",
+        lambda name: asked.append(name) or f"{name}.exe")
+
+    assert import_events._resolve_tesseract_executable(str(requested)) == (
+        f"{requested}.exe")
+    assert asked == [str(requested)]
+
+
+def test_resolve_tesseract_executable_still_reports_a_genuine_miss(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(import_events.shutil, "which", lambda name: None)
+
+    assert import_events._resolve_tesseract_executable(
+        str(tmp_path / "nope" / "tesseract")) is None
+
+
 def test_resolve_tesseract_path_caches_missing_lookup(monkeypatch):
     calls = []
     monkeypatch.setattr(import_events.shutil, "which",

@@ -2957,7 +2957,13 @@ def _resolve_tesseract_executable(raw_path: str) -> Optional[str]:
     has_separator = any(sep and sep in requested for sep in (os.sep, os.altsep))
     candidate = Path(requested).expanduser()
     if candidate.is_absolute() or has_separator:
-        return str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else None
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+        # ie-plat-02: on Windows the natural spelling omits the extension —
+        # the same spelling the bare-name branch would accept — and shutil.which
+        # applies PATHEXT to a command with a directory part too. Without this
+        # the run drops OCR entirely while the binary sits right there.
+        return shutil.which(str(candidate))
     return shutil.which(requested)
 
 
