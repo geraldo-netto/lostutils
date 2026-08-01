@@ -6,7 +6,7 @@ Proposed corrections / improvements. One table per review category. Format:
 
 Scan scope = root-directory `.py`/`.sh` files only (per AGENTS.md); cache/build paths are excluded. Tables sorted by `description` (each starts with `file:line`). Scripts are standalone — dedup findings are within-file only, never cross-file module extraction.
 
-Latest full verification: 2026-08-01 — 10 root scripts / 22,430 lines; pinned lint and type gates clean; CI Python 3.12 suite 2,120 passed, 1 skipped, 6 subtests passed, including 103 explicitly collected fuzz cases; total coverage 97.48%; all 1,304 functions/methods meet the 80% function gate.
+Latest full verification: 2026-08-01 — 10 root scripts / 22,430 lines; pinned lint and type gates clean; CI Python 3.12 suite 2,116 passed, 1 skipped, 6 subtests passed, including 103 explicitly collected fuzz cases; total coverage 97.46%; all 1,304 functions/methods meet the 80% function gate; one Python 3.12 POSIX-fork warning is recorded as `bt-mt-01`.
 
 id prefix | file name
 --- | ---
@@ -73,6 +73,7 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+bt-mt-01 | open | low | bookmark-tidy.py:1047-1048 — `LlamaCategorizer` explicitly selects the `fork` multiprocessing context on POSIX even when the parent process is multithreaded, which Python 3.12 warns can deadlock. Use `spawn` or `forkserver` and retain the existing startup/abort lifecycle tests. | multithreading — background-process lifecycle / fork safety; full CI-equivalent run emits `DeprecationWarning: This process is multi-threaded, use of fork() may lead to deadlocks in the child`
 
 ## distributed systems
 
