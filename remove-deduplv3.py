@@ -76,7 +76,10 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description=_("Emit `rm` commands to clear content-duplicates "
                       "while keeping the entry with the longest basename."),
-        epilog=_("Exit codes: 0 success, 2 input file error, 3 decode error."))
+        epilog=_(
+            "Exit codes: 0 success, 2 command-line/input/output setup error, "
+            "3 encoding/decode error."
+        ))
     ap.add_argument("file", help=_("hash file (one '<hash> <path>' per line)"))
     ap.add_argument("--encoding", default=None,
                     help=_("Force encoding (e.g. utf-8, utf-16, gbk, "

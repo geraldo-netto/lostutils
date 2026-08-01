@@ -77,10 +77,10 @@ def test_help_documents_exit_codes(capsys):
     with pytest.raises(SystemExit) as exc:
         rd.parse_args(["--help"])
     assert exc.value.code == 0
-    out = capsys.readouterr().out
+    out = " ".join(capsys.readouterr().out.split())
     assert "Exit codes:" in out
-    assert "2 input file error" in out
-    assert "3 decode error" in out
+    assert "2 command-line/input/output setup error" in out
+    assert "3 encoding/decode error" in out
 
 
 def test_invalid_encoding_clean_error_exit3(monkeypatch, tmp_path, capsys):

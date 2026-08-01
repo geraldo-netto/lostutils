@@ -248,7 +248,6 @@ lq-config-01 | open | med | link_queue.py:774-810 — schema coercion validates 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 ie-api-02 | open | low | import_events.py:4154-4159 — `-o X --emit-ics X` is accepted; JSON is written then overwritten by ICS while the summary claims both artifacts. Post-validate resolved output targets as distinct. | output artifact contract
-rdv3-api-01 | open | low | remove-deduplv3.py:78,102,146 — documented exit-code contract (epilog "2 input file error, 3 decode error") is mislabeled: invalid `--encoding` exits 3 though it is an argument error, and missing stdout binary buffer exits 2 though it is an output error. Align codes/labels or add distinct argument/output error codes. | API contract & compatibility — error-surface taxonomy
 
 ## CLI / option integrity
 
