@@ -1110,6 +1110,15 @@ def test_merge_text_blocks_fuzz_idempotent_and_bounded(blocks, max_chars):
     assert import_events._merge_text_blocks([merged], max_chars) == merged.rstrip("\n")
 
 
+def test_merge_text_blocks_budget_cut_leaves_no_dangling_separator():
+    """ie-rel-01: the budget cut used to land mid-line and keep the separator
+    the normalizer had already collapsed, so re-merging changed the text."""
+    merged = import_events._merge_text_blocks(["0000000", "0\t0"], 10)
+
+    assert merged == "0000000\n0"
+    assert import_events._merge_text_blocks([merged], 10) == merged
+
+
 @given(line=st.text(min_size=1, max_size=120))
 def test_merge_text_blocks_fuzz_dedupes_later_normalized_repeats(line):
     assume(len(line.splitlines()) <= 1)

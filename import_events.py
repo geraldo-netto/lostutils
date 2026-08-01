@@ -2698,7 +2698,10 @@ def _merge_text_blocks(blocks: List[str], max_chars: int = MAX_CONTENT_CHARS) ->
         lines = _normalized_text_lines(block)
         primary_seen = _merge_normalized_lines(
             lines, merged, seen, primary_seen)
-    return "\n".join(merged)[:max_chars]
+    # rstrip: the budget cut lands anywhere, so it can leave the tail line
+    # holding a separator this function had already normalized away. Without
+    # it, feeding the result back in returns something different.
+    return "\n".join(merged)[:max_chars].rstrip()
 
 
 def _normalized_text_lines(block: str) -> List[str]:
