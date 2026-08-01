@@ -231,7 +231,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-api-02 | open | low | import_events.py:4154-4159 — `-o X --emit-ics X` is accepted; JSON is written then overwritten by ICS while the summary claims both artifacts. Post-validate resolved output targets as distinct. | output artifact contract
 
 ## CLI / option integrity
 

@@ -4350,8 +4350,19 @@ def _write_and_print_run_outputs(events: List[Dict[str, Any]], args: argparse.Na
     _print_run_output(events, targets, args.summary_only)
 
 
+def _outputs_are_distinct(args: argparse.Namespace) -> bool:
+    if not args.emit_ics:
+        return True
+    json_target = os.path.normcase(str(Path(args.output).expanduser().resolve()))
+    ics_target = os.path.normcase(str(Path(args.emit_ics).expanduser().resolve()))
+    return json_target != ics_target
+
+
 def _run_main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    if not _outputs_are_distinct(args):
+        logger.error("--output and --emit-ics must name different files")
+        return 2
     model_config = ModelConfig.from_args(args)
     _log_llm_runtime_config(model_config)
     _enable_fault_tracebacks()

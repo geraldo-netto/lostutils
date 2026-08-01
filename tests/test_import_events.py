@@ -5005,6 +5005,20 @@ def test_language_and_date_edge_helpers():
     assert import_events._split_time_explicit("23:59:60 Invalid", False) is None
 
 
+def test_cli_rejects_same_json_and_ics_target(tmp_path, caplog):
+    source = tmp_path / "events"
+    source.mkdir()
+    output = tmp_path / "events.out"
+
+    rc = import_events._run_main([
+        str(source), "--output", str(output), "--emit-ics", str(output)
+    ])
+
+    assert rc == 2
+    assert not output.exists()
+    assert "must name different files" in caplog.text
+
+
 def test_close_paddle_engine_surfaces_close_failure(caplog):
     class Engine:
         def close(self):
