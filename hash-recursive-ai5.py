@@ -1601,27 +1601,6 @@ def _stage_progress_cb(on_stage_progress, stage):
     return _cb
 
 
-def _emit_stage2_groups(regrouped, on_composite, accept_group):
-    """Emit confirmed stage-2 ``(head, tail)`` groups (hr-cmplx-04).
-
-    hr-obs-02: reports the composite ``head:tail`` digest per key so the hashes
-    dump records the true dup-grouping identity (two files sharing a head but
-    differing past it get DISTINCT dump digests). Groups with <2 members are
-    dropped."""
-    _publish_stage2_digests(regrouped, on_composite)
-    for combined, keys in regrouped.items():
-        if len(keys) >= 2:
-            accept_group(combined, keys)
-
-
-def _publish_stage2_digests(regrouped, on_composite):
-    if on_composite is None:
-        return
-    for (head, tail), keys in regrouped.items():
-        for key in keys:
-            on_composite(key, f"{head}:{tail}")
-
-
 def find_duplicate_groups(files, jobs, on_group=None, config=None,
                           on_walk_done=None, cancel_event=None,
                           on_hashed=None, on_stage_progress=None,
@@ -2408,8 +2387,8 @@ def main():
     try:
         stall_monitor.start("scan")
         # hr-rob-02: each stage-1 head line is written immediately, then the
-        # fixed-width digest field is patched if stage 2 upgrades it to a
-        # composite head:tail digest.
+        # fixed-width digest field is patched if stage 3 upgrades it to the
+        # confirmed full-file digest.
         skip_ino = _setup_hash_dump(args.hashes_file, hashes_state)
         # hr-obs-02 + hr-scal-05: stream the walk so we never materialise
         # the full `files` list. `on_walk_done` snaps the walk/hash

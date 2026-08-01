@@ -283,7 +283,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-wire-50 | open | low | hash-recursive-ai5.py:1536-1546 — `_emit_stage2_groups` has no production caller: `find_duplicate_groups` (1660-1674) goes stage 2 → `_stage3_hash` → `_emit_stage3_groups` directly. Only tests/test_hash_recursive.py:175-176 reach it, and its helper `_publish_stage2_digests` is reachable only through it. Delete both, or wire the stage-2 composite `head:tail` digests into `on_composite` if the dump was meant to record them. | wiring gaps — decide delete vs wire; stage 3 already publishes a full-file digest for the same keys, so deletion is likely correct
 
 ## unused code
 

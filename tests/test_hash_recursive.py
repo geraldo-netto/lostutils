@@ -159,47 +159,6 @@ def test_emit_groups_writes_only_real_duplicates():
     assert sum(1 for ln in digA_chunk.splitlines() if ln.startswith("digA ")) == 2
 
 
-def test_emit_stage2_groups_publishes_and_filters_singletons(monkeypatch):
-    published = []
-    accepted = []
-    monkeypatch.setattr(
-        hr,
-        "_publish_stage2_digests",
-        lambda regrouped, callback: published.append((regrouped, callback)),
-    )
-    callback = object()
-    regrouped = {
-        ("head", "tail"): [(1, 1), (1, 2)],
-        ("other", "tail"): [(1, 3)],
-    }
-
-    hr._emit_stage2_groups(regrouped, callback, lambda *group: accepted.append(group))
-    hr._emit_stage2_groups({}, callback, lambda *group: accepted.append(group))
-
-    assert published == [(regrouped, callback), ({}, callback)]
-    assert accepted == [(("head", "tail"), [(1, 1), (1, 2)])]
-
-
-def test_publish_stage2_digests_handles_callbacks_and_empty_inputs():
-    published = []
-    regrouped = {
-        ("head", "tail"): [(1, 1), (1, 2)],
-        ("other", "digest"): [(1, 3)],
-    }
-
-    hr._publish_stage2_digests(regrouped, None)
-    hr._publish_stage2_digests({}, lambda *entry: published.append(entry))
-    hr._publish_stage2_digests(
-        regrouped, lambda *entry: published.append(entry)
-    )
-
-    assert published == [
-        ((1, 1), "head:tail"),
-        ((1, 2), "head:tail"),
-        ((1, 3), "other:digest"),
-    ]
-
-
 def _write(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
