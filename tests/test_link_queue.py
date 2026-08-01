@@ -5158,3 +5158,76 @@ def test_clear_queue_prompt_uses_the_singular_for_one_item(app, monkeypatch):
     app._on_clear_queue()
 
     assert "1 pending item?" in prompts[0]
+
+
+# --- lq-plat-05: the Windows liveness probe reads LastError safely ----------
+
+
+def _fake_windows_kernel(monkeypatch, *, handle, exit_code=None, last_error=0):
+    """Install a fake kernel32 so the win32 probe can be driven from any host."""
+    import ctypes
+
+    calls = {"closed": []}
+
+    class Kernel32:
+        @staticmethod
+        def OpenProcess(access, inherit, pid):
+            calls["opened"] = (access, inherit, pid)
+            return handle
+
+        @staticmethod
+        def GetExitCodeProcess(_handle, out):
+            if exit_code is None:
+                return 0
+            out._obj.value = exit_code
+            return 1
+
+        @staticmethod
+        def CloseHandle(closing):
+            calls["closed"].append(closing)
+            return 1
+
+        @staticmethod
+        def GetLastError():
+            raise AssertionError("LastError must come from ctypes.get_last_error")
+
+    def win_dll(name, **kwargs):
+        calls["windll"] = (name, kwargs)
+        return Kernel32
+
+    monkeypatch.setattr(ctypes, "WinDLL", win_dll, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: last_error, raising=False)
+    return calls
+
+
+def test_pid_probe_reads_last_error_through_the_ctypes_capture(monkeypatch):
+    calls = _fake_windows_kernel(monkeypatch, handle=0, last_error=5)
+
+    assert link_queue.StateFileLock._pid_is_running_windows(4242) is True
+    assert calls["windll"] == ("kernel32", {"use_last_error": True})
+
+
+def test_pid_probe_treats_other_open_failures_as_a_dead_owner(monkeypatch):
+    _fake_windows_kernel(monkeypatch, handle=0, last_error=87)
+
+    assert link_queue.StateFileLock._pid_is_running_windows(4242) is False
+
+
+def test_pid_probe_reports_a_live_owner_and_closes_the_handle(monkeypatch):
+    calls = _fake_windows_kernel(monkeypatch, handle=7, exit_code=259)
+
+    assert link_queue.StateFileLock._pid_is_running_windows(4242) is True
+    assert calls["closed"] == [7]
+
+
+def test_pid_probe_reports_an_exited_owner(monkeypatch):
+    _fake_windows_kernel(monkeypatch, handle=7, exit_code=0)
+
+    assert link_queue.StateFileLock._pid_is_running_windows(4242) is False
+
+
+def test_pid_probe_assumes_alive_when_the_exit_code_is_unreadable(monkeypatch):
+    calls = _fake_windows_kernel(monkeypatch, handle=7, exit_code=None)
+
+    assert link_queue.StateFileLock._pid_is_running_windows(4242) is True
+    assert calls["closed"] == [7]
