@@ -1391,7 +1391,7 @@ def move_file(path: Path, destination: Path) -> Path:
     try:
         _link_exclusive(path, target)
     except OSError as exc:
-        if exc.errno != errno.EXDEV and exc.errno not in _LINK_UNSUPPORTED_ERRNOS:
+        if exc.errno != errno.EXDEV and not _link_unsupported(exc):
             raise
         _move_cross_device(path, target)
     else:
@@ -1511,7 +1511,24 @@ _STACKED_BLOCKER_RETRY_CAP = 8
 # letting a bare OSError abort the whole plan.
 _LINK_UNSUPPORTED_ERRNOS = frozenset({
     errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP, errno.EMLINK,
+    # oze-plat-05: ENOTSUP and EOPNOTSUPP are aliases on Linux but distinct
+    # numbers on Darwin (45 vs 102), and msdos/exFAT/SMB mounts there report
+    # the former — so the set only looked complete on Linux.
+    getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
 })
+
+# oze-plat-05: Windows says "this filesystem has no hardlinks" with
+# ERROR_INVALID_FUNCTION (FAT32/exFAT, i.e. any USB stick or SD card) or
+# ERROR_NOT_SUPPORTED. CPython maps both to EINVAL, which means something
+# unrelated on POSIX, so key on winerror instead of widening the errno set.
+_LINK_UNSUPPORTED_WINERRORS = frozenset({1, 50})
+
+
+def _link_unsupported(exc: OSError) -> bool:
+    """Whether `exc` means this filesystem cannot make the hardlink at all."""
+    if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
+        return True
+    return getattr(exc, "winerror", None) in _LINK_UNSUPPORTED_WINERRORS
 
 
 def _raise_collision_exhausted(source: Path, last_exc: OSError | None) -> NoReturn:
@@ -1630,7 +1647,7 @@ def _reserve_collision_candidate(
     except FileExistsError as exc:
         return None, False, exc
     except OSError as exc:
-        if exc.errno in _LINK_UNSUPPORTED_ERRNOS:
+        if _link_unsupported(exc):
             return _reserve_slot_via_rename(source), False, last_exc
         raise
     return candidate, True, last_exc

@@ -586,7 +586,9 @@ class OrganizeByExtensionTest(unittest.TestCase):
         self.assertEqual(
             _oze._LINK_UNSUPPORTED_ERRNOS,
             frozenset({errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP,
-                       errno.EMLINK}))
+                       errno.EMLINK,
+                       # oze-plat-05: distinct from EOPNOTSUPP on Darwin
+                       getattr(errno, "ENOTSUP", errno.EOPNOTSUPP)}))
         with TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
             src = self.make_file(root, "data.txt")
@@ -4755,3 +4757,45 @@ def test_is_bucketed_file_accepts_a_case_variant_directory_when_folding(
     monkeypatch.setattr(
         organize_by_extension, "filesystem_folds_case", lambda directory: False)
     assert is_bucketed_file(tmp_path, target) is False
+
+
+# --- oze-plat-05: "no hardlink support" as Windows and macOS report it ------
+
+
+def test_link_unsupported_recognises_the_windows_shapes():
+    """FAT32/exFAT on Windows raise ERROR_INVALID_FUNCTION, which CPython maps
+    to EINVAL — an errno that means something unrelated on POSIX."""
+    for winerror in (1, 50):
+        exc = OSError(errno.EINVAL, "Incorrect function")
+        exc.winerror = winerror
+        assert organize_by_extension._link_unsupported(exc) is True
+
+    unrelated = OSError(errno.EINVAL, "Invalid argument")
+    assert organize_by_extension._link_unsupported(unrelated) is False
+
+    other_winerror = OSError(errno.EACCES, "Access denied")
+    other_winerror.winerror = 5
+    assert organize_by_extension._link_unsupported(other_winerror) is False
+
+
+def test_link_unsupported_covers_every_posix_fallback_errno():
+    for code in organize_by_extension._LINK_UNSUPPORTED_ERRNOS:
+        assert organize_by_extension._link_unsupported(OSError(code, "x")) is True
+
+
+def test_move_file_falls_back_when_windows_reports_no_hardlinks(tmp_path):
+    """The end-to-end guarantee: a USB stick must organize, not skip."""
+    source = tmp_path / "data.txt"
+    source.write_text("payload", encoding="utf-8")
+    destination = tmp_path / "txt" / "d00000"
+
+    def no_hardlinks(*_args, **_kwargs):
+        exc = OSError(errno.EINVAL, "Incorrect function")
+        exc.winerror = 1
+        raise exc
+
+    with patch("organize_by_extension.os.link", side_effect=no_hardlinks):
+        target = organize_by_extension.move_file(source, destination)
+
+    assert target.read_text(encoding="utf-8") == "payload"
+    assert not source.exists()
