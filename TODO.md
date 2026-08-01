@@ -72,7 +72,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-conc-50 | open | med | hash-recursive-ai5.py:1414-1420 — `_stage2_tail` calls `_retry_tail_alias` for any item whose tail is None, including items `_run_stage` never hashed because the SIGINT cooperative cancel fired. After Ctrl-C, stage 2 therefore performs unbounded synchronous re-hashing of every multi-alias candidate on the main thread with no `cancel_event` check. `_bucket_stage1_heads` (1352-1353) has the right shape — it skips keys absent from `head_by_key`. | concurrency — cancellation not honoured on the recovery path; asymmetric with stage 1
 
 ## multithreading
 

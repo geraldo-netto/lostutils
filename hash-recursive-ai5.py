@@ -1276,7 +1276,7 @@ def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
     return 1, real_count
 
 
-def _retry_alias(key, tried, aliases, hash_alias):
+def _retry_alias(key, tried, aliases, hash_alias, cancel_event=None):
     """Re-hash `key` on its next readable alias after the representative
     produced a None digest (hr-rel-02 / hr-rel-30 / hr-rel-50).
 
@@ -1287,8 +1287,12 @@ def _retry_alias(key, tried, aliases, hash_alias):
     digest, or None when no sibling is readable.
 
     Every stage routes through this one helper so the recovery policy has a
-    single definition instead of one copy per stage."""
+    single definition instead of one copy per stage — which is also why the
+    hr-conc-50 cancel check lives here: a hardlink-heavy inode would otherwise
+    keep hashing aliases on the main thread long after a Ctrl-C."""
     for alias in aliases.get(key, ()):
+        if _cancelled(cancel_event):
+            return None
         if alias == tried:
             continue
         digest = hash_alias(alias)
@@ -1297,20 +1301,22 @@ def _retry_alias(key, tried, aliases, hash_alias):
     return None
 
 
-def _retry_head_alias(key, tried, aliases, config):
+def _retry_head_alias(key, tried, aliases, config, cancel_event=None):
     """Stage-1 head retry (hr-rel-02)."""
     return _retry_alias(
-        key, tried, aliases, lambda alias: hash_head(alias, config))
+        key, tried, aliases, lambda alias: hash_head(alias, config),
+        cancel_event)
 
 
-def _retry_tail_alias(key, tried, size, aliases, config):
+def _retry_tail_alias(key, tried, size, aliases, config, cancel_event=None):
     """Stage-2 tail/sample retry (hr-rel-30)."""
     return _retry_alias(
         key, tried, aliases,
-        lambda alias: hash_tail_and_samples(alias, size, config=config))
+        lambda alias: hash_tail_and_samples(alias, size, config=config),
+        cancel_event)
 
 
-def _retry_full_alias(key, tried, size, aliases, config):
+def _retry_full_alias(key, tried, size, aliases, config, cancel_event=None):
     """Stage-3 full-file retry (hr-rel-50).
 
     Stages 1 and 2 already recovered a vanished representative; without the
@@ -1318,7 +1324,8 @@ def _retry_full_alias(key, tried, size, aliases, config):
     confirmation and the full hash was dropped from its confirmed duplicate
     group even though a readable hardlink sibling existed."""
     return _retry_alias(
-        key, tried, aliases, lambda alias: hash_full(alias, size, config))
+        key, tried, aliases, lambda alias: hash_full(alias, size, config),
+        cancel_event)
 
 
 def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
@@ -1353,14 +1360,15 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
         candidates, _make_head_candidate_batch(rep, config), stage1_bytes,
         jobs, **run_kwargs)
     by_head, recovered = _bucket_stage1_heads(
-        candidates, head_by_key, rep, aliases, config, on_hashed)
+        candidates, head_by_key, rep, aliases, config, on_hashed, cancel_event)
     return by_head, {
         "stage1": len(head_by_key),
         "stage1_errors": max(0, errors - recovered),
     }
 
 
-def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashed):
+def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashed,
+                         cancel_event=None):
     """Bucket hashed candidates by ``(size, head)`` (hr-cmplx-03).
 
     A None head on a multi-alias inode is retried on the next readable sibling
@@ -1375,7 +1383,8 @@ def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashe
             continue
         head = head_by_key[key]
         if head is None and aliases is not None and len(aliases.get(key, ())) > 1:
-            head = _retry_head_alias(key, rep[key], aliases, config)
+            head = _retry_head_alias(
+                key, rep[key], aliases, config, cancel_event)
             recovered += head is not None
         if on_hashed is not None:
             on_hashed(done, total, head, key, aliases)
@@ -1422,7 +1431,7 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     for item in stage2_items:
         _size, _path, head, key = item
         tail, was_recovered = _stage2_tail(
-            item, tail_by_item, aliases, config)
+            item, tail_by_item, aliases, config, cancel_event)
         recovered += was_recovered
         if tail is None:
             continue   # failed/unhashed tail — already in stage2_errors
@@ -1433,13 +1442,21 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     }
 
 
-def _stage2_tail(item, tail_by_item, aliases, config):
+def _stage2_tail(item, tail_by_item, aliases, config, cancel_event=None):
     size, path, _head, key = item
-    tail = tail_by_item.get(item)
-    failed = item in tail_by_item and tail is None
-    if tail is None and aliases is not None and len(aliases.get(key, ())) > 1:
-        tail = _retry_tail_alias(key, path, size, aliases, config)
-    return tail, bool(failed and tail is not None)
+    if item not in tail_by_item:
+        # hr-conc-50: absent means `_run_stage` never dispatched this item —
+        # the only way that happens is a SIGINT cancel at a batch boundary.
+        # Retrying here would resume unbounded synchronous hashing on the main
+        # thread after the user asked to stop. Stage 1 already skips absent
+        # keys; this makes stage 2 match.
+        return None, False
+    tail = tail_by_item[item]
+    if tail is not None:
+        return tail, False
+    if aliases is not None and len(aliases.get(key, ())) > 1:
+        tail = _retry_tail_alias(key, path, size, aliases, config, cancel_event)
+    return tail, tail is not None
 
 
 def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
@@ -1471,7 +1488,8 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
     by_full: dict = {}
     recovered = 0
     for item in items:
-        digest, was_recovered = _stage3_digest(item, full_by_item, aliases, config)
+        digest, was_recovered = _stage3_digest(
+            item, full_by_item, aliases, config, cancel_event)
         recovered += was_recovered
         if digest is not None:
             by_full.setdefault(digest, []).append(item[3])
@@ -1481,15 +1499,21 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
     }
 
 
-def _stage3_digest(item, full_by_item, aliases, config):
+def _stage3_digest(item, full_by_item, aliases, config, cancel_event=None):
     """Resolve one stage-3 item's full digest, retrying a sibling alias when the
-    representative failed (hr-rel-50). Returns ``(digest, was_recovered)``."""
+    representative failed (hr-rel-50). Returns ``(digest, was_recovered)``.
+
+    hr-conc-50: an item absent from ``full_by_item`` was never dispatched
+    because the cancel fired, so it is skipped rather than re-hashed."""
     path, size, _sampled, key = item
-    digest = full_by_item.get(item)
-    failed = item in full_by_item and digest is None
-    if digest is None and aliases is not None and len(aliases.get(key, ())) > 1:
-        digest = _retry_full_alias(key, path, size, aliases, config)
-    return digest, bool(failed and digest is not None)
+    if item not in full_by_item:
+        return None, False
+    digest = full_by_item[item]
+    if digest is not None:
+        return digest, False
+    if aliases is not None and len(aliases.get(key, ())) > 1:
+        digest = _retry_full_alias(key, path, size, aliases, config, cancel_event)
+    return digest, digest is not None
 
 
 def _emit_stage3_groups(by_full, on_composite, accept_group):

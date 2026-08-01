@@ -5,6 +5,7 @@ import io
 import json
 import os
 import re
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -3453,6 +3454,56 @@ def test_stage2_recovered_alias_is_not_counted_as_hash_error(monkeypatch):
 
     assert regrouped == {("HEAD", "TAIL"): [key]}
     assert info["stage2_errors"] == 0
+
+
+def test_retry_alias_stops_on_cancel(monkeypatch):
+    """hr-conc-50: a hardlink-heavy inode must not keep hashing after Ctrl-C."""
+    cancel = threading.Event()
+    cancel.set()
+    calls = []
+    assert hr._retry_alias(
+        ("d", 0), "/dead", {("d", 0): ["/dead", "/live"]},
+        lambda alias: calls.append(alias) or "DIGEST", cancel) is None
+    assert calls == []
+
+
+def test_stage2_skips_items_the_cancel_never_hashed(monkeypatch):
+    """hr-conc-50: an item absent from the stage result was never dispatched;
+    retrying it would resume synchronous hashing after the user asked to stop."""
+    key = ("d", 0)
+    item = (100, "/dead", "HEAD", key)
+    monkeypatch.setattr(hr, "_run_stage", lambda *_a, **_k: ({}, 0))
+    retried = []
+    monkeypatch.setattr(
+        hr, "_retry_tail_alias", lambda *a: retried.append(a) or "TAIL")
+
+    regrouped, info = hr._stage2_hash(
+        [item], jobs=1, config=None, aliases={key: ["/dead", "/live"]})
+
+    assert regrouped == {}
+    assert retried == []
+    assert info["stage2_errors"] == 0
+
+
+def test_stage3_skips_items_the_cancel_never_hashed(monkeypatch):
+    key = ("d", 0)
+    monkeypatch.setattr(hr, "_run_stage", lambda *_a, **_k: ({}, 0))
+    retried = []
+    monkeypatch.setattr(
+        hr, "_retry_full_alias", lambda *a: retried.append(a) or "FULL")
+
+    by_full, info = hr._stage3_hash(
+        {("HEAD", "TAIL"): [key, ("d", 1)]},
+        rep={key: "/dead", ("d", 1): "/other"},
+        sizes={key: 100, ("d", 1): 100},
+        jobs=1,
+        config=None,
+        aliases={key: ["/dead", "/live"], ("d", 1): ["/other"]},
+    )
+
+    assert by_full == {}
+    assert retried == []
+    assert info["stage3_errors"] == 0
 
 
 def test_retry_full_alias_uses_the_next_readable_sibling(monkeypatch):
