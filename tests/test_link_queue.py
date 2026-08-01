@@ -4667,6 +4667,36 @@ def test_command_timeout_terminates_then_kills_process_group(
     assert fallback_proc.killed
 
 
+def test_windows_timeout_targets_full_process_tree(
+        headless_dispatcher, monkeypatch):
+    calls = []
+
+    class Proc:
+        pid = 456
+
+        @staticmethod
+        def terminate():
+            raise AssertionError("taskkill fallback used")
+
+        @staticmethod
+        def kill():
+            raise AssertionError("taskkill fallback used")
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        return types.SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(link_queue.sys, "platform", "win32")
+    monkeypatch.setattr(link_queue.subprocess, "run", run)
+
+    headless_dispatcher._terminate_process_tree(Proc())
+    headless_dispatcher._kill_process_tree(Proc())
+
+    assert calls[0][0] == ["taskkill", "/PID", "456", "/T"]
+    assert calls[1][0] == ["taskkill", "/PID", "456", "/T", "/F"]
+    assert all(call[1]["check"] is False for call in calls)
+
+
 def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monkeypatch):
     class Proc:
         stdout = ()

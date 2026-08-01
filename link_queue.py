@@ -2235,9 +2235,29 @@ class Dispatcher:
         return timer
 
     @staticmethod
+    def _taskkill_process_tree(proc, *, force: bool) -> bool:
+        args = ["taskkill", "/PID", str(int(proc.pid)), "/T"]
+        if force:
+            args.append("/F")
+        try:
+            result = subprocess.run(
+                args,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
+    @staticmethod
     def _terminate_process_tree(proc) -> None:
         try:
-            if hasattr(os, "killpg"):
+            if sys.platform == "win32":
+                if not Dispatcher._taskkill_process_tree(proc, force=False):
+                    proc.terminate()
+            elif hasattr(os, "killpg"):
                 os.killpg(proc.pid, signal.SIGTERM)
             else:
                 proc.terminate()
@@ -2247,7 +2267,10 @@ class Dispatcher:
     @staticmethod
     def _kill_process_tree(proc) -> None:
         try:
-            if hasattr(os, "killpg"):
+            if sys.platform == "win32":
+                if not Dispatcher._taskkill_process_tree(proc, force=True):
+                    proc.kill()
+            elif hasattr(os, "killpg"):
                 os.killpg(proc.pid, signal.SIGKILL)
             else:
                 proc.kill()
