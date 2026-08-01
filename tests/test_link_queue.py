@@ -29,6 +29,7 @@ Run:
 
 from __future__ import annotations
 
+import gc
 import os
 import queue
 import sys
@@ -145,6 +146,22 @@ def q(url, protocol="http", template="echo {url}", shell=False):
 # ---------------------------------------------------------------------------
 # fixture
 # ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _finalize_tk_interpreters():
+    """Collect every Tk root this module drops, on the main thread.
+
+    A Tk root is part of a reference cycle, so `destroy()` plus losing the last
+    name still leaves the `Tkapp` object for the cyclic collector. Whichever
+    thread happens to trip the collector then finalizes it, and Tcl aborts the
+    whole process with `Tcl_AsyncDelete: async handler deleted by the wrong
+    thread` when that thread is not the one that created the interpreter. This
+    module runs real worker threads, so the roots have to go before one of them
+    reaches a collection.
+    """
+    yield
+    gc.collect()
+
 
 @pytest.fixture
 def headless_dispatcher(tmp_path, monkeypatch):

@@ -7,6 +7,7 @@ module).  The App tests need a Tk display; they are skipped automatically when
 none is available.
 """
 
+import gc
 import logging
 import os
 import random
@@ -26,6 +27,22 @@ from minikeypad import KeyParam, MAX_KBD_GROUPS
 def _no_sleep(monkeypatch):
     """Keep write-retry backoff from slowing the suite."""
     monkeypatch.setattr(minikeypad.time, "sleep", lambda _s: None)
+
+
+@pytest.fixture(autouse=True)
+def _finalize_tk_interpreters():
+    """Collect every Tk root this module drops, on the main thread.
+
+    A Tk root is part of a reference cycle, so `destroy()` plus losing the last
+    name still leaves the `Tkapp` object for the cyclic collector. Whichever
+    thread happens to trip the collector then finalizes it, and Tcl aborts the
+    whole process with `Tcl_AsyncDelete: async handler deleted by the wrong
+    thread` when that thread is not the one that created the interpreter. The
+    later thread-pool tests supply exactly such a thread, so the roots have to
+    be gone before this module ends.
+    """
+    yield
+    gc.collect()
 
 
 # --------------------------------------------------------------------------- #
