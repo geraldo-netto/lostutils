@@ -6,7 +6,9 @@ Proposed corrections / improvements. One table per review category. Format:
 
 Scan scope = root-directory `.py`/`.sh` files only (per AGENTS.md); cache/build paths are excluded. Tables sorted by `description` (each starts with `file:line`). Scripts are standalone — dedup findings are within-file only, never cross-file module extraction.
 
-Latest full rescan: 2026-08-01 — 10 root scripts / 22,430 lines (no `.sh` files in root); cache/build paths (`__pycache__`, `.ruff_cache`, `.pytest_cache`, `.complexipy_cache`, `.hypothesis`, `coverage.json`, `.coverage`) excluded. Pinned gates re-run clean: `ruff@0.15.22 check *.py` → all checks passed; `pyright@1.1.411 --pythonpath /usr/bin/python3.12 *.py` → 0 errors/warnings/informations; `lizard -l python -C 11 *.py` → 0 warnings (highest per-file average CCN 3.7). Neither tool is on `PATH` in this workspace — invoke via `uvx ruff@0.15.22` / `uvx pyright@1.1.411`. One Python 3.12 POSIX-fork warning is recorded as `bt-mt-01`.
+Latest full rescan: 2026-08-01 — 10 root scripts / 22,430 lines (no `.sh` files in root); cache/build paths (`__pycache__`, `.ruff_cache`, `.pytest_cache`, `.complexipy_cache`, `.hypothesis`, `coverage.json`, `.coverage`) excluded. Neither lint tool is on `PATH` in this workspace — invoke via `uvx ruff@0.15.22` / `uvx pyright@1.1.411`.
+
+Latest verification (after the data-integrity → state-machine-integrity fix batch): `ruff@0.15.22 check *.py` → all checks passed; `pyright@1.1.411 --pythonpath /usr/bin/python3.12 *.py` → 0 errors/warnings/informations; `lizard -l python -C 11 *.py` → 0 warnings; CI-equivalent suite 2,096 passed / 1 skipped / 6 subtests plus 103 explicitly collected fuzz cases; total coverage 97.53%; all 1,340 functions/methods meet the 80% function gate. The Python 3.12 POSIX-fork warning is gone — `bt-mt-01` shipped, and the only remaining `fork` use is an explicit, locally-suppressed test seam.
 
 id prefix | file name
 --- | ---
