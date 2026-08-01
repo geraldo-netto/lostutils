@@ -49,7 +49,6 @@ bt-gov-01 | open | low | bookmark-tidy.py:902 — verbose duplicate logging prin
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-int-01 | open | low | organize_by_extension.py:1591-1611 — any existing zero-byte target plus nonempty source is assumed to be a stranded reservation and overwritten, destroying a legitimate empty file despite the no-overwrite contract. Never reclaim ambiguous targets, or authenticate reservations with durable journal metadata. | ambiguous recovery state
 
 ## performance
 

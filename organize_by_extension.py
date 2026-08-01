@@ -1623,17 +1623,6 @@ def _same_file_content(a: Path, b: Path) -> bool:
         return False
 
 
-def _is_stranded_reservation(source: Path, target: Path) -> bool:
-    """True when ``target`` is an empty ``O_EXCL`` reservation left behind by a
-    move killed before ``os.replace``, while ``source`` has real content
-    (oze-robust-10). Any stat failure answers False so a genuine collision
-    still raises instead of being silently reclaimed."""
-    try:
-        return target.stat().st_size == 0 and source.stat().st_size != 0
-    except OSError:
-        return False
-
-
 def _move_cross_device(source: Path, target: Path) -> None:
     """Move a file across filesystems, kill-safe and idempotent (oze-di-01).
 
@@ -1670,13 +1659,7 @@ def _prepare_cross_device_target(source: Path, target: Path) -> bool:
         if _same_file_content(source, target):
             os.unlink(source)
             return True
-        if not _is_stranded_reservation(source, target):
-            raise
-        logger.warning(
-            "overwriting 0-byte target %s with %s — treating it as a stranded "
-            "reservation from an interrupted move; an intentional empty file at "
-            "this path would be replaced", target, source)
-        return False
+        raise
 
 
 def _copy_cross_device_target(source: Path, target: Path, tmp: Path) -> None:

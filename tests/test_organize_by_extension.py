@@ -4158,15 +4158,13 @@ def test_main_logs_interrupted_message(tmp_path, monkeypatch, caplog):
     assert any("Interrupted." in r.getMessage() for r in caplog.records)
 
 
-def test_cross_device_reclaims_stranded_zero_byte_reservation(tmp_path):
-    """oze-robust-10: a 0-byte target (an O_EXCL reservation stranded by a move
-    killed before os.replace) with a non-empty source is reclaimed and the move
-    completes, instead of raising a phantom collision on every re-run."""
+def test_cross_device_preserves_ambiguous_zero_byte_target(tmp_path):
     src = tmp_path / "src.bin"; src.write_bytes(b"payload")
-    dst = tmp_path / "dst.bin"; dst.write_bytes(b"")  # stranded reservation
-    oze._move_cross_device(src, dst)
-    assert dst.read_bytes() == b"payload"
-    assert not src.exists()
+    dst = tmp_path / "dst.bin"; dst.write_bytes(b"")
+    with pytest.raises(FileExistsError):
+        oze._move_cross_device(src, dst)
+    assert dst.read_bytes() == b""
+    assert src.read_bytes() == b"payload"
 
 
 def test_cross_device_empty_source_zero_target_is_recovery(tmp_path):
@@ -4218,28 +4216,17 @@ def test_collision_slot_rolls_back_candidate_on_interrupt(tmp_path, monkeypatch)
     assert not (tmp_path / "f.bin.collision1").exists()
 
 
-def test_cross_device_reclaim_overwrites_without_unlinking_target(tmp_path, monkeypatch):
-    """oze-robust-20: reclaiming a stranded 0-byte target must overwrite it
-    atomically via os.replace, never unlink it first (no TOCTOU window)."""
+def test_cross_device_ambiguous_target_is_not_unlinked(tmp_path, monkeypatch):
     src = tmp_path / "src.bin"; src.write_bytes(b"payload")
     dst = tmp_path / "dst.bin"; dst.write_bytes(b"")   # stranded reservation
     unlinked = []
     real_unlink = oze.os.unlink
     monkeypatch.setattr(oze.os, "unlink",
                         lambda p: unlinked.append(str(p)) or real_unlink(p))
-    oze._move_cross_device(src, dst)
-    assert dst.read_bytes() == b"payload"
-    assert str(dst) not in unlinked   # target overwritten atomically, not unlinked
-
-
-def test_cross_device_reclaim_logs_warning(tmp_path, caplog):
-    """oze-di-20: overwriting a 0-byte target must be warned, not silent."""
-    import logging as _logging
-    src = tmp_path / "src.bin"; src.write_bytes(b"payload")
-    dst = tmp_path / "dst.bin"; dst.write_bytes(b"")
-    with caplog.at_level(_logging.WARNING):
+    with pytest.raises(FileExistsError):
         oze._move_cross_device(src, dst)
-    assert any("overwriting 0-byte target" in r.message for r in caplog.records)
+    assert dst.read_bytes() == b""
+    assert str(dst) not in unlinked
 
 
 def test_pdf_carrier_with_embedded_pdf_routes_to_pdf(tmp_path):
@@ -4337,4 +4324,3 @@ def test_content_and_reservation_helpers_fail_closed_on_missing_paths(tmp_path):
     target = tmp_path / "target"
 
     assert not _oze._same_file_content(missing, target)
-    assert not _oze._is_stranded_reservation(missing, target)
