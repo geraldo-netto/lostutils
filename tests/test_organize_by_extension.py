@@ -3738,6 +3738,71 @@ def test_normalize_extension_edges(filename, expected):
     assert oze.normalize_extension(Path(filename)) == expected
 
 
+# --- oze-plat: bucket layout and reservation portability ------------------
+
+def test_portable_bucket_name_is_a_passthrough_on_posix():
+    assert oze._portable_bucket_name("aux") == "aux"
+
+
+def test_portable_bucket_name_renames_reserved_device_names_on_windows(monkeypatch):
+    monkeypatch.setattr(oze.os, "name", "nt")
+    assert oze._portable_bucket_name("aux") == "aux_"
+    assert oze._portable_bucket_name("com1") == "com1_"
+    assert oze._portable_bucket_name("pdf") == "pdf"
+
+
+def test_portable_bucket_name_is_idempotent(monkeypatch):
+    # resolve_real_extension can hand an already-mapped `declared` value back
+    # through the guard, so a second pass must not append a second suffix.
+    monkeypatch.setattr(oze.os, "name", "nt")
+    once = oze._portable_bucket_name("nul")
+    assert oze._portable_bucket_name(once) == once
+
+
+def test_normalize_extension_avoids_a_windows_device_name(monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(oze.os, "name", "nt")
+    assert oze.normalize_extension(Path("paper.aux")) == "aux_"
+    assert oze.normalize_extension(Path("report.pdf")) == "pdf"
+
+
+def test_reserve_slot_via_rename_survives_a_rename_that_refuses_an_existing_target(
+        tmp_path, monkeypatch):
+    # Windows `os.rename` raises FileExistsError when the destination exists,
+    # and the destination here is the placeholder the function just created.
+    def _refuse(*_args, **_kwargs):
+        raise FileExistsError("rename onto an existing target")
+
+    monkeypatch.setattr(oze.os, "rename", _refuse)
+    source = tmp_path / "note.txt"
+    source.write_bytes(b"payload")
+
+    candidate = oze._reserve_slot_via_rename(source)
+
+    assert candidate.name == "note.txt.collision1"
+    assert candidate.read_bytes() == b"payload"
+    assert not source.exists()
+
+
+def test_link_regular_no_follow_falls_back_when_nofollow_is_unsupported(
+        tmp_path, monkeypatch):
+    real_link = oze.os.link
+
+    def _link(src, dst, *, follow_symlinks=True):
+        if not follow_symlinks:
+            raise NotImplementedError("link: follow_symlinks unavailable on this platform")
+        return real_link(src, dst)
+
+    monkeypatch.setattr(oze.os, "link", _link)
+    source = tmp_path / "src.bin"
+    source.write_bytes(b"payload")
+    destination = tmp_path / "dst.bin"
+
+    oze._link_regular_no_follow(source, destination)
+
+    assert destination.read_bytes() == b"payload"
+
+
 # --- oze-test-07: _parse_extra_zip_family adversarial fuzz ----------------
 
 @pytest.mark.parametrize("raw,must_not_contain", [

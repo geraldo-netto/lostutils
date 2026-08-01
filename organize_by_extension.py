@@ -80,6 +80,28 @@ logger = logging.getLogger(__name__)
 WEAK_HEADER_LABELS = frozenset({"bmp", "bz2", "exe", "mp3"})
 
 
+# oze-plat-03: Windows refuses to create a file or directory named after a
+# reserved DOS device, so a plain `.aux` or `.prn` file would ask for a bucket
+# directory the OS rejects and the whole extension becomes unorganizable. The
+# rename is applied only on Windows: a POSIX tree already carrying `aux/` keeps
+# working, and the two layouts never have to agree because a tree is organized
+# by one host. Applied at both places an extension becomes a directory name —
+# the declared suffix and the header-detected type.
+WINDOWS_RESERVED_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{n}" for n in range(1, 10)}
+    | {f"lpt{n}" for n in range(1, 10)}
+)
+WINDOWS_RESERVED_SUFFIX = "_"
+
+
+def _portable_bucket_name(extension: str) -> str:
+    """Return `extension` under a name the host OS can actually create."""
+    if os.name == "nt" and extension in WINDOWS_RESERVED_NAMES:
+        return extension + WINDOWS_RESERVED_SUFFIX
+    return extension
+
+
 def normalize_extension(path: Path) -> str:
     """Return the normalized extension string for a file path.
 
@@ -91,7 +113,7 @@ def normalize_extension(path: Path) -> str:
     # characters (a control char would leak into the bucket directory name).
     if not suffix or suffix == '.' or any(c.isspace() or ord(c) < 0x20 for c in suffix):
         return 'no_extension'
-    return suffix.lower().lstrip('.')
+    return _portable_bucket_name(suffix.lower().lstrip('.'))
 
 
 # Header-sniff registry uses a uniform `Signature` protocol (oze-arch-03):
@@ -487,8 +509,12 @@ def resolve_real_extension(
     detected = detect_type_by_header(path, head_cache=ctx.head_cache)
     if detected is None:
         return declared
-    return _resolve_detected_extension(
-        path, declared, detected, ctx, log_mismatch)
+    # oze-plat-03: header detection is the other way an extension reaches a
+    # bucket directory name, so it needs the same reserved-name guard. The
+    # mapping is idempotent, so a `declared` value returned unchanged from the
+    # helper is not mapped twice.
+    return _portable_bucket_name(_resolve_detected_extension(
+        path, declared, detected, ctx, log_mismatch))
 
 
 def _resolve_detected_extension(
@@ -1431,10 +1457,15 @@ def _reserve_slot_via_rename(source: Path) -> Path:
     """Fallback reservation for filesystems without hardlink support (oze-rel-01).
 
     Reserves `<name>.collisionN` with ``O_CREAT|O_EXCL`` (atomic no-clobber,
-    raises FileExistsError if taken) then ``os.rename``s the source onto the
-    reserved slot. The rename overwrites the just-created empty placeholder we
+    raises FileExistsError if taken) then ``os.replace``s the source onto the
+    reserved slot. The replace overwrites the just-created empty placeholder we
     own, so no sibling worker's data is ever clobbered. Same directory, so the
-    rename never hits EXDEV. Caps at ``_COLLISION_RETRY_CAP`` attempts."""
+    replace never hits EXDEV. Caps at ``_COLLISION_RETRY_CAP`` attempts.
+
+    oze-plat-01: ``os.replace``, not ``os.rename`` — only ``os.replace`` has
+    the replace-the-target semantics on every platform. Windows ``os.rename``
+    raises ``FileExistsError`` when the destination exists, which would make
+    this fallback fail on the very placeholder it just created."""
     last_exc: OSError | None = None
     for n in range(1, _COLLISION_RETRY_CAP + 1):
         candidate = source.with_name(f"{source.name}.collision{n}")
@@ -1444,7 +1475,7 @@ def _reserve_slot_via_rename(source: Path) -> Path:
             last_exc = exc
             continue
         os.close(fd)
-        os.rename(source, candidate)
+        os.replace(source, candidate)
         return candidate
     _raise_collision_exhausted(source, last_exc)
 
@@ -1592,9 +1623,14 @@ def _link_with_transient_retry(src: Path, dst: Path) -> None:
 
 
 def _link_regular_no_follow(src: Path, dst: Path) -> None:
+    # oze-plat-02: `os.link` is outside `os.supports_follow_symlinks` on
+    # Windows, where passing the keyword raises NotImplementedError rather than
+    # the TypeError an older signature would give. Both mean the same thing —
+    # no atomic no-follow link here — so both fall back to the plain link and
+    # let the lstat check below catch a symlink that slipped in.
     try:
         os.link(src, dst, follow_symlinks=False)
-    except TypeError:
+    except (TypeError, NotImplementedError):
         os.link(src, dst)
     st = os.lstat(dst)
     if _stat.S_ISLNK(st.st_mode) or not _stat.S_ISREG(st.st_mode):
