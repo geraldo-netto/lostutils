@@ -36,6 +36,8 @@ LLAMA_PROCESS_STOP_SECONDS = 1
 LLM_CONSECUTIVE_FAILURE_LIMIT = 3
 FORMAT_SNIFF_CHARS = 4096
 MOZLZ4_MAGIC = b"mozLz40\x00"
+MAX_LZ4_INPUT_BYTES = 64 * 1024 * 1024
+MAX_LZ4_OUTPUT_BYTES = 256 * 1024 * 1024
 TRACKING_PARAM_NAMES = frozenset(
     {
         "dclid",
@@ -523,15 +525,23 @@ def _decode_mozlz4(data: bytes) -> bytes:
     return _decode_lz4_block(data[len(MOZLZ4_MAGIC):])
 
 
-def _decode_lz4_block(data: bytes) -> bytes:
+def _decode_lz4_block(
+    data: bytes,
+    *,
+    max_input_size: int | None = None,
+    max_output_size: int | None = None,
+) -> bytes:
+    input_limit = MAX_LZ4_INPUT_BYTES if max_input_size is None else max_input_size
+    output_limit = MAX_LZ4_OUTPUT_BYTES if max_output_size is None else max_output_size
+    if len(data) > input_limit:
+        raise UserError("LZ4 input exceeds the decoded bookmark size limit")
     output = bytearray()
     index = 0
     while index < len(data):
         token = data[index]
         index += 1
         literal_len, index = _lz4_length(data, index, token >> 4)
-        output.extend(data[index:index + literal_len])
-        index += literal_len
+        index = _copy_lz4_literals(data, index, literal_len, output, output_limit)
         if index >= len(data):
             break
         if index + 2 > len(data):
@@ -539,8 +549,24 @@ def _decode_lz4_block(data: bytes) -> bytes:
         offset = data[index] | (data[index + 1] << 8)
         index += 2
         match_len, index = _lz4_length(data, index, token & 0x0F)
-        _copy_lz4_match(output, offset, match_len + 4)
+        _copy_lz4_match(output, offset, match_len + 4, output_limit)
     return bytes(output)
+
+
+def _copy_lz4_literals(
+    data: bytes,
+    index: int,
+    length: int,
+    output: bytearray,
+    output_limit: int,
+) -> int:
+    literal_end = index + length
+    if literal_end > len(data):
+        raise UserError("truncated LZ4 literal run")
+    if len(output) + length > output_limit:
+        raise UserError("decoded LZ4 bookmark exceeds the size limit")
+    output.extend(data[index:literal_end])
+    return literal_end
 
 
 def _lz4_length(data: bytes, index: int, nibble: int) -> tuple[int, int]:
@@ -556,9 +582,16 @@ def _lz4_length(data: bytes, index: int, nibble: int) -> tuple[int, int]:
     raise UserError("truncated LZ4 length")
 
 
-def _copy_lz4_match(output: bytearray, offset: int, length: int) -> None:
+def _copy_lz4_match(
+    output: bytearray,
+    offset: int,
+    length: int,
+    output_limit: int = MAX_LZ4_OUTPUT_BYTES,
+) -> None:
     if offset <= 0 or offset > len(output):
         raise UserError("invalid LZ4 match offset")
+    if length > output_limit - len(output):
+        raise UserError("decoded LZ4 bookmark exceeds the size limit")
     start = len(output) - offset
     while length > 0:
         available = len(output) - start

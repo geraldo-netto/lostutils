@@ -25,7 +25,6 @@ rdv3- | remove-deduplv3.py
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-bt-sec-02 | open | med | bookmark-tidy.py:519-535 — custom LZ4 decoding has no decoded-size cap and accepts truncated literal runs; tiny inputs can expand heavily and malformed blocks are silently accepted. Bound input/output and reject `index + literal_len > len(data)`. | STRIDE Denial of service; OWASP ASVS resource-bound validation
 bt-sec-01 | open | low | bookmark-tidy.py:1182-1201 — `--auto-install-llama` runs a live `pip install` of a PyPI package into the running interpreter (arbitrary code execution via the package/its build); the pinned version limits but does not remove supply-chain risk. Default to failing with install instructions and document the trust boundary. | STRIDE Elevation of privilege / supply-chain; live pip call at 1191-1194
 hr-sec-07 | open | med | hash-recursive-ai5.py:614-690 — hash opens never compare descriptor `(dev, ino, size)` with walked identity or recheck stability after reads, so path swaps/mutation can bind a digest to stale identity. Pass expected identity; `fstat` before/after hashing and reject changes. | STRIDE Tampering; TOCTOU attack tree
 hr-sec-08 | open | high | hash-recursive-ai5.py:1223-1244,1845-1848 — raw newlines in filenames inject fake `<digest> <path>` records, poisoning downstream deletion input. Use NUL-delimited or escaped structured output. | STRIDE Tampering; command-input attack tree

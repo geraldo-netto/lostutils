@@ -529,6 +529,25 @@ def test_lz4_match_copy_handles_long_overlapping_run():
     assert output == b"a" * 4097
 
 
+def test_lz4_decoder_rejects_truncated_literal_and_size_overflow():
+    with pytest.raises(bookmark_tidy.UserError, match="truncated.*literal"):
+        bookmark_tidy._decode_lz4_block(b"\x20a")
+    with pytest.raises(bookmark_tidy.UserError, match="size limit"):
+        bookmark_tidy._decode_lz4_block(b"\x20ab", max_output_size=1)
+    with pytest.raises(bookmark_tidy.UserError, match="input exceeds"):
+        bookmark_tidy._decode_lz4_block(b"\x00", max_input_size=0)
+
+
+def test_lz4_match_copy_enforces_output_limit():
+    with pytest.raises(bookmark_tidy.UserError, match="size limit"):
+        bookmark_tidy._copy_lz4_match(
+            bytearray(b"a"),
+            1,
+            10,
+            output_limit=5,
+        )
+
+
 def test_detect_and_read_bookmark_formats(tmp_path):
     chrome = tmp_path / "chrome.json"
     firefox = tmp_path / "firefox.json"
