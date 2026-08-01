@@ -2422,7 +2422,8 @@ class Dispatcher:
         return subprocess.Popen(
             resolved, shell=True,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=cwd, start_new_session=True,
+            text=True, encoding="utf-8", errors="replace",
+            bufsize=1, cwd=cwd, start_new_session=True,
         )
 
     def _warn_shell_template_trusted(self, template: str) -> None:
@@ -2459,7 +2460,13 @@ class Dispatcher:
         return subprocess.Popen(
             argv, shell=False,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=cwd, start_new_session=True,
+            # lq-plat-08: without an explicit encoding text mode decodes with
+            # the locale default — the ANSI code page on Windows — while the
+            # tools this dispatches (yt-dlp, aria2c, curl) emit UTF-8. A
+            # decode error in the reader thread stops the drain and the child
+            # then blocks forever on a full pipe.
+            text=True, encoding="utf-8", errors="replace",
+            bufsize=1, cwd=cwd, start_new_session=True,
         )
 
     def _run_item(self, item: QueueItem, label: str) -> int:

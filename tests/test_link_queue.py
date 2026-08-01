@@ -3631,6 +3631,50 @@ def test_spawn_proc_starts_new_process_session(app, monkeypatch):
     assert [call["start_new_session"] for call in calls] == [True, True]
 
 
+def test_spawn_proc_decodes_child_output_as_utf8(app, monkeypatch):
+    """lq-plat-08: locale decoding would mangle or stall UTF-8 child output."""
+    calls = []
+
+    class FakeProc:
+        stdout = iter(())
+
+        def wait(self, timeout=None):
+            return 0
+
+    def fake_popen(*args, **kwargs):
+        calls.append(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(link_queue.subprocess, "Popen", fake_popen)
+
+    app.dispatcher._spawn_exec_proc(q("http://x", template="echo {url}"), "t", None, "")
+    app.dispatcher._spawn_shell_proc(
+        q("http://x", template="echo {url_quoted}", shell=True), "t", None, "")
+
+    assert [call["encoding"] for call in calls] == ["utf-8", "utf-8"]
+    assert [call["errors"] for call in calls] == ["replace", "replace"]
+
+
+def test_run_item_drains_undecodable_child_bytes_without_stalling(
+        headless_dispatcher, tmp_path):
+    """A byte that is invalid UTF-8 must be replaced, not raise in the reader
+    thread and leave the child blocked on a full pipe."""
+    script = tmp_path / "emit.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stdout.buffer.write(b'ok \\x81 done\\n')\n",
+        encoding="utf-8")
+    msgs: list[str] = []
+    headless_dispatcher._log = msgs.append
+
+    rc = headless_dispatcher._run_item(
+        q("http://x", template=f"{link_queue.shlex.quote(sys.executable)} "
+                               f"{link_queue.shlex.quote(str(script))}"), "t")
+
+    assert rc == 0
+    assert any("ok" in m and "done" in m for m in msgs)
+
+
 def test_run_item_terminates_on_timeout(app, monkeypatch):
     # Force the timeout path: command runs `sleep 5`; we set timeout=1
     # and verify the worker logs the timeout + escalation. The exit code
