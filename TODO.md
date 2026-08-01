@@ -218,7 +218,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 bt-cli-50 | open | low | bookmark-tidy.py:1609-1610 — `--llm-batch-size` help reads "llama.cpp prompt batch size", but the value is the number of bookmarks per categorization batch (`_assign_categories`, 918-931) and is never passed to llama.cpp (`n_batch` is not set anywhere). Reword the help. | CLI / option integrity — help text describes a different knob than the flag controls
-mkp-cli-50 | open | low | minikeypad.py:1893-1894 — `--no-auto-install` is declared with `help=argparse.SUPPRESS`, so it is invisible in `--help` even though it silently overrides both `--auto-install-pyusb` and `MINIKEYPAD_AUTO_INSTALL=1`. The module docstring (24-26) documents the opt-ins but not the override. Unhide it or document it. | CLI / option integrity — hidden flag with precedence over two documented ones
 
 ## dependency
 

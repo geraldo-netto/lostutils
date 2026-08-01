@@ -2344,3 +2344,37 @@ def test_ensure_device_reaper_survives_a_thread_start_failure(app, monkeypatch):
 
     assert app._device_reaper is None
     assert "Device cleanup error" in app.log_box.get("1.0", "end")
+
+
+def test_no_auto_install_is_visible_in_help(capsys):
+    """mkp-cli-50: a flag with precedence over two documented opt-ins must not
+    be hidden from --help."""
+    with pytest.raises(SystemExit):
+        minikeypad.main(["--help"])
+
+    out = capsys.readouterr().out
+    assert "--no-auto-install" in out
+    assert "MINIKEYPAD_AUTO_INSTALL" in out
+
+
+@pytest.mark.parametrize(
+    "argv, env",
+    [
+        (["--auto-install-pyusb", "--no-auto-install"], {}),
+        (["--no-auto-install"], {"MINIKEYPAD_AUTO_INSTALL": "1"}),
+    ],
+)
+def test_no_auto_install_wins_over_each_opt_in(monkeypatch, argv, env):
+    """The precedence the help text now advertises."""
+    monkeypatch.delenv("MINIKEYPAD_AUTO_INSTALL", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(minikeypad, "App", _FakeApp)
+    monkeypatch.setattr(minikeypad, "_install_signal_handlers", lambda _app: None)
+    monkeypatch.setattr(minikeypad, "_USB_OK", False)
+    called = []
+    monkeypatch.setattr(minikeypad, "_ensure_pyusb", lambda: called.append(True))
+
+    minikeypad.main(argv)
+
+    assert called == []

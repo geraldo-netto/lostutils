@@ -22,8 +22,10 @@ Dependencies:
     pip install pyusb==1.3.1        # and a libusb backend (libusb-1.0)
     If pyusb is missing the app starts without device access by default.
     To opt into installing the pinned dependency at startup, pass
-    --auto-install-pyusb or set MINIKEYPAD_AUTO_INSTALL=1.  The native
-    libusb-1.0 backend still has to come from your OS package manager.
+    --auto-install-pyusb or set MINIKEYPAD_AUTO_INSTALL=1.  --no-auto-install
+    wins over both, so a shared environment can pin the behaviour off.
+    The native libusb-1.0 backend still has to come from your OS package
+    manager.
 Linux note:
     Accessing the device needs permission.  The recommended way is a udev rule
     (avoid running the whole GUI as root) -- e.g.
@@ -2009,8 +2011,11 @@ def main(argv=None):
                         version="minikeypad %s" % __version__)
     parser.add_argument("--auto-install-pyusb", action="store_true",
                         help=f"install missing pyusb with pip ({PYUSB_REQUIREMENT})")
+    # mkp-cli-50: this used to be argparse.SUPPRESS, so a flag that overrides
+    # both documented opt-ins was invisible in --help.
     parser.add_argument("--no-auto-install", action="store_true",
-                        help=argparse.SUPPRESS)
+                        help=("never install pyusb, overriding both "
+                              "--auto-install-pyusb and MINIKEYPAD_AUTO_INSTALL=1"))
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="verbose (DEBUG) terminal logging")
     args = parser.parse_args(argv)

@@ -132,10 +132,10 @@ Opens a Tk configurator for a MINI-KeyBoard programmable USB keypad:
 
 ```bash
 python3 minikeypad.py
-python3 minikeypad.py --no-auto-install
+python3 minikeypad.py --auto-install-pyusb
 ```
 
-The supported device is VID `0x1189`, PID `0x8890`, HID interface `1`. The GUI runs without the device attached and reports a disconnected state. If `pyusb` is missing, the app offers to install it unless `--no-auto-install` is passed or `MINIKEYPAD_NO_AUTO_INSTALL=1` is set. A native `libusb` backend is still required from the operating system. On Linux, prefer a udev rule for device permissions instead of running the GUI as root.
+The supported device is VID `0x1189`, PID `0x8890`, HID interface `1`. The GUI runs without the device attached and reports a disconnected state. If `pyusb` is missing, the app starts without device access; installing it at startup is opt-in via `--auto-install-pyusb` or `MINIKEYPAD_AUTO_INSTALL=1`. `--no-auto-install` overrides both, so a shared environment can pin the behaviour off. A native `libusb` backend is still required from the operating system. On Linux, prefer a udev rule for device permissions instead of running the GUI as root.
 
 ## Calendar extraction
 
