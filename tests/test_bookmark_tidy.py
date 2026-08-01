@@ -1190,6 +1190,22 @@ def test_load_immutable_file_and_read_all_bookmarks(tmp_path, caplog):
     assert "unsupported bookmark file" in caplog.text
 
 
+def test_bom_prefixed_bookmark_files_are_still_recognised(tmp_path):
+    """bt-plat-01: U+FEFF is not whitespace, so a surviving BOM would sit in
+    front of the '<' / '{' the format sniff keys on."""
+    html = tmp_path / "bookmarks.html"
+    json_path = tmp_path / "Bookmarks"
+    html.write_text(_netscape_html(), encoding="utf-8-sig")
+    json_path.write_text(
+        json.dumps({"roots": {"bookmark_bar": {
+            "type": "folder", "name": "Bar", "children": [
+                {"type": "url", "name": "Example", "url": "https://example.com/"}]}}}),
+        encoding="utf-8-sig")
+
+    assert len(bookmark_tidy.read_all_bookmarks([html])) == 2
+    assert len(bookmark_tidy.read_all_bookmarks([json_path])) == 1
+
+
 def test_load_immutable_file_missing_path_is_user_error(tmp_path):
     with pytest.raises(bookmark_tidy.UserError, match="could not read immutable file"):
         bookmark_tidy.load_immutable_file(str(tmp_path / "missing.txt"))

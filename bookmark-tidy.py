@@ -247,8 +247,12 @@ class NetscapeBookmarkParser(HTMLParser):
 
 
 def _read_utf8_text(path: Path) -> str:
+    # bt-plat-01: utf-8-sig drops a leading BOM and is identical to utf-8 for
+    # BOM-less input. A surviving U+FEFF is not whitespace, so str.lstrip()
+    # leaves it in front of the '<' or '{' the format sniff looks for and a
+    # bookmark file saved by Windows tooling is rejected as unsupported.
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8-sig")
     except UnicodeDecodeError as exc:
         raise UserError(f"bookmark file is not valid UTF-8: {path}") from exc
 
