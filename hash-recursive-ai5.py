@@ -12,9 +12,9 @@ Pipeline:
      Group by (size, head_digest).
   5. Stage 2 hash — for groups with size > CAP (4 MiB) and ≥2 members, also
      hash the last 4 MiB, a contiguous 4 MiB block at the file's center,
-     plus two 64 KiB samples at size/3 and 2*size/3. Files that match on
-     all windows are reported as duplicates; the rest fall out (head
-     matched but content differed past the head).
+     plus two 64 KiB samples at size/3 and 2*size/3.
+  6. Stage 3 confirmation — files matching every sampled window receive a
+     final full-file BLAKE3 hash before they are reported as duplicates.
 
 Why head + center + tail + samples? A first-window-only hash treats files
 as duplicate when they only share a container header — common false
@@ -22,12 +22,13 @@ positive for MKV/MP4 files with the same intro, ISOs of related distros,
 tar backups of similar trees, DB dumps with the same schema. Hashing three
 4 MiB blocks (head, center, tail) plus two point samples makes accidental
 collision essentially impossible for real-world content while staying
-bounded (max ~12.13 MiB read per file, regardless of size).
+an efficient rejection filter before the definitive full-file comparison.
 """
 from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import io
 import os
 import queue
@@ -1489,7 +1490,13 @@ def _retain_candidate_keys(mapping, candidate_keys) -> None:
             del mapping[key]
 
 
-def _split_stage1_buckets(by_head, rep, accept_group, config):
+def _split_stage1_buckets(
+    by_head,
+    rep,
+    accept_group,
+    config,
+    on_composite=None,
+):
     """Triage stage-1 ``(size, head)`` buckets (hr-cx-01).
 
     Buckets with a single member can't be duplicates and are dropped.
@@ -1501,6 +1508,7 @@ def _split_stage1_buckets(by_head, rep, accept_group, config):
     stage-2 item list."""
     stage2_items: list = []
     for (size, head), keys in by_head.items():
+        _publish_small_digests(size, head, keys, config, on_composite)
         if len(keys) < 2:
             continue
         if size <= config.head_tail_threshold:
@@ -1509,6 +1517,13 @@ def _split_stage1_buckets(by_head, rep, accept_group, config):
             for key in keys:
                 stage2_items.append((size, rep[key], head, key))
     return stage2_items
+
+
+def _publish_small_digests(size, digest, keys, config, on_composite):
+    if size > config.head_tail_threshold or on_composite is None:
+        return
+    for key in keys:
+        on_composite(key, digest)
 
 
 def _stage_progress_cb(on_stage_progress, stage):
@@ -1638,14 +1653,19 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         candidates, rep, jobs, config, cancel_event, aliases=aliases,
         on_hashed=on_hashed,
         on_progress=_stage_progress_cb(on_stage_progress, "stage1"))
-    stage2_items = _split_stage1_buckets(by_head, rep, _accept_group, config)
+    stage2_items = _split_stage1_buckets(
+        by_head,
+        rep,
+        _accept_group,
+        config,
+        on_composite,
+    )
 
     # ---- Stage 2: tail + center + middle samples for size+head collisions ----
     regrouped, stage2_info = _stage2_hash(
         stage2_items, jobs, config, cancel_event,
         on_progress=_stage_progress_cb(on_stage_progress, "stage2"),
         aliases=aliases)
-    _publish_stage2_digests(regrouped, on_composite)
     by_full, stage3_info = _stage3_hash(
         regrouped,
         rep,
@@ -1871,18 +1891,29 @@ class _ProgressStallMonitor:
 
 
 _DUMP_COMPOSITE_DIGEST_WIDTH = len(("00" * 32) + ":" + ("00" * 32))
+_DUMP_DIGEST_WIDTH = len(
+    "provisional:" + ("0" * 16) + ":" + ("0" * _DUMP_COMPOSITE_DIGEST_WIDTH)
+)
+
+
+def _provisional_digest(key, digest: str) -> str:
+    identity = hashlib.blake2s(
+        repr(key).encode("utf-8", "backslashreplace"),
+        digest_size=8,
+    ).hexdigest()
+    return f"provisional:{identity}:{digest}"
 
 
 def _dump_digest_field(digest: str) -> str:
-    return digest.ljust(_DUMP_COMPOSITE_DIGEST_WIDTH)
+    return digest.ljust(_DUMP_DIGEST_WIDTH)
 
 
 class HashDumpWriter:
     """Stream hash dump lines as each hash completes.
 
-    Stage 1 writes a line immediately for every hashed inode, and stage 2
-    patches the fixed-width digest field in place when a composite digest
-    replaces the head-only digest.
+    Stage 1 writes a unique provisional identity for every hashed inode.
+    A later full-content result patches the fixed-width field with a reusable
+    digest; interrupted or failed entries remain visibly provisional.
     """
 
     def __init__(self, handle):
@@ -1891,11 +1922,12 @@ class HashDumpWriter:
         self._digests: dict = {}
 
     def write_head(self, key, digest: str, paths) -> None:
+        provisional = _provisional_digest(key, digest)
         offsets = []
         for path in paths:
-            offsets.append(self._write_line(digest, path))
+            offsets.append(self._write_line(provisional, path))
         self._offsets[key] = offsets
-        self._digests[key] = digest
+        self._digests[key] = provisional
         self._handle.flush()
 
     def patch_composite(self, key, digest: str) -> None:

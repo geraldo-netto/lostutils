@@ -3380,10 +3380,8 @@ def test_stage2_recovered_alias_is_not_counted_as_hash_error(monkeypatch):
     assert info["stage2_errors"] == 0
 
 
-def test_main_dump_writes_composite_for_stage2_files(tmp_path, monkeypatch):
-    """hr-obs-02: two files sharing a head but differing past it get DISTINCT
-    composite head:tail digests in the dump (not identical head-only digests).
-    Use a tiny --block-size so small files reach stage 2."""
+def test_main_dump_marks_unconfirmed_stage2_files_provisional(tmp_path, monkeypatch):
+    """Files rejected by sampled stage 2 keep unique provisional identities."""
     head = b"H" * 64
     (tmp_path / "a.bin").write_bytes(head + b"AAAA")   # same size + head
     (tmp_path / "b.bin").write_bytes(head + b"BBBB")   # differ in the tail
@@ -3396,11 +3394,23 @@ def test_main_dump_writes_composite_for_stage2_files(tmp_path, monkeypatch):
     digests = {ln.split(" ", 1)[1].rsplit("/", 1)[-1]: ln.split(" ", 1)[0]
                for ln in lines}
     assert "a.bin" in digests and "b.bin" in digests
-    # composite form head:tail
-    assert ":" in digests["a.bin"] and ":" in digests["b.bin"]
-    # distinct identities despite shared head
+    assert digests["a.bin"].startswith("provisional:")
+    assert digests["b.bin"].startswith("provisional:")
     assert digests["a.bin"] != digests["b.bin"]
-    assert digests["a.bin"].split(":")[0] == digests["b.bin"].split(":")[0]  # same head
+
+
+def test_hash_dump_provisional_tokens_are_unique_per_inode(tmp_path):
+    out = tmp_path / "hashes.txt"
+    with out.open("w+", encoding="utf-8") as handle:
+        writer = hr.HashDumpWriter(handle)
+        writer.write_head((1, 1), "ab" * 32, ["/tmp/a.bin"])
+        writer.write_head((1, 2), "ab" * 32, ["/tmp/b.bin"])
+        handle.seek(0)
+        tokens = [line.split(" ", 1)[0] for line in handle]
+
+    assert len(tokens) == 2
+    assert len(set(tokens)) == 2
+    assert all(token.startswith("provisional:") for token in tokens)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="hardlinks via os.link (POSIX)")
