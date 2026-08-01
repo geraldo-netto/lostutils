@@ -596,18 +596,18 @@ def test_check_disk_space_lets_unsupported_proceed(tmp_path, monkeypatch):
     rf._check_disk_space(tmp_path / "src", tmp_path / "dst")  # no raise
 
 
-def test_src_total_bytes_sums_regular_only(tmp_path):
+def test_src_size_totals_sums_regular_only(tmp_path):
     src = tmp_path / "src"; src.mkdir()
     (src / "a.bin").write_bytes(b"hello")              # 5
     (src / "b.bin").write_bytes(b"world!")             # 6
     fifo = src / "fifo"; os.mkfifo(fifo)               # 0
     (src / "sub").mkdir()
     (src / "sub" / "c.bin").write_bytes(b"x" * 1000)
-    total = rf._src_total_bytes(src)
+    total = rf._src_size_totals(src)[0]
     assert total == 5 + 6 + 1000
 
 
-def test_src_total_bytes_skips_lstat_errors(tmp_path, monkeypatch):
+def test_src_size_totals_skips_lstat_errors(tmp_path, monkeypatch):
     src = tmp_path / "src"; src.mkdir()
     (src / "a.bin").write_bytes(b"hello")
 
@@ -619,7 +619,7 @@ def test_src_total_bytes_skips_lstat_errors(tmp_path, monkeypatch):
         return real_lstat(self)
 
     monkeypatch.setattr(Path, "lstat", flaky_lstat)
-    assert rf._src_total_bytes(src) == 0
+    assert rf._src_size_totals(src)[0] == 0
 
 
 # --- rf-rel-04: verify_ownership flag --------------------------------------
@@ -751,16 +751,21 @@ def test_find_open_file_holders_doc_mentions_snapshot_limitation():
 
 
 def test_copy_tree_skips_space_check_when_disabled(tmp_path, monkeypatch):
-    # rf-perf-02: check_space=False skips both _src_total_bytes and
+    # rf-perf-02: check_space=False skips both _src_size_totals and
     # _check_disk_space (no walk for the precheck).
     src = tmp_path / "src"; src.mkdir()
     (src / "a.bin").write_bytes(b"x" * 4096)
     called = {"space": 0, "total": 0}
     monkeypatch.setattr(rf, "_check_disk_space",
                         lambda *a, **k: called.__setitem__("space", called["space"] + 1))
-    real_total = rf._src_total_bytes
-    monkeypatch.setattr(rf, "_src_total_bytes",
-                        lambda s: (called.__setitem__("total", called["total"] + 1), real_total(s))[1])
+    real_totals = rf._src_size_totals
+    monkeypatch.setattr(
+        rf,
+        "_src_size_totals",
+        lambda s: (
+            called.__setitem__("total", called["total"] + 1), real_totals(s)
+        )[1],
+    )
     rf.copy_tree(src, tmp_path / "dst", check_space=False)
     assert called["space"] == 0
     assert called["total"] == 0          # no precheck walk
@@ -2030,14 +2035,14 @@ def test_copy_tree_progress_cb_called_per_file(tmp_path):
 
 def test_copy_tree_progress_done_matches_src_total_with_symlink(tmp_path):
     # rf-rel-05: a tree containing a symlink must still finish with
-    # done == total. _src_total_bytes counts regular files only and the
+    # done == total. _src_size_totals counts regular files only and the
     # tracking copy_function must account the same bytes (os.stat for the
     # followed target, never the link's own lstat size).
     src = tmp_path / "s"; src.mkdir()
     (src / "real.txt").write_bytes(b"x" * 4096)
     (src / "link").symlink_to("real.txt")
     dst = tmp_path / "t"
-    expected_total = rf._src_total_bytes(src)
+    expected_total = rf._src_size_totals(src)[0]
     calls = []
     rf.copy_tree(src, dst, progress_cb=lambda d, t: calls.append((d, t)))
     last = calls[-1]
@@ -2049,13 +2054,13 @@ def test_copy_tree_progress_done_matches_src_total_with_symlink(tmp_path):
                       min_size=1, max_size=6))
 def test_copy_tree_progress_done_equals_total_property(tmp_path_factory, sizes):
     # rf-rel-05: for any set of regular files, the final progress `done`
-    # equals the `total` derived from _src_total_bytes — no drift.
+    # equals the apparent total derived from _src_size_totals — no drift.
     src = tmp_path_factory.mktemp("s") / "tree"
     src.mkdir()
     for i, n in enumerate(sizes):
         (src / f"f{i}.bin").write_bytes(b"a" * n)
     dst = src.parent / "dst"
-    expected = rf._src_total_bytes(src)
+    expected = rf._src_size_totals(src)[0]
     calls = []
     rf.copy_tree(src, dst, progress_cb=lambda d, t: calls.append((d, t)))
     assert calls[-1][0] == calls[-1][1] == expected
@@ -2700,7 +2705,7 @@ def test_check_cross_device_returns_none_when_no_existing_ancestor(tmp_path, mon
     rf._check_cross_device(plan)   # silent return
 
 
-def test_src_total_bytes_skip_continues_after_oserror(tmp_path, monkeypatch):
+def test_src_size_totals_skip_continues_after_oserror(tmp_path, monkeypatch):
     src = tmp_path / "s"; src.mkdir()
     (src / "a").write_text("x")
     (src / "b").write_text("xx")
@@ -2714,7 +2719,7 @@ def test_src_total_bytes_skip_continues_after_oserror(tmp_path, monkeypatch):
         return real_lstat(self)
 
     monkeypatch.setattr(Path, "lstat", lstat)
-    total = rf._src_total_bytes(src)
+    total = rf._src_size_totals(src)[0]
     assert total == 2   # only "b" counted; "a" skipped via continue
 
 

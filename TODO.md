@@ -279,7 +279,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-rf-unused-10 | open | low | relocate_folder.py:926 — `_src_total_bytes` has no live caller; `_src_size_totals` superseded it and callers use tuple fields directly. Delete it and update its test. | grep-proven test-only
 rf-unused-12 | open | low | relocate_folder.py:994 — `_OWNERSHIP_INFLIGHT` is never read by live code; inflight bounds come from `_inflight_cap(workers)`. Delete it. | dead const — delete
 rf-unused-11 | open | low | relocate_folder.py:1222-1223 — `_VERIFY_WORKERS` and `_VERIFY_INFLIGHT` are assigned but never read by live code. Delete both. | dead const — delete
 rdv3-unused-01 | open | low | remove-deduplv3.py:188-189 — `if not to_remove: continue` is unreachable after distinct-path dedup and the `len(paths) < 2` guard. Delete the branch. | unused/dead-code — logic-proven unreachable

@@ -944,13 +944,6 @@ def _src_size_totals(src: Path) -> tuple[int, int]:
     return apparent, allocated
 
 
-def _src_total_bytes(src: Path) -> int:
-    """Apparent sum of regular-file sizes under `src` (rf-rel-07). Non-regular
-    files (sockets, FIFOs, devices) are zero-cost in the copy, so they're
-    excluded. Symlinks are not followed."""
-    return _src_size_totals(src)[0]
-
-
 def _make_ignore_specials(skipped: list[Path], mode_cache: dict[Path, int]):
     """Build a shutil.copytree ignore callback that filters non-regular files.
 
