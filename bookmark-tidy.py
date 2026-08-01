@@ -36,6 +36,10 @@ LLAMA_PROCESS_STOP_SECONDS = 1
 LLM_CONSECUTIVE_FAILURE_LIMIT = 3
 FORMAT_SNIFF_CHARS = 4096
 MOZLZ4_MAGIC = b"mozLz40\x00"
+# The magic is followed by a little-endian uint32 holding the decompressed size
+# (bt-rel-50). Feeding those 4 bytes to the LZ4 decoder as if they were block
+# data corrupts every real Firefox backup.
+MOZLZ4_SIZE_BYTES = 4
 MAX_LZ4_INPUT_BYTES = 64 * 1024 * 1024
 MAX_LZ4_OUTPUT_BYTES = 256 * 1024 * 1024
 TRACKING_PARAM_NAMES = frozenset(
@@ -442,7 +446,21 @@ def firefox_json_data_to_bookmarks(data: Any, source: str) -> list[Bookmark]:
 def _decode_mozlz4(data: bytes) -> bytes:
     if not data.startswith(MOZLZ4_MAGIC):
         raise UserError("Firefox jsonlz4 backup has an invalid mozLz4 header")
-    return _decode_lz4_block(data[len(MOZLZ4_MAGIC):])
+    body_at = len(MOZLZ4_MAGIC) + MOZLZ4_SIZE_BYTES
+    if len(data) < body_at:
+        raise UserError("Firefox jsonlz4 backup is truncated before its size header")
+    declared = int.from_bytes(data[len(MOZLZ4_MAGIC):body_at], "little")
+    if declared > MAX_LZ4_OUTPUT_BYTES:
+        raise UserError("decoded LZ4 bookmark exceeds the size limit")
+    # The declared size bounds the decoder, so a header that under-reports the
+    # payload fails on the output limit rather than silently truncating.
+    decoded = _decode_lz4_block(data[body_at:], max_output_size=declared)
+    if len(decoded) != declared:
+        raise UserError(
+            "Firefox jsonlz4 backup size mismatch: header declares "
+            f"{declared} bytes, decoded {len(decoded)}"
+        )
+    return decoded
 
 
 def _decode_lz4_block(

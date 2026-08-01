@@ -42,7 +42,7 @@ def _netscape_html():
 """
 
 
-def _mozlz4_literal(raw):
+def _lz4_literal_block(raw):
     extra = len(raw) - 15
     payload = bytearray([0xF0 if extra >= 0 else len(raw) << 4])
     while extra >= 255:
@@ -51,7 +51,18 @@ def _mozlz4_literal(raw):
     if extra >= 0:
         payload.append(extra)
     payload.extend(raw)
-    return bookmark_tidy.MOZLZ4_MAGIC + bytes(payload)
+    return bytes(payload)
+
+
+def _mozlz4_literal(raw, declared=None):
+    """Real mozLz4 layout: magic + little-endian uint32 decompressed size + LZ4
+    block (bt-rel-50). `declared` overrides the size field for the mismatch test."""
+    size = len(raw) if declared is None else declared
+    return (
+        bookmark_tidy.MOZLZ4_MAGIC
+        + size.to_bytes(bookmark_tidy.MOZLZ4_SIZE_BYTES, "little")
+        + _lz4_literal_block(raw)
+    )
 
 
 class FakeLlamaChat:
@@ -443,6 +454,36 @@ def test_read_firefox_jsonlz4_rejects_bad_container():
         bookmark_tidy._decode_mozlz4(b"not-lz4")
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy._decode_lz4_block(bytes([0x10, 0x01, 0x00]))
+
+
+def test_decode_mozlz4_honours_the_size_header():
+    """bt-rel-50: the 4 bytes after the magic are a size field, not block data."""
+    raw = b'{"root":"placesRoot"}'
+    assert bookmark_tidy._decode_mozlz4(_mozlz4_literal(raw)) == raw
+    # The pre-fix layout (magic immediately followed by the block) must now fail
+    # instead of decoding, so a regression can't pass silently.
+    with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy._decode_mozlz4(
+            bookmark_tidy.MOZLZ4_MAGIC + _lz4_literal_block(raw))
+
+
+@pytest.mark.parametrize("declared", [3, 999])
+def test_decode_mozlz4_rejects_size_mismatch(declared):
+    with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy._decode_mozlz4(_mozlz4_literal(b"payload-bytes", declared))
+
+
+def test_decode_mozlz4_rejects_truncated_size_header():
+    with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy._decode_mozlz4(bookmark_tidy.MOZLZ4_MAGIC + b"\x01\x02")
+
+
+def test_decode_mozlz4_rejects_oversized_declared_size():
+    oversized = bookmark_tidy.MAX_LZ4_OUTPUT_BYTES + 1
+    with pytest.raises(bookmark_tidy.UserError):
+        bookmark_tidy._decode_mozlz4(
+            bookmark_tidy.MOZLZ4_MAGIC
+            + oversized.to_bytes(bookmark_tidy.MOZLZ4_SIZE_BYTES, "little"))
 
 
 @pytest.mark.parametrize("suffix", [".html", ".json"])
