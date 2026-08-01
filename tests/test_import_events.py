@@ -4977,6 +4977,9 @@ def test_language_and_date_edge_helpers():
     assert import_events.normalize_event_date(123) == "123"
     assert import_events._calendar_event_line(2026, 2, 30, "Impossible") == ""
     assert import_events._split_time_explicit("09:30 Launch", False) == ("T09:30", "Launch")
+    assert import_events._split_time_explicit("24:00 Invalid", False) is None
+    assert import_events._split_time_explicit("23:60 Invalid", False) is None
+    assert import_events._split_time_explicit("23:59:60 Invalid", False) is None
 
 
 def test_close_paddle_engine_surfaces_close_failure(caplog):

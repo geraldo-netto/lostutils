@@ -126,7 +126,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-ie-rel-13 | open | med | import_events.py:1859 — `_split_time_explicit` formats hour/minute/second without range validation, so values such as `24:99` enter table output and later disappear from ICS. Validate through `_format_normalized_time` and add adversarial boundary tests. | cross-format correctness
 
 ## robustness / recovery
 

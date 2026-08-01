@@ -1905,7 +1905,10 @@ def _split_time_explicit(text: str, has_time_columns: bool) -> Optional[Tuple[st
     hour = int(explicit.group(1))
     minute = int(explicit.group(2) or 0)
     second = int(explicit.group(3) or 0)
-    return _hms_suffix(hour, minute, second), explicit.group(4).strip()
+    normalized = _format_normalized_time(hour, minute, second)
+    if normalized is None:
+        return None
+    return f"T{normalized}", explicit.group(4).strip()
 
 
 def _split_table_time(text: str, has_time_columns: bool) -> Tuple[str, str]:
