@@ -2175,6 +2175,34 @@ def test_run_text_llm_stage_cache_key_includes_prompt_digest(tmp_path, monkeypat
     assert captured[0]["prompt_sha256"] != captured[1]["prompt_sha256"]
 
 
+def test_run_text_llm_stage_cache_key_tracks_model_identity(tmp_path, monkeypatch):
+    source = tmp_path / "event.txt"
+    source.write_text("Launch", encoding="utf-8")
+    model = tmp_path / "model.gguf"
+    clip = tmp_path / "clip.gguf"
+    model.write_bytes(b"model-v1")
+    clip.write_bytes(b"clip-v1")
+    cfg = import_events.ModelConfig(
+        model_path=str(model),
+        clip_path=str(clip),
+        stage_cache="on",
+        stage_cache_dir=str(tmp_path / "cache"),
+    )
+    captured = []
+    monkeypatch.setattr(
+        import_events,
+        "_read_stage_cache_text",
+        lambda _cfg, _path, _stage, options: captured.append(options.copy()) or "[]",
+    )
+
+    import_events._run_text_llm("Launch", "en", source, "Text/LLM", None, cfg)
+    model.write_bytes(b"model-version-two")
+    import_events._run_text_llm("Launch", "en", source, "Text/LLM", None, cfg)
+
+    assert captured[0]["model_identity"] != captured[1]["model_identity"]
+    assert captured[0]["clip_identity"] == captured[1]["clip_identity"]
+
+
 def test_extract_from_image_falls_back_to_vision_without_ocr(tmp_path, monkeypatch):
     img = tmp_path / "poster.png"
     img.write_bytes(b"image")
