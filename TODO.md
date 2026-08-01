@@ -129,7 +129,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-hr-rel-32 | open | high | hash-recursive-ai5.py:1423-1470 — large files are declared duplicates after sampled windows only; files differing solely outside sampled bytes can be emitted as duplicates. Add a final full-file BLAKE3 confirmation or explicitly advertise approximate matches. | reproduced with equal 32-byte files except one unsampled byte
 ie-rel-13 | open | med | import_events.py:1859 — `_split_time_explicit` formats hour/minute/second without range validation, so values such as `24:99` enter table output and later disappear from ICS. Validate through `_format_normalized_time` and add adversarial boundary tests. | cross-format correctness
 
 ## robustness / recovery

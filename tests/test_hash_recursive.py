@@ -235,6 +235,33 @@ def test_center_block_catches_middle_only_difference(tmp_path):
             "center block failed to catch a midpoint-only difference"
 
 
+def test_full_hash_rejects_difference_outside_sampled_windows(tmp_path):
+    config = hr.RunConfig(block_size=4, sample_size=1)
+    left = bytearray(b"A" * 32)
+    right = bytearray(left)
+    right[5] = ord("B")
+    a = tmp_path / "a.bin"
+    b = tmp_path / "b.bin"
+    a.write_bytes(left)
+    b.write_bytes(right)
+    assert hr.hash_head(a, config) == hr.hash_head(b, config)
+    assert hr.hash_tail_and_samples(a, len(left), config=config) == (
+        hr.hash_tail_and_samples(b, len(right), config=config)
+    )
+    files = []
+    for path in (a, b):
+        stat_result = path.stat()
+        files.append(
+            (str(path), stat_result.st_size, stat_result.st_dev, stat_result.st_ino)
+        )
+
+    result = hr.find_duplicate_groups(files, jobs=1, config=config)
+
+    assert result.groups == {}
+    assert result.info["stage3"] == 2
+    assert result.info["stage3_errors"] == 0
+
+
 def test_find_duplicate_groups_no_candidates():
     with TemporaryDirectory() as d:
         root = Path(d)

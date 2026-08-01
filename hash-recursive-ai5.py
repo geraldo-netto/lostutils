@@ -791,6 +791,15 @@ def hash_tail_and_samples(path, size, strategy=None, config=None):
     return _hash_file_windows(path, sampler.windows(size), config)
 
 
+def hash_full(path, size, config=None):
+    """Final confirmation: BLAKE3 every byte of a sampled candidate."""
+    return _hash_file_windows(
+        path,
+        [FileWindow(0, size, os.SEEK_SET, strict=True)],
+        config,
+    )
+
+
 def _readable_rep(paths):
     """Pick the first read-accessible alias of an inode, falling back to
     the first path if none probes readable — the hash open still handles
@@ -829,6 +838,15 @@ def _make_tail_stage2_batch(config):
             for item in items
         ]
     return _tail_batch
+
+
+def _make_full_stage3_batch(config):
+    def _full_batch(items):
+        return [
+            (item, hash_full(item[0], item[1], config))
+            for item in items
+        ]
+    return _full_batch
 
 
 def _iter_batches(items, batch_size):
@@ -1405,6 +1423,43 @@ def _stage2_tail(item, tail_by_item, aliases, config):
     return tail, bool(failed and tail is not None)
 
 
+def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
+                 on_progress=None):
+    items = [
+        (rep[key], sizes[key], sampled, key)
+        for sampled, keys in regrouped.items()
+        if len(keys) >= 2
+        for key in keys
+    ]
+    if not items:
+        return {}, {"stage3": 0, "stage3_errors": 0}
+    run_kwargs = {"cancel_event": cancel_event}
+    if on_progress is not None:
+        run_kwargs["on_progress"] = on_progress
+    full_by_item, errors = _run_stage(
+        items,
+        _make_full_stage3_batch(config),
+        _capped_byte_total(item[1] for item in items),
+        jobs,
+        **run_kwargs,
+    )
+    by_full: dict = {}
+    for item in items:
+        digest = full_by_item.get(item)
+        if digest is not None:
+            by_full.setdefault(digest, []).append(item[3])
+    return by_full, {"stage3": len(full_by_item), "stage3_errors": errors}
+
+
+def _emit_stage3_groups(by_full, on_composite, accept_group):
+    for digest, keys in by_full.items():
+        if on_composite is not None:
+            for key in keys:
+                on_composite(key, digest)
+        if len(keys) >= 2:
+            accept_group((digest, None), keys)
+
+
 def _prepare_candidates(aliases, inode_size, overflow):
     """Select size-collision candidates and build the per-inode
     representative map (hr-cx-01).
@@ -1474,13 +1529,18 @@ def _emit_stage2_groups(regrouped, on_composite, accept_group):
     dump records the true dup-grouping identity (two files sharing a head but
     differing past it get DISTINCT dump digests). Groups with <2 members are
     dropped."""
+    _publish_stage2_digests(regrouped, on_composite)
     for combined, keys in regrouped.items():
-        if on_composite is not None:
-            head, tail = combined
-            for key in keys:
-                on_composite(key, f"{head}:{tail}")
         if len(keys) >= 2:
             accept_group(combined, keys)
+
+
+def _publish_stage2_digests(regrouped, on_composite):
+    if on_composite is None:
+        return
+    for (head, tail), keys in regrouped.items():
+        for key in keys:
+            on_composite(key, f"{head}:{tail}")
 
 
 def find_duplicate_groups(files, jobs, on_group=None, config=None,
@@ -1499,8 +1559,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     ingest-elided alias counts, or ``None`` when the cap was disabled —
     forward it to :func:`emit_groups` for an accurate ``+N more``).
 
-    Hashing is split into helper functions :func:`_stage1_hash` and
-    :func:`_stage2_hash` (hr-cx-05) so each piece stays under the
+    Hashing is split into stage helpers so each piece stays under the
     AGENTS.md cyclomatic-complexity ceiling.
 
     `on_group(digest_key, keys, aliases)` (hr-scal-02): when supplied,
@@ -1523,7 +1582,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
 
     `on_stage_progress(stage, done, total)` (hr-log-05): fired as stage
     batches are collected, not after the whole stage returns. This keeps
-    long stage-1 / stage-2 hashing runs visibly alive even when the walk
+    long hashing runs visibly alive even when the walk
     has already finished.
 
     `cancel_event` (hr-conc-01): the SIGINT cooperative-cancel flag, the
@@ -1553,6 +1612,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         on_walk_done()
     n_inodes = len(aliases)
     candidates, rep = _prepare_candidates(aliases, inode_size, overflow)
+    candidate_sizes = {key: size for size, key in candidates}
     # hr-scal-02: inode_size is no longer needed once candidates are
     # selected — drop it so it isn't live alongside aliases/rep at peak.
     del inode_size
@@ -1585,13 +1645,24 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         stage2_items, jobs, config, cancel_event,
         on_progress=_stage_progress_cb(on_stage_progress, "stage2"),
         aliases=aliases)
-    _emit_stage2_groups(regrouped, on_composite, _accept_group)
+    _publish_stage2_digests(regrouped, on_composite)
+    by_full, stage3_info = _stage3_hash(
+        regrouped,
+        rep,
+        candidate_sizes,
+        jobs,
+        config,
+        cancel_event,
+        on_progress=_stage_progress_cb(on_stage_progress, "stage3"),
+    )
+    _emit_stage3_groups(by_full, on_composite, _accept_group)
 
     info = {
         "inodes": n_inodes,
         "candidates": len(candidates),
         **stage1_info,
         **stage2_info,
+        **stage3_info,
     }
     return DedupResult(
         groups=final_groups, aliases=aliases, info=info, overflow=overflow)
@@ -1992,7 +2063,11 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
     skips. Subtract those subsets so the printed ``hash_errors`` is the count of
     REAL failures worth investigating, matching the counter's contract."""
     f = _fmt_count
-    total_hash_errors = info["stage1_errors"] + info["stage2_errors"]
+    total_hash_errors = (
+        info["stage1_errors"]
+        + info["stage2_errors"]
+        + info.get("stage3_errors", 0)
+    )
     real_hash_errors = max(
         0,
         total_hash_errors
@@ -2013,6 +2088,7 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
         f"size_collision_inodes={f(info['candidates'])} "
         f"hashed_stage1={f(info['stage1'])} "
         f"hashed_stage2={f(info['stage2'])} "
+        f"hashed_stage3={f(info.get('stage3', 0))} "
         f"dup_groups={f(dup_groups)} "
         f"dup_paths={f(dup_paths)} "
         f"walk_errors={f(walk_stats['dir_errors'])}+"
