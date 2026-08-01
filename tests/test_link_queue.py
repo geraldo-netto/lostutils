@@ -4720,6 +4720,50 @@ def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monke
     assert "unresponsive" in logs[0]
 
 
+def test_stream_deadline_closes_inherited_output_pipe(
+        headless_dispatcher, monkeypatch):
+    joins = []
+    closed = []
+
+    class Reader:
+        def __init__(self, **_kwargs):
+            pass
+
+        @staticmethod
+        def start():
+            pass
+
+        @staticmethod
+        def is_alive():
+            return True
+
+        @staticmethod
+        def join(timeout=None):
+            joins.append(timeout)
+
+    class Proc:
+        pid = 12
+        stdout = object()
+
+    monkeypatch.setattr(link_queue.threading, "Thread", Reader)
+    monkeypatch.setattr(
+        headless_dispatcher,
+        "_arm_command_timeout",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        headless_dispatcher,
+        "_close_subprocess_pipe",
+        lambda pipe: closed.append(pipe),
+    )
+
+    assert not headless_dispatcher._stream_and_wait(
+        Proc(), "job", "https://example.test", 1, "summary"
+    )
+    assert joins and joins[0] is not None
+    assert closed == [Proc.stdout]
+
+
 def test_main_reports_state_lock_error(monkeypatch, capsys):
     class Root:
         def destroy(self):

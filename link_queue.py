@@ -2506,32 +2506,71 @@ class Dispatcher:
 
     def _stream_and_wait(self, proc: "subprocess.Popen", label: str, url: str,
                          timeout: float, verbosity: str) -> bool:
-        """Stream the subprocess output under the command-timeout timer, then
-        wait for exit with a hard deadline (lq-cx-05). Returns True on a clean
-        exit; False when the process stayed unresponsive past the deadline and
-        was abandoned to the OS reaper (caller returns -1 for cooldown/retry).
+        """Stream output in a bounded reader, then wait for process exit.
 
         lq-rel-02: the bounded wait after streaming stops a SIGTERM/SIGKILL-proof
         zombie from hanging the worker; the safety net is 2*timeout+5 to cover
         the timer's terminate->kill ladder. lq-rel-06: `command_timeout_seconds
         == 0` opts out of the timer entirely ("wait forever" for long idempotent
-        downloads), so the hard deadline is None in that case."""
+        downloads), so the hard deadline is None in that case. The deadline is
+        measured from reader startup: a detached descendant that inherited the
+        pipe cannot postpone it by withholding EOF."""
+        hard_deadline = (
+            time.monotonic() + timeout * 2 + 5 if timeout > 0 else None
+        )
         timer = self._arm_command_timeout(proc, label, url, timeout)
+        reader = threading.Thread(
+            target=self._read_subprocess_output,
+            args=(proc.stdout, label, verbosity),
+            daemon=True,
+            name=f"output-reader-{getattr(proc, 'pid', 'unknown')}",
+        )
+        reader.start()
         try:
-            self._stream_subprocess_output(proc.stdout, label, verbosity)
-            hard_deadline = (timeout * 2 + 5) if timeout > 0 else None
+            reader.join(timeout=self._deadline_remaining(hard_deadline))
+            if reader.is_alive():
+                self._log(
+                    f"[{label} stuck] output pipe remained open after "
+                    f"deadline; closing it  url={url}"
+                )
+                self._close_subprocess_pipe(proc.stdout)
+                return False
             try:
-                proc.wait(timeout=hard_deadline)
+                proc.wait(timeout=self._deadline_remaining(hard_deadline))
             except subprocess.TimeoutExpired:
                 self._log(
                     f"[{label} stuck] subprocess unresponsive after "
-                    f"{hard_deadline}s; abandoning  url={url}"
+                    f"deadline; abandoning  url={url}"
                 )
                 return False
         finally:
             if timer is not None:
                 timer.cancel()
         return True
+
+    def _read_subprocess_output(
+        self, stdout, label: str, verbosity: str
+    ) -> None:
+        try:
+            self._stream_subprocess_output(stdout, label, verbosity)
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def _deadline_remaining(deadline: "float | None") -> "float | None":
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
+
+    @staticmethod
+    def _close_subprocess_pipe(stdout) -> None:
+        try:
+            os.close(stdout.fileno())
+        except (AttributeError, OSError, ValueError):
+            try:
+                stdout.close()
+            except (AttributeError, OSError, ValueError):
+                pass
 
     def _item_display(self, item: QueueItem) -> str:
         """Render a queue item for the Treeview. Does not execute anything."""
