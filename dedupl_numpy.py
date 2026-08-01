@@ -93,7 +93,7 @@ def main() -> None:
     with open(args.hash_file, "rb") as f:
         if os.fstat(f.fileno()).st_size == 0:
             return
-        mm = mmap.mmap(f.fileno(), 0, prot=mmap.PROT_READ)
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
 
     data = np.frombuffer(mm, dtype=np.uint8)
     error = None

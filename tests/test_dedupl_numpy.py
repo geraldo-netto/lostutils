@@ -147,8 +147,10 @@ def test_main_closes_mmap(monkeypatch, tmp_path, capfd):
     source.write_bytes(b"a" * 32 + b" /one\n")
     real_mmap = dedupl_numpy.mmap.mmap
     mappings = []
+    mmap_calls = []
 
     def tracked_mmap(*args, **kwargs):
+        mmap_calls.append(kwargs)
         mapping = real_mmap(*args, **kwargs)
         mappings.append(mapping)
         return mapping
@@ -164,6 +166,7 @@ def test_main_closes_mmap(monkeypatch, tmp_path, capfd):
 
     capfd.readouterr()
     assert mappings[0].closed
+    assert mmap_calls == [{"access": dedupl_numpy.mmap.ACCESS_READ}]
 
 
 def test_main_accepts_empty_input(monkeypatch, tmp_path, capfd):
