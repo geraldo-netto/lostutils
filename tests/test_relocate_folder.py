@@ -1403,15 +1403,8 @@ def test_verify_copy_parallel_propagates_size_mismatch(tmp_path):
         rf.verify_copy(src, dst, checksum=True)
 
 
-def test_capture_first_helper_removed():
-    # rf-cmplx-02: the dead _capture_first helper was dropped; only
-    # _collect_chown_error remains as the future-exception drainer.
-    assert not hasattr(rf, "_capture_first")
-
-
 def test_collect_chown_error_appends_each_exception():
-    # rf-cmplx-02: the surviving drainer records every exception (the
-    # caller decides first-vs-all), unlike the removed _capture_first.
+    # The drainer records every exception; the caller decides first-vs-all.
     from concurrent.futures import Future
     f1: Future = Future(); f1.set_exception(ValueError("a"))
     f2: Future = Future(); f2.set_exception(ValueError("b"))
@@ -3380,11 +3373,7 @@ def test_check_disk_space_uses_env_headroom(monkeypatch, tmp_path):
         rf._check_disk_space(tmp_path, tmp_path / "dst", total_bytes=1024)
 
 
-# --- rf-rel-05: dead TMPLINK_SUFFIX constant removed ------------------------
-
-def test_tmplink_suffix_constant_removed():
-    assert not hasattr(rf, "TMPLINK_SUFFIX")
-
+# --- rf-rel-05: unique staging prefixes -------------------------------------
 
 def test_staging_prefix_still_present():
     # the live staging mechanism replaced the fixed .relocate-tmp name.
