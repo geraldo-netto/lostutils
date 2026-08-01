@@ -140,7 +140,7 @@ rf-rob-50 | open | med | relocate_folder.py:1739-1753 — `_fsync_tree` (the fir
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-mkp-state-50 | open | med | minikeypad.py:1804-1818 — `_write_all` replays every saved `(layer, key_id)`, but `build_download_reports` (599-625) emits the `0xA1` layer-switch command only when `ReportID != 0`. On a device that negotiated report ID 0, all three layers are written to whichever layer is currently selected, silently overwriting each other. Confirm the intended protocol against the decompiled C# original before changing behaviour; if confirmed, refuse Write-all for multi-layer profiles on a report-ID-0 device. | state machine integrity — NEEDS CONFIRMATION against the original firmware protocol; do not "fix" on inference alone
+mkp-state-50 | open | low | minikeypad.py:1820-1844 — `_warn_if_layers_collapse` now warns before a multi-layer Write-all on a reportID-0 device, but the write still proceeds and the layers still overwrite each other on the hardware. | state machine integrity — PARTIAL: the warning shipped (see `_warn_if_layers_collapse`); the hard refusal is deferred because whether reportID 0 really means "this firmware cannot switch layers" is a property of the original C# protocol that is still unconfirmed, and refusing would break a legitimate program-one-layer-at-a-time workflow. Confirm against the decompiled original, then decide refuse vs keep-warning.
 
 ## test coverage
 

@@ -1629,6 +1629,43 @@ def test_write_all_reports_failure_stays_unambiguous(app):
     assert "ambiguous" not in app._assignments[(1, 1)]
 
 
+def test_write_all_warns_when_report_id_zero_collapses_layers(app):
+    """mkp-state-50: reportID 0 emits no layer-switch, so multi-layer profiles
+    overwrite each other on the device."""
+    app._io_busy = False
+    app.kp.ReportID = 0
+    data = _one_key_assignment(app)
+    app._assignments = {
+        (1, 1): {"data": data, "desc": "A"},
+        (3, 1): {"data": data, "desc": "B"},
+    }
+    app.dev = FakeDev(connected=True, write_ok=True)
+
+    app._write_all()
+    _wait_drain(app)
+
+    log = app.log_box.get("1.0", "end")
+    assert "no layer-switch command" in log
+    assert "layers 1, 3" in log
+
+
+@pytest.mark.parametrize(
+    ("report_id", "layers"),
+    [(0, (1,)), (2, (1, 3))],
+)
+def test_write_all_stays_quiet_when_layers_cannot_collapse(app, report_id, layers):
+    app._io_busy = False
+    app.kp.ReportID = report_id
+    data = _one_key_assignment(app)
+    app._assignments = {(layer, 1): {"data": data, "desc": "A"} for layer in layers}
+    app.dev = FakeDev(connected=True, write_ok=True)
+
+    app._write_all()
+    _wait_drain(app)
+
+    assert "no layer-switch command" not in app.log_box.get("1.0", "end")
+
+
 def test_write_all_clears_ambiguous_after_a_successful_rewrite(app):
     """mkp-di-50: a key confirmed by a later write-all must stop showing as
     ambiguous."""

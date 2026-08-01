@@ -1831,6 +1831,7 @@ class App(tk.Tk):
         if not self._assignments:
             self._dl_note("Nothing saved to write.")
             return
+        self._warn_if_layers_collapse()
         jobs = []
         for (layer, kid), rec in self._assignments.items():
             built = self._reports_for(layer, rec["data"])
@@ -1840,6 +1841,32 @@ class App(tk.Tk):
             reports, flash, _ = built
             jobs.append(((layer, kid), reports, self._flash_buf(flash)))
         self._run_write_all(jobs)
+
+    def _warn_if_layers_collapse(self):
+        """Warn before a multi-layer write-all on a reportID-0 device (mkp-state-50).
+
+        `build_download_reports` prepends the 0xA1 layer-switch command only
+        when ReportID != 0. With reportID 0 there is no switch, so every saved
+        layer is written to whichever layer the device is showing right now and
+        the later ones overwrite the earlier — the profile is intact on disk,
+        but the device keeps only the last layer written.
+
+        Deliberately a warning, not a refusal: whether reportID 0 really means
+        "this firmware cannot switch layers" is a property of the original C#
+        protocol that has not been confirmed, and refusing would break a
+        legitimate program-one-layer-at-a-time workflow.
+        """
+        if self.kp.ReportID != 0:
+            return
+        layers = sorted({layer for layer, _kid in self._assignments})
+        if len(layers) < 2:
+            return
+        self.log(
+            "Write-all: reportID 0 sends no layer-switch command, so layers "
+            "%s will all be written to the layer the device is on now and "
+            "overwrite each other. Select one layer at a time to program them "
+            "separately." % ", ".join(str(x) for x in layers)
+        )
 
     def _run_write_all(self, jobs):
         def write_all(rid):
