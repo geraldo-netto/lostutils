@@ -1721,6 +1721,7 @@ def _unlink_cross_device_source(source: Path, target: Path) -> None:
             "duplicate left at %s — remove it manually",
             source, target, unlink_exc, source,
         )
+        raise PartialMoveError(source, target, unlink_exc) from unlink_exc
     else:
         _fsync_directory(source.parent)
 
@@ -1860,6 +1861,15 @@ def resolve_root(root: str | Path | None) -> Path:
     return canonical
 
 
+class PartialMoveError(RuntimeError):
+    def __init__(self, source: Path, destination: Path, cause: OSError) -> None:
+        super().__init__(
+            f"destination committed but source remains: {source} -> "
+            f"{destination}: {cause}"
+        )
+        self.destination = destination
+
+
 MoveResult = tuple[Path, Path, Exception | None]
 WorkerFn = Callable[[Path, Path], MoveResult]
 
@@ -1887,6 +1897,8 @@ def make_worker(preview: bool) -> WorkerFn:
             # `dest` can diverge from reality — use its return value.
             actual = move_file(source, bucket_dir)
             return source, actual, None
+        except PartialMoveError as exc:
+            return source, exc.destination, exc
         except (OSError, RuntimeError, ValueError) as exc:
             return source, dest, exc
     return _move_worker
@@ -2120,6 +2132,7 @@ class _RunStats:
 
     processed: int = 0
     skipped: int = 0
+    partial: int = 0
 
 
 def _drain_futures(
@@ -2186,6 +2199,10 @@ def _drain_move_future(
         stats.skipped += 1
         return
     if error:
+        if isinstance(error, PartialMoveError):
+            logger.error("Partial move %s: %s", source, error)
+            stats.partial += 1
+            return
         logger.warning(f"Skipped {source}: {error}")
         if manager is not None:
             manager.release(source, destination.parent)
@@ -2207,7 +2224,7 @@ def _maybe_log_progress(
     (bucket-selection failure) and add ``.collision`` renames, so the final
     processed+skipped tally need not equal it. The denominator is rendered with
     a leading ``~`` to mark it as an estimate, not a hard target."""
-    done_so_far = stats.processed + stats.skipped
+    done_so_far = stats.processed + stats.skipped + stats.partial
     if (done_so_far - progress["last"]) >= PROGRESS_EVERY:
         logger.info("progress: processed %d/~%d, skipped %d",
                     stats.processed, total_files, stats.skipped)
@@ -2253,7 +2270,7 @@ def _run_moves(
     except KeyboardInterrupt:
         executor.shutdown(wait=False, cancel_futures=True)
         logger.info(f"\nInterrupted. Processed {stats.processed} file(s), "
-                    f"skipped {stats.skipped} file(s).")
+                    f"skipped {stats.skipped} file(s), partial {stats.partial}.")
         raise SystemExit(1) from None
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
@@ -2307,10 +2324,10 @@ def _run_move_stage(root: Path, files: list[Path], ctx: SniffContext, *,
         head_cache=head_cache,
         manager=manager,
     )
-    if verbose or preview or stats.processed > 0 or stats.skipped > 0:
+    if verbose or preview or stats.processed > 0 or stats.skipped > 0 or stats.partial > 0:
         logger.info(
             f"Finished. Processed {stats.processed} file(s), "
-            f"skipped {stats.skipped} file(s)."
+            f"skipped {stats.skipped} file(s), partial {stats.partial}."
         )
     _log_run_stats(head_cache, manager)
 

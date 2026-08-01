@@ -167,7 +167,6 @@ _clean — `pyright==1.1.411 --pythonpath /usr/bin/python3.12 *.py` reports 0 er
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-obs-11 | open | low | organize_by_extension.py:1646-1653,1800-1803 — source-unlink failure after committed cross-device copy logs a warning but returns success, so workers report `Moved` and increment processed while a duplicate remains. Return a typed partial-move outcome and expose it in final totals. | silent-failure audit
 
 ## watchdog
 

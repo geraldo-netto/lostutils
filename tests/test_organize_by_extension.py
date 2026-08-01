@@ -3957,10 +3957,7 @@ def test_list_files_wraps_bucket_check_with_scan_monitor(tmp_path):
     ]
 
 
-def test_cross_device_source_unlink_failure_surfaced_not_raised(tmp_path, monkeypatch, caplog):
-    """oze-robust-01: a failed source removal after a committed cross-device
-    copy is logged loudly (duplicate left) and does NOT raise — the target is
-    complete, so the move succeeded."""
+def test_cross_device_source_unlink_failure_is_partial_move(tmp_path, monkeypatch, caplog):
     src = tmp_path / "src.bin"; src.write_bytes(b"payload")
     dst = tmp_path / "dst.bin"
 
@@ -3969,11 +3966,36 @@ def test_cross_device_source_unlink_failure_surfaced_not_raised(tmp_path, monkey
     monkeypatch.setattr(oze.os, "unlink", boom)  # only the trailing source unlink runs here
 
     with caplog.at_level("WARNING"):
-        oze._move_cross_device(src, dst)  # must not raise
+        with pytest.raises(oze.PartialMoveError):
+            oze._move_cross_device(src, dst)
     assert dst.read_bytes() == b"payload", "target copy not committed"
     assert src.exists(), "source removed despite unlink failure"
     assert any("duplicate left" in r.getMessage() for r in caplog.records), \
         "orphaned duplicate not surfaced"
+
+
+def test_partial_move_result_has_separate_total(tmp_path, monkeypatch, caplog):
+    from concurrent.futures import Future
+
+    src = tmp_path / "src.bin"
+    bucket = tmp_path / "bucket"
+    destination = bucket / src.name
+    error = oze.PartialMoveError(src, destination, OSError("busy"))
+    monkeypatch.setattr(
+        oze, "move_file", lambda _source, _bucket: (_ for _ in ()).throw(error)
+    )
+    future = Future()
+    future.set_result(oze.make_worker(False)(src, bucket))
+    stats = oze._RunStats()
+
+    with caplog.at_level("ERROR"):
+        oze._drain_move_future(
+            future, {future: src}, stats, False, {}, None
+        )
+
+    assert stats.partial == 1
+    assert stats.processed == stats.skipped == 0
+    assert "Partial move" in caplog.text
 
 
 def test_move_file_rejects_symlink_source(tmp_path):
