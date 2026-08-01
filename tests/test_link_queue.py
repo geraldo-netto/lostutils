@@ -4278,6 +4278,39 @@ def test_dispatch_immediate_item_lands_in_live_queue(headless_dispatcher):
     assert disp._immediate_q.qsize() == 1
 
 
+def test_immediate_enqueue_and_completion_request_state_save(
+        headless_dispatcher):
+    disp = headless_dispatcher
+    disp._immediate_pool_size = 0
+    saves = []
+    disp._request_save_state = lambda: saves.append(disp._build_state_snapshot())
+
+    item = q("magnet:?persist", protocol="magnet")
+    assert disp._dispatch_immediate(item) is True
+    work_q, claimed = disp._take_immediate_item(1)
+    assert claimed is item
+    disp._run_immediate_item = lambda _item: None
+    disp._consume_immediate_item(1, work_q, item)
+
+    assert len(saves) == 2
+    assert saves[0]["immediate"]
+    assert saves[1]["immediate"] == []
+
+
+def test_queue_completion_requests_state_save(headless_dispatcher):
+    disp = headless_dispatcher
+    item = q("https://example.test/persist")
+    disp.current_items[3] = item
+    disp._domain_active["example.test"] = 1
+    saves = []
+    disp._request_save_state = lambda: saves.append(disp._build_state_snapshot())
+
+    disp._release_item(3, item)
+
+    assert len(saves) == 1
+    assert saves[0]["in_flight"] == []
+
+
 def test_normalize_config_coerces_garbage_numeric_scalars():
     """lq-val-01: a non-numeric worker_count must degrade to its default, not
     crash startup."""

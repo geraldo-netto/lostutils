@@ -1739,6 +1739,7 @@ class Dispatcher:
         finally:
             with self._immediate_lock:
                 self._immediate_current[cid] = None
+            self._request_save_state()
             work_q.task_done()
             self._note_immediate_depth()
             self._update_status()
@@ -1875,6 +1876,7 @@ class Dispatcher:
             )
             return False  # lq-rel-10: report the drop so callers can count it
         self._log(f"[immediate] {item.protocol}: {item.url}")
+        self._request_save_state()
         self._note_immediate_depth()
         return True
 
@@ -2736,6 +2738,7 @@ class Dispatcher:
                 self._domain_active.pop(domain, None)
             self.current_items[idx] = None
             self._dispatch_cv.notify()
+        self._request_save_state()
 
     def _worker_loop(self, idx: int, stop_self: threading.Event) -> None:
         # Register our current-items slot (WorkerPool no longer does this for
