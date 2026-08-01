@@ -9,6 +9,7 @@ import argparse
 import mmap
 import os
 import sys
+from typing import BinaryIO
 
 import numpy as np
 
@@ -92,6 +93,16 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     return paths, file_equal, n_lines
 
 
+def _write_paths(paths: set[bytes], out: BinaryIO) -> bool:
+    try:
+        for path in sorted(paths):
+            out.write(path + b"\n")
+        out.flush()
+    except BrokenPipeError:
+        return False
+    return True
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -123,9 +134,8 @@ def main() -> None:
     if n_lines == 0:
         return
 
-    out = sys.stdout.buffer
-    for p in sorted(paths):
-        out.write(p + b"\n")
+    if not _write_paths(paths, sys.stdout.buffer):
+        return
     print(f"equal files: {file_equal} / {n_lines}", file=sys.stderr)
 
 

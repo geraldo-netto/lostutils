@@ -97,7 +97,6 @@ ie-dist-01 | open | med | import_events.py:3805 — `_output_lock` creates `<out
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-dnp-depend-01 | open | low | dedupl_numpy.py:55-57 — stdout writes have no BrokenPipeError guard, so piping into `head` raises a BrokenPipeError traceback on close. Wrap the write/flush in a BrokenPipeError handler or restore SIGPIPE to default. | common CLI pipe pattern
 
 ## code complexity
 

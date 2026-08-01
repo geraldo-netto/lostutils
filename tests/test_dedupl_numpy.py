@@ -226,3 +226,14 @@ def test_group_duplicates_does_not_make_contiguous_gather_copy(monkeypatch):
     assert paths == {b"/one", b"/two"}
     assert equal_files == 1
     assert record_count == 2
+
+
+def test_write_paths_handles_broken_pipe():
+    class ClosedPipe:
+        def write(self, _data):
+            raise BrokenPipeError
+
+        def flush(self):
+            raise AssertionError("flush must not follow a failed write")
+
+    assert not dedupl_numpy._write_paths({b"/one"}, ClosedPipe())
