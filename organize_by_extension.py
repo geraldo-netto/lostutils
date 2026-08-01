@@ -20,6 +20,7 @@ import errno
 import logging
 import os
 import secrets
+import sqlite3
 import stat as _stat
 import re
 import threading
@@ -658,13 +659,13 @@ def _scan_regular_path(
     return Path(entry.path)
 
 
-def list_files(
+def _iter_files(
     root: Path,
     skip_paths: Iterable[Path],
     verbose: bool = False,
     ctx: SniffContext | None = None,
-) -> list[Path]:
-    """Return all files under the root, excluding skipped paths and bucketed outputs.
+) -> Iterator[Path]:
+    """Yield files under the root without retaining the scan in memory.
 
     Implementation note (oze-perf-03): walks the tree with `os.scandir` instead
     of `Path.rglob('*')`, so we never materialise the full tree into a list
@@ -678,7 +679,7 @@ def list_files(
     if ctx is None:
         ctx = _DEFAULT_SNIFF_CTX
     skip = {str(p) for p in skip_paths}   # O(1) membership; compare on path string (oze-perf-01)
-    files: list[Path] = []
+    pending = 0
     already_bucketed = 0
     scanned = 0   # oze-obs-04: regular files examined so far (for scan progress)
     symlink_resolve_cache: dict[Path, Path | None] = {}
@@ -700,17 +701,27 @@ def list_files(
             # smaller-but-slow tree (header sniff opens each file) shows live
             # progress before the 10k-file INFO heartbeat would ever fire.
             logger.debug("scan: %s", path)
-            _log_scan_progress(scanned, len(files), already_bucketed)
+            _log_scan_progress(scanned, pending, already_bucketed)
             if _scan_path_is_bucketed(root, path, ctx, scan_monitor):
                 already_bucketed += 1
                 _evict_sniff_head(ctx, path)
                 continue
-            files.append(path)
+            pending += 1
+            yield path
     finally:
         scan_monitor.stop()
     if verbose: # Use logger.info for verbose output
-        logger.info(f"Scanning complete. Found {len(files)} files to organize ({already_bucketed} already bucketed).")
-    return files
+        logger.info(f"Scanning complete. Found {pending} files to organize ({already_bucketed} already bucketed).")
+
+
+def list_files(
+    root: Path,
+    skip_paths: Iterable[Path],
+    verbose: bool = False,
+    ctx: SniffContext | None = None,
+) -> list[Path]:
+    """Compatibility wrapper returning the streamed scan as a list."""
+    return list(_iter_files(root, skip_paths, verbose, ctx))
 
 
 def _log_scan_progress(scanned: int, pending: int, already_bucketed: int) -> None:
@@ -1948,10 +1959,9 @@ def plan_moves(
             raise ValueError(
                 "plan_moves expects `files` to be sorted; pass sorted(files)"
             )
-    # Returns [(current_source_path, original_ext_dir)] — preplan resolves
-    # the extension BEFORE any rename so a `.collision<n>` suffix doesn't
-    # accidentally re-classify the file (oze-rel-14).
-    plan_pairs = _preplan_resolve_collisions(root, list(files), ctx, preview=preview)
+    # The disk-backed spool preserves deterministic path order and the global
+    # collision pre-pass without retaining one Python object per source.
+    plan_pairs = _spooled_plan_pairs(root, files, ctx, preview)
     for source, ext_dir in plan_pairs:
         # oze-rel-18: use `.name` so dotfiles (`.bashrc` → stem="") and
         # multi-dot names (`archive.tar.gz` → stem="archive.tar") get
@@ -1975,6 +1985,57 @@ def plan_moves(
         # redundant no-op on the live pipeline. The single drain-side pop keeps
         # the cache RSS tracking the in-flight plan window (oze-scal-06).
         yield source, bucket.path
+
+
+def _spooled_plan_pairs(
+    root: Path,
+    files: Iterable[Path],
+    ctx: SniffContext,
+    preview: bool,
+) -> Iterator[tuple[Path, Path]]:
+    needed_dirs: set[Path] = set()
+    database = sqlite3.connect("")
+    try:
+        database.execute("CREATE TABLE pairs (source BLOB PRIMARY KEY, ext_dir BLOB)")
+        for source in files:
+            ext_dir = root / resolve_real_extension(source, ctx=ctx)
+            database.execute(
+                "INSERT INTO pairs VALUES (?, ?)",
+                (os.fsencode(source), os.fsencode(ext_dir)),
+            )
+            _evict_sniff_head(ctx, source)
+            current = ext_dir
+            while current != current.parent and current != root:
+                needed_dirs.add(current)
+                current = current.parent
+        database.commit()
+        rename_map = _spooled_collision_renames(
+            database, needed_dirs, ctx, preview
+        )
+        for source_raw, ext_raw in database.execute(
+            "SELECT source, ext_dir FROM pairs ORDER BY source"
+        ):
+            source = Path(os.fsdecode(source_raw))
+            yield rename_map.get(source, source), Path(os.fsdecode(ext_raw))
+    finally:
+        database.close()
+
+
+def _spooled_collision_renames(
+    database: sqlite3.Connection,
+    needed_dirs: set[Path],
+    ctx: SniffContext,
+    preview: bool,
+) -> dict[Path, Path]:
+    rename_map: dict[Path, Path] = {}
+    for (source_raw,) in database.execute("SELECT source FROM pairs ORDER BY source"):
+        source = Path(os.fsdecode(source_raw))
+        if not _blocks_a_needed_dir(source, needed_dirs):
+            continue
+        candidate = _resolve_one_planning_collision(source, ctx, preview)
+        if candidate is not None:
+            rename_map[source] = candidate
+    return rename_map
 
 
 def _preplan_resolve_collisions(
@@ -2133,6 +2194,7 @@ class _RunStats:
     processed: int = 0
     skipped: int = 0
     partial: int = 0
+    planned: int = 0
 
 
 def _drain_futures(
@@ -2214,7 +2276,7 @@ def _drain_move_future(
 
 
 def _maybe_log_progress(
-    stats: _RunStats, total_files: int, progress: dict[str, int]
+    stats: _RunStats, total_files: int | None, progress: dict[str, int]
 ) -> None:
     """Emit the periodic ``progress:`` line once every ``PROGRESS_EVERY``
     completed items (oze-obs-01). ``progress["last"]`` tracks the count at the
@@ -2226,8 +2288,12 @@ def _maybe_log_progress(
     a leading ``~`` to mark it as an estimate, not a hard target."""
     done_so_far = stats.processed + stats.skipped + stats.partial
     if (done_so_far - progress["last"]) >= PROGRESS_EVERY:
-        logger.info("progress: processed %d/~%d, skipped %d",
-                    stats.processed, total_files, stats.skipped)
+        if total_files is None:
+            logger.info("progress: processed %d/~stream, skipped %d",
+                        stats.processed, stats.skipped)
+        else:
+            logger.info("progress: processed %d/~%d, skipped %d",
+                        stats.processed, total_files, stats.skipped)
         progress["last"] = done_so_far
 
 
@@ -2236,7 +2302,7 @@ def _run_moves(
     worker: WorkerFn,
     num_threads: int,
     preview: bool,
-    total_files: int,
+    total_files: int | None,
     head_cache: dict[Path, HeadBytes],
     manager: BucketManager,
 ) -> _RunStats:
@@ -2255,6 +2321,7 @@ def _run_moves(
     progress = {"last": 0}
     try:
         for source, bucket_dir in plan:
+            stats.planned += 1
             while len(futures) >= max_outstanding:
                 _drain_futures(futures, stats, preview, head_cache, manager)
                 _maybe_log_progress(stats, total_files, progress)
@@ -2304,7 +2371,7 @@ def _clamp_num_threads(num_threads: int) -> int:
     return num_threads
 
 
-def _run_move_stage(root: Path, files: list[Path], ctx: SniffContext, *,
+def _run_move_stage(root: Path, files: Iterable[Path], ctx: SniffContext, *,
                     preview: bool, verbose: bool, num_threads: int,
                     bucket_size: int,
                     bucket_manager: BucketManager | None,
@@ -2316,13 +2383,13 @@ def _run_move_stage(root: Path, files: list[Path], ctx: SniffContext, *,
         if bucket_manager is not None
         else BucketManager(root=root, bucket_size=bucket_size)
     )
-    plan = plan_moves(root, sorted(files), manager, ctx=ctx, preview=preview)
+    plan = plan_moves(root, files, manager, ctx=ctx, preview=preview)
     stats = _run_moves(
         plan,
         worker=make_worker(preview),
         num_threads=num_threads,
         preview=preview,
-        total_files=len(files),
+        total_files=None,
         head_cache=head_cache,
         manager=manager,
     )
@@ -2331,6 +2398,8 @@ def _run_move_stage(root: Path, files: list[Path], ctx: SniffContext, *,
             f"Finished. Processed {stats.processed} file(s), "
             f"skipped {stats.skipped} file(s), partial {stats.partial}."
         )
+    if stats.planned == 0 and (preview or verbose):
+        logger.info(f"No files to organize under {root} (already bucketed or empty).")
     _log_run_stats(head_cache, manager)
 
 
@@ -2393,28 +2462,19 @@ def organize(
         head_cache = {}
     ctx = SniffContext(sniff=sniff, head_cache=head_cache,
                        extra_zip_family=extra_zip_family)
-    files = list_files(
+    files = _iter_files(
         root,
         skip_paths={Path(__file__).resolve()},
         verbose=verbose,
         ctx=ctx,
     )
 
-    # oze-rel-12: when there are no files to move, skip the move stage but
-    # still fall through to the prune stage below — an already-organized tree
-    # (every file already bucketed) is the common case where the user runs
-    # --prune-empty-dirs to clean up leftover empty dirs. Returning here
-    # silently dropped the prune request whenever --verbose/--preview was set.
-    if not files:
-        if preview or verbose:
-            logger.info(f"No files to organize under {root} (already bucketed or empty).")
-    else:
-        _run_move_stage(
-            root, files, ctx,
-            preview=preview, verbose=verbose, num_threads=num_threads,
-            bucket_size=bucket_size,
-            bucket_manager=bucket_manager, head_cache=head_cache,
-        )
+    _run_move_stage(
+        root, files, ctx,
+        preview=preview, verbose=verbose, num_threads=num_threads,
+        bucket_size=bucket_size,
+        bucket_manager=bucket_manager, head_cache=head_cache,
+    )
 
     if prune_empty:
         _run_prune_stage(root, preview=preview, verbose=verbose)

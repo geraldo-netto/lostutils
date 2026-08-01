@@ -278,7 +278,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
                     organize(root, verbose=True) # verbose to ensure summary is logged
                 output = "\n".join(cm.output)
                 self.assertIn("Skipped", output)
-                self.assertIn("Processed 0 file(s), skipped 1 file(s).", output)
+                self.assertIn("Processed 0 file(s), skipped 1 file(s), partial 0.", output)
 
     def test_organize_verbose_mode_output(self):
         """Verify that verbose mode prints scanning details and a summary."""
@@ -294,7 +294,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
                 self.assertIn("INFO:organize_by_extension:Scanning complete. Found 2 files to organize (0 already bucketed).", cm.output)
                 self.assertIn(f"INFO:organize_by_extension:Moved {root / 'file1.txt'} -> {root / 'txt' / 'f00000' / 'file1.txt'}", cm.output)
                 self.assertIn(f"INFO:organize_by_extension:Moved {root / 'file2.txt'} -> {root / 'txt' / 'f00000' / 'file2.txt'}", cm.output)
-                self.assertIn("INFO:organize_by_extension:Finished. Processed 2 file(s), skipped 0 file(s).", cm.output)
+                self.assertIn("INFO:organize_by_extension:Finished. Processed 2 file(s), skipped 0 file(s), partial 0.", cm.output)
 
     def test_organize_quiet_mode_output(self):
         """Verify that quiet mode (default) only logs warnings/errors."""

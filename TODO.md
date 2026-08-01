@@ -59,7 +59,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-scal-07 | open | med | organize_by_extension.py:649-716,1854,1911-1930,2170 — scan/move planning retains several O(files) lists (`files`, sorted/list copies, pairs, results), contradicting the streaming claim and risking exhaustion on million-file trees. Stream or spool the plan and bound collision state. | memory/scalability
 
 ## N+1 / call efficiency
 
