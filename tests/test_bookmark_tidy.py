@@ -1190,6 +1190,17 @@ def test_load_immutable_file_and_read_all_bookmarks(tmp_path, caplog):
     assert "unsupported bookmark file" in caplog.text
 
 
+def test_supported_input_file_matches_bare_names_case_insensitively(tmp_path):
+    """bt-plat-02: on Windows/macOS the typed case need not match on disk, and
+    Chrome's profile file has no suffix to fall back on."""
+    for name in ("Bookmarks", "bookmarks", "BOOKMARKS",
+                 "places.sqlite", "Places.sqlite", "PLACES.SQLITE"):
+        assert bookmark_tidy._supported_input_file(tmp_path / name), name
+
+    assert not bookmark_tidy._supported_input_file(tmp_path / "notes.txt")
+    assert not bookmark_tidy._supported_input_file(tmp_path / "bookmarksbak")
+
+
 def test_bom_prefixed_bookmark_files_are_still_recognised(tmp_path):
     """bt-plat-01: U+FEFF is not whitespace, so a surviving BOM would sit in
     front of the '<' / '{' the format sniff keys on."""

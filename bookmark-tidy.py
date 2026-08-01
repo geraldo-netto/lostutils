@@ -655,8 +655,14 @@ def read_bookmark_file(path: Path) -> list[Bookmark]:
 
 
 def _supported_input_file(path: Path) -> bool:
+    # bt-plat-02: casefold the bare names for the same reason the suffix is
+    # casefolded. On Windows and macOS the spelling the user typed need not
+    # match the on-disk case, and Chrome's profile file has no suffix to fall
+    # back on. A stray lowercase `bookmarks` on Linux just fails the content
+    # sniff, which is already a graceful path.
+    name = path.name.casefold()
     suffix = path.suffix.casefold()
-    return path.name == "Bookmarks" or path.name == "places.sqlite" or suffix in {
+    return name in {"bookmarks", "places.sqlite"} or suffix in {
         ".htm",
         ".html",
         ".json",
