@@ -501,14 +501,10 @@ class PruneEmptyDirsFuzz(unittest.TestCase):
             # Post-condition 1: no empty descendant directory remains.
             self.assertFalse(_has_empty_descendant(root),
                              f"empty descendant survived prune under {root}")
-            # Post-condition 2: every file we successfully created and that
-            # the FS still reports as existing must still exist.
+            # Post-condition 2: pruning directories never removes a file we
+            # successfully created.
             for f in files_kept:
-                if f.exists():
-                    # If we created it AND nobody removed it externally, prune
-                    # MUST NOT have removed it (it removes only directories).
-                    self.assertTrue(f.is_file() or f.is_symlink(),
-                                    f"file became non-file after prune: {f}")
+                self.assertTrue(f.is_file(), f"file removed during prune: {f}")
             # Post-condition 3: root itself survives.
             self.assertTrue(root.exists())
             self.assertTrue(root.is_dir())
@@ -565,6 +561,8 @@ class PruneSymlinkFuzz(unittest.TestCase):
             except (OSError, ValueError, NotImplementedError):
                 return
             prune_empty_dirs(root)
+            self.assertTrue(link.is_symlink(), f"symlink removed during prune: {link}")
+            self.assertEqual(link.resolve(), outside.resolve())
             # The outside target is untouched (we never followed the link).
             self.assertTrue(outside.exists(),
                             f"prune followed symlink and removed target {outside}")

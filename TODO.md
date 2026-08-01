@@ -143,7 +143,6 @@ rf-test-05 | open | low | tests/test_relocate_folder.py:1406,3385 — two tests 
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-oze-fuzz-02 | open | low | tests/fuzz/fuzz_organize_by_extension.py:493-575 — prune preservation checks are conditional on a file still existing and never assert that the symlink itself survives, so deletion regressions satisfy both properties. Assert unconditional file and symlink preservation. | Property-test audit: `prune_empty_dirs` promises to remove directories only and never follow or remove symlinks
 
 ## ruff (lint)
 
