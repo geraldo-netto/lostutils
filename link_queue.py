@@ -567,8 +567,21 @@ class _PendingQueue:
 
     def append(self, it) -> None:
         key = _pending_key(it)
-        if key in self.urls:          # dedupe is the caller's contract; keep
-            self.urls[key] = it       # first position/seq, refresh payload
+        if key in self.urls:          # keep first position/seq, refresh payload
+            old = self.urls[key]
+            old_domain = self._domain_fn(old)
+            new_domain = self._domain_fn(it)
+            self.urls[key] = it
+            if old_domain != new_domain:
+                del self.by_domain[old_domain][key]
+                if not self.by_domain[old_domain]:
+                    del self.by_domain[old_domain]
+            self.by_domain.setdefault(new_domain, {})[key] = it
+            old_iid = _queue_iid_for_item(old)
+            new_iid = _queue_iid_for_item(it)
+            if old_iid != new_iid:
+                self.iids.pop(old_iid, None)
+            self.iids[new_iid] = key
             self._invalidate_order_cache()
             return
         self.urls[key] = it

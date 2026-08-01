@@ -799,6 +799,21 @@ def test_pending_queue_setitem_and_eq():
     assert pq == other                     # __eq__ vs another _PendingQueue
 
 
+def test_pending_queue_duplicate_refreshes_every_index():
+    old = q("https://same/1", protocol="http", template="old {url}")
+    refreshed = q("https://same/1", protocol="ftp", template="new {url}")
+    pq = link_queue._PendingQueue([old], domain_fn=lambda item: item.protocol)
+
+    pq.append(refreshed)
+
+    key = link_queue._pending_key(refreshed)
+    assert pq.urls[key] is refreshed
+    assert "http" not in pq.by_domain
+    assert pq.by_domain["ftp"][key] is refreshed
+    assert next(iter(pq.by_domain["ftp"].values())) is refreshed
+    assert pq.item_for_iid(link_queue._queue_iid_for_item(refreshed)) is refreshed
+
+
 def test_write_log_sink_branches(app, monkeypatch):
     app.config["log_file"] = ""
     app._write_log_sink("ignored\n")       # sink off -> no enqueue, returns
