@@ -1953,7 +1953,7 @@ class App(tk.Tk):
     def _save_dialog(self):
         path = filedialog.asksaveasfilename(  # pragma: no cover - dialog glue
             title="Save profile", defaultextension=".json",
-            filetypes=[("JSON profile", "*.json")])
+            filetypes=[("JSON profile", "*.json")], parent=self)
         if not path:  # pragma: no cover - dialog glue
             return
         try:  # pragma: no cover - dialog glue
@@ -1964,7 +1964,8 @@ class App(tk.Tk):
 
     def _load_dialog(self):
         path = filedialog.askopenfilename(  # pragma: no cover - dialog glue
-            title="Load profile", filetypes=[("JSON profile", "*.json")])
+            title="Load profile", filetypes=[("JSON profile", "*.json")],
+            parent=self)
         if not path:  # pragma: no cover - dialog glue
             return
         try:  # pragma: no cover - dialog glue

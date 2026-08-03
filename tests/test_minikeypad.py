@@ -2239,6 +2239,22 @@ def test_probe_alive_offthread_reports_alive(app):
     assert app._io_busy is False
 
 
+def test_profile_file_dialogs_are_parented_to_app(app, monkeypatch):
+    parents = []
+
+    def cancel(**kwargs):
+        parents.append(kwargs.get("parent"))
+        return ""
+
+    monkeypatch.setattr(minikeypad.filedialog, "asksaveasfilename", cancel)
+    monkeypatch.setattr(minikeypad.filedialog, "askopenfilename", cancel)
+
+    app._save_dialog()
+    app._load_dialog()
+
+    assert parents == [app, app]
+
+
 def test_load_dialog_handles_malformed_profile_typeerror(app, tmp_path, monkeypatch):
     """mkp-rel-01: a JSON null where an int is expected raises TypeError from
     _load_profile; _load_dialog must catch it and log 'Load failed', not crash."""
