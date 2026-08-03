@@ -1709,22 +1709,37 @@ def _drive_proto_editor(app, name, command, mode="queue", shell=False, existing=
     return dlg
 
 
-def test_protocol_new_save(app):
-    _drive_proto_editor(app, "ftps", "echo {url}", mode="immediate", shell=True)
+def test_protocol_new_save(app, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        messagebox, "askyesno",
+        lambda *args, **kwargs: prompts.append(kwargs) or True)
+    dlg = _drive_proto_editor(
+        app, "ftps", "echo {url}", mode="immediate", shell=True)
     assert "ftps" in app.config["protocols"]
     assert app.config["protocols"]["ftps"]["shell"] is True
+    assert prompts[0]["parent"] is dlg
 
 
-def test_protocol_save_invalid_quoting(app):
-    # Bad quoting in exec mode -> showerror (monkeypatched) -> not saved.
-    _drive_proto_editor(app, "weird", "echo 'unterminated", shell=False)
+def test_protocol_save_invalid_quoting(app, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        messagebox, "showerror",
+        lambda *args, **kwargs: prompts.append(kwargs))
+    dlg = _drive_proto_editor(app, "weird", "echo 'unterminated", shell=False)
     assert "weird" not in app.config["protocols"]
+    assert prompts[0]["parent"] is dlg
 
 
-def test_protocol_save_empty_name(app):
-    _drive_proto_editor(app, "", "echo {url}")
+def test_protocol_save_empty_name(app, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        messagebox, "showerror",
+        lambda *args, **kwargs: prompts.append(kwargs))
+    dlg = _drive_proto_editor(app, "", "echo {url}")
     # empty name rejected; nothing new with blank key
     assert "" not in app.config["protocols"]
+    assert prompts[0]["parent"] is dlg
 
 
 def test_protocol_edit_existing(app):
@@ -2614,25 +2629,38 @@ def _drive_mapping_editor(app, existing, prefix, flag):
     entries[1].delete(0, "end")
     entries[1].insert(0, flag)
     find_widget(dlg, ttk.Button, text="Save").invoke()
+    return dlg
 
 
-def test_mapping_editor_new_edit_delete(app):
+def test_mapping_editor_new_edit_delete(app, monkeypatch):
     app._open_settings_dialog()
     _drive_mapping_editor(app, None, "g:", "--geo")
     assert app.config["token_mappings"]["g:"] == "--geo"
     assert "g:" in app.map_tree.get_children()
     _drive_mapping_editor(app, "g:", "g:", "--geo-bypass")  # edit (prefix readonly)
     assert app.config["token_mappings"]["g:"] == "--geo-bypass"
+    prompts = []
+    monkeypatch.setattr(
+        messagebox, "askyesno",
+        lambda *args, **kwargs: prompts.append(kwargs) or True)
     app.map_tree.selection_set("g:")
-    app._on_delete_mapping()                # askyesno patched True
+    app._on_delete_mapping()
     assert "g:" not in app.config["token_mappings"]
+    assert prompts[0]["parent"] is app._settings_dialog
 
 
-def test_mapping_editor_requires_fields(app):
-    _drive_mapping_editor(app, None, "", "-o")     # empty prefix -> showerror, no save
+def test_mapping_editor_requires_fields(app, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        messagebox, "showerror",
+        lambda *args, **kwargs: prompts.append(kwargs))
+    prefix_dlg = _drive_mapping_editor(
+        app, None, "", "-o")     # empty prefix -> showerror, no save
     assert "" not in app.config["token_mappings"]
-    _drive_mapping_editor(app, None, "z:", "")     # empty flag -> showerror, no save
+    flag_dlg = _drive_mapping_editor(
+        app, None, "z:", "")     # empty flag -> showerror, no save
     assert "z:" not in app.config["token_mappings"]
+    assert [prompt["parent"] for prompt in prompts] == [prefix_dlg, flag_dlg]
 
 
 def test_mapping_button_handlers(app):
@@ -5250,6 +5278,7 @@ def test_clear_queue_asks_before_discarding(app, monkeypatch):
     message, kwargs = prompts[0]
     assert "2 pending items" in message
     assert kwargs["default"] == "no"        # the safe answer is preselected
+    assert kwargs["parent"] is app.root
 
 
 def test_clear_queue_cancelled_keeps_every_item(app, monkeypatch):

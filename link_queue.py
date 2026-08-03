@@ -4703,7 +4703,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         return messagebox.askyesno(
             "Clear queue",
             f"Discard {pending} pending {noun}? This cannot be undone.",
-            default="no")
+            default="no", parent=self.root)
 
     def _on_clear_queue(self) -> None:
         with self._dispatch_cv:
@@ -4909,7 +4909,10 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         if not sel:
             return
         key = sel[0]
-        if messagebox.askyesno(f"Delete {label}", f"Delete {label} '{key}'?"):  # pragma: no cover - withdrawn-root Tk early-exit
+        confirmed = messagebox.askyesno(
+            f"Delete {label}", f"Delete {label} '{key}'?",
+            parent=tree.winfo_toplevel())
+        if confirmed:  # pragma: no cover - withdrawn-root Tk early-exit
             store.pop(key, None)
             self._save_config()
             refresh()
@@ -5699,8 +5702,7 @@ class ProtocolEditor(_FormDialog):
         frm.columnconfigure(1, weight=1)
         self.cmd_text.focus_set()
 
-    @staticmethod
-    def _validate(command: str, shell: bool) -> bool:
+    def _validate(self, command: str, shell: bool) -> bool:
         """True if the template is OK to save. exec mode must shlex-split;
         shell mode with a bare {url} prompts (sec-01) and returns the user's
         choice."""
@@ -5714,7 +5716,8 @@ class ProtocolEditor(_FormDialog):
                 messagebox.showerror(
                     "Invalid template",
                     f"The command cannot be parsed as a shell argv:\n\n{e}\n\n"
-                    "Either fix the quoting or enable the Shell option.")
+                    "Either fix the quoting or enable the Shell option.",
+                    parent=self.dlg)
                 return False
         elif _template_has_bare_url(probe):
             return messagebox.askyesno(
@@ -5722,14 +5725,15 @@ class ProtocolEditor(_FormDialog):
                 "This command runs via the shell and uses {url}, which is "
                 "substituted UNQUOTED — a malicious URL could inject shell "
                 "commands.\n\nUse {url_quoted} for a shell-safe value.\n\n"
-                "Save anyway?")
+                "Save anyway?", parent=self.dlg)
         return True
 
     def _on_save(self) -> None:
         host = self.host
         name = self.proto_var.get().strip().lower()
         if not name:
-            messagebox.showerror("Error", "Protocol name is required.")
+            messagebox.showerror(
+                "Error", "Protocol name is required.", parent=self.dlg)
             return
         command = self.cmd_text.get("1.0", tk.END).strip()
         shell = bool(self.shell_var.get())
@@ -5798,10 +5802,12 @@ class MappingEditor(_FormDialog):
         p = self.prefix_var.get().strip()
         flag = self.flag_var.get().strip()
         if not p:
-            messagebox.showerror("Error", "Prefix is required.")
+            messagebox.showerror(
+                "Error", "Prefix is required.", parent=self.dlg)
             return
         if not flag:
-            messagebox.showerror("Error", "Command flag is required.")
+            messagebox.showerror(
+                "Error", "Command flag is required.", parent=self.dlg)
             return
         host.mappings[p] = flag
         host.save()

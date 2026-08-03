@@ -240,7 +240,6 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
-lq-ui-02 | open | low | link_queue.py:4703,4912,5714-5732,5801-5804 — native confirmation/error dialogs have no owning `parent`, so window managers may place them away from or behind the main/Settings/editor window. Parent each prompt to the window that launched it. | Laws of UX — Law of Proximity; keep feedback spatially associated with the initiating context
 
 ## accessibility
 
