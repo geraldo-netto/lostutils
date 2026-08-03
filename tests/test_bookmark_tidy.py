@@ -567,7 +567,7 @@ def test_detect_and_read_bookmark_formats(tmp_path):
     netscape = tmp_path / "bookmarks.html"
     bad_json = tmp_path / "bad.json"
     unknown_json = tmp_path / "unknown.json"
-    unsupported = tmp_path / "notes.txt"
+    unsupported = tmp_path / "notes.md"
     chrome.write_text('{"roots":{"bookmark_bar":{"children":[]}}}', encoding="utf-8")
     firefox.write_text('{"children":[]}', encoding="utf-8")
     netscape.write_text(_netscape_html(), encoding="utf-8")
@@ -585,6 +585,48 @@ def test_detect_and_read_bookmark_formats(tmp_path):
         bookmark_tidy._detect_bookmark_format_with_data(unknown_json)
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy._detect_bookmark_format_with_data(unsupported)
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "https://one.example\nhttps://two.example/path\nmailto:user@example.test\n",
+        "https://one.example https://two.example/path\tmailto:user@example.test",
+    ],
+)
+def test_plain_text_url_lists_accept_newlines_and_spaces(tmp_path, contents):
+    path = tmp_path / "urls.txt"
+    path.write_text(contents, encoding="utf-8")
+
+    assert bookmark_tidy._detect_bookmark_format_with_data(path)[0] == "plain-text"
+    bookmarks = bookmark_tidy.read_bookmark_file(path)
+
+    expected = [
+        "https://one.example",
+        "https://two.example/path",
+        "mailto:user@example.test",
+    ]
+    assert [bookmark.url for bookmark in bookmarks] == expected
+    assert [bookmark.title for bookmark in bookmarks] == expected
+    assert all(bookmark.source == str(path) for bookmark in bookmarks)
+
+
+@pytest.mark.parametrize(
+    "contents, item",
+    [
+        ("", None),
+        ("https://one.example not-a-url https://two.example", 2),
+        ("https://", 1),
+        ("https://example.test:bad-port", 1),
+    ],
+)
+def test_plain_text_url_lists_reject_empty_or_invalid_input(tmp_path, contents, item):
+    path = tmp_path / "urls.txt"
+    path.write_text(contents, encoding="utf-8")
+
+    match = "is empty" if item is None else f"non-URL token at item {item}"
+    with pytest.raises(bookmark_tidy.UserError, match=match):
+        bookmark_tidy.read_bookmark_file(path)
 
 
 def test_read_bookmark_file_dispatches_every_format(monkeypatch, tmp_path):
@@ -659,13 +701,16 @@ def test_expand_inputs_and_discovery_helpers(tmp_path, monkeypatch):
     nested.mkdir(parents=True)
     direct = folder / "Bookmarks"
     html = nested / "bookmarks.html"
-    ignored = nested / "ignored.txt"
+    urls = nested / "urls.txt"
+    ignored = nested / "ignored.md"
     direct.write_text('{"roots":{"bookmark_bar":{"children":[]}}}', encoding="utf-8")
     html.write_text(_netscape_html(), encoding="utf-8")
+    urls.write_text("https://example.test", encoding="utf-8")
     ignored.write_text("x", encoding="utf-8")
 
     assert bookmark_tidy.expand_input_paths([str(folder)], recursive=False) == [direct.resolve()]
-    assert bookmark_tidy.expand_input_paths([str(folder)], recursive=True) == [direct.resolve(), html.resolve()]
+    assert bookmark_tidy.expand_input_paths([str(folder)], recursive=True) == [
+        direct.resolve(), html.resolve(), urls.resolve()]
     assert bookmark_tidy._supported_input_file(folder / "places.sqlite")
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy.expand_input_paths([str(folder / "missing")], recursive=True)
@@ -1178,7 +1223,7 @@ def test_fsync_parent_dir_ignores_unsupported_directory_fsync(tmp_path, monkeypa
 def test_load_immutable_file_and_read_all_bookmarks(tmp_path, caplog):
     immutable = tmp_path / "immutable.txt"
     html = tmp_path / "bookmarks.html"
-    unsupported = tmp_path / "notes.txt"
+    unsupported = tmp_path / "notes.md"
     immutable.write_text("# comment\nWork\n\nPersonal\n", encoding="utf-8")
     html.write_text(_netscape_html(), encoding="utf-8")
     unsupported.write_text("plain", encoding="utf-8")
@@ -1197,7 +1242,8 @@ def test_supported_input_file_matches_bare_names_case_insensitively(tmp_path):
                  "places.sqlite", "Places.sqlite", "PLACES.SQLITE"):
         assert bookmark_tidy._supported_input_file(tmp_path / name), name
 
-    assert not bookmark_tidy._supported_input_file(tmp_path / "notes.txt")
+    assert bookmark_tidy._supported_input_file(tmp_path / "notes.txt")
+    assert bookmark_tidy._supported_input_file(tmp_path / "URLS.TXT")
     assert not bookmark_tidy._supported_input_file(tmp_path / "bookmarksbak")
 
 

@@ -73,6 +73,18 @@ def test_deduplicate_bookmarks_keeps_unique_mutable_canonical_urls(urls):
     assert len(mutable) <= len(urls)
 
 
+@given(
+    urls=st.lists(web_url, min_size=1, max_size=30),
+    separator=st.sampled_from([" ", "\n", "\t", " \n\t"]),
+)
+@FUZZ
+def test_plain_text_url_lists_roundtrip_whitespace_separators(urls, separator):
+    bookmarks = bookmark_tidy.plain_text_to_bookmarks(
+        separator.join(urls), "fuzz")
+
+    assert [bookmark.url for bookmark in bookmarks] == urls
+
+
 @given(category=st.one_of(folder_text, st.lists(folder_text, max_size=5)))
 @FUZZ
 def test_category_path_never_returns_empty_parts(category):

@@ -601,6 +601,33 @@ def _firefox_json_bookmark(
     )
 
 
+def plain_text_to_bookmarks(text: str, source: str) -> list[Bookmark]:
+    """Parse a whitespace-separated list containing only absolute URLs."""
+    urls = text.split()
+    if not urls:
+        raise UserError(f"plain-text URL list is empty: {source}")
+    for index, url in enumerate(urls, start=1):
+        if not _is_absolute_url(url):
+            raise UserError(
+                f"plain-text URL list contains a non-URL token at item "
+                f"{index}: {source}")
+    return [Bookmark(url=url, title=url, folder_path=(), source=source)
+            for url in urls]
+
+
+def _is_absolute_url(value: str) -> bool:
+    try:
+        parsed = urlsplit(value)
+        parsed.port
+    except ValueError:
+        return False
+    if not parsed.scheme:
+        return False
+    if parsed.scheme.casefold() in {"http", "https", "ftp"}:
+        return bool(parsed.netloc)
+    return True
+
+
 def _detect_bookmark_format_with_data(path: Path) -> tuple[str, Any | None]:
     if path.suffix.casefold() == ".jsonlz4":
         return "firefox-jsonlz4", None
@@ -613,6 +640,8 @@ def _detect_bookmark_format_with_data(path: Path) -> tuple[str, Any | None]:
     if stripped.startswith("{"):
         data = _parse_json_bookmark_text(text, path)
         return _json_bookmark_format(data, path), data
+    if path.suffix.casefold() == ".txt":
+        return "plain-text", plain_text_to_bookmarks(text, str(path))
     raise UserError(f"unsupported bookmark file: {path}")
 
 
@@ -637,6 +666,10 @@ def _json_bookmark_format(data: Any, path: Path) -> str:
 
 def read_bookmark_file(path: Path) -> list[Bookmark]:
     fmt, data = _detect_bookmark_format_with_data(path)
+    if fmt == "plain-text":
+        if not isinstance(data, list):
+            raise UserError(f"could not parse plain-text URL list: {path}")
+        return data
     if fmt == "chromium":
         if data is not None:
             return chromium_json_data_to_bookmarks(data, str(path))
@@ -669,6 +702,7 @@ def _supported_input_file(path: Path) -> bool:
         ".jsonlz4",
         ".sqlite",
         ".sqlite3",
+        ".txt",
     }
 
 
@@ -1621,7 +1655,12 @@ def _gpu_layers_int(text: str) -> int:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("inputs", nargs="*", help="Bookmark files or folders. If omitted, browser profiles are discovered.")
+    parser.add_argument(
+        "inputs",
+        nargs="*",
+        help=("Browser bookmark exports, plain-text URL lists, or folders. "
+              "If omitted, browser profiles are discovered."),
+    )
     parser.add_argument("-o", "--output", help="Output file path. Defaults to bookmarks_tidy_output.json/html.")
     parser.add_argument(
         "--output-format", "--format",
