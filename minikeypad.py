@@ -176,6 +176,16 @@ COL_CONNECTED = "#188a18"
 COL_DISCONNECTED = "#c83232"
 
 
+def _center_window(window):
+    """Place a window in the center of its virtual screen."""
+    window.update_idletasks()
+    x = window.winfo_vrootx() + max(
+        0, (window.winfo_vrootwidth() - window.winfo_width()) // 2)
+    y = window.winfo_vrooty() + max(
+        0, (window.winfo_vrootheight() - window.winfo_height()) // 2)
+    window.geometry(f"+{x}+{y}")
+
+
 # --------------------------------------------------------------------------- #
 #  USB / device layer (port of HidLib + the FormMain send routines)
 # --------------------------------------------------------------------------- #
@@ -1132,6 +1142,7 @@ class App(tk.Tk):
         self.title("MINI-KeyBoard configurator")
         self.geometry(WINDOW_GEOMETRY)
         self.minsize(*WINDOW_MIN_SIZE)
+        _center_window(self)
 
         # Cross-thread UI marshalling: background device threads enqueue
         # callables; only the Tk main thread ever touches widgets.

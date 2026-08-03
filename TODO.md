@@ -241,7 +241,6 @@ id | status | effort | description | notes
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
 lq-ui-01 | open | low | link_queue.py:3622,4072 — the main window has a size but no position, and the reusable Settings window is likewise never placed, so both rely on inconsistent window-manager defaults. Center the main window on screen and Settings over its parent with edge clamping. | Laws of UX — Aesthetic-Usability Effect for balanced initial placement; Law of Proximity for parent/dialog association
-mkp-ui-01 | open | low | minikeypad.py:1133 — the fixed-size main window has no position, so launch placement depends on the window manager and can appear away from the user's focus. Center the window on screen with edge clamping. | Laws of UX — Aesthetic-Usability Effect; deterministic balanced initial placement
 
 ## accessibility
 

@@ -48,6 +48,52 @@ def _finalize_tk_interpreters():
 # --------------------------------------------------------------------------- #
 #  helpers
 # --------------------------------------------------------------------------- #
+class _FakeWindow:
+    def __init__(self, width, height, screen=(0, 0, 1920, 1080)):
+        self.width = width
+        self.height = height
+        self.screen = screen
+        self.geometry_value = None
+        self.idle_updates = 0
+
+    def update_idletasks(self):
+        self.idle_updates += 1
+
+    def winfo_width(self):
+        return self.width
+
+    def winfo_height(self):
+        return self.height
+
+    def winfo_vrootx(self):
+        return self.screen[0]
+
+    def winfo_vrooty(self):
+        return self.screen[1]
+
+    def winfo_vrootwidth(self):
+        return self.screen[2]
+
+    def winfo_vrootheight(self):
+        return self.screen[3]
+
+    def geometry(self, value):
+        self.geometry_value = value
+
+
+def test_center_window_centers_and_keeps_oversize_window_on_screen_origin():
+    window = _FakeWindow(1440, 880)
+    minikeypad._center_window(window)
+
+    assert window.idle_updates == 1
+    assert window.geometry_value == "+240+100"
+
+    oversize = _FakeWindow(1440, 880, screen=(20, 30, 1024, 768))
+    minikeypad._center_window(oversize)
+
+    assert oversize.geometry_value == "+20+30"
+
+
 def _select(kp, key_id=1):
     assert kp.select_physical_key(key_id) is True
     return kp
