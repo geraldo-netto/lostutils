@@ -52,6 +52,28 @@ from urllib.parse import urlparse
 
 __version__ = "1.0"
 
+
+def _center_window(window, parent=None) -> None:
+    """Center a window on screen or over its parent, clamped to screen edges."""
+    window.update_idletasks()
+    width = window.winfo_width()
+    height = window.winfo_height()
+    left = window.winfo_vrootx()
+    top = window.winfo_vrooty()
+    screen_width = window.winfo_vrootwidth()
+    screen_height = window.winfo_vrootheight()
+    if parent is None:
+        x = left + (screen_width - width) // 2
+        y = top + (screen_height - height) // 2
+    else:
+        parent.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+    x = max(left, min(x, left + max(0, screen_width - width)))
+    y = max(top, min(y, top + max(0, screen_height - height)))
+    window.geometry(f"+{x}+{y}")
+
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
@@ -3621,6 +3643,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         self.root.title("Link Processing Queue")
         self.root.geometry("980x700")
         self.root.minsize(820, 560)
+        _center_window(self.root)
 
         # ConfigStore owns load/normalize/save (arch-03); paths injected (dec-03).
         self.config = ConfigStore(CONFIG_FILE, LEGACY_CONFIG_FILE)
@@ -4186,6 +4209,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             # Race-only: dialog was destroyed somehow. Rebuild.
             self._build_settings_dialog()
         assert self._settings_dialog is not None  # _build_settings_dialog sets it
+        _center_window(self._settings_dialog, self.root)
         self._settings_dialog.deiconify()
         self._settings_dialog.lift()
         self._settings_dialog_visible = True
@@ -5327,10 +5351,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         has actually mapped it (dup-02). Deferring grab_set until after
         wait_visibility avoids Tk's 'grab failed: window not viewable'; the
         after() retry covers WMs where wait_visibility itself raises."""
-        dlg.update_idletasks()
-        x = self.root.winfo_rootx() + (self.root.winfo_width() // 2) - (dlg.winfo_width() // 2)
-        y = self.root.winfo_rooty() + (self.root.winfo_height() // 2) - (dlg.winfo_height() // 2)
-        dlg.geometry(f"+{x}+{y}")
+        _center_window(dlg, self.root)
         try:
             dlg.wait_visibility()
             dlg.grab_set()

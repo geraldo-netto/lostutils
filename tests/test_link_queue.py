@@ -56,6 +56,67 @@ def test_default_output_folder_is_portable():
     assert link_queue.DEFAULT_CONFIG["output_folder"] == ""
 
 
+class _FakeWindow:
+    def __init__(self, width, height, screen=(0, 0, 1920, 1080), origin=(0, 0)):
+        self.width = width
+        self.height = height
+        self.screen = screen
+        self.origin = origin
+        self.geometry_value = None
+        self.idle_updates = 0
+
+    def update_idletasks(self):
+        self.idle_updates += 1
+
+    def winfo_width(self):
+        return self.width
+
+    def winfo_height(self):
+        return self.height
+
+    def winfo_rootx(self):
+        return self.origin[0]
+
+    def winfo_rooty(self):
+        return self.origin[1]
+
+    def winfo_vrootx(self):
+        return self.screen[0]
+
+    def winfo_vrooty(self):
+        return self.screen[1]
+
+    def winfo_vrootwidth(self):
+        return self.screen[2]
+
+    def winfo_vrootheight(self):
+        return self.screen[3]
+
+    def geometry(self, value):
+        self.geometry_value = value
+
+
+def test_center_window_centers_on_screen_or_parent_and_clamps_to_edges():
+    window = _FakeWindow(980, 700)
+    link_queue._center_window(window)
+
+    assert window.idle_updates == 1
+    assert window.geometry_value == "+470+190"
+
+    parent = _FakeWindow(980, 700, origin=(100, 50))
+    dialog = _FakeWindow(780, 520)
+    link_queue._center_window(dialog, parent)
+
+    assert parent.idle_updates == 1
+    assert dialog.geometry_value == "+200+140"
+
+    edge_parent = _FakeWindow(500, 500, origin=(-200, -100))
+    edge_dialog = _FakeWindow(780, 520)
+    link_queue._center_window(edge_dialog, edge_parent)
+
+    assert edge_dialog.geometry_value == "+0+0"
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
