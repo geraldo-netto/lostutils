@@ -89,6 +89,10 @@ DEFAULT_TESSERACT_PSM = "6"
 DEFAULT_TESSERACT_PATH = "tesseract"
 DEFAULT_OCR_ENGINE = "auto"
 DEFAULT_PADDLE_OCR_DEVICE = "cpu"
+IMAGE_JPEG_MIME = "image/jpeg"
+IMAGE_OCR_LABEL = "image OCR"
+PDF_OCR_LABEL = "PDF OCR"
+UNTITLED_EVENT = "No Title"
 PADDLE_OCR_CACHE_SIZE = 2
 DEFAULT_PDF_OCR_MODE = "never"
 DEFAULT_TENTATIVE_EVENTS = "keep"
@@ -719,12 +723,12 @@ class ModelConfig:
         caller pins it explicitly with --model-sha256/--clip-sha256."""
         model_path = args.model_path or str(cache_dir / MODEL_FILENAME)
         clip_path = args.clip_path or str(cache_dir / CLIP_FILENAME)
-        model_sha256 = args.model_sha256 if args.model_sha256 is not None else (
-            MODEL_SHA256 if args.model_path is None else None
-        )
-        clip_sha256 = args.clip_sha256 if args.clip_sha256 is not None else (
-            CLIP_SHA256 if args.clip_path is None else None
-        )
+        model_sha256 = args.model_sha256
+        if model_sha256 is None and args.model_path is None:
+            model_sha256 = MODEL_SHA256
+        clip_sha256 = args.clip_sha256
+        if clip_sha256 is None and args.clip_path is None:
+            clip_sha256 = CLIP_SHA256
         return model_path, clip_path, model_sha256, clip_sha256
 
     @classmethod
@@ -793,8 +797,8 @@ class ModelConfig:
 # data URL is labelled correctly (a PNG sent as image/jpeg confuses some models).
 IMAGE_MIME = {
     ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
+    ".jpg": IMAGE_JPEG_MIME,
+    ".jpeg": IMAGE_JPEG_MIME,
     ".webp": "image/webp",
     ".gif": "image/gif",
     ".bmp": "image/bmp",
@@ -945,7 +949,7 @@ def _touch_paddle_ocr_engine(
     cache: "OrderedDict[Tuple[str, str], Any]",
     engine: Any,
 ) -> None:
-    for key, value in list(cache.items()):
+    for key, value in tuple(cache.items()):
         if value is engine:
             cache.move_to_end(key)
 
@@ -1368,10 +1372,10 @@ def reset_llm_cache() -> None:
 atexit.register(reset_llm_cache)
 
 
-def _new_llm_client(config: ModelConfig, Llama: Any,
-                    Qwen25VLChatHandler: Any, gpu_layers: int) -> Any:
+def _new_llm_client(config: ModelConfig, llama_class: Any,
+                    chat_handler_class: Any, gpu_layers: int) -> Any:
     with _quiet_output_context(config.llm_verbose):
-        chat_handler = Qwen25VLChatHandler(
+        chat_handler = chat_handler_class(
             clip_model_path=config.clip_path,
             verbose=config.llm_verbose,
         )
@@ -1396,7 +1400,7 @@ def _new_llm_client(config: ModelConfig, Llama: Any,
         }
         if use_mlock:
             kwargs["use_mlock"] = True
-        return Llama(**kwargs)
+        return llama_class(**kwargs)
 
 
 def _llm_supports_gpu_offload(llama_cpp: Any) -> bool:
@@ -1412,21 +1416,21 @@ def _log_llm_device(config: ModelConfig, effective_gpu_layers: int) -> None:
                 _llm_model_name(config), effective_gpu_layers, config.llm_main_gpu)
 
 
-def _load_llm_client(config: ModelConfig, Llama: Any,
-                     Qwen25VLChatHandler: Any, llama_cpp: Any) -> Tuple[Any, int]:
+def _load_llm_client(config: ModelConfig, llama_class: Any,
+                     chat_handler_class: Any, llama_cpp: Any) -> Tuple[Any, int]:
     if config.llm_gpu_layers == 0:
-        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0), 0
+        return _new_llm_client(config, llama_class, chat_handler_class, 0), 0
     if not _llm_supports_gpu_offload(llama_cpp):
         logger.warning("LLM GPU offload requested, but llama.cpp has no GPU backend; falling back to CPU.")
-        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0), 0
+        return _new_llm_client(config, llama_class, chat_handler_class, 0), 0
     try:
         return (
-            _new_llm_client(config, Llama, Qwen25VLChatHandler, config.llm_gpu_layers),
+            _new_llm_client(config, llama_class, chat_handler_class, config.llm_gpu_layers),
             config.llm_gpu_layers,
         )
     except Exception as exc:
         logger.warning("LLM GPU offload failed; falling back to CPU: %s", exc)
-        return _new_llm_client(config, Llama, Qwen25VLChatHandler, 0), 0
+        return _new_llm_client(config, llama_class, chat_handler_class, 0), 0
 
 
 def _llm_file_identity(path: str) -> Tuple[Any, ...]:
@@ -1439,7 +1443,7 @@ def _llm_file_identity(path: str) -> Tuple[Any, ...]:
     try:
         stat = os.stat(path)
     except OSError:
-        return (None,)
+        return (None, None)
     return (stat.st_mtime_ns, stat.st_size)
 
 
@@ -1556,7 +1560,7 @@ def _event_from_ics_component(
     if dtend_obj and hasattr(dtend_obj, "dt"):
         end = normalize_event_date(_apply_default_tz(dtend_obj.dt, default_tz))
     return {
-        "title": str(summary) if summary else "No Title",
+        "title": str(summary) if summary else UNTITLED_EVENT,
         "start": normalize_event_date(_apply_default_tz(dtstart_obj.dt, default_tz)),
         "end": end,
         "location": str(location) if location else "",
@@ -1571,13 +1575,16 @@ def _event_from_ics_component(
 _DATE_SHAPE = re.compile(r"\d{4}-\d{2}-\d{2}$")
 _TIME_SHAPE = re.compile(r"^\d{2}:\d{2}(:\d{2})?$")
 _LOOSE_TIME_AMPM = re.compile(
-    r"^\s*(\d{1,2})(?:(?::|\.)(\d{2}))?\s*([ap])\.?m\.?\s*$",
+    r"^(\d{1,2})(?:[:.](\d{2}))?\s*([ap])\.?m\.?$",
     re.IGNORECASE,
 )
-_LOOSE_TIME_24H = re.compile(r"^\s*(\d{1,2})(?:(?::|\.)(\d{2})(?::(\d{2}))?|\s*[hH]\s*(\d{2})?)\s*$")
+_LOOSE_TIME_DELIMITED_24H = re.compile(
+    r"^(\d{1,2})[:.](\d{2})(?::(\d{2}))?$"
+)
+_LOOSE_TIME_H_24H = re.compile(r"^(\d{1,2})\s*[hH]\s*(\d{2})?$")
 _CALENDAR_CLOCK_TEXT = (
-    r"\d{1,2}(?:(?::|\.)\d{2}(?::\d{2})?|\s*[hH]\s*\d{0,2}|"
-    r"(?:(?::|\.)\d{2})?\s*[ap]\.?m\.?)"
+    r"\d{1,2}(?:[:.]\d{2}(?::\d{2})?|\s*[hH]\s*\d{0,2}|"
+    r"(?:[:.]\d{2})?\s*[ap]\.?m\.?)"
 )
 _CALENDAR_EVENT_TIME_PREFIX_RE = re.compile(
     rf"^\s*({_CALENDAR_CLOCK_TEXT})\s*(?:[-:]\s*)?(.+)$",
@@ -1587,7 +1594,7 @@ _CALENDAR_EVENT_TIME_SUFFIX_RE = re.compile(
     rf"^(.+?)\s+(?:(?:at|as|às|a las|alle|um)\s+)?({_CALENDAR_CLOCK_TEXT})\s*$",
     re.IGNORECASE,
 )
-_CALENDAR_DAY_RE = re.compile(r"^(\d{1,2})(?:[.)])?(?:\s+(.*)|$)$")
+_CALENDAR_DAY_RE = re.compile(r"^(\d{1,2})[.)]?(?: (.+))?$")
 _CALENDAR_YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2}|21\d{2})\b")
 _TABLE_DATE_FIND_RE = re.compile(
     r"\b\d{1,4}\s*[/.-]\s*[0-9A-Za-zÀ-ÿ]{1,12}"
@@ -1674,11 +1681,13 @@ def _parse_ampm_time(match: "re.Match[str]") -> Optional[str]:
     return _format_normalized_time(hour, minute)
 
 
-def _parse_24h_time(match: "re.Match[str]") -> Optional[str]:
+def _parse_24h_time(
+    match: "re.Match[str]", *, includes_seconds: bool,
+) -> Optional[str]:
     """Coerce a 24-hour regex match into HH:MM (ie-cx-10)."""
     return _format_normalized_time(
-        int(match.group(1)), int(match.group(2) or match.group(4) or 0),
-        int(match.group(3) or 0),
+        int(match.group(1)), int(match.group(2) or 0),
+        int(match.group(3) or 0) if includes_seconds else 0,
     )
 
 
@@ -1691,9 +1700,12 @@ def _normalize_loose_time(clock: str) -> Optional[str]:
     match = _LOOSE_TIME_AMPM.match(clock)
     if match:
         return _parse_ampm_time(match)
-    match = _LOOSE_TIME_24H.match(clock)
+    match = _LOOSE_TIME_DELIMITED_24H.match(clock)
     if match:
-        return _parse_24h_time(match)
+        return _parse_24h_time(match, includes_seconds=True)
+    match = _LOOSE_TIME_H_24H.match(clock)
+    if match:
+        return _parse_24h_time(match, includes_seconds=False)
     return None
 
 
@@ -1954,7 +1966,11 @@ def _split_time_columns(text: str) -> Optional[Tuple[str, str]]:
     has_min, has_sec = _digit_at(parts, 1), _digit_at(parts, 2)
     minute = int(parts[1]) if has_min else 0
     second = int(parts[2]) if has_sec else 0
-    consumed = 3 if has_sec else (2 if has_min else 1)
+    consumed = 1
+    if has_sec:
+        consumed = 3
+    elif has_min:
+        consumed = 2
     if minute > 59 or second > 59 or len(parts) <= consumed:
         return None
     return _hms_suffix(int(parts[0]), minute, second), " ".join(parts[consumed:])
@@ -1964,7 +1980,10 @@ def _split_time_explicit(text: str, has_time_columns: bool) -> Optional[Tuple[st
     """Parse an explicit `HH[:h MM][:m SS] title` prefix (ie-cx-11), returning
     `(Tsuffix, title)` or None. A bare leading number with no `:`/`h` separator
     is treated as a time only when the table declared time columns."""
-    explicit = re.match(r"^(\d{1,2})(?:(?:[:hH])(\d{2}))?(?:[:mM](\d{2}))?\s+(.+)$", text)
+    explicit = re.match(
+        r"^(\d{1,2})(?:[:hH](\d{2}))?(?:[:mM](\d{2}))?\s+(\S.*)$",
+        text,
+    )
     if not explicit:
         return None
     if not (has_time_columns or ":" in explicit.group(0) or "h" in explicit.group(0).lower()):
@@ -2161,19 +2180,18 @@ def _table_handle_pending_start(line: str, st: _TableState, year: Optional[int])
     return True
 
 
-def _table_handle_rows(line: str, st: _TableState, year: Optional[int]) -> bool:
+def _table_handle_rows(line: str, st: _TableState, year: Optional[int]) -> None:
     # Terminal handler: consumes the line whether or not it yields rows.
     if not st.active_order:
-        return True
+        return
     rows = _table_rows_from_line(line, st.active_order, year)
     if not rows:
-        return True
+        return
     if len(rows) == 1 and not rows[0][1]:
         dated, _title = rows[0]
         st.pending_start = dated.split(" - ", 1)[0]
-        return True
+        return
     st.out.extend(dated for dated, title in rows if title)
-    return True
 
 
 _TABLE_HANDLERS = (
@@ -2181,7 +2199,6 @@ _TABLE_HANDLERS = (
     _table_handle_pending_date,
     _table_handle_promote,
     _table_handle_pending_start,
-    _table_handle_rows,
 )
 
 
@@ -2199,9 +2216,8 @@ def _calendar_table_lines(text: str) -> List[str]:
         heading_year = _calendar_heading_year(line)
         if heading_year is not None:
             year = heading_year
-        for handler in _TABLE_HANDLERS:
-            if handler(line, st, year):
-                break
+        if not any(handler(line, st, year) for handler in _TABLE_HANDLERS):
+            _table_handle_rows(line, st, year)
     return st.out
 
 
@@ -2287,7 +2303,7 @@ def parse_llm_events(text_output: str, file_path: Path, event_type: str) -> List
         if not isinstance(e, dict):
             continue
         formatted_events.append({
-            "title": e.get("title") or "No Title",
+            "title": e.get("title") or UNTITLED_EVENT,
             "start": _coerce_start(e),
             "end": str(e.get("end") or ""),
             "location": str(e.get("location") or ""),
@@ -2411,7 +2427,7 @@ def _image_messages(
     language: str = DEFAULT_LANGUAGE,
     config: Optional[ModelConfig] = None,
 ) -> List[Any]:
-    mime = IMAGE_MIME.get(file_path.suffix.lower(), "image/jpeg")
+    mime = IMAGE_MIME.get(file_path.suffix.lower(), IMAGE_JPEG_MIME)
     # ie-mem-02: read one byte past the limit so an oversize file is rejected
     # rather than truncated — a half-read image is not a valid image. Matches
     # how _read_ics_text enforces --max-ics-bytes.
@@ -2794,28 +2810,28 @@ def _paddle_constructor_kwargs(paddle_lang: str, device: Optional[str]) -> List[
     return [{**item, "device": device} for item in kwargs]
 
 
-def _build_paddle_ocr_with_kwargs(PaddleOCR: Any, paddle_lang: str,
+def _build_paddle_ocr_with_kwargs(paddle_ocr_class: Any, paddle_lang: str,
                                   device: Optional[str]) -> Tuple[Any, Optional[Exception]]:
     last_exc: Optional[Exception] = None
     for kwargs in _paddle_constructor_kwargs(paddle_lang, device):
         try:
             with _redirect_stdout_stderr():
-                return PaddleOCR(**kwargs), None
+                return paddle_ocr_class(**kwargs), None
         except Exception as exc:
             last_exc = exc
     return None, last_exc
 
 
-def _build_paddle_ocr(PaddleOCR: Any, paddle_lang: str, device: str) -> Tuple[Any, str]:
-    engine, exc = _build_paddle_ocr_with_kwargs(PaddleOCR, paddle_lang, device)
+def _build_paddle_ocr(paddle_ocr_class: Any, paddle_lang: str, device: str) -> Tuple[Any, str]:
+    engine, exc = _build_paddle_ocr_with_kwargs(paddle_ocr_class, paddle_lang, device)
     if engine is not None:
         return engine, device
     if device != "cpu":
         logger.warning("PaddleOCR failed on %s; falling back to CPU: %s", device, exc)
-    engine, exc = _build_paddle_ocr_with_kwargs(PaddleOCR, paddle_lang, "cpu")
+    engine, exc = _build_paddle_ocr_with_kwargs(paddle_ocr_class, paddle_lang, "cpu")
     if engine is not None:
         return engine, "cpu"
-    engine, exc = _build_paddle_ocr_with_kwargs(PaddleOCR, paddle_lang, None)
+    engine, exc = _build_paddle_ocr_with_kwargs(paddle_ocr_class, paddle_lang, None)
     if engine is not None:
         return engine, "cpu"
     if exc is not None:
@@ -2827,7 +2843,7 @@ def _load_paddle_ocr_runtime(runtime_config: ModelConfig) -> Optional[Tuple[Any,
     global _PADDLE_OCR_MISSING
     try:
         import paddleocr as paddleocr_module
-        PaddleOCR = paddleocr_module.PaddleOCR
+        paddle_ocr_class = paddleocr_module.PaddleOCR
         import paddle as paddle_module
     except ImportError:
         with _PADDLE_OCR_LOCK:
@@ -2836,7 +2852,7 @@ def _load_paddle_ocr_runtime(runtime_config: ModelConfig) -> Optional[Tuple[Any,
         return None
     device = _resolve_paddle_ocr_device(
         runtime_config.paddle_ocr_device, paddle_module)
-    return paddleocr_module, PaddleOCR, device
+    return paddleocr_module, paddle_ocr_class, device
 
 
 def _get_cached_paddle_ocr(cache_key: Tuple[str, str]) -> Optional[Any]:
@@ -2862,13 +2878,13 @@ def _get_paddle_ocr(
     runtime = _load_paddle_ocr_runtime(runtime_config)
     if runtime is None:
         return None
-    paddleocr_module, PaddleOCR, device = runtime
+    paddleocr_module, paddle_ocr_class, device = runtime
     cache_key = (paddle_lang, device)
     cached = _get_cached_paddle_ocr(cache_key)
     if cached is not None:
         return cached
     try:
-        engine, effective_device = _build_paddle_ocr(PaddleOCR, paddle_lang, device)
+        engine, effective_device = _build_paddle_ocr(paddle_ocr_class, paddle_lang, device)
     except Exception as exc:
         _warn_once(f"paddle-init-{paddle_lang}",
                    "PaddleOCR failed to initialize for language %s on %s: %s",
@@ -3376,11 +3392,13 @@ def extract_from_image(
     runtime_config = model_config or ModelConfig()
     ocr_chain, ocr_source = _ocr_language_chain_with_source("", runtime_config)
     ocr_language = ocr_chain[0]
-    _log_language_preanalysis(file_path, "image OCR", ocr_language, ocr_source)
-    _log_ocr_language_chain(file_path, "image OCR", ocr_chain, runtime_config.ocr_language_score)
+    _log_language_preanalysis(file_path, IMAGE_OCR_LABEL, ocr_language, ocr_source)
+    _log_ocr_language_chain(file_path, IMAGE_OCR_LABEL, ocr_chain, runtime_config.ocr_language_score)
     text = _timed_stage(
         runtime_config, file_path, "image_ocr",
-        lambda: _ocr_image_path(file_path, runtime_config, ocr_language, ocr_chain, "image OCR"),
+        lambda: _ocr_image_path(
+            file_path, runtime_config, ocr_language, ocr_chain, IMAGE_OCR_LABEL
+        ),
     )
     if text.strip():
         language, source = _language_for_text_with_source(text, runtime_config)
@@ -3532,7 +3550,7 @@ def _pdf_ocr_text_from_paths(
         tuple(languages),
         runtime_config,
         subject,
-        "PDF OCR",
+        PDF_OCR_LABEL,
     )
 
 
@@ -3598,8 +3616,8 @@ def _pdf_ocr_text(
         return ""
     ocr_chain, ocr_source = _ocr_language_chain_with_source(pdf_text, config)
     ocr_language = ocr_chain[0]
-    _log_language_preanalysis(file_path, "PDF OCR", ocr_language, ocr_source)
-    _log_ocr_language_chain(file_path, "PDF OCR", ocr_chain, config.ocr_language_score)
+    _log_language_preanalysis(file_path, PDF_OCR_LABEL, ocr_language, ocr_source)
+    _log_ocr_language_chain(file_path, PDF_OCR_LABEL, ocr_chain, config.ocr_language_score)
     options = _pdf_ocr_options(config, ocr_chain)
     cached = _read_stage_cache_text(config, file_path, "pdf_ocr", options)
     if cached is not None:
@@ -3795,7 +3813,7 @@ def _file_worker(
             with _llm_stall_callback(on_llm_stall):
                 events = _extract_file_events(file, runtime_config, llm_client, default_tz)
             done_queue.put((index, events, None))
-        except BaseException as exc:
+        except BaseException as exc:  # NOSONAR -- every worker exit must reach the coordinator queue.
             stop_event.set()
             done_queue.put((index, [], exc))
         finally:
@@ -3816,7 +3834,7 @@ def _feed_file_queue(
             if not _put_file_work(work_queue, stop_event, count, file):
                 break
             count += 1
-    except BaseException as exc:
+    except BaseException as exc:  # NOSONAR -- producer failures are forwarded to the main thread.
         error = exc
         stop_event.set()
     finally:
@@ -4436,7 +4454,7 @@ def _build_ics_component(event: Dict[str, Any], event_class: Any) -> Optional[An
     component = event_class()
     component.add("uid", _event_uid(event))
     component.add("dtstamp", _event_dtstamp(start))
-    component.add("summary", event.get("title", "No Title"))
+    component.add("summary", event.get("title", UNTITLED_EVENT))
     component.add("dtstart", start)
     _add_ics_end(component, event, start)
     if event.get("location"):
@@ -4795,7 +4813,7 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
     try:
         _prepare_output_parents(args)
     except OSError as exc:
-        logger.error("Could not prepare output directory: %s", exc)
+        logger.exception("Could not prepare output directory: %s", exc)
         return 2
 
     try:
@@ -4838,7 +4856,7 @@ def _configure_logging() -> None:
                 encoding="utf-8", errors="backslashreplace")
         except OSError:
             _APP_LOG_FILE = sys.stderr
-    for handler in list(root.handlers):
+    for handler in tuple(root.handlers):
         if getattr(handler, "_import_events_app_handler", False):
             root.removeHandler(handler)
     handler = logging.StreamHandler(_APP_LOG_FILE)

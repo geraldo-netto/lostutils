@@ -3800,7 +3800,7 @@ def test_llm_file_identity_changes_with_mtime_and_size(tmp_path):
 
     assert first != after_touch  # mtime advance re-keys
     assert after_touch != after_grow  # size change re-keys
-    assert import_events._llm_file_identity(str(tmp_path / "missing.gguf")) == (None,)
+    assert import_events._llm_file_identity(str(tmp_path / "missing.gguf")) == (None, None)
 
 
 def test_get_llm_keys_after_lazy_model_download(tmp_path, monkeypatch):
@@ -4006,8 +4006,8 @@ def test_get_llm_cache_size_zero_evicts_existing_entry(monkeypatch):
             (
                 "A.gguf",
                 "ca.gguf",
-                (None,),  # model file absent -> sentinel identity
-                (None,),  # clip file absent -> sentinel identity
+                (None, None),  # model file absent -> sentinel identity
+                (None, None),  # clip file absent -> sentinel identity
                 import_events.DEFAULT_LLM_CONTEXT_SIZE,
                 import_events.DEFAULT_LLM_GPU_LAYERS,
                 import_events.DEFAULT_LLM_MAIN_GPU,
