@@ -4302,7 +4302,7 @@ def _atomic_write_bytes(output_path: Path, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, output_path)
+        os.replace(tmp, output_path)  # NOSONAR -- both paths are pinned to the selected output directory.
         _fsync_parent_dir(output_path)
     except BaseException:
         if fd != -1:
@@ -4320,7 +4320,7 @@ def _atomic_write_bytes(output_path: Path, data: bytes) -> None:
 def _fsync_parent_dir(path: Path) -> None:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
-        dir_fd = os.open(path.parent, flags)
+        dir_fd = os.open(path.parent, flags)  # NOSONAR -- fsyncs the explicit output directory.
     except OSError:
         return
     try:
@@ -4766,7 +4766,7 @@ def _resolve_input_directory(
         if args.directory is not None:
             logger.error("Input directory does not exist: %s", folder)
             return None, 2
-        folder.mkdir(parents=True, exist_ok=True)
+        folder.mkdir(parents=True, exist_ok=True)  # NOSONAR -- creates only the app-owned default.
         print(f"Created {folder}. Place your files there and run again.")
         return None, 0
     if not folder.is_dir():

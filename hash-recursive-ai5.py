@@ -2029,10 +2029,10 @@ class HashDumpWriter:
 
 def _open_hash_dump(path: str):
     try:
-        fh = open(path, "r+", buffering=1, encoding="utf-8",
+        fh = open(path, "r+", buffering=1, encoding="utf-8",  # NOSONAR -- explicit CLI output.
                   errors="surrogateescape")
     except FileNotFoundError:
-        fh = open(path, "w+", buffering=1, encoding="utf-8",
+        fh = open(path, "w+", buffering=1, encoding="utf-8",  # NOSONAR -- explicit CLI output.
                   errors="surrogateescape")
     fh.seek(0, os.SEEK_END)
     return fh

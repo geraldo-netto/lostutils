@@ -60,7 +60,7 @@ def _line_content_end(data: np.ndarray, line_end: int) -> int:
 
 
 def _open_input(path: str) -> mmap.mmap | None:
-    with open(path, "rb") as source:
+    with open(path, "rb") as source:  # NOSONAR -- input path is the CLI's explicit contract.
         if os.fstat(source.fileno()).st_size == 0:
             return None
         return mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)

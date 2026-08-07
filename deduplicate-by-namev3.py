@@ -198,7 +198,7 @@ def _load_cleaned_lines(path, replacements, word_re):
     """
     line_nums = {}
     dropped_empty = 0
-    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as f:  # NOSONAR -- explicit CLI input.
         for lineno, raw in enumerate(f, 1):
             cleaned = cleanup(raw, replacements, word_re)
             if not cleaned:

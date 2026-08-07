@@ -142,7 +142,7 @@ def _read_groups(lines):
 
 
 def _load_groups(path, forced_encoding, err_mode):
-    with open(path, "rb") as binary:
+    with open(path, "rb") as binary:  # NOSONAR -- input path is the CLI's explicit contract.
         encoding = _validate_encoding(
             forced_encoding or detect_encoding(binary.peek(4))
         )
