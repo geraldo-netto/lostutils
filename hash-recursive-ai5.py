@@ -296,7 +296,7 @@ def _process_walk_dir(idx, directory, state: "_WalkState", wstats) -> tuple[bool
     except (OSError, ValueError):
         wstats["dir_errors"] += 1
         return False, False
-    except BaseException as exc:
+    except BaseException as exc:  # NOSONAR -- worker failures must always be reported to the coordinator.
         _record_walk_worker_failure(idx, directory, exc, state)
         return False, True
 
@@ -465,8 +465,9 @@ class _WalkIter:
             # self-terminate once `pending` drains, posting SENTINEL_OUT),
             # join the coordinator, then finalise stats — always.
             if not stream_ended:
-                while state.out_q.get() is not SENTINEL_OUT:
-                    pass
+                item = state.out_q.get()
+                while item is not SENTINEL_OUT:
+                    item = state.out_q.get()
             coord_thread.join()
             _finalise_walk_stats(
                 self.stats, per_worker_stats, state.worker_failures)
@@ -951,7 +952,7 @@ def _drain_stage_futures_after_error(first_exc, done, inflight) -> NoReturn:
             continue
         try:
             fut.result()
-        except BaseException:
+        except BaseException:  # NOSONAR -- sibling failures must not mask the first failure below.
             pass
     raise first_exc
 
@@ -987,7 +988,7 @@ def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event,
                 pending_done.remove(fut)
                 try:
                     result = fut.result()
-                except BaseException as exc:
+                except BaseException as exc:  # NOSONAR -- the drain helper re-raises this exact failure.
                     _drain_stage_futures_after_error(
                         exc, pending_done, inflight)
                 batch_errors, count = _collect_batch(result, out)
@@ -1566,7 +1567,7 @@ def _prepare_candidates(aliases, inode_size, overflow):
 
 
 def _retain_candidate_keys(mapping, candidate_keys) -> None:
-    for key in list(mapping):
+    for key in tuple(mapping):
         if key not in candidate_keys:
             del mapping[key]
 
