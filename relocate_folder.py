@@ -112,6 +112,7 @@ def with_hash_fn(fn: "Callable[[Path], str]") -> "Iterator[Callable[[Path], str]
 
 
 BACKUP_SUFFIX = ".relocate-backup"
+FAILED_MESSAGE = "FAILED: %s"
 STAGING_PREFIX = ".relocate-stage-"
 STAGING_PID_FILE = ".owner-pid"
 _CHOWN_WARNING_LIMIT = 10
@@ -224,7 +225,7 @@ def _swallow_or_warn(label: str, fn: Callable, *args, **kwargs):
     with a clear message (rf-rel-09)."""
     try:
         return fn(*args, **kwargs)
-    except (PermissionError, OSError) as exc:
+    except OSError as exc:
         _log().warning("could not %s: %s", label, exc)
         return None
 
@@ -240,7 +241,7 @@ def _raise_or_fail(label: str, fn: Callable, *args, **kwargs):
     longer reach for "safe" thinking it means "doesn't crash"."""
     try:
         return fn(*args, **kwargs)
-    except (PermissionError, OSError) as exc:
+    except OSError as exc:
         raise RuntimeError(f"required {label} failed: {exc}") from exc
 
 
@@ -1238,7 +1239,7 @@ def _chown_pair(
         os.chown(dst_path, st.st_uid, st.st_gid, follow_symlinks=False)
     except FileNotFoundError:
         return  # dst skipped during copy (socket / FIFO / device) or vanished
-    except (PermissionError, OSError) as exc:
+    except OSError as exc:
         _warn_chown_failure(dst_path, exc, warning_limiter)
     except ValueError as exc:
         # rf-rel-13: NUL byte in src/dst path. Attributed here so the
@@ -1724,7 +1725,7 @@ def _sha256(path: Path) -> str:
     :func:`_sha256_watchdog`."""
     last_exc: BaseException | None = None
     attempts = _sha256_retry_attempts()
-    for attempt in range(attempts):
+    for _ in range(attempts):
         try:
             with _sha256_watchdog(path):
                 return _hash_once_strict(path)
@@ -1924,7 +1925,7 @@ def _backup_target(target: Path) -> Iterator[Path]:
             os.rename(backup, target)
             _fsync_directory(target.parent)
         except OSError as restore_exc:
-            _log().error(
+            _log().exception(
                 "atomic_swap failed AND rollback failed: %s is gone and the "
                 "backup at %s could not be moved back (%s). Run "
                 "`mv %s %s` manually before re-running.",
@@ -2860,7 +2861,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         plan = Plan.from_args(ns)
     except (OSError, ValueError) as exc:
-        _log().error("FAILED: %s", exc)
+        _log().error(FAILED_MESSAGE, exc)  # NOSONAR -- expected CLI validation stays concise.
         return 2
     _log().info("plan: source=%s target=%s dry_run=%s verify=%s checksum=%s strict=%s",
                 plan.source, plan.target, plan.dry_run, plan.verify,
@@ -2868,10 +2869,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = execute(plan)
     except shutil.Error as exc:
-        _log().error("FAILED during copy:\n%s", _format_shutil_error(exc))
+        _log().error(  # NOSONAR -- a structured copy failure is already user-readable.
+            "FAILED during copy:\n%s", _format_shutil_error(exc)
+        )
         return 1
     except Exception as exc:
-        _log().error("FAILED: %s", exc)
+        _log().error(FAILED_MESSAGE, exc)  # NOSONAR -- CLI failures intentionally omit tracebacks.
         return 1
     _log().info(result)
     return 0
@@ -2902,7 +2905,7 @@ def _run_recover(ns: argparse.Namespace) -> int:
     try:
         result = recover(source, force=getattr(ns, "force", False))
     except Exception as exc:
-        _log().error("FAILED: %s", exc)
+        _log().error(FAILED_MESSAGE, exc)  # NOSONAR -- CLI failures intentionally omit tracebacks.
         return 1
     _log().info(result)
     return 0
