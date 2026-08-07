@@ -3817,7 +3817,8 @@ def test_parse_extra_zip_family_basic(raw, must_not_contain):
 
 def test_parse_extra_zip_family_strips_dots_and_lowers():
     result = oze._parse_extra_zip_family(".JaR, .War")
-    assert "jar" in result and "war" in result
+    assert "jar" in result
+    assert "war" in result
 
 
 def test_parse_extra_zip_family_handles_nul_byte():
@@ -3933,7 +3934,8 @@ def test_cross_device_late_interrupt_keeps_completed_target(tmp_path, monkeypatc
     assert src.read_bytes() == b"payload", "source lost after late interrupt"
     # Re-run recovers idempotently.
     oze._move_cross_device(src, dst)
-    assert not src.exists() and dst.read_bytes() == b"payload"
+    assert not src.exists()
+    assert dst.read_bytes() == b"payload"
 
 
 def test_drain_futures_skips_unexpected_worker_exception(tmp_path):
@@ -3948,7 +3950,8 @@ def test_drain_futures_skips_unexpected_worker_exception(tmp_path):
     stats = oze._RunStats()
     head_cache = {src: object()}
     oze._drain_futures(futures, stats, preview=False, head_cache=head_cache)  # must not raise
-    assert stats.skipped == 1 and stats.processed == 0
+    assert stats.skipped == 1
+    assert stats.processed == 0
     assert fut not in futures, "drained future not removed"
     assert src not in head_cache, "head_cache not pruned for failed source"
 
@@ -4113,7 +4116,8 @@ def test_preplan_reserves_bucket_level_blocker(tmp_path):
     assert blocker not in sources, "bucket-dir blocker left in plan unrenamed"
     assert not blocker.exists(), "bucket-dir blocker not renamed on disk"
     renamed = [p for p in sources if p.parent == blocker.parent]
-    assert renamed and renamed[0].name.startswith("a00000.collision"), \
+    assert renamed, "blocker was not renamed"
+    assert renamed[0].name.startswith("a00000.collision"), \
         "blocker not renamed to a .collision sibling in place"
 
 
@@ -4171,7 +4175,8 @@ def test_parse_extra_zip_family_rejects_nul_byte():
 def test_parse_extra_zip_family_rejects_oversize():
     huge = "a" * 100
     result = oze._parse_extra_zip_family(f"ok,{huge},also")
-    assert "ok" in result and "also" in result
+    assert "ok" in result
+    assert "also" in result
     assert huge not in result
 
 
@@ -4304,7 +4309,8 @@ def test_cross_device_empty_source_zero_target_is_recovery(tmp_path):
     src = tmp_path / "src.bin"; src.write_bytes(b"")
     dst = tmp_path / "dst.bin"; dst.write_bytes(b"")
     oze._move_cross_device(src, dst)
-    assert dst.exists() and not src.exists()
+    assert dst.exists()
+    assert not src.exists()
 
 
 def test_organize_clamps_runaway_thread_count(tmp_path, caplog):

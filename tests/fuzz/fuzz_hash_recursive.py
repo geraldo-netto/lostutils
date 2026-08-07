@@ -71,7 +71,7 @@ class IndexInodesFuzz(unittest.TestCase):
         candidates = hr.size_collision_candidates(inode_size)
         cand_keys = {key for _, key in candidates}
         # Every candidate key was in the inode_size dict.
-        self.assertTrue(cand_keys <= set(inode_size))
+        self.assertLessEqual(cand_keys, set(inode_size))
         # All candidates correspond to a size that appears at least twice.
         sizes = [s for s, _ in candidates]
         # No singletons survive the filter.

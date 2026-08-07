@@ -159,7 +159,8 @@ def test_case_variant_paths_are_never_nominated_for_removal(monkeypatch, tmp_pat
 
     assert [ln for ln in out.splitlines() if ln.startswith("rm -f")] == []
     assert "SKIPPED" in out
-    assert "/photos/x.jpg" in out and "/Photos/x.jpg" in out
+    assert "/photos/x.jpg" in out
+    assert "/Photos/x.jpg" in out
 
 
 def test_case_variants_do_not_block_the_rest_of_a_group(monkeypatch, tmp_path):

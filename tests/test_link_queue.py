@@ -382,7 +382,8 @@ def test_stream_summary_logs_first_line_and_milestones(headless_dispatcher):
     # First line always logged; then each crossed milestone line.
     assert logs[0] == "[t] starting download"
     joined = "\n".join(logs)
-    assert "30%" in joined and "80%" in joined
+    assert "30%" in joined
+    assert "80%" in joined
 
 
 def test_dispatch_wait_remaining():
@@ -493,7 +494,8 @@ def test_facade_delegates_non_dunder_only():
 def test_merge_and_normalize_config():
     cfg = {"protocols": {"http": {"mode": "queue"}}}
     LinkQueueApp._merge_user_config(cfg, {"x": 1, "protocols": {"ftp": {"command": "c"}}})
-    assert cfg["x"] == 1 and "ftp" in cfg["protocols"]
+    assert cfg["x"] == 1
+    assert "ftp" in cfg["protocols"]
     cfg["protocols"]["bad"] = "notadict"
     LinkQueueApp._normalize_config_schema(cfg)
     assert "bad" not in cfg["protocols"]
@@ -539,7 +541,8 @@ try:
         cfg = {"protocols": {"http": {"mode": "queue", "command": "echo {url}",
                                       "shell": False}}}
         LinkQueueApp._merge_user_config(cfg, {"protocols": bad})
-        assert isinstance(cfg["protocols"], dict) and "http" in cfg["protocols"]
+        assert isinstance(cfg["protocols"], dict)
+        assert "http" in cfg["protocols"]
         LinkQueueApp._normalize_config_schema(cfg)
 except ImportError:  # pragma: no cover - hypothesis always installed in CI
     pass
@@ -552,7 +555,8 @@ def test_read_user_config_corrupt(tmp_path, monkeypatch):
         f.write("::: not yaml :::\n\t- broken")
     store = link_queue.ConfigStore(link_queue.CONFIG_FILE, link_queue.LEGACY_CONFIG_FILE)
     user, migrated = store._read_user_config_dict()
-    assert migrated is False and user is None     # corrupt -> (None, False)
+    assert migrated is False
+    assert user is None     # corrupt -> (None, False)
     assert "protocols" in store                   # fell back to defaults
 
 
@@ -923,7 +927,9 @@ def test_pending_queue_ops():
     pq.append(a)
     pq.append(b)
     pq.append(c)
-    assert len(pq) == 3 and a in pq and ("http://a.com/1", ()) in pq.urls
+    assert len(pq) == 3
+    assert a in pq
+    assert ("http://a.com/1", ()) in pq.urls
     assert list(pq.by_domain["a.com"].keys()) == [("http://a.com/1", ()),
                                                   ("http://a.com/3", ())]
     # dedupe: re-appending an existing url doesn't grow the queue
@@ -935,17 +941,23 @@ def test_pending_queue_ops():
     assert pq.item_for_iid(iid_a) is a
     assert pq.item_for_iid("p:nope") is None
     pq.remove(b)                          # O(1) removal by url
-    assert "b.com" not in pq.by_domain and b not in pq
+    assert "b.com" not in pq.by_domain
+    assert b not in pq
     assert link_queue._queue_iid_for_url("http://b.com/2") not in pq.iids
-    assert pq[0] is a and pq[-1] is c     # int index
+    assert pq[0] is a
+    assert pq[-1] is c     # int index
     assert pq[:1] == [a]                  # slice -> list
     pq[:] = [b]                           # whole-queue slice assign
-    assert list(pq) == [b] and pq.urls == {("http://b.com/2", ()): b}
+    assert list(pq) == [b]
+    assert pq.urls == {("http://b.com/2", ()): b}
     # slice-assign rebuilt the iid index too.
     assert pq.item_for_iid(link_queue._queue_iid_for_url("http://b.com/2")) is b
     assert iid_a not in pq.iids
     pq.clear()
-    assert len(pq) == 0 and not pq.urls and not pq.by_domain and not pq
+    assert len(pq) == 0
+    assert not pq.urls
+    assert not pq.by_domain
+    assert not pq
     assert not pq.iids
 
 
@@ -1018,7 +1030,8 @@ def test_log_sink_surfaces_drops(app, tmp_path):
     app._log_drop_count = 3                 # pretend 3 lines were dropped
     app._flush_log_batch(["real\n"])
     content = open(app.config["log_file"], encoding="utf-8").read()
-    assert "[sink] dropped 3 line(s)" in content and "real" in content
+    assert "[sink] dropped 3 line(s)" in content
+    assert "real" in content
     assert app._log_drop_count == 0         # reset after surfacing
 
 
@@ -1203,7 +1216,8 @@ def test_restore_queue_from_state(app):
         app.current_items.clear()
     app._restore_queue_from_state()
     urls = [it.url for it in app.queue_items]
-    assert "http://b/2" in urls and "http://a/1" in urls
+    assert "http://b/2" in urls
+    assert "http://a/1" in urls
     pump(app, 0.2)
 
 
@@ -2262,25 +2276,29 @@ MAP = {"f:": "-o"}
 
 def test_split_entry_basic():
     url, extra = LinkQueueApp._split_entry("http://x.com f:clip.mp4", MAP)
-    assert url == "http://x.com" and extra == (("-o", "clip.mp4"),)
+    assert url == "http://x.com"
+    assert extra == (("-o", "clip.mp4"),)
 
 
 def test_split_entry_no_prefix_whole_line_is_url():
     # No prefix token -> the entire line is the URL (multi-token kept verbatim).
     url, extra = LinkQueueApp._split_entry("http://x.com and more", MAP)
-    assert url == "http://x.com and more" and extra == ()
+    assert url == "http://x.com and more"
+    assert extra == ()
 
 
 def test_split_entry_prefix_does_not_eat_url():
     # rel-07: a short prefix that matches the start of a URL must not consume it.
     url, extra = LinkQueueApp._split_entry("http://x.com", {"h": "-x"})
-    assert url == "http://x.com" and extra == ()
+    assert url == "http://x.com"
+    assert extra == ()
 
 
 def test_split_entry_empty_param_skipped():
     # rel-08: a bare prefix (no value) is dropped, not turned into "-o ''".
     url, extra = LinkQueueApp._split_entry("http://x.com f:", MAP)
-    assert url == "http://x.com" and extra == ()
+    assert url == "http://x.com"
+    assert extra == ()
 
 
 def test_token_is_url():
@@ -2295,12 +2313,14 @@ def test_token_is_url():
 def test_split_entry_does_not_eat_magnet():
     # rel-09: prefix "magn" must not consume a magnet: URL.
     url, extra = LinkQueueApp._split_entry("magnet:?xt=urn:btih:abc", {"magn": "-x"})
-    assert url == "magnet:?xt=urn:btih:abc" and extra == ()
+    assert url == "magnet:?xt=urn:btih:abc"
+    assert extra == ()
 
 
 def test_worker_pool_counts(app):
     alive, stopping = app._pool.counts()
-    assert isinstance(alive, int) and isinstance(stopping, int)
+    assert isinstance(alive, int)
+    assert isinstance(stopping, int)
     assert stopping <= alive
 
 
@@ -2428,13 +2448,15 @@ def test_process_link_carries_extra(app):
     it = list(app.queue_items)[0]
     assert it.extra == (("-o", "c.mp4"),)
     disp = app._item_display(it)
-    assert "-o" in disp and "c.mp4" in disp
+    assert "-o" in disp
+    assert "c.mp4" in disp
 
 
 def test_item_display_appends_extra_shell(app):
     it = QueueItem("http://x", "http", "echo {url}", True, (("-o", "a b.mp4"),))
     disp = app._item_display(it)
-    assert disp.startswith("(shell)") and "-o 'a b.mp4'" in disp
+    assert disp.startswith("(shell)")
+    assert "-o 'a b.mp4'" in disp
 
 
 def test_run_item_with_extra(app):
@@ -2588,7 +2610,8 @@ def test_normalize_warns_on_dropped_non_dict_protocol(capsys):
     }
     link_queue.ConfigStore._normalize_config_schema(cfg)
     err = capsys.readouterr().err
-    assert "'broken'" in err and "'also_broken'" in err
+    assert "'broken'" in err
+    assert "'also_broken'" in err
     assert "good" not in err               # good protocol is not warned about
     assert "broken" not in cfg["protocols"]   # actually dropped
     assert "also_broken" not in cfg["protocols"]
@@ -2615,7 +2638,8 @@ def test_queue_iid_handles_unicode_and_surrogates():
     # Pathologic URL must not raise.
     url = "https://example/\udca0\udca1?x={1}"
     out = link_queue._queue_iid_for_url(url)
-    assert out.startswith("p:") and len(out) == 18
+    assert out.startswith("p:")
+    assert len(out) == 18
 
 
 def _drive_mapping_editor(app, existing, prefix, flag):
@@ -3190,7 +3214,8 @@ try:
         disp = link_queue.Dispatcher.headless(cfg)
         try:
             n = disp._immediate_concurrency()
-            assert isinstance(n, int) and n >= 1
+            assert isinstance(n, int)
+            assert n >= 1
         finally:
             disp.stop_event.set()
 except ImportError:  # pragma: no cover - hypothesis always installed in CI
@@ -3329,7 +3354,8 @@ def test_resize_immediate_pool_logs_drop_warning(tmp_path, monkeypatch):
         d.config["immediate_queue_maxsize"] = 3
         d._resize_immediate_pool()
         drops = [m for m in logs if "shrinking the immediate queue cap" in m]
-        assert drops and "5 item(s) lost" in drops[0]
+        assert drops
+        assert "5 item(s) lost" in drops[0]
     finally:
         d.stop_event.set()
 
@@ -3399,7 +3425,8 @@ def test_resize_immediate_queue_property(tmp_path_factory, initial, new_cap, n_i
         kept = d._immediate_q.qsize()
         assert d._immediate_q.maxsize == new_cap
         if new_cap == 0:
-            assert kept == present and dropped == 0
+            assert kept == present
+            assert dropped == 0
         else:
             assert kept <= new_cap
         assert kept + dropped == present
@@ -4165,7 +4192,8 @@ def test_queue_iid_for_url_empty_string():
     # Empty URL hashes to a fixed digest. Pin so a future caller that
     # treats "" as "no iid" can be added without silent regressions.
     iid = link_queue._queue_iid_for_url("")
-    assert isinstance(iid, str) and iid != ""
+    assert isinstance(iid, str)
+    assert iid != ""
 
 
 def test_queue_iid_for_url_nul_byte():
@@ -4176,7 +4204,8 @@ def test_queue_iid_for_url_nul_byte():
 def test_queue_iid_for_url_oversize_input():
     iid = link_queue._queue_iid_for_url("a" * 10000)
     # Hash output is fixed-width regardless of input length.
-    assert isinstance(iid, str) and len(iid) < 100
+    assert isinstance(iid, str)
+    assert len(iid) < 100
 
 
 def test_queue_iid_for_url_distinct_inputs_distinct_outputs():
@@ -4503,7 +4532,8 @@ def test_immediate_consumer_survives_item_exception(headless_dispatcher):
     disp._dispatch_immediate(q("boom"))
     disp._dispatch_immediate(q("ok"))
     assert done.wait(3), "consumer died after an item raised; 'ok' never ran"
-    assert "boom" in seen and "ok" in seen
+    assert "boom" in seen
+    assert "ok" in seen
 
 
 def test_immediate_consumer_refreshes_depth_after_completion(
@@ -4701,7 +4731,8 @@ def test_cooldown_wait_hint_sleeps_until_expiry(headless_dispatcher):
     with disp._cooldown_lock:
         disp._cooldown_until[domain] = _time.monotonic() + 50.0
     hint = disp._cooldown_wait_hint()
-    assert hint is not None and 40.0 < hint <= 50.0     # sleep until expiry
+    assert hint is not None
+    assert 40.0 < hint <= 50.0     # sleep until expiry
 
 
 def test_claim_or_wait_for_cooldown_waits_until_next_expiry(
@@ -5178,7 +5209,8 @@ def test_stream_deadline_closes_inherited_output_pipe(
     assert not headless_dispatcher._stream_and_wait(
         Proc(), "job", "https://example.test", 1, "summary"
     )
-    assert joins and joins[0] is not None
+    assert joins
+    assert joins[0] is not None
     assert closed == [Proc.stdout]
 
 

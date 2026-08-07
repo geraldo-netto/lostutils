@@ -147,7 +147,8 @@ def test_atomic_swap_rolls_back_on_symlink_failure():
             with pytest.raises(OSError):
                 rf.atomic_swap(source, target)
         # rolled back: source restored as a real directory
-        assert source.is_dir() and not source.is_symlink()
+        assert source.is_dir()
+        assert not source.is_symlink()
         assert (source / "f").read_text() == "x"
 
 
@@ -548,7 +549,8 @@ def test_collect_chown_error_records_exception():
     fut.set_exception(ValueError("boom"))
     errs: list = []
     rf._collect_chown_error(fut, errs)
-    assert len(errs) == 1 and isinstance(errs[0], ValueError)
+    assert len(errs) == 1
+    assert isinstance(errs[0], ValueError)
 
 
 def test_collect_chown_error_ignores_success():
@@ -814,7 +816,8 @@ def test_copy_tree_space_check_still_needs_total_for_progress(tmp_path, monkeypa
     calls = []
     rf.copy_tree(src, tmp_path / "dst", check_space=False,
                  progress_cb=lambda d, t: calls.append((d, t)))
-    assert calls and calls[-1][1] == 100   # total still reflects real bytes
+    assert calls
+    assert calls[-1][1] == 100   # total still reflects real bytes
 
 
 def test_parse_args_no_space_check_flag():
@@ -1458,7 +1461,8 @@ def test_backup_target_rmtrees_on_success(tmp_path):
     t = tmp_path / "target"; t.mkdir()
     (t / "f").write_text("x")
     with rf._backup_target(t) as backup:
-        assert backup.is_dir() and not t.exists()
+        assert backup.is_dir()
+        assert not t.exists()
         t.mkdir()                     # body re-creates a replacement
         (t / "g").write_text("y")
     assert not backup.exists()        # backup removed on success
@@ -1471,7 +1475,8 @@ def test_backup_target_restores_on_exception(tmp_path):
     with pytest.raises(RuntimeError):
         with rf._backup_target(t):
             raise RuntimeError("body failure")
-    assert t.is_dir() and (t / "f").read_text() == "x"
+    assert t.is_dir()
+    assert (t / "f").read_text() == "x"
 
 
 def test_backup_target_refuses_stale_backup(tmp_path):
@@ -2662,7 +2667,8 @@ def test_find_open_file_holders_records_pid_with_files(monkeypatch, tmp_path):
     monkeypatch.setattr(rf, "Path",
                         lambda arg: FakeDir(arg) if str(arg) == "/proc" else real_path(arg))
     snap = rf.find_open_file_holders(src)
-    assert snap.holders and snap.holders[0][0] == 12345
+    assert snap.holders
+    assert snap.holders[0][0] == 12345
 
 
 def test_process_open_files_in_under_root(tmp_path, monkeypatch):
@@ -2830,7 +2836,8 @@ def test_nearest_existing_dir_returns_root_when_only_root_is_dir(tmp_path, monke
     monkeypatch.setattr(rf.Path, "is_dir", fake_is_dir)
     monkeypatch.setattr(rf.Path, "is_symlink", lambda self: False)
     result = rf._nearest_existing_dir(tmp_path / "deep" / "subdir")
-    assert result is not None and result == result.parent   # filesystem root
+    assert result is not None
+    assert result == result.parent   # filesystem root
 
 
 def test_nearest_existing_dir_skips_when_only_symlinked_dir_in_chain(tmp_path):
@@ -4011,7 +4018,8 @@ def test_copy_and_verify_rmtree_after_pool_joined(tmp_path, monkeypatch):
 def test_run_streamed_docstring_documents_inflight_abort():
     doc = rf._run_streamed.__doc__ or ""
     assert "rf-conc-02" in doc
-    assert "running" in doc and "cancel" in doc
+    assert "running" in doc
+    assert "cancel" in doc
 
 
 def test_run_verify_pool_first_error_surfaces_only_in_final_drain():
@@ -4257,7 +4265,8 @@ def test_execute_preamble_dry_run_status(tmp_path):
                    dry_run=True, force=True)
     states = []
     status = rf._execute_preamble(plan, states.append)
-    assert status is not None and status.startswith("dry-run:")
+    assert status is not None
+    assert status.startswith("dry-run:")
     assert states == [rf.MigrationState.DRY_RUN]
 
 
@@ -4326,7 +4335,8 @@ def test_backup_target_restores_source_on_keyboardinterrupt(tmp_path):
     backup = target.with_name(target.name + rf.BACKUP_SUFFIX)
     with pytest.raises(KeyboardInterrupt):
         with rf._backup_target(target) as b:
-            assert b == backup and backup.exists()
+            assert b == backup
+            assert backup.exists()
             raise KeyboardInterrupt
     assert target.exists(), "source not restored after Ctrl+C"
     assert not backup.exists(), "backup left behind after restore"
@@ -4339,7 +4349,8 @@ def test_recover_restores_orphaned_backup(tmp_path):
     backup.mkdir(); (backup / "f").write_text("x", encoding="utf-8")
     result = rf.recover(source, force=True)
     assert result.startswith("recovered:")
-    assert source.is_dir() and not backup.exists()
+    assert source.is_dir()
+    assert not backup.exists()
 
 
 def test_recover_refuses_when_source_reappears(tmp_path, monkeypatch):
@@ -4463,7 +4474,7 @@ def test_iter_verify_tasks_logs_unstatable_entry(tmp_path, monkeypatch, caplog):
         tasks = list(rf._iter_verify_tasks(src, tmp_path / "dst", False, False))
     assert any("cannot stat source entry" in r.message for r in caplog.records)
     # the raising task is still yielded
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError, match="could not stat source entry"):
         for t in tasks:
             t()
 

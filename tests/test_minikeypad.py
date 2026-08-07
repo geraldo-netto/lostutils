@@ -342,13 +342,19 @@ def test_unicode_macro_linux_holds_ctrl_shift_over_u_and_hex():
     d = kp.data
     # 5 keystrokes: U, '0','3','b','1' -- each with Ctrl|Shift (=3) held
     assert d[kp.KeyGroupCharNum] == 5
-    assert d[4] == 3 and d[5] == 24                         # Ctrl+Shift + 'u'
-    assert d[6] == 3 and d[7] == minikeypad.HEX_HID["0"]
-    assert d[8] == 3 and d[9] == minikeypad.HEX_HID["3"]
-    assert d[10] == 3 and d[11] == minikeypad.HEX_HID["b"]
-    assert d[12] == 3 and d[13] == minikeypad.HEX_HID["1"]
+    assert d[4] == 3
+    assert d[5] == 24                         # Ctrl+Shift + 'u'
+    assert d[6] == 3
+    assert d[7] == minikeypad.HEX_HID["0"]
+    assert d[8] == 3
+    assert d[9] == minikeypad.HEX_HID["3"]
+    assert d[10] == 3
+    assert d[11] == minikeypad.HEX_HID["b"]
+    assert d[12] == 3
+    assert d[13] == minikeypad.HEX_HID["1"]
     reports, flash, _ = _built(kp)
-    assert flash == "kbd" and reports[0][0] == 1
+    assert flash == "kbd"
+    assert reports[0][0] == 1
 
 
 def test_unicode_macro_darwin_holds_option_over_4_hex():
@@ -356,10 +362,14 @@ def test_unicode_macro_darwin_holds_option_over_4_hex():
     assert kp.unicode_macro(0x05D0, "darwin") is True       # Hebrew alef
     d = kp.data
     assert d[kp.KeyGroupCharNum] == 4                        # 4 hex, no 'u'
-    assert d[4] == 4 and d[5] == minikeypad.HEX_HID["0"]    # Option held
-    assert d[6] == 4 and d[7] == minikeypad.HEX_HID["5"]
-    assert d[8] == 4 and d[9] == minikeypad.HEX_HID["d"]
-    assert d[10] == 4 and d[11] == minikeypad.HEX_HID["0"]
+    assert d[4] == 4
+    assert d[5] == minikeypad.HEX_HID["0"]    # Option held
+    assert d[6] == 4
+    assert d[7] == minikeypad.HEX_HID["5"]
+    assert d[8] == 4
+    assert d[9] == minikeypad.HEX_HID["d"]
+    assert d[10] == 4
+    assert d[11] == minikeypad.HEX_HID["0"]
 
 
 def test_unicode_macro_unsupported_platform_returns_false():
@@ -400,7 +410,8 @@ def test_layout_tables_scancodes_are_valid_hid():
     for expected in ("Greek / Cyrillic", "Hebrew", "German / Nordic", "Latin (accents)"):
         assert expected in names
     gc = {g for g, _ in dict(minikeypad.LAYOUTS)["Greek / Cyrillic"]}
-    assert "α" in gc and "я" in gc        # Greek + Cyrillic merged
+    assert "α" in gc
+    assert "я" in gc        # Greek + Cyrillic merged
     nordic = {g for g, _ in dict(minikeypad.LAYOUTS)["German / Nordic"]}
     assert {"ä", "ö", "ü", "ß", "å", "æ", "ø"} <= nordic
     for _title, entries in scripts:
@@ -456,7 +467,8 @@ def test_available_layouts_gates_on_unicode(monkeypatch):
     assert len(minikeypad._available_layouts()) == len(minikeypad.LAYOUTS)
     monkeypatch.setattr(minikeypad, "_unicode_available", lambda: False)
     only = minikeypad._available_layouts()
-    assert len(only) == 1 and only[0][1] is None     # US basic only
+    assert len(only) == 1
+    assert only[0][1] is None     # US basic only
 
 
 # ===========================================================================
@@ -518,7 +530,8 @@ def test_pip_install_uses_argv_list_no_shell(monkeypatch):
     cmd, kwargs = calls[0]
     assert isinstance(cmd, list)                # argv, not a string
     assert cmd[-1] == "pyusb"
-    assert "-m" in cmd and "pip" in cmd
+    assert "-m" in cmd
+    assert "pip" in cmd
     assert kwargs.get("shell", False) is False
 
 
@@ -726,7 +739,8 @@ def test_connect_success_with_endpoint(monkeypatch):
     logs = []
     d = minikeypad.KeypadDevice(log=logs.append)
     assert d.connect() is True
-    assert d.connected and d.ep_out is ep
+    assert d.connected
+    assert d.ep_out is ep
     assert dev.detached is True
     assert any("Connected" in m for m in logs)
 
@@ -857,7 +871,8 @@ def test_close_reattaches_and_disposes(monkeypatch):
     d.close()
     assert dev.attached is True
     assert dev in usb.util.disposed
-    assert d.dev is None and d._detached is False
+    assert d.dev is None
+    assert d._detached is False
 
 
 def test_close_dispose_exception_is_logged(monkeypatch):
@@ -907,7 +922,8 @@ def test_write_device_endpoint(monkeypatch):
     d.ep_out = ep
     assert d.write_device(2, bytes(range(1, 9))) is True
     sent = ep.written[0][0]
-    assert sent[0] == 2 and sent[1] == 1
+    assert sent[0] == 2
+    assert sent[1] == 1
     assert len(sent) == minikeypad.REPORT_LEN + 1
 
 
@@ -1120,7 +1136,8 @@ def test_need_key_blocks_every_handler_without_selection(app):
     app._shift_and(30, "!")
     app._multimedia(("Vol +", (0, 2), (0, 64), (0, 233)))
     app._mouse(("L Click", (1, 0, 0, 0)))
-    assert app.set_text.get() == "" and app.fun_text.get() == ""
+    assert app.set_text.get() == ""
+    assert app.fun_text.get() == ""
 
 
 def test_append_log_falls_back_to_print(app, capsys):
@@ -1304,7 +1321,8 @@ def test_clear_handler(app):
     app._select_key(1)
     app._basic_key(4, "A")
     app._clear()
-    assert app.set_text.get() == "" and app._selected_id is None
+    assert app.set_text.get() == ""
+    assert app._selected_id is None
 
 
 def test_log_appends(app):
@@ -1387,7 +1405,8 @@ def test_download_pre_flash_failure_says_intact(app):
     _wait_drain(app)
     log = app.log_box.get("1.0", "end").lower()
     assert "failed" in app.dl_status.cget("text").lower()
-    assert "intact" in log and "partial" not in log
+    assert "intact" in log
+    assert "partial" not in log
 
 
 def test_download_flash_failure_warns_partial(app):
@@ -1665,7 +1684,8 @@ def test_reports_for_rebuilds_saved_key(app):
     built = app._reports_for(1, bytes(app.kp.data))
     assert built is not None
     reports, flash, _ = built
-    assert flash == "kbd" and reports[0][0] == 1
+    assert flash == "kbd"
+    assert reports[0][0] == 1
 
 
 def test_write_all_not_connected(app):
@@ -1836,10 +1856,12 @@ def test_write_all_does_not_ask_when_layers_cannot_collapse(
 
 def test_apply_report_id_records_whether_the_device_answered(app):
     app._apply_report_id(2, "probed")
-    assert app.kp.ReportID == 2 and app._report_id_confirmed is True
+    assert app.kp.ReportID == 2
+    assert app._report_id_confirmed is True
 
     app._apply_report_id(0, "fallback", confirmed=False)
-    assert app.kp.ReportID == 0 and app._report_id_confirmed is False
+    assert app.kp.ReportID == 0
+    assert app._report_id_confirmed is False
 
 
 def test_report_id_starts_unconfirmed(app):
@@ -1899,7 +1921,8 @@ def test_write_all_worker_crash_logged(app):
     app._write_all()
     _wait_drain(app)
     log = app.log_box.get("1.0", "end").lower()
-    assert "error" in log and "0/1" in log
+    assert "error" in log
+    assert "0/1" in log
     assert app._io_busy is False
 
 
@@ -2056,7 +2079,8 @@ def test_main_installs_signals_and_destroys(monkeypatch):
     monkeypatch.setattr(minikeypad, "_install_signal_handlers",
                         lambda a: installed.append(a))
     minikeypad.main([])
-    assert installed and installed[0].destroyed is True
+    assert installed
+    assert installed[0].destroyed is True
 
 
 def test_main_handles_keyboard_interrupt(monkeypatch):
@@ -2282,7 +2306,8 @@ def test_save_profile_fsyncs_before_rename(app, tmp_path, monkeypatch):
 
     app._save_profile(str(tmp_path / "p.json"))
 
-    assert "fsync" in calls and "replace" in calls
+    assert "fsync" in calls
+    assert "replace" in calls
     assert calls.index("fsync") < calls.index("replace")
 
 

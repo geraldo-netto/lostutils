@@ -1440,7 +1440,8 @@ def test_get_paddle_ocr_cached_language_not_blocked_by_other_build(monkeypatch):
     release.set()
     worker.join(3)
     assert not worker.is_alive()
-    assert built and results[0] is built[0][2]
+    assert built
+    assert results[0] is built[0][2]
 
 
 def test_get_paddle_ocr_eviction_closes_lru_engine(monkeypatch):
@@ -2850,7 +2851,8 @@ def test_build_ics_keeps_all_day_end_as_date(monkeypatch):
 
     ics = import_events.build_ics(events).decode("utf-8")
 
-    assert "DTSTART" in ics and "DTEND" in ics
+    assert "DTSTART" in ics
+    assert "DTEND" in ics
     assert "DTEND;VALUE=DATE:20260625" in ics
 
 
@@ -4985,7 +4987,8 @@ def test_main_writes_json_and_ics(tmp_path, monkeypatch):
 
     assert rc == 0
     data = json.loads(out.read_text(encoding="utf-8"))
-    assert data and data[0]["title"] == "Launch"
+    assert data
+    assert data[0]["title"] == "Launch"
     assert "SUMMARY:Launch" in ics.read_text(encoding="utf-8")
 
 
@@ -5062,7 +5065,8 @@ def test_download_logs_redact_home_path(tmp_path, monkeypatch, caplog):
     with caplog.at_level("INFO"):
         import_events._log_download_progress(cache_file, 4, 4)
     msg = caplog.records[-1].getMessage()
-    assert "~" in msg and str(fake_home) not in msg, f"home dir leaked: {msg}"
+    assert "~" in msg, f"home dir leaked: {msg}"
+    assert str(fake_home) not in msg, f"home dir leaked: {msg}"
 
 
 # --- ie-i18n-02: _read_text encoding handling --------------------------------
@@ -5118,7 +5122,8 @@ def test_feed_file_queue_count_excludes_unqueued_on_early_stop():
         item = dq.get()
         if item[0] is None:
             sentinel = item
-    assert sentinel is not None and sentinel[1] == 0
+    assert sentinel is not None
+    assert sentinel[1] == 0
     # work_queue holds only the None shutdown markers, never a real (idx, file)
     drained = []
     while not wq.empty():
@@ -5301,7 +5306,8 @@ def test_run_file_workers_aborts_and_attaches_partials_on_model_failure(
 
     assert exc_info.value is failure
     assert failure.partial_events == partial
-    assert pools[0].started and pools[0].aborted
+    assert pools[0].started
+    assert pools[0].aborted
 
 
 def test_worker_pool_clears_only_recovered_stall(monkeypatch):

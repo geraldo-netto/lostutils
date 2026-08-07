@@ -151,7 +151,8 @@ def test_emit_groups_writes_only_real_duplicates():
     out = []
     groups, paths = hr.emit_groups(final_groups, aliases, out.append)
     # digA expands to 2 alias paths (a hardlinked dup), digB to 2 distinct files
-    assert groups == 2 and paths == 4
+    assert groups == 2
+    assert paths == 4
     # hr-perf-03: one `write` call per group, each containing every line for
     # that group (so the per-line count requires splitting on newline).
     assert len(out) == 2
@@ -200,7 +201,9 @@ def test_no_false_dup_for_files_between_cap_and_2cap():
         shared_head = b"H" * hr.CAP
         a = shared_head + b"AAA" * (hr.CAP // 6)   # ~1.5 * CAP
         b = shared_head + b"BBB" * (hr.CAP // 6)   # same size, different tail
-        assert len(a) == len(b) and hr.CAP < len(a) <= 2 * hr.CAP
+        assert len(a) == len(b)
+        assert hr.CAP < len(a)
+        assert len(a) <= 2 * hr.CAP
         (root / "x1.bin").write_bytes(a)
         (root / "x2.bin").write_bytes(b)
         files, _ = _drain_walk(root, 2)
@@ -278,7 +281,8 @@ def test_find_duplicate_groups_no_candidates():
         files, _ = _drain_walk(root, 1)
         result = hr.find_duplicate_groups(files, 1)
         final_groups, info = result.groups, result.info
-        assert final_groups == {} and info["candidates"] == 0
+        assert final_groups == {}
+        assert info["candidates"] == 0
 
 
 # --- hr-cx-01: preflight + main smoke ---------------------------------------
@@ -311,7 +315,8 @@ def test_run_stage_serial_branch():
     items = ["a", "b", "c"]
     fake = lambda batch: [(p, p.upper()) for p in batch]
     out, errors = hr._run_stage(items, fake, total_bytes=10, jobs=2)
-    assert out == {"a": "A", "b": "B", "c": "C"} and errors == 0
+    assert out == {"a": "A", "b": "B", "c": "C"}
+    assert errors == 0
 
 
 def test_run_stage_threaded_branch(monkeypatch):
@@ -509,8 +514,10 @@ def test_main_smoke(monkeypatch, capsys):
         hr.main()
         out, err = capsys.readouterr()
         # both duplicate paths printed (same digest line each)
-        assert "a.bin" in out and "b.bin" in out
-        assert "dup_groups=1" in err and "dup_paths=2" in err
+        assert "a.bin" in out
+        assert "b.bin" in out
+        assert "dup_groups=1" in err
+        assert "dup_paths=2" in err
 
 
 # --- hr-perf-02: single-stat walk ------------------------------------------
@@ -557,7 +564,8 @@ def test_threaded_walk_single_stat_per_entry(monkeypatch):
         # 5 regular files + 1 subdir == 6 entries, one stat each.
         assert counter["calls"] >= 6
         # hr-perf-02: walk must not call is_dir / is_file on entries anymore.
-        assert counter["is_dir"] == 0 and counter["is_file"] == 0
+        assert counter["is_dir"] == 0
+        assert counter["is_file"] == 0
 
 
 def test_threaded_walk_handles_stat_failure_on_entry():
@@ -589,13 +597,16 @@ def test_emit_groups_writes_once_per_group():
     final_groups = {"dA": [("k1",)], "dB": [("k2",)]}
     out = []
     groups, paths = hr.emit_groups(final_groups, aliases, out.append)
-    assert groups == 2 and paths == 5
+    assert groups == 2
+    assert paths == 5
     # hr-perf-03: one write call per group.
     assert len(out) == 2
     # Each chunk contains every path for that group.
     chunk_A = next(c for c in out if c.startswith("dA "))
     assert chunk_A.count("\n") == 3
-    assert "/p1" in chunk_A and "/p1b" in chunk_A and "/p1c" in chunk_A
+    assert "/p1" in chunk_A
+    assert "/p1b" in chunk_A
+    assert "/p1c" in chunk_A
 
 
 def test_emit_groups_accepts_explicit_config():
@@ -684,7 +695,8 @@ def test_hash_file_windows_other_oserror_warns(monkeypatch, capsys):
     out = hr._hash_file_windows("/whatever", [(0, 10, hr.os.SEEK_SET)])
     assert out is None
     err = capsys.readouterr().err
-    assert "hash failed" in err and "EACCES" in err
+    assert "hash failed" in err
+    assert "EACCES" in err
 
 
 def test_hash_file_windows_fdopen_failure_closes_fd(monkeypatch):
@@ -1327,7 +1339,8 @@ def test_main_summary_surfaces_hash_shrank(tmp_path, monkeypatch, capsys):
 def test_hash_file_windows_non_strict_short_file_returns_digest(tmp_path):
     f = tmp_path / "tiny.bin"; f.write_bytes(b"only9byte")
     digest = hr._hash_file_windows(str(f), [hr.FileWindow(0, 100, 0, strict=False)])
-    assert digest is not None and len(digest) > 0
+    assert digest is not None
+    assert len(digest) > 0
 
 
 def test_read_window_into_assembles_short_reads():
@@ -1424,7 +1437,8 @@ def test_fmt_count_int_boundaries():
     import sys as _sys
     for n in (0, 1, -1, _sys.maxsize, -_sys.maxsize - 1, _sys.maxsize + 1):
         out = hr._fmt_count(n)
-        assert isinstance(out, str) and len(out) > 0
+        assert isinstance(out, str)
+        assert len(out) > 0
 
 
 def test_fmt_elapsed_hour_path():
@@ -1574,7 +1588,8 @@ def test_expand_keys_to_paths_more_sentinel_type():
     out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=10)
     assert len(out) == 11   # 10 paths + 1 sentinel
     assert isinstance(out[-1], hr._MoreSentinel)
-    assert isinstance(out[0], str) and not isinstance(out[0], hr._MoreSentinel)
+    assert isinstance(out[0], str)
+    assert not isinstance(out[0], hr._MoreSentinel)
 
 
 def test_count_real_paths_excludes_sentinel():
@@ -1677,7 +1692,8 @@ def test_thirds_strategy_honors_explicit_sizes():
     assert [w.length for w in windows] == [4, 4, 2, 2]
     for w in windows:
         offset = w.offset + 16 if w.whence == hr.os.SEEK_END else w.offset
-        assert 0 <= offset and offset + w.length <= 16
+        assert 0 <= offset
+        assert offset + w.length <= 16
 
 
 def test_main_block_size_override_runs(tmp_path, monkeypatch, capsys):
@@ -1690,9 +1706,10 @@ def test_main_block_size_override_runs(tmp_path, monkeypatch, capsys):
         hr.sys, "argv",
         ["hr", "--block-size", "4", "--sample-size", "2", str(tmp_path)])
     hr.main()
-    assert (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD) == orig
+    assert orig == (hr.CAP, hr.SAMPLE, hr.HEAD_TAIL_THRESHOLD)
     captured = capsys.readouterr()
-    assert "a.bin" in captured.out and "b.bin" in captured.out
+    assert "a.bin" in captured.out
+    assert "b.bin" in captured.out
     _assert_timestamped(captured.err)
 
 
@@ -1928,7 +1945,8 @@ def test_main_logs_hashing_progress_percent(tmp_path, monkeypatch, capsys):
     hr.main()
     err = capsys.readouterr().err
     assert "hashing stage1 100% (120/120)" in err
-    assert "hashing stage1" in err and "(64/120)" in err
+    assert "hashing stage1" in err
+    assert "(64/120)" in err
 
 
 def test_main_hashing_progress_throttles_small_batches(
@@ -2099,7 +2117,8 @@ def test_main_hashes_close_failure_warns(tmp_path, monkeypatch, capsys):
         hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
     hr.main()                                   # must not raise
     err = capsys.readouterr().err
-    assert "closing" in err and "failed" in err
+    assert "closing" in err
+    assert "failed" in err
 
 
 def test_main_hashes_closed_when_dump_write_interrupted(tmp_path, monkeypatch):
@@ -2354,7 +2373,8 @@ def test_main_immediate_cancel_still_reports_timing(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(hr.sys, "argv", ["hr", str(tmp_path)])
     hr.main()
     err = capsys.readouterr().err
-    assert "walk_s=" in err and "hash_s=" in err
+    assert "walk_s=" in err
+    assert "hash_s=" in err
 
 
 # ===== rescan: boundary / validation gap tests (hr-test-05..20) ============
@@ -2959,7 +2979,8 @@ def test_run_stage_serial_skips_work_when_precancelled():
 
     out, errors = hr._run_stage(
         ["a", "b"], batch, total_bytes=1, jobs=1, cancel_event=ev)
-    assert out == {} and errors == 0
+    assert out == {}
+    assert errors == 0
     assert called["n"] == 0   # batch_fn never invoked
 
 
@@ -3207,7 +3228,8 @@ def test_find_duplicate_groups_uses_ingest_alias_cap_via_result(tmp_path):
     assert result.overflow is not None
     assert all(v == 15 for v in result.overflow.values())
     # The callback received the SAME overflow dict explicitly.
-    assert captured and all(c[3] is result.overflow for c in captured)
+    assert captured
+    assert all(c[3] is result.overflow for c in captured)
 
 
 def test_run_config_has_no_overflow_attr():
@@ -3243,7 +3265,8 @@ def test_emit_groups_forwards_overflow_to_sentinel():
     # 3 stored paths + 50 overflow = 53; with default cap (1024) no
     # sentinel, but the real count includes the overflow-bearing inode.
     assert groups == 1
-    assert "/a" in blob and "/c" in blob
+    assert "/a" in blob
+    assert "/c" in blob
 
 
 def test_dedup_result_overflow_field_default_none():
@@ -3537,7 +3560,8 @@ def test_main_dump_marks_unconfirmed_stage2_files_provisional(tmp_path, monkeypa
     lines = [ln for ln in out.read_text().splitlines() if ln and "hashes.txt" not in ln]
     digests = {ln.split(" ", 1)[1].rsplit("/", 1)[-1]: ln.split(" ", 1)[0]
                for ln in lines}
-    assert "a.bin" in digests and "b.bin" in digests
+    assert "a.bin" in digests
+    assert "b.bin" in digests
     assert digests["a.bin"].startswith("provisional:")
     assert digests["b.bin"].startswith("provisional:")
     assert digests["a.bin"] != digests["b.bin"]
