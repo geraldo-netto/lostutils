@@ -28,6 +28,9 @@ DEFAULT_FALLBACK_CATEGORY = "Uncategorized"
 DEFAULT_LLM_BATCH_SIZE = 30
 DEFAULT_LLM_CONTEXT = 4096
 DEFAULT_LLM_MAX_TOKENS = 1024
+BOOKMARKS_MENU_NAME = "Bookmarks Menu"
+FIREFOX_DATABASE_NAME = "places.sqlite"
+LZ4_OUTPUT_LIMIT_MESSAGE = "decoded LZ4 bookmark exceeds the size limit"
 LLAMA_CPP_PYTHON_REQUIREMENT = "llama-cpp-python==0.3.32"
 LLAMA_INSTALL_TIMEOUT_SECONDS = 300
 LLAMA_INFERENCE_TIMEOUT_SECONDS = 120
@@ -66,7 +69,7 @@ TRACKING_PARAM_NAMES = frozenset(
 )
 ROOT_DISPLAY = {
     "bookmark_bar": "Bookmarks Bar",
-    "menu": "Bookmarks Menu",
+    "menu": BOOKMARKS_MENU_NAME,
     "other": "Other Bookmarks",
     "synced": "Mobile Bookmarks",
 }
@@ -322,7 +325,7 @@ def _chromium_bookmark(
 
 def read_firefox_sqlite_bookmarks(path: Path) -> list[Bookmark]:
     with tempfile.TemporaryDirectory(prefix="bookmark-tidy-firefox-") as tmp_dir:
-        snapshot = Path(tmp_dir) / "places.sqlite"
+        snapshot = Path(tmp_dir) / FIREFOX_DATABASE_NAME
         _backup_sqlite_database(path, snapshot)
         return _read_firefox_sqlite_copy(snapshot, str(path))
 
@@ -461,7 +464,7 @@ def _decode_mozlz4(data: bytes) -> bytes:
         raise UserError("Firefox jsonlz4 backup is truncated before its size header")
     declared = int.from_bytes(data[len(MOZLZ4_MAGIC):body_at], "little")
     if declared > MAX_LZ4_OUTPUT_BYTES:
-        raise UserError("decoded LZ4 bookmark exceeds the size limit")
+        raise UserError(LZ4_OUTPUT_LIMIT_MESSAGE)
     # The declared size bounds the decoder, so a header that under-reports the
     # payload fails on the output limit rather than silently truncating.
     decoded = _decode_lz4_block(data[body_at:], max_output_size=declared)
@@ -512,7 +515,7 @@ def _copy_lz4_literals(
     if literal_end > len(data):
         raise UserError("truncated LZ4 literal run")
     if len(output) + length > output_limit:
-        raise UserError("decoded LZ4 bookmark exceeds the size limit")
+        raise UserError(LZ4_OUTPUT_LIMIT_MESSAGE)
     output.extend(data[index:literal_end])
     return literal_end
 
@@ -539,7 +542,7 @@ def _copy_lz4_match(
     if offset <= 0 or offset > len(output):
         raise UserError("invalid LZ4 match offset")
     if length > output_limit - len(output):
-        raise UserError("decoded LZ4 bookmark exceeds the size limit")
+        raise UserError(LZ4_OUTPUT_LIMIT_MESSAGE)
     start = len(output) - offset
     while length > 0:
         available = len(output) - start
@@ -631,7 +634,7 @@ def _is_absolute_url(value: str) -> bool:
 def _detect_bookmark_format_with_data(path: Path) -> tuple[str, Any | None]:
     if path.suffix.casefold() == ".jsonlz4":
         return "firefox-jsonlz4", None
-    if path.name == "places.sqlite" or path.suffix.casefold() in {".sqlite", ".sqlite3"}:
+    if path.name == FIREFOX_DATABASE_NAME or path.suffix.casefold() in {".sqlite", ".sqlite3"}:
         return "firefox-sqlite", None
     text = _read_utf8_text(path)
     stripped = text[:FORMAT_SNIFF_CHARS].lstrip()
@@ -695,7 +698,7 @@ def _supported_input_file(path: Path) -> bool:
     # sniff, which is already a graceful path.
     name = path.name.casefold()
     suffix = path.suffix.casefold()
-    return name in {"bookmarks", "places.sqlite"} or suffix in {
+    return name in {"bookmarks", FIREFOX_DATABASE_NAME} or suffix in {
         ".htm",
         ".html",
         ".json",
@@ -741,12 +744,13 @@ def discover_browser_bookmarks() -> list[Path]:
 
 
 def _linux_browser_patterns(home: Path) -> list[Path]:
+    config_home = home / ".config"
     return [
-        home / ".config" / "google-chrome" / "*" / "Bookmarks",
-        home / ".config" / "chromium" / "*" / "Bookmarks",
-        home / ".config" / "microsoft-edge" / "*" / "Bookmarks",
-        home / ".config" / "microsoft-edge-beta" / "*" / "Bookmarks",
-        home / ".mozilla" / "firefox" / "*" / "places.sqlite",
+        config_home / "google-chrome" / "*" / "Bookmarks",
+        config_home / "chromium" / "*" / "Bookmarks",
+        config_home / "microsoft-edge" / "*" / "Bookmarks",
+        config_home / "microsoft-edge-beta" / "*" / "Bookmarks",
+        home / ".mozilla" / "firefox" / "*" / FIREFOX_DATABASE_NAME,
     ]
 
 
@@ -756,7 +760,7 @@ def _mac_browser_patterns(home: Path) -> list[Path]:
         base / "Google" / "Chrome" / "*" / "Bookmarks",
         base / "Chromium" / "*" / "Bookmarks",
         base / "Microsoft Edge" / "*" / "Bookmarks",
-        base / "Firefox" / "Profiles" / "*" / "places.sqlite",
+        base / "Firefox" / "Profiles" / "*" / FIREFOX_DATABASE_NAME,
     ]
 
 
@@ -773,7 +777,7 @@ def _windows_browser_patterns() -> list[Path]:
             ]
         )
     if roaming:
-        patterns.append(Path(roaming) / "Mozilla" / "Firefox" / "Profiles" / "*" / "places.sqlite")
+        patterns.append(Path(roaming) / "Mozilla" / "Firefox" / "Profiles" / "*" / FIREFOX_DATABASE_NAME)
     return patterns
 
 
@@ -1090,8 +1094,8 @@ def _llama_process_worker(
     max_tokens: int,
 ) -> None:
     try:
-        Llama = _import_llama(auto_install)
-        llm = Llama(
+        llama_class = _import_llama(auto_install)
+        llm = llama_class(
             model_path=model_path,
             n_ctx=context,
             n_gpu_layers=gpu_layers,
@@ -1111,7 +1115,7 @@ def _llama_process_worker(
     except Exception as exc:
         try:
             connection.send(("startup_error", str(exc)))
-        except (BrokenPipeError, EOFError, OSError):
+        except (EOFError, OSError):
             pass
     finally:
         connection.close()
@@ -1186,7 +1190,7 @@ class LlamaCategorizer:
     def _complete(self, prompt: str) -> str:
         try:
             self._connection.send(("complete", prompt))
-        except (BrokenPipeError, EOFError, OSError) as exc:
+        except (EOFError, OSError) as exc:
             raise UserError("LLM inference worker is unavailable") from exc
         if not self._connection.poll(LLAMA_INFERENCE_TIMEOUT_SECONDS):
             self._abort()
@@ -1216,7 +1220,7 @@ class LlamaCategorizer:
         if self._process.is_alive():
             try:
                 self._connection.send(("close", ""))
-            except (BrokenPipeError, EOFError, OSError):
+            except (EOFError, OSError):
                 pass
             self._process.join(LLAMA_PROCESS_STOP_SECONDS)
         if self._process.is_alive():
@@ -1343,7 +1347,7 @@ def _folder_map(
 
 def _chrome_output_location(bookmark: Bookmark) -> tuple[str, tuple[str, ...]]:
     if bookmark.root == "menu":
-        return "other", ("Bookmarks Menu", *bookmark.folder_path)
+        return "other", (BOOKMARKS_MENU_NAME, *bookmark.folder_path)
     if bookmark.root in CHROME_ROOT_NAMES:
         return bookmark.root, bookmark.folder_path
     return "other", bookmark.folder_path
@@ -1430,7 +1434,7 @@ def _firefox_root_node(ids: "_IdFactory") -> dict[str, Any]:
 def _firefox_named_root(ids: "_IdFactory", root: str) -> dict[str, Any]:
     root_names = {
         "bookmark_bar": ("Bookmarks Toolbar", "toolbarFolder"),
-        "menu": ("Bookmarks Menu", "bookmarksMenuFolder"),
+        "menu": (BOOKMARKS_MENU_NAME, "bookmarksMenuFolder"),
         "other": ("Other Bookmarks", "unfiledBookmarksFolder"),
         "synced": ("Mobile Bookmarks", "mobileFolder"),
     }
