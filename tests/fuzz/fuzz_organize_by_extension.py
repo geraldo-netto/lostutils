@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, assume, given, settings, strategies as st
 
 # Import target relative to repo root.
 HERE = Path(__file__).resolve().parent
@@ -586,7 +586,7 @@ class PruneEncodingFuzz(unittest.TestCase):
     @FUZZ
     def test_surrogate_escape_dirnames_pruned(self, raw_tails):
         if os.name == "nt":
-            return
+            self.skipTest("raw byte path names are not supported on Windows")
         with TemporaryDirectory() as d:
             root = Path(d)
             created = 0
@@ -620,10 +620,8 @@ class ExtraZipFamilyFuzz(unittest.TestCase):
     @settings(parent=FUZZ, max_examples=80)
     @given(EXTRA_EXT)
     def test_extra_zip_family_preserves_declared_ext(self, ext):
-        if ext in oze.EXTENSION_ALIASES:
-            return   # alias would rewrite declared ext, breaking the invariant
-        if ext == "zip":
-            return   # vacuous: declared zip + zip header == zip
+        assume(ext not in oze.EXTENSION_ALIASES)
+        assume(ext != "zip")
         with TemporaryDirectory() as d:
             path = Path(d) / f"file.{ext}"
             path.write_bytes(b"PK\x03\x04rest")

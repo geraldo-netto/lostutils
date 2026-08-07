@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, assume, given, settings, strategies as st
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -175,8 +175,7 @@ class FindDuplicatesFuzz(unittest.TestCase):
         payload,
         replacement,
     ):
-        if payload[5] == replacement:
-            return
+        assume(payload[5] != replacement)
         changed = bytearray(payload)
         changed[5] = replacement
         config = hr.RunConfig(block_size=4, sample_size=1)
@@ -308,8 +307,7 @@ class FmtCountFuzz(unittest.TestCase):
     @settings(parent=FUZZ, max_examples=30)
     @given(st.integers(min_value=-100, max_value=100))
     def test_fmt_count_signed_symmetric(self, n: int) -> None:
-        if n == 0:
-            return
+        assume(n != 0)
         positive = hr._fmt_count(abs(n))
         negative = hr._fmt_count(-abs(n))
         self.assertEqual(negative, "-" + positive)

@@ -29,7 +29,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, assume, given, settings, strategies as st
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -243,8 +243,7 @@ class VerifyFileFuzz(unittest.TestCase):
     @settings(parent=FUZZ)
     @given(st.binary(min_size=1, max_size=64), st.binary(min_size=1, max_size=64))
     def test_size_diff_caught(self, a_bytes: bytes, b_bytes: bytes) -> None:
-        if len(a_bytes) == len(b_bytes):
-            return
+        assume(len(a_bytes) != len(b_bytes))
         with TemporaryDirectory() as d:
             a = Path(d) / "a"; a.write_bytes(a_bytes)
             b = Path(d) / "b"; b.write_bytes(b_bytes)
