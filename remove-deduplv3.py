@@ -282,7 +282,7 @@ def _silence_stdout_after_broken_pipe():
     try:
         try:
             os.dup2(devnull_fd, sys.stdout.fileno())
-        except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+        except (AttributeError, OSError, ValueError):
             pass
         try:
             sys.stdout = open(os.devnull, "w", encoding="utf-8")
@@ -301,9 +301,9 @@ def main(argv=None):
     _configure_stdout_errors(err_mode)
 
     try:
-        encoding, groups, skipped_lines = _load_groups(
+        groups, skipped_lines = _load_groups(
             args.file, args.encoding, err_mode
-        )
+        )[1:]
     except OSError as e:
         _fail(e, 2)
     except _InputDecodeError as e:

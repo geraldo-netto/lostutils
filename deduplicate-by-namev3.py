@@ -307,7 +307,7 @@ def emit_pairs(cleaned_strs, threshold, workers, write, block_threshold=None, bl
         )
         mask = block <= threshold
         mask = np.triu(mask, k=1)  # local: keep only c > r  (j = start+c > i = start+r)
-        rows, cols = np.where(mask)
+        rows, cols = np.nonzero(mask)
         for r, c in zip(rows.tolist(), cols.tolist()):
             i = start + r
             j = start + c

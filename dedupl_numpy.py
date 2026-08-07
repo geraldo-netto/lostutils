@@ -6,7 +6,6 @@ path extraction (variable-width slicing isn't naturally vectorizable)."""
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import mmap
 import os
@@ -207,7 +206,7 @@ def _silence_stdout_after_broken_pipe() -> None:
     try:
         try:
             os.dup2(devnull_fd, sys.stdout.fileno())
-        except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+        except (AttributeError, OSError, ValueError):
             pass
         try:
             sys.stdout = open(os.devnull, "w", encoding="utf-8")
