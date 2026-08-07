@@ -405,9 +405,9 @@ class KeypadDevice:
         if self.ep_out is not None:
             return self.ep_out.write(bytes(data), WRITE_TIMEOUT_MS)
         # No OUT endpoint -> HID SET_REPORT over control (output report=0x02).
-        wValue = (0x02 << 8) | (report_id & 0xFF)
+        w_value = (0x02 << 8) | (report_id & 0xFF)
         return self.dev.ctrl_transfer(
-            0x21, 0x09, wValue,
+            0x21, 0x09, w_value,
             self.intf.bInterfaceNumber if self.intf else HID_INTERFACE,
             bytes(data), WRITE_TIMEOUT_MS)
 
@@ -416,22 +416,23 @@ class KeypadDevice:
 #  Working buffer (port of FormMain.KeyParam + the per-page click handlers)
 # --------------------------------------------------------------------------- #
 class KeyParam:
-    # Fixed buffer index meanings (from the C# statics).
-    KeySet_KeyNum = 0
-    KeyType_Num = 1
-    KeyGroupCharNum = 2
-    KeySet_KeyValNum = 3
-    Key_Fun_Num = 4
+    # These legacy C# names are also used by existing KeyParam integrations;
+    # changing them would break that compatibility surface for no runtime gain.
+    KeySet_KeyNum = 0  # NOSONAR
+    KeyType_Num = 1  # NOSONAR
+    KeyGroupCharNum = 2  # NOSONAR
+    KeySet_KeyValNum = 3  # NOSONAR
+    Key_Fun_Num = 4  # NOSONAR
 
     def __init__(self):
         self.data = bytearray(65)
-        self.KeyChar = [None] * 100
-        self.FunKeyChar = [None] * 100
-        self.KEY_Char_Num = 5      # moving write pointer
-        self.FunKEY_Char_Num = 0
-        self.ReportID = 0
-        self.KEY_Cur_Layer = 1
-        self.KEY_Cur_Page = 1
+        self.KeyChar = [None] * 100  # NOSONAR
+        self.FunKeyChar = [None] * 100  # NOSONAR
+        self.KEY_Char_Num = 5  # NOSONAR -- moving write pointer
+        self.FunKEY_Char_Num = 0  # NOSONAR
+        self.ReportID = 0  # NOSONAR
+        self.KEY_Cur_Layer = 1  # NOSONAR
+        self.KEY_Cur_Page = 1  # NOSONAR
 
     # -- housekeeping --------------------------------------------------------
     def clear_key_char(self):
@@ -1970,7 +1971,7 @@ class App(tk.Tk):
             return
         try:  # pragma: no cover - dialog glue
             self.log("Loaded %d key(s) from %s" % (self._load_profile(path), path))
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as e:  # pragma: no cover
+        except (OSError, ValueError, TypeError, KeyError) as e:  # pragma: no cover
             # mkp-rel-01: a profile with a JSON null/list where an int/hex string
             # is expected raises TypeError from int()/bytes.fromhex(); catch it
             # too so a malformed profile reports "Load failed" instead of
