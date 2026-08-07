@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import binascii
 import contextlib
 import errno
 import hashlib
@@ -43,7 +42,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from collections import namedtuple
+from collections import deque, namedtuple
 from datetime import datetime
 from functools import partial
 from tkinter import messagebox, scrolledtext, ttk
@@ -51,6 +50,13 @@ from typing import Callable, TextIO, cast
 from urllib.parse import urlparse
 
 __version__ = "1.0"
+
+FOCUS_OUT_EVENT = "<FocusOut>"
+MIDDLE_CLICK_EVENT = "<Button-2>"
+PASTE_EVENT = "<<Paste>>"
+PAUSED_BUTTON_STYLE = "Paused.TButton"
+RETURN_EVENT = "<Return>"
+RIGHT_CLICK_EVENT = "<Button-3>"
 
 
 def _center_window(window, parent=None) -> None:
@@ -147,7 +153,7 @@ def _yaml_emittable(s: str) -> bool:
     try:
         yaml.dump(s, Dumper=_YamlDumper, allow_unicode=True)
         return True
-    except (yaml.YAMLError, UnicodeError, ValueError):
+    except (yaml.YAMLError, ValueError):
         return False
 
 
@@ -170,7 +176,7 @@ def _decode_state_field(entry: dict, key: str, default: str) -> str:
     if isinstance(b64, str):
         try:
             return base64.b64decode(b64.encode("ascii")).decode("utf-8", "surrogatepass")
-        except (binascii.Error, ValueError, UnicodeDecodeError):
+        except ValueError:
             # lq-rel-05: narrow the exception so MemoryError, KeyboardInterrupt,
             # SystemExit etc. propagate instead of being silently swallowed as
             # "corrupt base64".
@@ -888,7 +894,7 @@ class ConfigStore(dict):
         Drops any non-dict `protocols[<name>]` entry, warning about each (rel-10):
         a corrupt config that silently loses protocols is worse than one that
         surfaces the keys it threw away."""
-        for name, pc in list(cfg["protocols"].items()):
+        for name, pc in tuple(cfg["protocols"].items()):
             if not isinstance(pc, dict):
                 print(
                     f"[warn] config: dropping non-dict protocol entry "
@@ -2263,8 +2269,7 @@ class Dispatcher:
     def _drain_pipe(stdout) -> None:
         """Read stdout to EOF without logging — needed even in silent mode
         so the child doesn't block on a full pipe buffer."""
-        for _ in stdout:
-            pass
+        deque(stdout, maxlen=0)
 
     def _stream_verbose(self, stdout, prefix: str) -> None:
         for line in stdout:
@@ -3004,14 +3009,12 @@ class Dispatcher:
                 )
             self._refresh_queue_list()
 
-        if exit_code == COMMAND_TIMEOUT_EXIT:
-            pass
-        elif exit_code != 0:
+        if exit_code == 0:
+            self._record_metric("completions")
+        elif exit_code != COMMAND_TIMEOUT_EXIT:
             self._record_metric("failures")
             if exit_code != -1:
                 self._trigger_failure_cooldown(idx, item, exit_code)  # pragma: no cover - trigger cooldown after failure
-        else:
-            self._record_metric("completions")
         self._update_status()
         self._maybe_inter_item_sleep(stop_self, other_free)
 
@@ -3493,8 +3496,8 @@ class _SettingsTabs:
             sp = ttk.Spinbox(parent, from_=frm, to=to, width=w,
                              textvariable=var, command=handler)
             sp.grid(row=row, column=1, sticky="w", padx=4, pady=4)
-            sp.bind("<FocusOut>", lambda e, h=handler: h())
-            sp.bind("<Return>",   lambda e, h=handler: h())
+            sp.bind(FOCUS_OUT_EVENT, lambda e, h=handler: h())
+            sp.bind(RETURN_EVENT, lambda e, h=handler: h())
             app._install_text_editing(sp, "entry")
             row += 1
 
@@ -3510,9 +3513,9 @@ class _SettingsTabs:
             out_row, textvariable=app.output_folder_var)
         app.output_folder_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         app.output_folder_entry.bind(
-            "<FocusOut>", lambda e: app._on_output_folder_changed())
+            FOCUS_OUT_EVENT, lambda e: app._on_output_folder_changed())
         app.output_folder_entry.bind(
-            "<Return>", lambda e: app._on_output_folder_changed())
+            RETURN_EVENT, lambda e: app._on_output_folder_changed())
         app._install_text_editing(app.output_folder_entry, "entry")
         ttk.Button(out_row, text="Browse…",
                    command=app._on_browse_output_folder).pack(
@@ -3569,8 +3572,8 @@ class _SettingsTabs:
             command=app._on_log_max_lines_changed,
         )
         sp.grid(row=1, column=1, sticky="w", padx=4, pady=4)
-        sp.bind("<FocusOut>", lambda e: app._on_log_max_lines_changed())
-        sp.bind("<Return>",   lambda e: app._on_log_max_lines_changed())
+        sp.bind(FOCUS_OUT_EVENT, lambda e: app._on_log_max_lines_changed())
+        sp.bind(RETURN_EVENT, lambda e: app._on_log_max_lines_changed())
         app._install_text_editing(sp, "entry")
 
         ttk.Label(parent, text="Log file (empty = panel only):").grid(
@@ -3580,8 +3583,8 @@ class _SettingsTabs:
         parent.columnconfigure(1, weight=1)
         lf_entry = ttk.Entry(lf_row, textvariable=app.log_file_var)
         lf_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        lf_entry.bind("<FocusOut>", lambda e: app._on_log_file_changed())
-        lf_entry.bind("<Return>", lambda e: app._on_log_file_changed())
+        lf_entry.bind(FOCUS_OUT_EVENT, lambda e: app._on_log_file_changed())
+        lf_entry.bind(RETURN_EVENT, lambda e: app._on_log_file_changed())
         app._install_text_editing(lf_entry, "entry")
         ttk.Button(lf_row, text="Browse…",
                    command=app._on_browse_log_file).pack(side=tk.LEFT, padx=4)
@@ -3900,11 +3903,11 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         # when active.
         try:
             style.configure(
-                "Paused.TButton",
+                PAUSED_BUTTON_STYLE,
                 foreground="white", background="#c0392b",
             )
             style.map(
-                "Paused.TButton",
+                PAUSED_BUTTON_STYLE,
                 background=[("active", "#a93226"),
                             ("disabled", "#999999")],
             )
@@ -3999,7 +4002,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         self.url_text.bind("<Command-Return>", self._on_add_event)
         self.url_text.bind("<KeyRelease>", lambda e: self._schedule_link_count())
         self.url_text.bind(
-            "<<Paste>>",
+            PASTE_EVENT,
             lambda e: self.root.after(0, self._normalize_paste_area),
         )
 
@@ -4680,7 +4683,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             self._log("[queue] resumed")
         else:
             self.pause_event.set()
-            self.pause_btn.configure(text="Resume", style="Paused.TButton")
+            self.pause_btn.configure(text="Resume", style=PAUSED_BUTTON_STYLE)
             self._log("[queue] paused")
         # Wake every waiting worker so they immediately observe the change
         # rather than continuing to sleep on the cv.
@@ -4973,7 +4976,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         self._configure_text_selection(widget, kind)
         do_copy = partial(self._text_edit_event, widget, "<<Copy>>")
         do_cut = partial(self._text_edit_event, widget, "<<Cut>>")
-        do_paste = partial(self._text_edit_event, widget, "<<Paste>>")
+        do_paste = partial(self._text_edit_event, widget, PASTE_EVENT)
         do_select_all = partial(self._select_all_text, widget, kind)
 
         # IMPORTANT: we deliberately do NOT bind <Control-Key-c|v|x>. Tk's
@@ -5001,8 +5004,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         menu.add_separator()
         menu.add_command(label="Select All", accelerator="Ctrl+A", command=do_select_all)
         show_menu = partial(self._show_text_menu, widget, kind, menu)
-        widget.bind("<Button-3>", show_menu)   # Linux/Windows right-click
-        widget.bind("<Button-2>", show_menu)   # macOS right-click
+        widget.bind(RIGHT_CLICK_EVENT, show_menu)   # Linux/Windows right-click
+        widget.bind(MIDDLE_CLICK_EVENT, show_menu)   # macOS right-click
 
     def _configure_text_selection(self, widget, kind: str) -> None:
         if kind != "text":
@@ -5083,7 +5086,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         edits via key/paste/cut bindings instead.
         """
         widget.bind("<Key>", self._readonly_block_key)
-        widget.bind("<<Paste>>", lambda e: "break")
+        widget.bind(PASTE_EVENT, lambda e: "break")
         widget.bind("<<Cut>>",   lambda e: "break")
 
     # Modifier-key state bits (Tk): Shift=0x1, Control=0x4
@@ -5280,8 +5283,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         m.add_command(label="Copy URL",       command=self._on_queue_copy_url)
         m.add_command(label="Copy command",   command=self._on_queue_copy_cmd)
         self._queue_menu = m
-        self.queue_tree.bind("<Button-3>", self._popup_queue_menu)
-        self.queue_tree.bind("<Button-2>", self._popup_queue_menu)  # macOS
+        self.queue_tree.bind(RIGHT_CLICK_EVENT, self._popup_queue_menu)
+        self.queue_tree.bind(MIDDLE_CLICK_EVENT, self._popup_queue_menu)  # macOS
 
         # Protocol rows.
         pm = tk.Menu(self.root, tearoff=0)
@@ -5291,8 +5294,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         pm.add_separator()
         pm.add_command(label="Delete  (Del)",         command=self._on_delete_protocol)
         self._proto_menu = pm
-        self.proto_tree.bind("<Button-3>", self._popup_proto_menu)
-        self.proto_tree.bind("<Button-2>", self._popup_proto_menu)  # macOS
+        self.proto_tree.bind(RIGHT_CLICK_EVENT, self._popup_proto_menu)
+        self.proto_tree.bind(MIDDLE_CLICK_EVENT, self._popup_proto_menu)  # macOS
 
     def _popup_queue_menu(self, event) -> None:
         row = self.queue_tree.identify_row(event.y)
@@ -5335,7 +5338,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         self.queue_tree.bind("<BackSpace>", lambda e: self._on_remove_selected())
 
         self.proto_tree.bind("<Delete>",    lambda e: self._on_delete_protocol())
-        self.proto_tree.bind("<Return>",    lambda e: self._on_edit_protocol())
+        self.proto_tree.bind(RETURN_EVENT, lambda e: self._on_edit_protocol())
         self.proto_tree.bind("<Control-d>", lambda e: (self._on_duplicate_protocol(), "break")[1])
         self.proto_tree.bind("<Control-D>", lambda e: (self._on_duplicate_protocol(), "break")[1])
 
