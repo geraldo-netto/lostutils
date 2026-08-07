@@ -29,16 +29,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements-ci.txt
+          cache-dependency-path: requirements-ci.lock
 
       - name: Install CI dependencies
-        run: python -m pip install --disable-pip-version-check -r requirements-ci.txt
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-ci.lock
 
       - name: Lint root scripts
-        run: ruff check *.py
+        run: ruff check -- ./*.py
 
       - name: Type-check root scripts
-        run: pyright --pythonpath "$(command -v python)" *.py
+        run: pyright --pythonpath "$(command -v python)" ./*.py
 
       - name: Run unit, regression, integration, and fuzz tests
         run: |
