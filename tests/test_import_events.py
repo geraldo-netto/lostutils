@@ -4969,7 +4969,8 @@ def test_main_exits_nonzero_on_extraction_failure(tmp_path, monkeypatch):
 
 
 def test_main_resets_failures_between_runs(tmp_path, monkeypatch):
-    import_events._extraction_failures = 99  # simulate a prior failed run
+    monkeypatch.setattr(
+        import_events, "_extraction_failures", 99)  # simulate a prior failed run
     (tmp_path / "event.txt").write_text("Launch", encoding="utf-8")
     out = tmp_path / "out.json"
     monkeypatch.setattr(
@@ -5588,8 +5589,8 @@ def test_paddle_backend_fallback_helpers(monkeypatch):
         import_events._build_paddle_ocr(object(), "en", "cpu")
 
 
-def test_store_paddle_engine_rejects_publish_after_disable():
-    import_events._PADDLE_OCR_DISABLED = True
+def test_store_paddle_engine_rejects_publish_after_disable(monkeypatch):
+    monkeypatch.setattr(import_events, "_PADDLE_OCR_DISABLED", True)
     engine = object()
 
     assert import_events._store_or_reuse_paddle_ocr(

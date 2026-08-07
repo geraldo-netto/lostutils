@@ -384,15 +384,13 @@ def test_emit_pairs_blocking_invariant(lines, t, block_rows):
             cleaned.append(c)
     if not cleaned:
         return
-    orig_bt, orig_br = dn.BLOCK_THRESHOLD, dn.BLOCK_ROWS
-    try:
-        dn.BLOCK_THRESHOLD = 10 ** 9
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(dn, "BLOCK_THRESHOLD", 10 ** 9)
         single = _emit(cleaned, t)
-        dn.BLOCK_THRESHOLD = 0
-        dn.BLOCK_ROWS = block_rows
+        monkeypatch.setattr(dn, "BLOCK_THRESHOLD", 0)
+        monkeypatch.setattr(dn, "BLOCK_ROWS", block_rows)
         blocked = _emit(cleaned, t)
-    finally:
-        dn.BLOCK_THRESHOLD, dn.BLOCK_ROWS = orig_bt, orig_br
     assert single == blocked
     assert len(blocked) == len(set(blocked))
 

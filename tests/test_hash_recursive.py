@@ -492,21 +492,16 @@ def test_run_stage_windowed_drains_siblings_after_exception(monkeypatch):
 def test_run_stage_windowed_property_all_results(n, jobs, hash_batch, window):
     # hr-scal-02 property: the windowed dispatch returns exactly one entry
     # per item, no losses or duplicates, for any window / batch / job mix.
-    old_t, old_b, old_w = (hr.THREAD_THRESHOLD_BYTES, hr.HASH_BATCH,
-                           hr.SUBMIT_WINDOW)
-    hr.THREAD_THRESHOLD_BYTES = 0
-    hr.HASH_BATCH = hash_batch
-    hr.SUBMIT_WINDOW = window
-    try:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0)
+        monkeypatch.setattr(hr, "HASH_BATCH", hash_batch)
+        monkeypatch.setattr(hr, "SUBMIT_WINDOW", window)
         items = [f"/x/{i}" for i in range(n)]
         out, errors = hr._run_stage(
             items, lambda b: [(p, p.upper()) for p in b],
             total_bytes=10**9, jobs=jobs)
         assert out == {f"/x/{i}": f"/X/{i}" for i in range(n)}
         assert errors == 0
-    finally:
-        (hr.THREAD_THRESHOLD_BYTES, hr.HASH_BATCH,
-         hr.SUBMIT_WINDOW) = old_t, old_b, old_w
 
 
 def test_main_smoke(monkeypatch, capsys):
@@ -789,7 +784,7 @@ def test_vanished_errnos_contains_enoent_and_estale():
 
 # --- hr-rel-06: sample windows never read past EOF --------------------------
 
-def test_hash_tail_and_samples_clamps_windows(tmp_path):
+def test_hash_tail_and_samples_clamps_windows(monkeypatch):
     """Even on a contrived `size` value, the offsets handed to
     _hash_file_windows must satisfy offset + SAMPLE <= size."""
     captured = {}
@@ -798,21 +793,16 @@ def test_hash_tail_and_samples_clamps_windows(tmp_path):
         captured["windows"] = windows
         return "deadbeef"
 
-    import types
-    orig = hr._hash_file_windows
-    try:
-        hr._hash_file_windows = fake_hash    # type: ignore[assignment]
-        hr.hash_tail_and_samples("/dummy", 3 * hr.CAP)   # > CAP
-        for window in captured["windows"]:
-            offset, length, whence = window[0], window[1], window[2]
-            if whence == hr.os.SEEK_SET:
-                assert offset + length <= 3 * hr.CAP, \
-                    f"window past EOF: {offset}+{length} > {3 * hr.CAP}"
-    finally:
-        hr._hash_file_windows = orig   # type: ignore[assignment]
+    monkeypatch.setattr(hr, "_hash_file_windows", fake_hash)
+    hr.hash_tail_and_samples("/dummy", 3 * hr.CAP)   # > CAP
+    for window in captured["windows"]:
+        offset, length, whence = window[0], window[1], window[2]
+        if whence == hr.os.SEEK_SET:
+            assert offset + length <= 3 * hr.CAP, \
+                f"window past EOF: {offset}+{length} > {3 * hr.CAP}"
 
 
-def test_hash_tail_and_samples_tiny_size_does_not_overflow():
+def test_hash_tail_and_samples_tiny_size_does_not_overflow(monkeypatch):
     # Defensive: even if a future caller drops the size > CAP gate, no
     # window may read past EOF.
     captured = {}
@@ -821,17 +811,13 @@ def test_hash_tail_and_samples_tiny_size_does_not_overflow():
         captured["windows"] = windows
         return None
 
-    orig = hr._hash_file_windows
-    try:
-        hr._hash_file_windows = fake_hash   # type: ignore[assignment]
-        hr.hash_tail_and_samples("/dummy", 100)   # << SAMPLE
-        for window in captured["windows"]:
-            offset, length, whence = window[0], window[1], window[2]
-            if whence == hr.os.SEEK_SET:
-                # offset is clamped to size - SAMPLE = max(0, 100-65536) = 0
-                assert offset == 0
-    finally:
-        hr._hash_file_windows = orig    # type: ignore[assignment]
+    monkeypatch.setattr(hr, "_hash_file_windows", fake_hash)
+    hr.hash_tail_and_samples("/dummy", 100)   # << SAMPLE
+    for window in captured["windows"]:
+        offset, length, whence = window[0], window[1], window[2]
+        if whence == hr.os.SEEK_SET:
+            # offset is clamped to size - SAMPLE = max(0, 100-65536) = 0
+            assert offset == 0
 
 
 # --- 100% coverage gap-fillers ---------------------------------------------
@@ -1556,7 +1542,6 @@ def test_alias_cap_warning_logged_at_end_of_run(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "WARNING: alias cap" in err
     assert "truncated 3 group(s)" in err
-    hr.ALIAS_CAP = 1024
 
 
 def test_iter_batches_returns_fresh_lists(tmp_path):

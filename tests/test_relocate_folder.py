@@ -1308,12 +1308,10 @@ def test_verify_copy_unreadable_entry_property(tmp_path_factory, idx):
             raise OSError("unreadable")
         return real_lstat(p, *a, **k)
 
-    rf.os.lstat = selective
-    try:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(rf.os, "lstat", selective)
         with pytest.raises(RuntimeError, match="could not stat source entry"):
             rf.verify_copy(src, dst, checksum=False)
-    finally:
-        rf.os.lstat = real_lstat
 
 
 def test_verify_content_pass_and_fail(tmp_path):
