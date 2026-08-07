@@ -2614,19 +2614,17 @@ class SourceCollisionResolution(unittest.TestCase):
             real = root / "target.bin"; real.write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             link = root / "avi"
             os.symlink(real, link)
-            ctx = _oze.SniffContext(sniff=True, head_cache={})
             result = _oze._resolve_one_planning_collision(
-                link, ctx, preview=False)
+                link, preview=False)
             self.assertIsNone(result)
             self.assertTrue(link.is_symlink())   # untouched
 
     def test_planning_collision_missing_source_returns_none(self):
         # oze-rel-04: lexists() False -> None without touching the FS.
         with TemporaryDirectory() as d:
-            ctx = _oze.SniffContext(sniff=True, head_cache={})
             missing = Path(d) / "gone"
             self.assertIsNone(
-                _oze._resolve_one_planning_collision(missing, ctx, preview=False))
+                _oze._resolve_one_planning_collision(missing, preview=False))
 
     @settings(deadline=None, max_examples=40)
     @given(name=st.text(
@@ -2642,9 +2640,8 @@ class SourceCollisionResolution(unittest.TestCase):
             if link.exists() or link.is_symlink() or link == real:
                 return
             os.symlink(real, link)
-            ctx = _oze.SniffContext(sniff=True, head_cache={})
             self.assertIsNone(
-                _oze._resolve_one_planning_collision(link, ctx, preview=False))
+                _oze._resolve_one_planning_collision(link, preview=False))
             self.assertTrue(link.is_symlink())
 
     def test_planning_collision_leaves_head_cache_to_caller(self):
@@ -2657,10 +2654,9 @@ class SourceCollisionResolution(unittest.TestCase):
             source = root / "avi"
             source.write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             cache: dict = {}
-            ctx = _oze.SniffContext(sniff=True, head_cache=cache)
             _oze.read_head_bytes(source, head_cache=cache)
             candidate = _oze._resolve_one_planning_collision(
-                source, ctx, preview=False)
+                source, preview=False)
             self.assertIsNotNone(candidate)
             self.assertIn(source, cache)          # helper left the seed alone
             self.assertNotIn(candidate, cache)    # and added no new key

@@ -1444,7 +1444,6 @@ def _resolve_source_collision(source: Path, destination: Path) -> Path:
             "renamed to %s so the bucket dir can be created",
             blocker, destination, candidate,
         )
-        continue
     # Retry budget exhausted (extremely unlikely on real workloads).
     logger.warning(
         "name collision retries exhausted for %s -> %s; falling through",
@@ -1587,7 +1586,7 @@ def _unlink_source_or_rollback_candidate(source: Path, candidate: Path) -> None:
         try:
             os.unlink(candidate)
         except OSError as cand_exc:
-            logger.error(
+            logger.exception(
                 "collision reservation: linked %s -> %s but could not remove "
                 "the source (%s) or roll back the new link (%s); the file is "
                 "left at both paths and a hardlink is leaked — manual cleanup "
@@ -2082,11 +2081,10 @@ def plan_moves(
     # oze-decl-02: enforce the docstring contract. Sorted-list inputs are
     # required for deterministic plans; iterators are accepted (we have
     # no way to assert order without consuming first).
-    if isinstance(files, list):
-        if not all(a <= b for a, b in pairwise(files)):
-            raise ValueError(
-                "plan_moves expects `files` to be sorted; pass sorted(files)"
-            )
+    if isinstance(files, list) and not all(a <= b for a, b in pairwise(files)):
+        raise ValueError(
+            "plan_moves expects `files` to be sorted; pass sorted(files)"
+        )
     # The disk-backed spool preserves deterministic path order and the global
     # collision pre-pass without retaining one Python object per source.
     plan_pairs = _spooled_plan_pairs(root, files, ctx, preview)
@@ -2171,9 +2169,7 @@ def _spooled_plan_pairs(
         database.execute("CREATE TABLE pairs (source BLOB PRIMARY KEY, ext_dir BLOB)")
         needed_dirs = _fill_plan_spool(database, root, files, ctx)
         database.commit()
-        rename_map = _spooled_collision_renames(
-            database, needed_dirs, ctx, preview
-        )
+        rename_map = _spooled_collision_renames(database, needed_dirs, preview)
         for source_raw, ext_raw in database.execute(
             "SELECT source, ext_dir FROM pairs ORDER BY source"
         ):
@@ -2222,7 +2218,6 @@ def _warn_duplicate_sources(database: sqlite3.Connection, seen: int) -> None:
 def _spooled_collision_renames(
     database: sqlite3.Connection,
     needed_dirs: set[Path],
-    ctx: SniffContext,
     preview: bool,
 ) -> dict[Path, Path]:
     rename_map: dict[Path, Path] = {}
@@ -2230,7 +2225,7 @@ def _spooled_collision_renames(
         source = Path(os.fsdecode(source_raw))
         if not _blocks_a_needed_dir(source, needed_dirs):
             continue
-        candidate = _resolve_one_planning_collision(source, ctx, preview)
+        candidate = _resolve_one_planning_collision(source, preview)
         if candidate is not None:
             rename_map[source] = candidate
     return rename_map
@@ -2269,7 +2264,7 @@ def _preplan_resolve_collisions(
     # keeps peak RSS off the file count.
     pairs = _resolved_plan_pairs(root, files, ctx)
     needed_dirs = _needed_plan_dirs(root, pairs)
-    rename_map = _planning_collision_renames(pairs, needed_dirs, ctx, preview)
+    rename_map = _planning_collision_renames(pairs, needed_dirs, preview)
     return [(rename_map.get(src, src), ext_dir) for src, ext_dir in pairs]
 
 
@@ -2302,14 +2297,13 @@ def _needed_plan_dirs(
 def _planning_collision_renames(
     pairs: list[tuple[Path, Path]],
     needed_dirs: set[Path],
-    ctx: SniffContext,
     preview: bool,
 ) -> dict[Path, Path]:
     rename_map: dict[Path, Path] = {}
     for source, _ext_dir in pairs:
         if not _blocks_a_needed_dir(source, needed_dirs):
             continue
-        candidate = _resolve_one_planning_collision(source, ctx, preview)
+        candidate = _resolve_one_planning_collision(source, preview)
         if candidate is not None:
             rename_map[source] = candidate
     return rename_map
@@ -2339,7 +2333,6 @@ def _blocks_a_needed_dir(source: Path, needed_dirs: set[Path]) -> bool:
 
 def _resolve_one_planning_collision(
     source: Path,
-    ctx: "SniffContext",
     preview: bool,
 ) -> "Path | None":
     """Resolve one source that blocks a bucket ancestor (oze-rel-14).
