@@ -723,7 +723,12 @@ def _expand_one_input(path: Path, recursive: bool) -> list[Path]:
     if path.is_file():
         return [path] if _supported_input_file(path) else []
     iterator = path.rglob("*") if recursive else path.glob("*")
-    return [candidate for candidate in iterator if candidate.is_file() and _supported_input_file(candidate)]
+    supported = [
+        candidate
+        for candidate in iterator
+        if candidate.is_file() and _supported_input_file(candidate)
+    ]
+    return sorted(supported, key=lambda candidate: (str(candidate).casefold(), str(candidate)))
 
 
 def _unique_paths(paths: Iterable[Path]) -> list[Path]:
