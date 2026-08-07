@@ -488,15 +488,16 @@ def test_decode_mozlz4_honours_the_size_header():
     assert bookmark_tidy._decode_mozlz4(_mozlz4_literal(raw)) == raw
     # The pre-fix layout (magic immediately followed by the block) must now fail
     # instead of decoding, so a regression can't pass silently.
+    legacy_payload = bookmark_tidy.MOZLZ4_MAGIC + _lz4_literal_block(raw)
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy._decode_mozlz4(
-            bookmark_tidy.MOZLZ4_MAGIC + _lz4_literal_block(raw))
+        bookmark_tidy._decode_mozlz4(legacy_payload)
 
 
 @pytest.mark.parametrize("declared", [3, 999])
 def test_decode_mozlz4_rejects_size_mismatch(declared):
+    payload = _mozlz4_literal(b"payload-bytes", declared)
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy._decode_mozlz4(_mozlz4_literal(b"payload-bytes", declared))
+        bookmark_tidy._decode_mozlz4(payload)
 
 
 def test_decode_mozlz4_rejects_truncated_size_header():
@@ -506,10 +507,12 @@ def test_decode_mozlz4_rejects_truncated_size_header():
 
 def test_decode_mozlz4_rejects_oversized_declared_size():
     oversized = bookmark_tidy.MAX_LZ4_OUTPUT_BYTES + 1
+    payload = (
+        bookmark_tidy.MOZLZ4_MAGIC
+        + oversized.to_bytes(bookmark_tidy.MOZLZ4_SIZE_BYTES, "little")
+    )
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy._decode_mozlz4(
-            bookmark_tidy.MOZLZ4_MAGIC
-            + oversized.to_bytes(bookmark_tidy.MOZLZ4_SIZE_BYTES, "little"))
+        bookmark_tidy._decode_mozlz4(payload)
 
 
 @pytest.mark.parametrize("suffix", [".html", ".json"])
@@ -763,11 +766,13 @@ def test_raw_host_part_handles_brackets_auth_and_ipv6_text():
 
 
 def test_tidy_bookmarks_requires_categorizer_for_mutable_bookmarks():
+    bookmarks = [_sample_bookmark()]
+    options = bookmark_tidy.NormalizeOptions()
     with pytest.raises(bookmark_tidy.UserError):
         bookmark_tidy.tidy_bookmarks(
-            [_sample_bookmark()],
+            bookmarks,
             immutable_roots=[],
-            options=bookmark_tidy.NormalizeOptions(),
+            options=options,
             categorizer=None,
         )
     assert bookmark_tidy.tidy_bookmarks([], [], bookmark_tidy.NormalizeOptions(), None) == []
@@ -1312,8 +1317,9 @@ def test_parse_args_logging_and_cli_helpers(tmp_path, monkeypatch, capsys):
     bookmark_tidy._configure_logging(1)
     bookmark_tidy._configure_logging(2)
     assert bookmark_tidy._input_paths_from_args(args) == [html.resolve()]
+    bookmarks = [_sample_bookmark()]
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy._categorizer_from_args(args, [_sample_bookmark()])
+        bookmark_tidy._categorizer_from_args(args, bookmarks)
 
     class FakeCategorizer:
         def __init__(self, **kwargs):
@@ -1451,8 +1457,9 @@ def test_lazy_categorizer_load_failure_is_fatal_not_a_fallback():
         raise bookmark_tidy.UserError("boom")
 
     lazy = bookmark_tidy._LazyCategorizer(factory)
+    bookmarks = [_sample_bookmark()]
     with pytest.raises(bookmark_tidy.UserError, match="boom"):
-        bookmark_tidy._assign_categories([_sample_bookmark()], lazy, "Uncategorized", 30)
+        bookmark_tidy._assign_categories(bookmarks, lazy, "Uncategorized", 30)
 
 
 def test_lazy_categorizer_rejects_a_none_factory_result():
@@ -1519,16 +1526,18 @@ def test_parse_args_accepts_positive_llm_values():
 
 def test_categorizer_from_args_rejects_missing_model(tmp_path):
     args = bookmark_tidy.parse_args(["--model", str(tmp_path / "missing.gguf")])
+    bookmarks = [_sample_bookmark()]
 
     with pytest.raises(bookmark_tidy.UserError, match="model file not found"):
-        bookmark_tidy._categorizer_from_args(args, [_sample_bookmark()])
+        bookmark_tidy._categorizer_from_args(args, bookmarks)
 
 
 def test_run_without_inputs_reports_error(monkeypatch):
     monkeypatch.setattr(bookmark_tidy, "discover_browser_bookmarks", lambda: [])
+    args = bookmark_tidy.parse_args([])
 
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy._run(bookmark_tidy.parse_args([]))
+        bookmark_tidy._run(args)
 
 
 def test_llm_batch_size_is_bookmarks_per_request_not_n_batch(monkeypatch):

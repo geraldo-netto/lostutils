@@ -1472,9 +1472,13 @@ def test_backup_target_rmtrees_on_success(tmp_path):
 def test_backup_target_restores_on_exception(tmp_path):
     t = tmp_path / "target"; t.mkdir()
     (t / "f").write_text("x")
-    with pytest.raises(RuntimeError):
+
+    def fail_in_backup_window():
         with rf._backup_target(t):
             raise RuntimeError("body failure")
+
+    with pytest.raises(RuntimeError):
+        fail_in_backup_window()
     assert t.is_dir()
     assert (t / "f").read_text() == "x"
 
@@ -1532,10 +1536,14 @@ def test_backup_target_refuses_restore_on_substituted_backup(tmp_path, monkeypat
     monkeypatch.setattr(rf.os, "rename", counting_rename)
     _spoof_changing_lstat(monkeypatch, t.name + rf.BACKUP_SUFFIX)
     import logging
+
+    def fail_in_backup_window():
+        with rf._backup_target(t):
+            raise RuntimeError("trigger rollback")
+
     with caplog.at_level(logging.ERROR, logger="relocate"):
         with pytest.raises(RuntimeError, match="trigger rollback"):
-            with rf._backup_target(t):
-                raise RuntimeError("trigger rollback")
+            fail_in_backup_window()
     # only the rename-aside happened; no restore rename onto target.
     assert rename_calls["n"] == 1
     assert any("was substituted" in r.message for r in caplog.records)
@@ -2510,8 +2518,9 @@ def test_run_verify_pool_no_warning_on_single_error(caplog):
     def boom():
         raise RuntimeError("one")
     caplog.clear()
+    tasks = iter([boom])
     with pytest.raises(RuntimeError):
-        rf._run_verify_pool(iter([boom]))
+        rf._run_verify_pool(tasks)
     assert not any("verify pool raised" in r.message for r in caplog.records)
 
 
@@ -3928,8 +3937,9 @@ def test_run_verify_pool_joins_running_threads_on_abort():
         release.set()            # let the slow one proceed to completion
         raise RuntimeError("verify failure")
 
+    tasks = iter([slow_running, boom])
     with pytest.raises(RuntimeError, match="verify failure"):
-        rf._run_verify_pool(iter([slow_running, boom]), jobs=2)
+        rf._run_verify_pool(tasks, jobs=2)
 
     # rf-conc-01: shutdown(wait=True) means the running task is joined before
     # the function returns — no detached thread survives the abort.
@@ -3961,8 +3971,9 @@ def test_run_verify_pool_error_path_no_detached_threads():
         go.set()
         raise RuntimeError("diverged")
 
+    tasks = iter([slow, fail])
     with pytest.raises(RuntimeError, match="diverged"):
-        rf._run_verify_pool(iter([slow, fail]), jobs=2)
+        rf._run_verify_pool(tasks, jobs=2)
 
     assert running_done.is_set()
     # no worker thread from this pool is left alive after return.
@@ -4041,8 +4052,9 @@ def test_run_verify_pool_first_error_surfaces_only_in_final_drain():
         yield slow_fail
         release.set()
 
+    tasks = one_task()
     with pytest.raises(RuntimeError, match="surfaced in drain"):
-        rf._run_verify_pool(one_task(), jobs=2)
+        rf._run_verify_pool(tasks, jobs=2)
     assert ran["n"] == 1
 
 
@@ -4333,11 +4345,15 @@ def test_backup_target_restores_source_on_keyboardinterrupt(tmp_path):
     target = tmp_path / "real"; target.mkdir()
     (target / "f").write_text("x", encoding="utf-8")
     backup = target.with_name(target.name + rf.BACKUP_SUFFIX)
-    with pytest.raises(KeyboardInterrupt):
-        with rf._backup_target(target) as b:
-            assert b == backup
+
+    def interrupt_backup_window():
+        with rf._backup_target(target) as candidate:
+            assert candidate == backup
             assert backup.exists()
             raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        interrupt_backup_window()
     assert target.exists(), "source not restored after Ctrl+C"
     assert not backup.exists(), "backup left behind after restore"
 
@@ -4789,9 +4805,12 @@ def test_inventory_db_reports_an_unusable_temp_database(monkeypatch):
 
 
 def test_inventory_db_wraps_a_mid_use_sqlite_failure():
-    with pytest.raises(rf.InventorySpoolError, match="SQLITE_TMPDIR"):
+    def query_missing_table():
         with rf._inventory_db() as database:
             database.execute("SELECT * FROM does_not_exist")
+
+    with pytest.raises(rf.InventorySpoolError, match="SQLITE_TMPDIR"):
+        query_missing_table()
 
 
 def test_inventory_db_closes_the_connection():

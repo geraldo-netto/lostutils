@@ -916,10 +916,7 @@ class FuzzInternationalEncodings(unittest.TestCase):
         import shlex
         out = LinkQueueApp._resolve_command(PH_URL_QUOTED, url, "https")
         # shlex.split must give back exactly the original url.
-        try:
-            parts = shlex.split(out)
-        except ValueError:
-            self.fail(f"shlex.split failed on quoted URL: {out!r}")
+        parts = shlex.split(out)
         self.assertEqual(parts, [url])
 
     # --- state-file round trip in utf-8 -------------------------------------

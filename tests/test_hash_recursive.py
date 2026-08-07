@@ -471,10 +471,15 @@ def test_run_stage_windowed_drains_siblings_after_exception(monkeypatch):
     monkeypatch.setattr(hr, "ThreadPoolExecutor", FakeExecutor)
     monkeypatch.setattr(hr, "wait", fake_wait)
 
+    items = ["bad", "sibling", "running"]
+
+    def batch_fn(batch):
+        return batch
+
+    out = {}
+    cancel_event = hr.threading.Event()
     with pytest.raises(RuntimeError, match="boom"):
-        hr._run_stage_windowed(
-            ["bad", "sibling", "running"], lambda batch: batch, 1,
-            {}, hr.threading.Event())
+        hr._run_stage_windowed(items, batch_fn, 1, out, cancel_event)
     assert sibling.result_calls == 1
     assert running.cancel_calls == 1
     assert running.result_calls == 1
@@ -3133,8 +3138,9 @@ def test_index_inodes_closes_source_iterator_on_error():
         finally:
             closed["v"] = True
 
+    source = gen()
     with pytest.raises(ValueError):
-        hr.index_inodes(gen())
+        hr.index_inodes(source)
     assert closed["v"] is True
 
 

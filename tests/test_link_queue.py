@@ -484,9 +484,10 @@ def test_facade_delegates_non_dunder_only():
     # introspection (copy/pickle) sees the real (absent) attribute and does
     # not get a Dispatcher/ConfigStore dunder smuggled in.
     import copy
+    app_type = type(LinkQueueApp)
     for name in ("__reduce_ex__", "__getstate__", "__deepcopy__"):
         with pytest.raises(AttributeError):
-            type(LinkQueueApp).__getattr__(LinkQueueApp, name)
+            app_type.__getattr__(LinkQueueApp, name)
     # copy of the class object must not blow up via a delegated dunder.
     assert copy.copy(LinkQueueApp) is LinkQueueApp
 
@@ -662,9 +663,10 @@ def test_state_file_lock_pidfile_rejects_live_pid(tmp_path, monkeypatch):
         fh.write("pid=123\nstate=old\n")
     monkeypatch.setattr(link_queue, "fcntl", None)
     monkeypatch.setattr(link_queue.os, "kill", lambda pid, sig: None)
+    lock = link_queue.StateFileLock(state_path)
 
     with pytest.raises(link_queue.StateFileLockError):
-        link_queue.StateFileLock(state_path).acquire()
+        lock.acquire()
 
 
 def test_state_file_lock_pidfile_cleans_up_metadata_failure(tmp_path, monkeypatch):
@@ -3047,8 +3049,9 @@ def test_pending_queue_remove_missing_raises():
     """L252: removing an item that was never appended raises ValueError.
     test-02b-followup: pure `_PendingQueue` test, no fixture needed."""
     pq = link_queue._PendingQueue(domain_fn=lambda it: "x")
+    item = q("http://never-added/")
     with pytest.raises(ValueError, match="not in pending queue"):
-        pq.remove(q("http://never-added/"))
+        pq.remove(item)
 
 
 def _force_restored_log_branches(app, monkeypatch, kind: str) -> list[str]:

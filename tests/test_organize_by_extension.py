@@ -305,9 +305,12 @@ class OrganizeByExtensionTest(unittest.TestCase):
             # assertLogs fails if no logs are emitted at the given level.
             # We verify that organize is quiet (emits no INFO logs) by asserting 
             # that assertLogs raises an AssertionError when looking for INFO logs.
-            with self.assertRaises(AssertionError) as cm:
+            def assert_info_logs():
                 with self.assertLogs('organize_by_extension', level='INFO'):
                     organize(root, verbose=False)
+
+            with self.assertRaises(AssertionError) as cm:
+                assert_info_logs()
             self.assertIn("no logs of level INFO", str(cm.exception))
 
     def test_organize_skips_already_bucketed_files_quietly(self):
@@ -1618,13 +1621,12 @@ class HeaderAlwaysWinsTests(unittest.TestCase):
             f = Path(d) / "sheet.docx"
             f.write_bytes(b"PK\x03\x04rest")
             # No warning expected when extension is within ZIP family.
-            try:
+            def assert_warning_logs():
                 with self.assertLogs("organize_by_extension", level="WARNING"):
                     resolve_real_extension(f)
-                self.fail("unexpected WARNING for family-compatible declaration")
-            except AssertionError as e:
-                # assertLogs raises if NO logs at the level were captured.
-                self.assertIn("no logs", str(e).lower())
+
+            with self.assertRaisesRegex(AssertionError, "no logs"):
+                assert_warning_logs()
 
     def test_weak_magic_keeps_declared_extension(self):
         cases = (
@@ -3168,13 +3170,16 @@ class SourceCollisionResolution(unittest.TestCase):
             now[0] += 0.6
             return set(), set(futures_arg)
 
+        futures = {fut: src}
+        stats = _oze._RunStats()
+        head_cache = {}
         with patch.object(_oze, "wait", side_effect=never_done):
             with self.assertRaisesRegex(RuntimeError, "move stage aborted"):
                 _oze._drain_futures(
-                    {fut: src},
-                    _oze._RunStats(),
+                    futures,
+                    stats,
                     preview=False,
-                    head_cache={},
+                    head_cache=head_cache,
                     wait_timeout=0.01,
                     max_stall_seconds=1.0,
                     now_fn=lambda: now[0],
@@ -3202,16 +3207,22 @@ class SourceCollisionResolution(unittest.TestCase):
             yield Path("a.txt"), Path("bucket")
             raise RuntimeError("plan failed")
 
+        def move_fn(source, bucket):
+            return source, bucket / source.name, None
+
+        plan = broken_plan()
+        head_cache = {}
+        manager = _oze.BucketManager(root=Path("."))
         with patch.object(_oze, "ThreadPoolExecutor", FakeExecutor):
             with self.assertRaisesRegex(RuntimeError, "plan failed"):
                 _oze._run_moves(
-                    broken_plan(),
-                    lambda source, bucket: (source, bucket / source.name, None),
+                    plan,
+                    move_fn,
                     num_threads=1,
                     preview=False,
                     total_files=1,
-                    head_cache={},
-                    manager=_oze.BucketManager(root=Path(".")),
+                    head_cache=head_cache,
+                    manager=manager,
                 )
 
         self.assertEqual(shutdown_calls, [{"wait": True, "cancel_futures": True}])
@@ -4476,9 +4487,12 @@ def test_plan_spool_reports_an_unusable_temp_database(monkeypatch):
 
 
 def test_plan_spool_wraps_a_mid_use_sqlite_failure():
-    with pytest.raises(organize_by_extension.PlanSpoolError, match="SQLITE_TMPDIR"):
+    def query_missing_table():
         with organize_by_extension._plan_spool() as db:
             db.execute("SELECT * FROM does_not_exist")
+
+    with pytest.raises(organize_by_extension.PlanSpoolError, match="SQLITE_TMPDIR"):
+        query_missing_table()
 
 
 def test_plan_spool_closes_the_connection_on_success():
@@ -4567,13 +4581,16 @@ def test_move_watchdog_reads_the_clock_at_call_time(monkeypatch, caplog):
         organize_by_extension.time, "monotonic", lambda: clock[0])
 
     fut: Future = Future()
+    futures = {fut: Path("/slow/source.bin")}
+    stats = organize_by_extension._RunStats()
+    head_cache = {}
     with caplog.at_level(logging.WARNING, "organize_by_extension"):
         with pytest.raises(organize_by_extension.MoveStallError):
             organize_by_extension._drain_futures(
-                {fut: Path("/slow/source.bin")},
-                organize_by_extension._RunStats(),
+                futures,
+                stats,
                 preview=False,
-                head_cache={},
+                head_cache=head_cache,
             )
 
     assert [r for r in caplog.records if "move stage stalled" in r.message] == []

@@ -98,10 +98,9 @@ def test_group_duplicates_derives_hash_width(hash_width):
     ],
 )
 def test_group_duplicates_rejects_invalid_record_layout(raw, error):
+    data = dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8)
     with pytest.raises(ValueError, match=error):
-        dedupl_numpy.group_duplicates(
-            dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
-        )
+        dedupl_numpy.group_duplicates(data)
 
 
 def test_main_reports_invalid_record_layout(monkeypatch, tmp_path, capfd):

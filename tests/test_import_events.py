@@ -280,13 +280,13 @@ def test_run_llm_restores_fd_output_after_keyboard_interrupt(capfd):
             os.write(2, b"hidden stderr\n")
             raise KeyboardInterrupt
 
+    messages = [{"role": "user", "content": "Launch"}]
+    source = Path("event.txt")
+    client = InterruptingNoisyLlm()
+    config = import_events.ModelConfig(llm_verbose=False)
     with pytest.raises(KeyboardInterrupt):
         import_events._run_llm(
-            [{"role": "user", "content": "Launch"}],
-            Path("event.txt"),
-            "Text/LLM",
-            InterruptingNoisyLlm(),
-            import_events.ModelConfig(llm_verbose=False),
+            messages, source, "Text/LLM", client, config,
         )
 
     os.write(1, b"visible stdout\n")
@@ -2016,13 +2016,14 @@ def test_timed_stage_logs_when_benchmark_enabled(caplog):
 
 
 def test_timed_stage_preserves_keyboard_interrupt():
+    config = import_events.ModelConfig(benchmark=True)
+    source = Path("sample.pdf")
+
+    def interrupt():
+        raise KeyboardInterrupt
+
     with pytest.raises(KeyboardInterrupt):
-        import_events._timed_stage(
-            import_events.ModelConfig(benchmark=True),
-            Path("sample.pdf"),
-            "llm",
-            lambda: (_ for _ in ()).throw(KeyboardInterrupt),
-        )
+        import_events._timed_stage(config, source, "llm", interrupt)
 
 
 def test_cached_text_stage_reuses_file_hash_cache(tmp_path):
@@ -2519,10 +2520,13 @@ def test_output_lock_releases_on_write_error(tmp_path):
     out = tmp_path / "events.json"
     lock = tmp_path / "events.json.lock"
 
-    with pytest.raises(RuntimeError):
+    def fail_while_locked():
         with import_events._output_lock(out):
             assert lock.exists()  # held during the critical section
             raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        fail_while_locked()
 
     assert not lock.exists()  # cleaned up on the error path
 
@@ -3718,11 +3722,13 @@ def test_get_llm_preserves_keyboard_interrupt_during_gpu_init(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "llama_cpp.llama_chat_format", fake_chat)
     monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict())
     monkeypatch.setattr(import_events, "ensure_models_exist", lambda config=None: None)
+    config = import_events.ModelConfig(
+        model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0,
+        llm_gpu_layers=-1,
+    )
 
     with pytest.raises(KeyboardInterrupt):
-        import_events.get_llm(import_events.ModelConfig(
-            model_path="A.gguf", clip_path="ca.gguf", llm_cache_size=0,
-            llm_gpu_layers=-1))
+        import_events.get_llm(config)
 
     assert created == [-1]
 
@@ -4653,9 +4659,11 @@ def test_extract_from_pdf_propagates_keyboard_interrupt_from_text_stage(monkeypa
         lambda path, max_chars=import_events.MAX_CONTENT_CHARS: (
             _ for _ in ()).throw(KeyboardInterrupt),
     )
+    source = Path("agenda.pdf")
+    client = FakeLlm()
 
     with pytest.raises(KeyboardInterrupt):
-        import_events.extract_from_pdf(Path("agenda.pdf"), llm_client=FakeLlm())
+        import_events.extract_from_pdf(source, llm_client=client)
 
 
 def test_extract_from_pdf_propagates_keyboard_interrupt_from_ocr_stage(monkeypatch):
@@ -4668,12 +4676,13 @@ def test_extract_from_pdf_propagates_keyboard_interrupt_from_ocr_stage(monkeypat
         lambda path, config=None, language="en": (
             _ for _ in ()).throw(KeyboardInterrupt),
     )
+    source = Path("scan.pdf")
+    client = FakeLlm()
+    config = import_events.ModelConfig(pdf_ocr_mode="auto")
 
     with pytest.raises(KeyboardInterrupt):
         import_events.extract_from_pdf(
-            Path("scan.pdf"),
-            llm_client=FakeLlm(),
-            model_config=import_events.ModelConfig(pdf_ocr_mode="auto"),
+            source, llm_client=client, model_config=config,
         )
 
 
@@ -4702,9 +4711,10 @@ def test_run_llm_propagates_keyboard_interrupt_without_counting(tmp_path):
     import_events.reset_extraction_failures()
     src = tmp_path / "x.txt"
     src.write_text("content", encoding="utf-8")
+    client = InterruptingLlm()
 
     with pytest.raises(KeyboardInterrupt):
-        import_events.extract_with_llm(src, llm_client=InterruptingLlm())
+        import_events.extract_with_llm(src, llm_client=client)
 
     assert import_events.extraction_failure_count() == 0
 
@@ -5298,11 +5308,11 @@ def test_run_file_workers_aborts_and_attaches_partials_on_model_failure(
         "_collect_file_results",
         lambda *_args: (_ for _ in ()).throw(failure),
     )
+    files = []
+    config = import_events.ModelConfig(workers=1)
 
     with pytest.raises(import_events.ModelUnavailableError) as exc_info:
-        import_events._run_file_workers(
-            [], import_events.ModelConfig(workers=1), None, None
-        )
+        import_events._run_file_workers(files, config, None, None)
 
     assert exc_info.value is failure
     assert failure.partial_events == partial
@@ -6140,10 +6150,11 @@ def test_at_least_accepts_values_on_and_above_the_floor(value, expected):
 
 
 def test_at_least_rejects_below_the_floor():
+    parser = import_events._at_least(36)
     with pytest.raises(
         import_events.argparse.ArgumentTypeError, match="36 or greater"
     ):
-        import_events._at_least(36)("35")
+        parser("35")
 
 
 @pytest.mark.parametrize("value, expected", [("0", 0), ("512", 512), ("4096", 4096)])
@@ -6199,9 +6210,10 @@ def test_image_messages_accepts_a_file_on_the_limit(tmp_path):
 def test_image_messages_defaults_to_the_module_limit(tmp_path, monkeypatch):
     """Passing no config must still bound the read."""
     monkeypatch.setattr(import_events, "MAX_IMAGE_BYTES", 16)
+    image = _png(tmp_path, 64)
 
     with pytest.raises(ValueError, match="--max-image-bytes=16"):
-        import_events._image_messages(_png(tmp_path, 64), "en")
+        import_events._image_messages(image, "en")
 
 
 def test_read_text_caps_the_byte_window(tmp_path):
