@@ -114,6 +114,7 @@ id | status | effort | description | notes
 
 id | status | effort | description | notes
 --- | --- | --- | --- | ---
+ie-arch-50 | open | high | import_events.py:1464-4142 — migrate model lifecycle and structured extraction behind OmniTensor's planned accelerator-only `event-extraction` workload, then reduce this standalone script to a compatibility client only after file-format, privacy, partial-result, JSON/ICS, and exit-code parity. | Cross-project boundary: the script may depend on an installed third-party package or D-Bus/CLI service but must not import sibling scripts; retain the current direct local path until the workload passes end-to-end acceptance so migration cannot remove a working offline tool.
 
 ## system design
 
