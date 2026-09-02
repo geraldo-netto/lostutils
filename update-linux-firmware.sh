@@ -34,11 +34,19 @@ REQUIRED_WORK_MB="${REQUIRED_WORK_MB:-5120}"
 REQUIRED_LIB_MB="${REQUIRED_LIB_MB:-2048}"
 
 FORCE=0
+usage() {
+    echo "Usage: $0 [--force]"
+}
+
 case "${1:-}" in
     "") ;;
     --force) FORCE=1 ;;
+    -h|--help)
+        usage
+        exit 0
+        ;;
     *)
-        echo "Usage: $0 [--force]" >&2
+        usage >&2
         echo "Unknown argument: $1" >&2
         exit 1
         ;;
