@@ -3043,6 +3043,20 @@ def test_main_cli_metadata_does_not_start_tk(flag, monkeypatch, capsys):
     assert capsys.readouterr().out
 
 
+def test_help_renders_config_paths_home_relative(monkeypatch):
+    home = os.path.abspath(os.path.expanduser("~"))
+    config = os.path.join(home, "private", "link_queue_config.yaml")
+    state = os.path.join(home, "private", "link_queue_state.yaml")
+    monkeypatch.setattr(link_queue, "CONFIG_FILE", config)
+    monkeypatch.setattr(link_queue, "STATE_FILE", state)
+
+    help_text = link_queue.build_parser().format_help()
+
+    assert home not in help_text
+    assert os.path.join("~", "private", "link_queue_config.yaml") in help_text
+    assert os.path.join("~", "private", "link_queue_state.yaml") in help_text
+
+
 # --- coverage gap-fillers --------------------------------------------------
 
 def test_pending_queue_remove_missing_raises():

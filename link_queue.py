@@ -5824,10 +5824,25 @@ class MappingEditor(_FormDialog):
 # entrypoint
 # ---------------------------------------------------------------------------
 
+def _home_relative_path(path: str) -> str:
+    home = os.path.abspath(os.path.expanduser("~"))
+    absolute = os.path.abspath(path)
+    try:
+        relative = os.path.relpath(absolute, home)
+    except ValueError:  # Different drives on Windows cannot be relative.
+        return path
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return path
+    return "~" if relative == os.curdir else os.path.join("~", relative)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Launch the Link Processing Queue GUI.",
-        epilog=f"Config: {CONFIG_FILE}\nState: {STATE_FILE}",
+        epilog=(
+            f"Config: {_home_relative_path(CONFIG_FILE)}\n"
+            f"State: {_home_relative_path(STATE_FILE)}"
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
