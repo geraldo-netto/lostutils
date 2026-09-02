@@ -99,15 +99,61 @@ CURL_NETWORK_ARGS=(
     --speed-time "$CURL_LOW_SPEED_TIME"
 )
 
-if [ "$(id -u)" -eq 0 ]; then
+RUN_UID=$(id -u)
+if [ "$RUN_UID" -eq 0 ]; then
     SUDO=()
 else
     SUDO=(sudo)
 fi
 
+ensure_private_cache() {
+    if [ ! -e "$CACHE_DIR" ] && [ ! -L "$CACHE_DIR" ]; then
+        if ! (umask 077; mkdir -p -- "$CACHE_DIR"); then
+            echo "ERROR: could not create cache directory: $CACHE_DIR" >&2
+            return 1
+        fi
+    fi
+    if [ -L "$CACHE_DIR" ] || [ ! -d "$CACHE_DIR" ]; then
+        echo "ERROR: cache path must be a real directory, not a symlink: $CACHE_DIR" >&2
+        return 1
+    fi
+    local owner
+    owner=$(stat -c '%u' -- "$CACHE_DIR")
+    if [ "$owner" != "$RUN_UID" ]; then
+        echo "ERROR: cache directory is owned by uid $owner, expected $RUN_UID: $CACHE_DIR" >&2
+        return 1
+    fi
+    chmod 0700 -- "$CACHE_DIR"
+    if [ "$(stat -c '%a' -- "$CACHE_DIR")" != 700 ]; then
+        echo "ERROR: cache directory is not private mode 0700: $CACHE_DIR" >&2
+        return 1
+    fi
+}
+
+validate_cached_file() {
+    local path=$1
+    if [ -L "$path" ]; then
+        echo "ERROR: refusing symlink at cache output: $path" >&2
+        return 1
+    fi
+    if [ -e "$path" ]; then
+        if [ ! -f "$path" ]; then
+            echo "ERROR: cache output is not a regular file: $path" >&2
+            return 1
+        fi
+        local owner links
+        owner=$(stat -c '%u' -- "$path")
+        links=$(stat -c '%h' -- "$path")
+        if [ "$owner" != "$RUN_UID" ] || [ "$links" -ne 1 ]; then
+            echo "ERROR: cache output must be owned by uid $RUN_UID with one link: $path" >&2
+            return 1
+        fi
+    fi
+}
+
 # --- Preflight ---------------------------------------------------------------
 
-for cmd in curl gpg tar rsync; do
+for cmd in curl gpg stat tar rsync; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: missing required command: $cmd" >&2
         exit 1
@@ -151,6 +197,8 @@ echo "=== Kernel Firmware Update (unified) ==="
 echo "Kernel version: $(uname -r)"
 echo ""
 
+ensure_private_cache
+
 # Fail early if we can't get root, rather than mid-way through
 if [ "${#SUDO[@]}" -gt 0 ]; then
     echo "Requesting sudo access (needed for backup and install)..."
@@ -158,7 +206,6 @@ if [ "${#SUDO[@]}" -gt 0 ]; then
 fi
 
 WORK_DIR="$(mktemp -d /var/tmp/firmware-update.XXXXXX)"
-mkdir -p "$CACHE_DIR"
 TARBALL=""
 SUCCESS=0
 cleanup() {
@@ -252,6 +299,7 @@ echo "[2/7] Fetching signature and signer key..."
 # itself, which matters because staging runs copy-firmware.sh from it.
 SIG_FILE="${RELEASE}.tar.sign"
 SIG_PATH="$CACHE_DIR/$SIG_FILE"
+validate_cached_file "$SIG_PATH"
 if ! curl -fsS "${CURL_NETWORK_ARGS[@]}" --retry 3 \
         -o "$SIG_PATH" "${FIRMWARE_URL}${SIG_FILE}"; then
     echo "ERROR: Failed to download signature file $SIG_FILE" >&2
@@ -275,6 +323,7 @@ fi
 echo "[3/7] Downloading firmware (~600MB+, this may take a while)..."
 TARBALL="$CACHE_DIR/$LATEST_FIRMWARE"
 FW_TAR="$WORK_DIR/fw.tar"
+validate_cached_file "$TARBALL"
 
 # Decompressing once to a plain tar doubles as the integrity check and lets
 # gpg/tar tf/tar xf below run without three more full decompressions

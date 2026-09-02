@@ -126,7 +126,7 @@ Every runtime setting can be overridden through the environment:
 | `FW_DIR` | `/lib/firmware` | Installed firmware tree. |
 | `STAMP_FILE` | `/var/lib/linux-firmware-release.version` | Installed release marker. |
 | `OLD_GIT_STAMP` | `/var/lib/linux-firmware-git.commit` | Obsolete marker removed after a successful install. |
-| `CACHE_DIR` | `/var/tmp/firmware-update-cache` | Persistent signature/archive cache used for resumable downloads. |
+| `CACHE_DIR` | `/var/tmp/firmware-update-cache` | Persistent signature/archive cache; it must be a real directory owned by the invoking uid and is forced to mode `0700`. |
 | `BACKUP_DIR` | `${FW_DIR}.backup.<timestamp>` | Backup destination; the path must not already exist. |
 | `PINNED_FPR` | `4CDE8575E547BF835FE15807A31B6BD72486CFD6` | Trusted linux-firmware OpenPGP fingerprint. Verify any change independently against kernel.org. |
 | `KEYSERVER` | `hkps://keyserver.ubuntu.com` | Source used only to retrieve key material matching `PINNED_FPR`. |
