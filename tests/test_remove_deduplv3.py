@@ -275,43 +275,27 @@ def test_emit_remove_commands_chunks_large_group():
     assert survivor not in targets
 
 
-def test_emit_remove_commands_uses_translation_hook(monkeypatch):
-    def translate(message):
-        if message == rd.SAFETY_BANNER_TEMPLATE:
-            return "BANNER\n"
-        if message == "# duplicates: {hash}\n# saving: {path}\n":
-            return "DUP {hash}\nKEEP {path}\n"
-        return message
-
+def test_emit_remove_commands_uses_plain_messages():
     out = []
-    monkeypatch.setattr(rd, "_", translate)
 
     rd._emit_remove_commands({"h": ["/tmp/remove", "/tmp/keep-longer-name"]}, out.append)
 
     text = "".join(out)
-    assert text.startswith("BANNER\n")
-    assert "DUP h\nKEEP /tmp/keep-longer-name\n" in text
+    assert text.startswith(rd.SAFETY_BANNER_TEMPLATE)
+    assert "# duplicates: h\n# saving: /tmp/keep-longer-name\n" in text
     assert f"{rd.RM_COMMAND_PREFIX} /tmp/remove" in text
 
 
-def test_summary_and_error_use_translation_hook(monkeypatch, capsys):
-    def translate(message):
-        if message.startswith("summary:"):
-            return "SUM {group_count}/{dup_count}/{remove_count}"
-        if message.startswith(","):
-            return " SKIP {skipped_count}"
-        if message == "error: {message}":
-            return "ERR {message}"
-        return message
-
-    monkeypatch.setattr(rd, "_", translate)
-
-    assert rd._format_summary(3, 2, 1, 4) == "SUM 3/2/1 SKIP 4"
+def test_summary_and_error_use_plain_messages(capsys):
+    assert rd._format_summary(3, 2, 1, 4) == (
+        "summary: 3 hash group(s), 2 with duplicates, "
+        "1 file(s) queued for removal, 4 skipped line(s)"
+    )
     with pytest.raises(SystemExit) as exc:
         rd._fail("boom", 7)
 
     assert exc.value.code == 7
-    assert capsys.readouterr().err == "ERR boom\n"
+    assert capsys.readouterr().err == "error: boom\n"
 
 
 def test_output_starts_with_destructive_command_warning(monkeypatch, tmp_path):

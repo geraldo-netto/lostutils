@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import codecs
-import gettext
 import io
 import json
 import os
@@ -34,8 +33,6 @@ import shlex
 import sys
 from collections import defaultdict
 from typing import NoReturn
-
-_ = gettext.gettext
 
 # Order matters: UTF-32 BOMs share a 2-byte prefix with UTF-16 BOMs,
 # so the 4-byte UTF-32 entries must come first. The mapped codec names
@@ -86,19 +83,19 @@ def _decode_record_path(path):
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description=_("Emit `rm` commands to clear content-duplicates "
-                      "while keeping the entry with the longest basename."),
-        epilog=_(
+        description=("Emit `rm` commands to clear content-duplicates "
+                     "while keeping the entry with the longest basename."),
+        epilog=(
             "Exit codes: 0 success, 2 command-line/input/output setup error, "
             "3 encoding/decode error."
         ))
-    ap.add_argument("file", help=_("hash file (one '<hash> <path>' per line)"))
+    ap.add_argument("file", help="hash file (one '<hash> <path>' per line)")
     ap.add_argument("--encoding", default=None,
-                    help=_("Force encoding (e.g. utf-8, utf-16, gbk, "
-                           "latin-1). Default: BOM-detect → utf-8."))
+                    help=("Force encoding (e.g. utf-8, utf-16, gbk, "
+                          "latin-1). Default: BOM-detect → utf-8."))
     ap.add_argument("--strict", action="store_true",
-                    help=_("Fail on undecodable bytes (default: "
-                           "surrogateescape)."))
+                    help=("Fail on undecodable bytes (default: "
+                          "surrogateescape)."))
     return ap.parse_args(argv)
 
 
@@ -115,7 +112,7 @@ def _configure_stdout_errors(err_mode):
     if buffer is not None:
         sys.stdout = io.TextIOWrapper(buffer, encoding="utf-8", errors=err_mode)
         return
-    _fail(_("stdout does not expose a binary buffer for utf-8 output"), 2)
+    _fail("stdout does not expose a binary buffer for utf-8 output", 2)
 
 
 def _read_groups(lines):
@@ -159,7 +156,7 @@ def _validate_encoding(encoding):
         codecs.lookup(encoding)
     except LookupError as e:
         _fail(
-            _("unknown encoding {encoding!r}: {error}").format(
+            "unknown encoding {encoding!r}: {error}".format(
                 encoding=encoding,
                 error=e,
             ),
@@ -215,19 +212,19 @@ def _case_variant_conflicts(paths):
 
 
 def _emit_case_variant_warning(digest, conflicts, out):
-    out(_(
+    out(
         "# duplicates: {hash}\n"
         "# SKIPPED: these paths differ only by letter case, so on a\n"
         "#   case-insensitive filesystem they are one file and removing\n"
         "#   either would delete the copy the other one names:\n"
-    ).format(hash=digest))
+    .format(hash=digest))
     for path in sorted(conflicts):
         out(f"#   {path}\n")
     out("\n")
 
 
 def _emit_remove_commands(groups, out):
-    out(_(SAFETY_BANNER_TEMPLATE))
+    out(SAFETY_BANNER_TEMPLATE)
     groups_with_dups = 0
     files_to_remove = 0
     for h, paths in groups.items():
@@ -247,7 +244,7 @@ def _emit_remove_commands(groups, out):
         to_remove = [p for p in paths if p != keep]
         groups_with_dups += 1
         files_to_remove += len(to_remove)
-        out(_("# duplicates: {hash}\n# saving: {path}\n").format(hash=h, path=keep))
+        out("# duplicates: {hash}\n# saving: {path}\n".format(hash=h, path=keep))
         for quoted in _chunked_quoted(to_remove):
             out(f"{RM_COMMAND_PREFIX} {quoted}\n")
         out("\n")
@@ -255,21 +252,21 @@ def _emit_remove_commands(groups, out):
 
 
 def _format_summary(group_count, groups_with_dups, files_to_remove, skipped_lines):
-    summary = _(
+    summary = (
         "summary: {group_count} hash group(s), {dup_count} with duplicates, "
         "{remove_count} file(s) queued for removal"
     ).format(
         group_count=group_count, dup_count=groups_with_dups, remove_count=files_to_remove
     )
     if skipped_lines:
-        summary += _(", {skipped_count} skipped line(s)").format(
+        summary += ", {skipped_count} skipped line(s)".format(
             skipped_count=skipped_lines
         )
     return summary
 
 
 def _fail(msg, code) -> NoReturn:
-    print(_("error: {message}").format(message=msg), file=sys.stderr)
+    print("error: {message}".format(message=msg), file=sys.stderr)
     sys.exit(code)
 
 
@@ -308,11 +305,11 @@ def main(argv=None):
         _fail(e, 2)
     except _InputDecodeError as e:
         print(
-                _("decode error in {file} (encoding={encoding}): {error}\n"
-                  "hint: try --encoding <name> or omit --strict").format(
-                    file=args.file,
-                    encoding=e.encoding,
-                    error=e.error,
+            ("decode error in {file} (encoding={encoding}): {error}\n"
+             "hint: try --encoding <name> or omit --strict").format(
+                file=args.file,
+                encoding=e.encoding,
+                error=e.error,
             ),
             file=sys.stderr,
         )
