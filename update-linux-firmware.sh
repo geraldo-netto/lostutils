@@ -151,9 +151,20 @@ validate_cached_file() {
     fi
 }
 
+acquire_process_lock() {
+    if ! exec {LOCK_FD}<"$CACHE_DIR"; then
+        echo "ERROR: could not open cache directory for locking: $CACHE_DIR" >&2
+        return 1
+    fi
+    if ! flock -n "$LOCK_FD"; then
+        echo "ERROR: another firmware update is already running (lock: $CACHE_DIR)" >&2
+        return 1
+    fi
+}
+
 # --- Preflight ---------------------------------------------------------------
 
-for cmd in curl gpg stat tar rsync; do
+for cmd in curl flock gpg stat tar rsync; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: missing required command: $cmd" >&2
         exit 1
@@ -198,6 +209,7 @@ echo "Kernel version: $(uname -r)"
 echo ""
 
 ensure_private_cache
+acquire_process_lock
 
 # Fail early if we can't get root, rather than mid-way through
 if [ "${#SUDO[@]}" -gt 0 ]; then
