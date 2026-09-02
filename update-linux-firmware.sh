@@ -52,6 +52,29 @@ case "${1:-}" in
         ;;
 esac
 
+validate_space_threshold() {
+    local name=$1
+    local value=$2
+    local normalized
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: $name must be a non-negative integer (got '$value')" >&2
+        return 1
+    fi
+    normalized=$value
+    while [[ "$normalized" == 0* && ${#normalized} -gt 1 ]]; do
+        normalized=${normalized#0}
+    done
+    if [ "${#normalized}" -gt 10 ] \
+            || { [ "${#normalized}" -eq 10 ] && ((10#$normalized > 2147483647)); }; then
+        echo "ERROR: $name is too large for a portable MB threshold (got '$value')" >&2
+        return 1
+    fi
+    printf -v "$name" '%s' "$normalized"
+}
+
+validate_space_threshold REQUIRED_WORK_MB "$REQUIRED_WORK_MB"
+validate_space_threshold REQUIRED_LIB_MB "$REQUIRED_LIB_MB"
+
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=()
 else
