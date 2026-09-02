@@ -230,6 +230,29 @@ def test_group_duplicates_does_not_make_contiguous_gather_copy(monkeypatch):
     assert record_count == 2
 
 
+def test_group_duplicates_gathers_hashes_in_bounded_chunks(monkeypatch):
+    digests = [b"a" * 32, b"a" * 32, b"b" * 32, b"c" * 32, b"c" * 32]
+    raw = b"".join(digest + f" /path/{index}\n".encode() for index, digest in enumerate(digests))
+    real_take = dedupl_numpy.np.take
+    gathered_shapes = []
+
+    def tracked_take(data, indices, out):
+        gathered_shapes.append(indices.shape)
+        return real_take(data, indices, out=out)
+
+    monkeypatch.setattr(dedupl_numpy, "HASH_GATHER_CHUNK_RECORDS", 2)
+    monkeypatch.setattr(dedupl_numpy.np, "take", tracked_take)
+
+    paths, equal_files, record_count = dedupl_numpy.group_duplicates(
+        dedupl_numpy.np.frombuffer(raw, dtype=dedupl_numpy.np.uint8),
+    )
+
+    assert paths == {b"/path/0", b"/path/1", b"/path/3", b"/path/4"}
+    assert equal_files == 2
+    assert record_count == 5
+    assert gathered_shapes == [(2, 32), (2, 32), (1, 32)]
+
+
 def test_write_paths_handles_broken_pipe():
     class ClosedPipe:
         def write(self, _data):

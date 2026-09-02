@@ -4,7 +4,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| dnp-mem-01 | open | medium | medium | dedupl_numpy.py:79-83 — [memory/CPU] Process record starts in bounded chunks; broadcasting `line_starts[:, None] + np.arange(hash_width)` materializes an `(n_lines, hash_width)` int64 matrix plus gathered bytes. |
 | hr-sec-07 | open | high | medium | hash-recursive-ai5.py:621-685 — [security; STRIDE Tampering, TOCTOU attack tree] Bind each hash to the walked identity: pass expected `(device, inode, size)`, compare `fstat` before and after reading, and reject mutation/path swaps. |
 | lq-sec-04 | open | high | high | link_queue.py:2100-2108,2133-2149,2467-2490 — [security; STRIDE Tampering/Elevation of privilege, OWASP ASVS command injection] Stop using POSIX `shlex.quote` for Windows `cmd.exe` shell mode; reject shell mode there or implement and adversarially test a correct host-shell quoting contract. |
 | mkp-sec-02 | open | medium | medium | minikeypad.py:914-935 — [security; STRIDE Tampering/Information disclosure, CWE-59] Replace predictable `<profile>.tmp` writes with an exclusive same-directory tempfile, restrictive mode, fsync, and atomic replace so saves cannot follow/truncate a planted symlink. |

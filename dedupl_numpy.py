@@ -15,6 +15,7 @@ from typing import BinaryIO
 import numpy as np
 
 HASH_SEPARATOR_WIDTH = 1
+HASH_GATHER_CHUNK_RECORDS = 16_384
 _ESCAPED_PATH_PREFIX = b"@lostutils-json:"
 
 
@@ -65,6 +66,20 @@ def _open_input(path: str) -> mmap.mmap | None:
         return mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
 
 
+def _gather_hashes(
+    data: np.ndarray,
+    line_starts: np.ndarray,
+    hash_width: int,
+) -> np.ndarray:
+    hash_bytes = np.empty((len(line_starts), hash_width), dtype=np.uint8)
+    offsets = np.arange(hash_width)
+    for start in range(0, len(line_starts), HASH_GATHER_CHUNK_RECORDS):
+        stop = min(start + HASH_GATHER_CHUNK_RECORDS, len(line_starts))
+        hash_idx = line_starts[start:stop, None] + offsets
+        np.take(data, hash_idx, out=hash_bytes[start:stop])
+    return hash_bytes.view(f"S{hash_width}").ravel()
+
+
 def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     """Return duplicate paths, redundant-file count, and record count."""
     nl = np.flatnonzero(data == 0x0A)
@@ -76,11 +91,7 @@ def group_duplicates(data: np.ndarray) -> tuple[set[bytes], int, int]:
     line_starts, hash_width, path_offset = _record_layout(data, nl)
     n_lines = len(line_starts)
 
-    # Build the hash slice via index broadcasting; view as fixed-width bytes.
-    hash_idx = line_starts[:, None] + np.arange(hash_width)
-    hash_bytes = np.empty(hash_idx.shape, dtype=np.uint8)
-    np.take(data, hash_idx, out=hash_bytes)
-    hashes = hash_bytes.view(f"S{hash_width}").ravel()
+    hashes = _gather_hashes(data, line_starts, hash_width)
 
     _, inverse, counts = np.unique(
         hashes, return_inverse=True, return_counts=True)
