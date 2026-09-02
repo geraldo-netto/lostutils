@@ -3815,6 +3815,27 @@ def test_spawn_proc_starts_new_process_session(app, monkeypatch):
     assert [call["start_new_session"] for call in calls] == [True, True]
 
 
+def test_spawn_shell_proc_rejects_windows_cmd_metacharacters(
+        headless_dispatcher, monkeypatch):
+    logs = []
+    popen_calls = []
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    monkeypatch.setattr(headless_dispatcher, "_log", logs.append)
+    monkeypatch.setattr(
+        link_queue.subprocess, "Popen",
+        lambda *args, **kwargs: popen_calls.append((args, kwargs)),
+    )
+    item = q(
+        "https://example.test/?x=1&calc.exe|more%PATH%",
+        template="open {url_quoted}",
+        shell=True,
+    )
+
+    assert headless_dispatcher._spawn_shell_proc(item, "t", None, "") is None
+    assert popen_calls == []
+    assert any("shell=True is unsupported on Windows" in msg for msg in logs)
+
+
 def test_spawn_proc_decodes_child_output_as_utf8(app, monkeypatch):
     """lq-plat-08: locale decoding would mangle or stall UTF-8 child output."""
     calls = []

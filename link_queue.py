@@ -13,7 +13,7 @@ bindings for Python (e.g. `sudo apt install python3-tk`).
 
 Command templates support the following placeholders:
     {url}          the raw URL
-    {url_quoted}   the URL, shell-quoted (recommended when shell=True)
+    {url_quoted}   the URL, POSIX-shell-quoted (for shell=True on POSIX only)
     {protocol}     the URL scheme (http, https, ftp, magnet, ...)
 
 Config is persisted as YAML to $XDG_CONFIG_HOME/link_queue/link_queue_config.yaml
@@ -2134,7 +2134,8 @@ class Dispatcher:
         """Mapped pairs as a shell-quoted suffix (sec-02): the flag is split
         into words and each re-quoted so a config flag carrying shell
         metacharacters can't be smuggled into the /bin/sh -c string; the value
-        is shell-quoted as one argument.
+        is shell-quoted as one argument. This helper is POSIX-only; shell mode
+        is rejected on Windows before it can be called.
 
         lq-plat-07: split with the host's own path rules, the way the exec
         path already does. POSIX-mode splitting treats a backslash as an
@@ -2465,11 +2466,19 @@ class Dispatcher:
                     )
 
     def _spawn_shell_proc(self, item: QueueItem, label: str, cwd, cwd_note: str):
-        """shell=True branch (opt-in). sec-04: REFUSE a bare {url}, which would
-        be interpolated UNQUOTED into /bin/sh -c — an adversarial URL like
-        ``; rm -rf ~/`` would execute. {url_quoted} (or shell=False) is the
-        only safe path."""
+        """Run an opt-in POSIX shell command after enforcing its quote contract.
+
+        Refuse Windows because shlex.quote does not protect cmd.exe. On POSIX,
+        refuse bare {url}, which would be interpolated unquoted into /bin/sh -c.
+        """
         url, protocol, template = item.url, item.protocol, item.template
+        if os.name == "nt":
+            self._log(
+                f"[{label} error] shell=True is unsupported on Windows because "
+                "POSIX quoting does not protect cmd.exe; use shell=False: "
+                f"{template}  url={url}"
+            )
+            return None
         if _template_has_bare_url(template):
             self._log(
                 f"[{label} error] refusing shell=True template "
