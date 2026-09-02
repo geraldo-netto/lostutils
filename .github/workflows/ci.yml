@@ -37,6 +37,9 @@ jobs:
       - name: Lint root scripts
         run: ruff check -- ./*.py
 
+      - name: Lint shell scripts
+        run: shellcheck -- ./*.sh
+
       - name: Type-check root scripts
         run: pyright --pythonpath "$(command -v python)" ./*.py
 

@@ -4,7 +4,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| ulf-test-01 | open | medium | high | update-linux-firmware.sh:1-422 — [test/release engineering] Add hermetic failure-path/integration tests and CI `shellcheck`; the privileged updater currently has no automated coverage and the workflow only gates Python files. |
 
 ## Blocked / Deferred
 
