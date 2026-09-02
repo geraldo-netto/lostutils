@@ -4,7 +4,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| oze-sec-04 | open | high | high | organize_by_extension.py:1741-1862 — [security; STRIDE Information disclosure/Tampering, TOCTOU] Pin cross-device source identity with a no-follow descriptor, copy from that descriptor, and identity-check again before unlink; current path-based compare/copy/unlink can follow a swapped source. |
 | rf-sec-50 | open | high | medium | relocate_folder.py:1883-1906,1991-2047,2241-2274 — [security; STRIDE Tampering, TOCTOU] Route backup/link publication through a genuinely no-replace rename on every supported POSIX host; both sites still gate then call clobbering `os.rename`, and the existing helper falls back to the same unsafe operation off Linux. |
 | rf-sec-04 | open | high | high | relocate_folder.py:2361-2391,2594-2608 — [security; STRIDE Tampering, TOCTOU] Traverse, copy, and verify from the pinned source directory descriptor; holding its fd while reopening `plan.source` by path still permits swap-copy-restore of attacker-selected content. |
 | ulf-test-01 | open | medium | high | update-linux-firmware.sh:1-422 — [test/release engineering] Add hermetic failure-path/integration tests and CI `shellcheck`; the privileged updater currently has no automated coverage and the workflow only gates Python files. |

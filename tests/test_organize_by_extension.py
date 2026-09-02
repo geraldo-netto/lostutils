@@ -423,7 +423,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
             src = self.make_file(root, "data.txt")
             exdev = OSError(errno.EXDEV, "cross-device link")
             with patch('organize_by_extension.os.link', side_effect=exdev), \
-                 patch('organize_by_extension.shutil.copy2', side_effect=OSError("disk full")):
+                 patch('organize_by_extension.shutil.copyfileobj', side_effect=OSError("disk full")):
                 with self.assertRaises(OSError):
                     move_file(src, dest)
             target = dest / "data.txt"
@@ -1471,13 +1471,14 @@ class CrossDeviceCleanupLogging(unittest.TestCase):
             src.write_text("hi")
             bucket = root / "bucket"
             bucket.mkdir()
-            # Force the cross-device copy path: os.link raises EXDEV; copy2
-            # then raises OSError; the cleanup loop's os.unlink will hit
-            # FileNotFoundError (an OSError) which must be logged at DEBUG.
+            # Force the cross-device copy path: os.link raises EXDEV; copying
+            # then raises OSError; a cleanup unlink failure must be logged.
             exdev = OSError(errno.EXDEV, "fake xdev")
             with patch("organize_by_extension.os.link", side_effect=exdev), \
-                 patch("organize_by_extension.shutil.copy2",
+                 patch("organize_by_extension.shutil.copyfileobj",
                        side_effect=OSError("disk full")), \
+                 patch("organize_by_extension.os.unlink",
+                       side_effect=OSError("cleanup denied")), \
                  self.assertLogs("organize_by_extension", level="DEBUG") as cm:
                 with self.assertRaises(OSError):
                     move_file(src, bucket)
@@ -3894,12 +3895,12 @@ def test_read_head_bytes_unreadable_returns_singleton(tmp_path, monkeypatch):
 
 def test_cross_device_tmp_uses_random_suffix(tmp_path, monkeypatch):
     captured: dict = {}
-    real_copy = oze.shutil.copy2
+    real_copy = oze.shutil.copyfileobj
 
     def spy_copy(src, dst, *a, **kw):
-        captured["dst"] = str(dst)
+        captured["dst"] = str(dst.name)
         return real_copy(src, dst, *a, **kw)
-    monkeypatch.setattr(oze.shutil, "copy2", spy_copy)
+    monkeypatch.setattr(oze.shutil, "copyfileobj", spy_copy)
     src = tmp_path / "src.bin"; src.write_bytes(b"x")
     dst = tmp_path / "dst.bin"
     oze._move_cross_device(src, dst)
@@ -4043,6 +4044,57 @@ def test_cross_device_source_unlink_failure_is_partial_move(tmp_path, monkeypatc
     assert src.exists(), "source removed despite unlink failure"
     assert any("duplicate left" in r.getMessage() for r in caplog.records), \
         "orphaned duplicate not surfaced"
+
+
+def test_cross_device_copies_pinned_source_and_refuses_swapped_path(
+        tmp_path, monkeypatch):
+    src = tmp_path / "src.bin"
+    moved = tmp_path / "moved-original.bin"
+    dst = tmp_path / "dst.bin"
+    src.write_bytes(b"trusted payload")
+    real_copy = oze.shutil.copyfileobj
+
+    def swap_then_copy(source_stream, target_stream, *args, **kwargs):
+        os.replace(src, moved)
+        src.write_bytes(b"attacker replacement")
+        return real_copy(source_stream, target_stream, *args, **kwargs)
+
+    monkeypatch.setattr(oze.shutil, "copyfileobj", swap_then_copy)
+
+    with pytest.raises(oze.PartialMoveError, match="source changed"):
+        oze._move_cross_device(src, dst)
+
+    assert dst.read_bytes() == b"trusted payload"
+    assert src.read_bytes() == b"attacker replacement"
+    assert moved.read_bytes() == b"trusted payload"
+
+
+def test_cross_device_does_not_follow_symlink_swapped_before_open(
+        tmp_path, monkeypatch):
+    src = tmp_path / "src.bin"
+    moved = tmp_path / "moved-original.bin"
+    secret = tmp_path / "secret.bin"
+    dst = tmp_path / "dst.bin"
+    src.write_bytes(b"trusted payload")
+    secret.write_bytes(b"secret")
+    real_open = oze.os.open
+    swapped = False
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == src and not swapped:
+            swapped = True
+            os.replace(src, moved)
+            src.symlink_to(secret)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(oze.os, "open", swap_before_open)
+
+    with pytest.raises(OSError):
+        oze._move_cross_device(src, dst)
+
+    assert secret.read_bytes() == b"secret"
+    assert not dst.exists()
 
 
 def test_partial_move_result_has_separate_total(tmp_path, monkeypatch, caplog):
@@ -4480,10 +4532,12 @@ def test_symlink_escape_warning_caches_resolution_failure():
 
 
 def test_content_and_reservation_helpers_fail_closed_on_missing_paths(tmp_path):
-    missing = tmp_path / "missing"
+    source = tmp_path / "source"
+    source.write_bytes(b"payload")
     target = tmp_path / "target"
 
-    assert not _oze._same_file_content(missing, target)
+    with _oze._open_pinned_regular(source) as (stream, source_stat):
+        assert not _oze._same_file_content(stream, source_stat, target)
 
 
 def test_plan_spool_reports_an_unusable_temp_database(monkeypatch):

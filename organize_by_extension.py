@@ -32,7 +32,7 @@ from functools import partial
 from itertools import pairwise
 from pathlib import Path
 import shutil
-from typing import Callable, Iterable, Iterator, NamedTuple, NoReturn, Protocol, Set
+from typing import BinaryIO, Callable, Iterable, Iterator, NamedTuple, NoReturn, Protocol, Set
 
 BUCKET_SIZE = 500
 PROGRESS_EVERY = 10_000   # oze-obs-02: emit a progress line every N done items
@@ -1738,26 +1738,51 @@ def _link_regular_no_follow(src: Path, dst: Path) -> None:
 _CONTENT_CMP_CHUNK = 1 << 16
 
 
-def _same_file_content(a: Path, b: Path) -> bool:
-    """True when ``a`` and ``b`` are byte-identical (oze-di-01).
+def _stat_snapshot(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    """Fields that must remain stable while a pinned source is copied."""
+    return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
 
-    Cross-device copies land on different inodes, so ``os.path.samefile`` can't
-    recognise a completed-but-not-finalised move; we compare size then bytes.
-    Any stat/read failure answers False — the caller then treats the target as
-    a genuine collision rather than silently dropping the source.
-    """
+
+@contextmanager
+def _open_pinned_regular(path: Path) -> Iterator[tuple[BinaryIO, os.stat_result]]:
+    """Open one regular file without following a raced-in symlink."""
+    before = os.lstat(path)
+    if _stat.S_ISLNK(before.st_mode) or not _stat.S_ISREG(before.st_mode):
+        raise ValueError(f"refusing non-regular file: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
     try:
-        if a.stat().st_size != b.stat().st_size:
-            return False
-        with open(a, "rb") as fa, open(b, "rb") as fb:
+        opened = os.fstat(fd)
+        if (not _stat.S_ISREG(opened.st_mode)
+                or _stat_snapshot(before) != _stat_snapshot(opened)):
+            raise OSError(errno.EBUSY, "file changed while being opened", path)
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            yield stream, opened
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _same_file_content(
+    source_stream: BinaryIO,
+    source_stat: os.stat_result,
+    target: Path,
+) -> bool:
+    """True when a pinned source and no-follow target are byte-identical."""
+    try:
+        with _open_pinned_regular(target) as (target_stream, target_stat):
+            if source_stat.st_size != target_stat.st_size:
+                return False
+            source_stream.seek(0)
             while True:
-                chunk_a = fa.read(_CONTENT_CMP_CHUNK)
-                chunk_b = fb.read(_CONTENT_CMP_CHUNK)
-                if chunk_a != chunk_b:
+                source_chunk = source_stream.read(_CONTENT_CMP_CHUNK)
+                target_chunk = target_stream.read(_CONTENT_CMP_CHUNK)
+                if source_chunk != target_chunk:
                     return False
-                if not chunk_a:
+                if not source_chunk:
                     return True
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -1776,26 +1801,30 @@ def _move_cross_device(source: Path, target: Path) -> None:
     endlessly re-suffixing ``.collision<n>``. A target with *different* content
     is a real name collision and still raises.
     """
-    if _prepare_cross_device_target(source, target):
-        return
-    # oze-sec-01: replace the PID-based suffix with cryptographically
-    # random bytes. The previous `.{name}.{pid}.tmp` pattern was
-    # predictable: an attacker with write access to the bucket dir
-    # could pre-create that exact path (or symlink it elsewhere) and
-    # race `shutil.copy2` into clobbering the wrong target. 8 bytes
-    # of `secrets.token_hex` collapse that race to ~2^-64 odds.
-    tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
-    _copy_cross_device_target(source, target, tmp)
-    _unlink_cross_device_source(source, target)
+    with _open_pinned_regular(source) as (source_stream, source_stat):
+        if _prepare_cross_device_target(
+                source, source_stream, source_stat, target):
+            return
+        # oze-sec-01: randomise the private copy name so another writer cannot
+        # predict it between reservation and publication.
+        tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+        _copy_cross_device_target(source_stream, source_stat, target, tmp)
+        _unlink_cross_device_source(source, source_stream, source_stat, target)
 
 
-def _prepare_cross_device_target(source: Path, target: Path) -> bool:
+def _prepare_cross_device_target(
+    source: Path,
+    source_stream: BinaryIO,
+    source_stat: os.stat_result,
+    target: Path,
+) -> bool:
     try:
         _reserve_target(target)
         return False
     except FileExistsError:
-        if _same_file_content(source, target):
-            os.unlink(source)
+        if _same_file_content(source_stream, source_stat, target):
+            _unlink_cross_device_source(
+                source, source_stream, source_stat, target)
             return True
         raise
 
@@ -1818,10 +1847,21 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
-def _copy_cross_device_target(source: Path, target: Path, tmp: Path) -> None:
+def _copy_cross_device_target(
+    source_stream: BinaryIO,
+    source_stat: os.stat_result,
+    target: Path,
+    tmp: Path,
+) -> None:
     replaced = False
+    tmp_created = False
     try:
-        shutil.copy2(source, tmp)
+        source_stream.seek(0)
+        with open(tmp, "xb") as target_stream:
+            tmp_created = True
+            shutil.copyfileobj(source_stream, target_stream)
+        os.chmod(tmp, _stat.S_IMODE(source_stat.st_mode))
+        os.utime(tmp, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         _fsync_file(tmp)
         os.replace(tmp, target)  # atomic: target only ever holds the complete file
         replaced = True
@@ -1832,7 +1872,9 @@ def _copy_cross_device_target(source: Path, target: Path, tmp: Path) -> None:
         # log at debug so unexpected exception classes still surface. Once the
         # rename succeeded the target IS the completed file — never unlink it on
         # a late interrupt; leave it for the idempotent re-run above.
-        leftovers = (tmp,) if replaced else (tmp, target)
+        leftovers = (tmp,) if replaced else (target,)
+        if tmp_created and not replaced:
+            leftovers = (tmp, target)
         for leftover in leftovers:
             try:
                 os.unlink(leftover)
@@ -1844,13 +1886,29 @@ def _copy_cross_device_target(source: Path, target: Path, tmp: Path) -> None:
         raise
 
 
-def _unlink_cross_device_source(source: Path, target: Path) -> None:
+def _unlink_cross_device_source(
+    source: Path,
+    source_stream: BinaryIO,
+    source_stat: os.stat_result,
+    target: Path,
+) -> None:
     # oze-robust-01: the copy is committed at `target`; source removal has no
     # rollback (cross-fs target is an independent copy, not a hardlink). If the
     # unlink fails the file exists at BOTH paths as full copies — surface it
     # loudly instead of as a bare OSError so the orphaned duplicate is visible.
     # The move itself succeeded, so don't re-raise; an idempotent re-run reclaims
     # the source via the same-content check above.
+    current_fd = os.fstat(source_stream.fileno())
+    try:
+        current_path = os.lstat(source)
+    except OSError as unlink_exc:
+        raise PartialMoveError(source, target, unlink_exc) from unlink_exc
+    if (_stat.S_ISLNK(current_path.st_mode)
+            or _stat_snapshot(current_fd) != _stat_snapshot(source_stat)
+            or _stat_snapshot(current_path) != _stat_snapshot(source_stat)):
+        changed = OSError(
+            errno.EBUSY, "source changed during cross-device move", source)
+        raise PartialMoveError(source, target, changed) from changed
     try:
         os.unlink(source)
     except OSError as unlink_exc:
