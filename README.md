@@ -115,7 +115,7 @@ Downloads the newest release tarball advertised by kernel.org, verifies its deta
 ./update-linux-firmware.sh --allow-downgrade
 ```
 
-`--force` reinstalls the currently stamped release but does not weaken rollback protection. If the signed release advertised by the index is older than the installed root-owned stamp, the run is refused unless `--allow-downgrade` is supplied explicitly after the operator verifies that the downgrade is intentional.
+`--force` reinstalls the currently stamped release but does not weaken rollback protection. If the signed release advertised by the index is older than the installed root-owned stamp, the run is refused unless `--allow-downgrade` is supplied explicitly after the operator verifies that the downgrade is intentional. A root-owned pending marker is written before firmware changes and removed only after initramfs rebuild succeeds; if rebuilding fails, the next run retries it even when the release stamp is already current.
 
 The script supports Linux systems with Bash and GNU userland features (`grep -P`, `df --output`, `find -printf`, and `sort -V`). Required commands are `curl`, `flock`, `gpg`, `tar`, `rsync`, and the decompressor matching the discovered release (`xz` or `gzip`). A non-root run also needs `sudo`. `zstd` is optional; without it firmware is staged uncompressed. Initramfs rebuilding supports Debian/Ubuntu-family `update-initramfs`, Fedora/RHEL-family `dracut`, and Arch-family `mkinitcpio`; if none is installed, the script completes with a warning and requires a manual rebuild for early-boot firmware.
 
@@ -128,6 +128,7 @@ Every runtime setting can be overridden through the environment:
 | `FIRMWARE_URL` | `https://www.kernel.org/pub/linux/kernel/firmware/` | Release index and download base URL. |
 | `FW_DIR` | `/lib/firmware` | Installed firmware tree. |
 | `STAMP_FILE` | `/var/lib/linux-firmware-release.version` | Installed release marker. |
+| `PENDING_INITRAMFS_FILE` | `/var/lib/linux-firmware-initramfs.pending` | Root-owned state retained until the installed release has been incorporated into initramfs. |
 | `OLD_GIT_STAMP` | `/var/lib/linux-firmware-git.commit` | Obsolete marker removed after a successful install. |
 | `CACHE_DIR` | `/var/tmp/firmware-update-cache` | Persistent signature/archive cache; it must be a real directory owned by the invoking uid and is forced to mode `0700`. |
 | `BACKUP_DIR` | `${FW_DIR}.backup.<timestamp>` | Backup destination; the path must not already exist. |

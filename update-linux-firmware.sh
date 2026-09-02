@@ -16,6 +16,7 @@ set -euo pipefail
 FIRMWARE_URL="${FIRMWARE_URL:-https://www.kernel.org/pub/linux/kernel/firmware/}"
 FW_DIR="${FW_DIR:-/lib/firmware}"
 STAMP_FILE="${STAMP_FILE:-/var/lib/linux-firmware-release.version}"
+PENDING_INITRAMFS_FILE="${PENDING_INITRAMFS_FILE:-/var/lib/linux-firmware-initramfs.pending}"
 # Stamp left behind by the superseded update-linux-firmware.sh; removed on
 # success so the two installers can't disagree about who manages FW_DIR
 OLD_GIT_STAMP="${OLD_GIT_STAMP:-/var/lib/linux-firmware-git.commit}"
@@ -171,6 +172,39 @@ validate_installed_stamp() {
     fi
 }
 
+validate_pending_initramfs_file() {
+    if [ -L "$PENDING_INITRAMFS_FILE" ]; then
+        echo "ERROR: pending initramfs marker must not be a symlink: $PENDING_INITRAMFS_FILE" >&2
+        return 1
+    fi
+    if [ -e "$PENDING_INITRAMFS_FILE" ]; then
+        if [ ! -f "$PENDING_INITRAMFS_FILE" ] \
+                || [ "$(stat -c '%u' -- "$PENDING_INITRAMFS_FILE")" -ne 0 ]; then
+            echo "ERROR: pending initramfs marker must be a root-owned regular file: $PENDING_INITRAMFS_FILE" >&2
+            return 1
+        fi
+    fi
+}
+
+retry_pending_initramfs() {
+    local pending_release=$1
+    if [ "$pending_release" != "$INSTALLED" ]; then
+        echo "ERROR: pending initramfs marker ($pending_release) disagrees with installed stamp ($INSTALLED)" >&2
+        return 1
+    fi
+    if [ "${#INITRAMFS_CMD[@]}" -eq 0 ]; then
+        echo "ERROR: initramfs rebuild is still pending for $pending_release, but no supported rebuild tool is installed" >&2
+        return 1
+    fi
+    echo "Retrying pending initramfs rebuild (${INITRAMFS_CMD[*]})..."
+    if ! "${SUDO[@]}" "${INITRAMFS_CMD[@]}"; then
+        echo "ERROR: pending initramfs rebuild failed again; marker retained: $PENDING_INITRAMFS_FILE" >&2
+        return 1
+    fi
+    "${SUDO[@]}" rm -f -- "$PENDING_INITRAMFS_FILE"
+    echo "Pending initramfs rebuild completed."
+}
+
 acquire_process_lock() {
     if ! exec {LOCK_FD}<"$CACHE_DIR"; then
         echo "ERROR: could not open cache directory for locking: $CACHE_DIR" >&2
@@ -323,6 +357,15 @@ if [ "$INSTALLED" != none ] \
     echo "ERROR: installed release stamp is malformed: $STAMP_FILE" >&2
     echo "Refusing to weaken rollback protection; inspect the stamp manually." >&2
     exit 1
+fi
+validate_pending_initramfs_file
+PENDING_INITRAMFS=$(cat "$PENDING_INITRAMFS_FILE" 2>/dev/null || echo none)
+if [ "$PENDING_INITRAMFS" != none ]; then
+    if [[ ! "$PENDING_INITRAMFS" =~ ^linux-firmware-[0-9]+$ ]]; then
+        echo "ERROR: pending initramfs marker is malformed: $PENDING_INITRAMFS_FILE" >&2
+        exit 1
+    fi
+    retry_pending_initramfs "$PENDING_INITRAMFS"
 fi
 if [ "$INSTALLED" != none ] && [ "$RELEASE" != "$INSTALLED" ] \
         && [ "$(printf '%s\n%s\n' "$RELEASE" "$INSTALLED" | sort -V | head -1)" = "$RELEASE" ] \
@@ -511,12 +554,18 @@ echo "Backup complete"
 print_restore_instructions() {
     echo "  sudo rm -rf $FW_DIR"
     echo "  sudo mv $BACKUP_DIR $FW_DIR"
+    echo "  sudo rm -f $PENDING_INITRAMFS_FILE"
     if [ "${#INITRAMFS_CMD[@]}" -gt 0 ]; then
         echo "  sudo ${INITRAMFS_CMD[*]}"
     fi
 }
 
 echo "[7/7] Installing (staging -> $FW_DIR, root:root, 0644/0755)..."
+if ! printf '%s\n' "$RELEASE" \
+        | "${SUDO[@]}" tee "$PENDING_INITRAMFS_FILE" >/dev/null; then
+    echo "ERROR: could not persist pending initramfs state; firmware was not modified" >&2
+    exit 1
+fi
 if ! "${SUDO[@]}" rsync -rlt --force --stats \
         --chown=root:root \
         --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
@@ -561,6 +610,7 @@ if [ "${#INITRAMFS_CMD[@]}" -gt 0 ]; then
         echo "  sudo ${INITRAMFS_CMD[*]}" >&2
         exit 1
     fi
+    "${SUDO[@]}" rm -f -- "$PENDING_INITRAMFS_FILE"
 fi
 
 rm -f -- "$TARBALL" "$SIG_PATH"
