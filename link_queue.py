@@ -3209,6 +3209,8 @@ class LogSink:
         self._drop_first_t: float | None = None
         self._queue: queue.Queue = queue.Queue(maxsize=100_000)
         self._stop = threading.Event()
+        self._health_lock = threading.Lock()
+        self._last_unexpected_result: str | None = None
         self._writer = threading.Thread(
             target=self._writer_loop, name="log-writer", daemon=True)
         self._writer.start()
@@ -3227,7 +3229,16 @@ class LogSink:
                     self._drop_first_t = time.monotonic()
                 self._drop_count += 1
 
-    def stop(self) -> None:
+    @property
+    def is_alive(self) -> bool:
+        return self._writer.is_alive()
+
+    @property
+    def last_unexpected_result(self) -> "str | None":
+        with self._health_lock:
+            return self._last_unexpected_result
+
+    def stop(self) -> bool:
         """Signal the writer to drain and exit, then join it.
 
         Flush-deadline contract (conc-02)
@@ -3246,8 +3257,23 @@ class LogSink:
         magic constant."""
         self._stop.set()
         self._writer.join(timeout=2.0)
+        if self._writer.is_alive():
+            self._record_unexpected_result("stop timed out after 2.0s")
+            return False
+        return True
 
     # -- internal -----------------------------------------------------------
+    def _record_unexpected_result(
+        self,
+        operation: str,
+        exc: "BaseException | None" = None,
+    ) -> None:
+        detail = f": {type(exc).__name__}: {exc}" if exc is not None else ""
+        result = f"{operation}{detail}"
+        with self._health_lock:
+            self._last_unexpected_result = result
+        print(f"[warn] log writer {result}", file=sys.stderr)
+
     def _writer_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -3256,14 +3282,14 @@ class LogSink:
                 continue
             try:
                 self._flush_batch(self._drain_queue([first]))
-            except Exception:
-                pass
+            except Exception as exc:
+                self._record_unexpected_result("batch flush failed", exc)
         try:
             remaining = self._drain_queue([])
             if remaining:
                 self._flush_batch(remaining)  # pragma: no cover - _flush_batch on remaining batch (post-loop)
-        except Exception:  # pragma: no cover - defensive Tk exception in flush
-            pass  # pragma: no cover - defensive Tk exception in flush
+        except Exception as exc:  # pragma: no cover - defensive Tk exception in flush
+            self._record_unexpected_result("final drain failed", exc)  # pragma: no cover
         with self._lock:
             self._close_locked()
 

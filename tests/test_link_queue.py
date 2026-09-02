@@ -1005,16 +1005,18 @@ def test_render_limit_fallback(app):
     assert app._render_limit() == 5
 
 
-def test_log_writer_survives_flush_error(app, tmp_path, monkeypatch):
+def test_log_writer_survives_flush_error(app, tmp_path, monkeypatch, capsys):
     # rel-06: a failure inside the writer's flush must not kill the thread.
     app.config["log_file"] = str(tmp_path / "f.log")
     # Patch the LogSink method the writer thread actually calls (cx-06).
     monkeypatch.setattr(app._log_sink, "_flush_batch", _raise)
     app._log("boom")
     deadline = time.time() + 2.0
-    while not app._log_queue.empty() and time.time() < deadline:
+    while app._log_sink.last_unexpected_result is None and time.time() < deadline:
         time.sleep(0.02)
-    assert app._log_writer.is_alive()        # writer thread still running
+    assert app._log_sink.is_alive
+    assert "batch flush failed: RuntimeError" in app._log_sink.last_unexpected_result
+    assert "[warn] log writer batch flush failed" in capsys.readouterr().err
     # restored flush works again
     monkeypatch.undo()
     app._log("ok-after")
@@ -1025,6 +1027,25 @@ def test_log_writer_survives_flush_error(app, tmp_path, monkeypatch):
             break
         time.sleep(0.02)
     assert "ok-after" in open(app.config["log_file"], encoding="utf-8").read()
+
+
+def test_log_sink_stop_surfaces_writer_timeout(capsys):
+    sink = link_queue.LogSink(lambda: "")
+    assert sink.stop() is True
+
+    class StuckWriter:
+        def join(self, timeout):
+            assert timeout == 2.0
+
+        def is_alive(self):
+            return True
+
+    sink._writer = StuckWriter()
+
+    assert sink.stop() is False
+    assert sink.is_alive
+    assert sink.last_unexpected_result == "stop timed out after 2.0s"
+    assert "[warn] log writer stop timed out after 2.0s" in capsys.readouterr().err
 
 
 def test_log_sink_surfaces_drops(app, tmp_path):
