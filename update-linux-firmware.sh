@@ -216,9 +216,30 @@ acquire_process_lock() {
     fi
 }
 
+validate_rollback_paths() {
+    FW_DIR=$(realpath -m -- "$FW_DIR")
+    BACKUP_DIR=$(realpath -m -- "$BACKUP_DIR")
+    if [ "$FW_DIR" = / ] || [ "$BACKUP_DIR" = / ]; then
+        echo "ERROR: firmware and backup paths must not resolve to filesystem root" >&2
+        return 1
+    fi
+    case "$BACKUP_DIR" in
+        "$FW_DIR"|"$FW_DIR"/*)
+            echo "ERROR: backup path must not equal or sit inside firmware path" >&2
+            return 1
+            ;;
+    esac
+    case "$FW_DIR" in
+        "$BACKUP_DIR"/*)
+            echo "ERROR: firmware path must not sit inside backup path" >&2
+            return 1
+            ;;
+    esac
+}
+
 # --- Preflight ---------------------------------------------------------------
 
-for cmd in curl flock gpg stat tar rsync; do
+for cmd in curl flock gpg realpath stat tar rsync; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: missing required command: $cmd" >&2
         exit 1
@@ -262,6 +283,7 @@ echo "=== Kernel Firmware Update (unified) ==="
 echo "Kernel version: $(uname -r)"
 echo ""
 
+validate_rollback_paths
 ensure_private_cache
 acquire_process_lock
 
@@ -274,7 +296,54 @@ fi
 WORK_DIR="$(mktemp -d /var/tmp/firmware-update.XXXXXX)"
 TARBALL=""
 SUCCESS=0
+BACKUP_READY=0
+BACKUP_ID=""
+FW_MUTATION_STARTED=0
+INSTALL_COMMITTED=0
+PENDING_STATE_STARTED=0
+
+backup_identity_matches() {
+    [ -d "$BACKUP_DIR" ] \
+        && [ ! -L "$BACKUP_DIR" ] \
+        && [ "$(stat -c '%u' -- "$BACKUP_DIR" 2>/dev/null)" = 0 ] \
+        && [ "$(stat -c '%d:%i' -- "$BACKUP_DIR" 2>/dev/null)" = "$BACKUP_ID" ]
+}
+
+restore_verified_backup() {
+    echo "Automatic rollback: restoring verified backup $BACKUP_DIR" >&2
+    if ! backup_identity_matches; then
+        echo "CRITICAL: backup identity changed; refusing automatic restore." >&2
+        print_restore_instructions >&2
+        return 1
+    fi
+    if ! "${SUDO[@]}" rm -rf -- "$FW_DIR" \
+            || ! "${SUDO[@]}" mv -- "$BACKUP_DIR" "$FW_DIR"; then
+        echo "CRITICAL: automatic rollback failed; firmware may be incomplete." >&2
+        print_restore_instructions >&2
+        return 1
+    fi
+    "${SUDO[@]}" rm -f -- "$PENDING_INITRAMFS_FILE"
+    FW_MUTATION_STARTED=0
+    if [ "$INSTALLED" = none ]; then
+        "${SUDO[@]}" rm -f -- "$STAMP_FILE"
+    elif ! write_root_state "$STAMP_FILE" "$INSTALLED"; then
+        echo "CRITICAL: firmware was restored, but the previous release stamp could not be restored." >&2
+        print_restore_instructions >&2
+        return 1
+    fi
+    echo "Automatic rollback completed; original firmware restored." >&2
+}
+
 cleanup() {
+    local status=$?
+    set +e
+    trap - EXIT INT TERM HUP
+    if [ "$FW_MUTATION_STARTED" -eq 1 ] && [ "$INSTALL_COMMITTED" -ne 1 ] \
+            && [ "$BACKUP_READY" -eq 1 ]; then
+        restore_verified_backup
+    elif [ "$PENDING_STATE_STARTED" -eq 1 ] && [ "$INSTALL_COMMITTED" -ne 1 ]; then
+        "${SUDO[@]}" rm -f -- "$PENDING_INITRAMFS_FILE"
+    fi
     if [ "$SUCCESS" -eq 1 ]; then
         rm -rf "$WORK_DIR"
     else
@@ -288,8 +357,11 @@ cleanup() {
         fi
         echo "Logs kept in: $WORK_DIR"
     fi
+    exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 
 # A failing df must fail the check, not silently skip it: an empty result
 # would make '[ "" -lt N ]' exit 2, which an if-condition treats as false
@@ -538,7 +610,7 @@ if [ "${#SUDO[@]}" -gt 0 ]; then
     sudo -v
 fi
 
-if [ -e "$BACKUP_DIR" ]; then
+if [ -e "$BACKUP_DIR" ] || [ -L "$BACKUP_DIR" ]; then
     echo "ERROR: Backup directory $BACKUP_DIR already exists" >&2
     exit 1
 fi
@@ -547,7 +619,24 @@ if ! "${SUDO[@]}" cp -a "$FW_DIR" "$BACKUP_DIR"; then
     echo "ERROR: Backup failed, aborting before touching $FW_DIR" >&2
     exit 1
 fi
-echo "Backup complete"
+if ! BACKUP_DIFFERENCES=$("${SUDO[@]}" rsync -aHnc --delete \
+        --itemize-changes "$FW_DIR"/ "$BACKUP_DIR"/); then
+    echo "ERROR: Backup verification failed, aborting before touching $FW_DIR" >&2
+    exit 1
+fi
+if [ -n "$BACKUP_DIFFERENCES" ]; then
+    echo "ERROR: Backup differs from $FW_DIR; refusing to install:" >&2
+    printf '%s\n' "$BACKUP_DIFFERENCES" | head -20 >&2
+    exit 1
+fi
+if [ -L "$BACKUP_DIR" ] || [ ! -d "$BACKUP_DIR" ] \
+        || [ "$(stat -c '%u' -- "$BACKUP_DIR")" -ne 0 ]; then
+    echo "ERROR: verified backup is not a root-owned real directory: $BACKUP_DIR" >&2
+    exit 1
+fi
+BACKUP_ID=$(stat -c '%d:%i' -- "$BACKUP_DIR")
+BACKUP_READY=1
+echo "Backup verified"
 
 # --- Install -----------------------------------------------------------------
 
@@ -560,12 +649,28 @@ print_restore_instructions() {
     fi
 }
 
+write_root_state() {
+    local path=$1
+    local value=$2
+    local temporary
+    if ! temporary=$("${SUDO[@]}" mktemp "${path}.tmp.XXXXXX"); then
+        return 1
+    fi
+    if ! printf '%s\n' "$value" | "${SUDO[@]}" tee "$temporary" >/dev/null \
+            || ! "${SUDO[@]}" chmod 0644 -- "$temporary" \
+            || ! "${SUDO[@]}" mv -f -- "$temporary" "$path"; then
+        "${SUDO[@]}" rm -f -- "$temporary"
+        return 1
+    fi
+}
+
 echo "[7/7] Installing (staging -> $FW_DIR, root:root, 0644/0755)..."
-if ! printf '%s\n' "$RELEASE" \
-        | "${SUDO[@]}" tee "$PENDING_INITRAMFS_FILE" >/dev/null; then
+PENDING_STATE_STARTED=1
+if ! write_root_state "$PENDING_INITRAMFS_FILE" "$RELEASE"; then
     echo "ERROR: could not persist pending initramfs state; firmware was not modified" >&2
     exit 1
 fi
+FW_MUTATION_STARTED=1
 if ! "${SUDO[@]}" rsync -rlt --force --stats \
         --chown=root:root \
         --chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r \
@@ -596,9 +701,13 @@ if [ -s stale-remove.txt ]; then
     echo "Removed $(tr -cd '\0' < stale-remove.txt | wc -c) stale firmware variant(s) that would shadow this release"
 fi
 
-# Record success before the initramfs rebuild: the firmware install itself is
-# now complete, and a rebuild failure must not force a 600MB reinstall
-printf '%s\n' "$RELEASE" | "${SUDO[@]}" tee "$STAMP_FILE" >/dev/null
+# Commit success before the initramfs rebuild: the firmware install itself is
+# now complete, and a rebuild failure must not force a 600MB reinstall.
+if ! write_root_state "$STAMP_FILE" "$RELEASE"; then
+    echo "ERROR: could not commit installed release stamp; rolling back" >&2
+    exit 1
+fi
+INSTALL_COMMITTED=1
 "${SUDO[@]}" rm -f -- "$OLD_GIT_STAMP" 2>/dev/null || true
 
 if [ "${#INITRAMFS_CMD[@]}" -gt 0 ]; then
