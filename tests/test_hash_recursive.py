@@ -40,6 +40,16 @@ def _drain_walk(root, jobs, cancel_event=None, skip_ino=None):
     return list(walk), walk.stats
 
 
+def _walk_record(path):
+    stat_result = path.stat()
+    return (
+        str(path),
+        stat_result.st_size,
+        stat_result.st_dev,
+        stat_result.st_ino,
+    )
+
+
 # --- hr-rel-01: jobs is clamped to >=1 so a walk never silently no-ops ------
 
 def test_threaded_walk_clamps_zero_jobs():
@@ -699,6 +709,49 @@ def test_hash_file_windows_other_oserror_warns(monkeypatch, capsys):
     assert "EACCES" in err
 
 
+def test_hash_file_windows_rejects_path_swap_after_walk(tmp_path, capsys):
+    path = tmp_path / "candidate.bin"
+    path.write_bytes(b"walked")
+    expected = hr._stat_identity(path.stat())
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"hostil")
+    hr.os.replace(replacement, path)
+
+    digest = hr._hash_file_windows(
+        str(path),
+        [hr.FileWindow(0, 6, hr.os.SEEK_SET, strict=True)],
+        expected=expected,
+    )
+
+    assert digest is None
+    assert "file identity changed while hashing" in capsys.readouterr().err
+
+
+def test_hash_file_windows_rejects_size_mutation_during_read(
+        tmp_path, monkeypatch, capsys):
+    path = tmp_path / "candidate.bin"
+    path.write_bytes(b"walked")
+    expected = hr._stat_identity(path.stat())
+    real_read = hr._read_window_into
+
+    def read_then_grow(hasher, file_obj, length, strict):
+        complete = real_read(hasher, file_obj, length, strict)
+        with path.open("ab") as changed:
+            changed.write(b"!")
+        return complete
+
+    monkeypatch.setattr(hr, "_read_window_into", read_then_grow)
+
+    digest = hr._hash_file_windows(
+        str(path),
+        [hr.FileWindow(0, 6, hr.os.SEEK_SET, strict=True)],
+        expected=expected,
+    )
+
+    assert digest is None
+    assert "file identity changed while hashing" in capsys.readouterr().err
+
+
 def test_hash_file_windows_fdopen_failure_closes_fd(monkeypatch):
     # hr-rob-02: os.open succeeds but os.fdopen fails; the raw fd must be
     # closed by us, since the `with` that would close it never runs.
@@ -789,7 +842,7 @@ def test_hash_tail_and_samples_clamps_windows(monkeypatch):
     _hash_file_windows must satisfy offset + SAMPLE <= size."""
     captured = {}
 
-    def fake_hash(path, windows, config=None):
+    def fake_hash(path, windows, config=None, expected=None):
         captured["windows"] = windows
         return "deadbeef"
 
@@ -807,7 +860,7 @@ def test_hash_tail_and_samples_tiny_size_does_not_overflow(monkeypatch):
     # window may read past EOF.
     captured = {}
 
-    def fake_hash(path, windows, config=None):
+    def fake_hash(path, windows, config=None, expected=None):
         captured["windows"] = windows
         return None
 
@@ -818,6 +871,47 @@ def test_hash_tail_and_samples_tiny_size_does_not_overflow(monkeypatch):
         if whence == hr.os.SEEK_SET:
             # offset is clamped to size - SAMPLE = max(0, 100-65536) = 0
             assert offset == 0
+
+
+def test_hash_stage_batches_forward_walked_identity(monkeypatch):
+    key = (7, 11)
+    size = 123
+    path = "/candidate"
+    expected = (7, 11, size)
+    seen = []
+
+    def fake_head(got_path, config, got_expected=None):
+        seen.append(("head", got_path, got_expected))
+        return "HEAD"
+
+    def fake_tail(got_path, got_size, strategy=None, config=None, expected=None):
+        seen.append(("tail", got_path, expected))
+        return "TAIL"
+
+    def fake_full(got_path, got_size, config=None, expected=None):
+        seen.append(("full", got_path, expected))
+        return "FULL"
+
+    monkeypatch.setattr(hr, "hash_head", fake_head)
+    monkeypatch.setattr(hr, "hash_tail_and_samples", fake_tail)
+    monkeypatch.setattr(hr, "hash_full", fake_full)
+
+    assert hr._make_head_candidate_batch({key: path}, None)([(size, key)]) == [
+        (key, "HEAD")
+    ]
+    tail_item = (size, path, "HEAD", key)
+    assert hr._make_tail_stage2_batch(None)([tail_item]) == [
+        (tail_item, "TAIL")
+    ]
+    full_item = (path, size, ("HEAD", "TAIL"), key)
+    assert hr._make_full_stage3_batch(None)([full_item]) == [
+        (full_item, "FULL")
+    ]
+    assert seen == [
+        ("head", path, expected),
+        ("tail", path, expected),
+        ("full", path, expected),
+    ]
 
 
 # --- 100% coverage gap-fillers ---------------------------------------------
@@ -944,8 +1038,7 @@ def test_find_duplicate_groups_skips_single_member_head_groups(tmp_path, monkeyp
     # bucket has 1 member -> `if len(keys) < 2: continue` (covers L310).
     a = tmp_path / "a.bin"; a.write_bytes(b"AAA" * 50)
     b = tmp_path / "b.bin"; b.write_bytes(b"BBB" * 50)
-    files = [(str(a), len(a.read_bytes()), 1, 100),
-             (str(b), len(b.read_bytes()), 1, 101)]
+    files = [_walk_record(a), _walk_record(b)]
     final_groups, *_ = hr.find_duplicate_groups(files, jobs=1)
     assert final_groups == {}
 
@@ -1051,7 +1144,7 @@ def test_find_duplicate_groups_streaming_callback(tmp_path):
     big = b"y" * 200
     a = tmp_path / "a.bin"; a.write_bytes(big)
     b = tmp_path / "b.bin"; b.write_bytes(big)
-    files = [(str(a), len(big), 1, 100), (str(b), len(big), 1, 101)]
+    files = [_walk_record(a), _walk_record(b)]
     captured = []
 
     def on_group(digest_key, keys, aliases, overflow):
@@ -1081,7 +1174,7 @@ def test_find_duplicate_groups_skips_failed_tail(tmp_path, monkeypatch):
         return ({item: None for item in items}, 0)
 
     monkeypatch.setattr(hr, "_run_stage", stub)
-    files = [(str(a), len(big), 1, 100), (str(b), len(big), 1, 101)]
+    files = [_walk_record(a), _walk_record(b)]
     final_groups, *_ = hr.find_duplicate_groups(files, jobs=1)
     # Stage-2 hash all None -> no final groups beyond head-only.
     assert all(len(v) >= 2 for v in final_groups.values()) or final_groups == {}
@@ -1623,7 +1716,7 @@ def test_find_duplicate_groups_info_counts_stage2_errors(tmp_path, monkeypatch):
         return ({item: None for item in items}, len(items))
 
     monkeypatch.setattr(hr, "_run_stage", stub)
-    files = [(str(a), len(big), 1, 100), (str(b), len(big), 1, 101)]
+    files = [_walk_record(a), _walk_record(b)]
     result = hr.find_duplicate_groups(files, jobs=1)
     assert result.info["stage2_errors"] >= 2
     assert "stage2_skipped" not in result.info
@@ -2618,7 +2711,7 @@ def test_iter_threaded_walk_consumed_twice_starts_second_walk(tmp_path):
 def test_find_duplicate_groups_stage_boundary(tmp_path, size, expected_stage2):
     a = tmp_path / "a.bin"; a.write_bytes(b"q" * size)
     b = tmp_path / "b.bin"; b.write_bytes(b"q" * size)
-    files = [(str(a), size, 1, 100), (str(b), size, 1, 101)]
+    files = [_walk_record(a), _walk_record(b)]
     result = hr.find_duplicate_groups(files, jobs=1)
     assert result.info["stage2"] > 0 if expected_stage2 else result.info["stage2"] == 0
 
@@ -2690,7 +2783,7 @@ def test_find_duplicate_groups_on_group_raises_propagates(tmp_path):
     body = b"y" * 100
     a = tmp_path / "a.bin"; a.write_bytes(body)
     b = tmp_path / "b.bin"; b.write_bytes(body)
-    files = [(str(a), len(body), 1, 100), (str(b), len(body), 1, 101)]
+    files = [_walk_record(a), _walk_record(b)]
 
     def bad_cb(digest, keys, aliases, overflow):
         raise RuntimeError("callback failure")
@@ -3281,24 +3374,25 @@ def test_retry_head_alias_skips_tried_and_returns_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_hash_head(path, config):
+    def fake_hash_head(path, config, expected=None):
         calls.append(path)
         return None if path == "/dead" else "GOODHEAD"
 
     monkeypatch.setattr(hr, "hash_head", fake_hash_head)
-    head = hr._retry_head_alias(("d", 0), "/dead", aliases, None)
+    head = hr._retry_head_alias(("d", 0), "/dead", 1234, aliases, None)
     assert head == "GOODHEAD"
     assert "/dead" not in calls   # the already-tried rep is skipped
 
 
 def test_retry_head_alias_returns_none_when_no_sibling_readable(monkeypatch):
     aliases = {("d", 0): ["/dead", "/alsodead"]}
-    monkeypatch.setattr(hr, "hash_head", lambda p, c: None)
-    assert hr._retry_head_alias(("d", 0), "/dead", aliases, None) is None
+    monkeypatch.setattr(hr, "hash_head", lambda p, c, expected=None: None)
+    assert hr._retry_head_alias(
+        ("d", 0), "/dead", 1234, aliases, None) is None
 
 
 def test_retry_head_alias_unknown_key_returns_none():
-    assert hr._retry_head_alias(("d", 9), "/x", {}, None) is None
+    assert hr._retry_head_alias(("d", 9), "/x", 1234, {}, None) is None
 
 
 def test_stage1_hash_retries_alias_when_rep_unreadable(tmp_path):
@@ -3307,7 +3401,8 @@ def test_stage1_hash_retries_alias_when_rep_unreadable(tmp_path):
     body = b"head-content"
     live = tmp_path / "live.bin"
     live.write_bytes(body)
-    key = ("d", 0)
+    live_stat = live.stat()
+    key = (live_stat.st_dev, live_stat.st_ino)
     rep = {key: str(tmp_path / "vanished.bin")}    # rep does not exist
     aliases = {key: [str(tmp_path / "vanished.bin"), str(live)]}
     by_head, info = hr._stage1_hash(
@@ -3351,15 +3446,19 @@ def test_find_duplicate_groups_unreadable_rep_still_grouped(tmp_path):
     body = b"D" * 400
     live_a = tmp_path / "a_live.bin"; live_a.write_bytes(body)
     live_b = tmp_path / "b_live.bin"; live_b.write_bytes(body)
+    a_stat = live_a.stat()
+    b_stat = live_b.stat()
+    a_key = (a_stat.st_dev, a_stat.st_ino)
+    b_key = (b_stat.st_dev, b_stat.st_ino)
     files = [
-        (str(tmp_path / "a_dead.bin"), len(body), 1, 100),  # rep, missing
-        (str(live_a), len(body), 1, 100),
-        (str(tmp_path / "b_dead.bin"), len(body), 1, 200),  # rep, missing
-        (str(live_b), len(body), 1, 200),
+        (str(tmp_path / "a_dead.bin"), len(body), *a_key),  # rep, missing
+        (str(live_a), len(body), *a_key),
+        (str(tmp_path / "b_dead.bin"), len(body), *b_key),  # rep, missing
+        (str(live_b), len(body), *b_key),
     ]
     result = hr.find_duplicate_groups(files, jobs=1)
     grouped_keys = [k for keys in result.groups.values() for k in keys]
-    assert sorted(grouped_keys) == [(1, 100), (1, 200)]
+    assert sorted(grouped_keys) == sorted([a_key, b_key])
 
 
 @given(st.integers(min_value=1, max_value=8),
@@ -3374,12 +3473,13 @@ def test_retry_head_alias_property(n_aliases, live_choice):
     readable = siblings[live_choice % len(siblings)] if live_choice % 3 else None
     probed = []
 
-    def fake(path, config):
+    def fake(path, config, expected=None):
         probed.append(path)
         return "HD" if path == readable else None
 
     with mock.patch.object(hr, "hash_head", side_effect=fake):
-        result = hr._retry_head_alias(("d", 0), "/p0", aliases, None)
+        result = hr._retry_head_alias(
+            ("d", 0), "/p0", 1234, aliases, None)
     assert "/p0" not in probed
     assert result == ("HD" if readable is not None else None)
 
@@ -3390,7 +3490,7 @@ def test_retry_tail_alias_skips_tried_and_returns_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_tail(path, size, config=None):
+    def fake_tail(path, size, config=None, expected=None):
         calls.append(path)
         return None if path == "/dead" else "GOODTAIL"
 
@@ -3402,7 +3502,11 @@ def test_retry_tail_alias_skips_tried_and_returns_sibling(monkeypatch):
 
 def test_retry_tail_alias_returns_none_when_no_sibling_readable(monkeypatch):
     aliases = {("d", 0): ["/dead", "/alsodead"]}
-    monkeypatch.setattr(hr, "hash_tail_and_samples", lambda p, s, config=None: None)
+    monkeypatch.setattr(
+        hr,
+        "hash_tail_and_samples",
+        lambda p, s, config=None, expected=None: None,
+    )
     assert hr._retry_tail_alias(("d", 0), "/dead", 1, aliases, None) is None
 
 
@@ -3484,7 +3588,7 @@ def test_retry_full_alias_uses_the_next_readable_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_full(path, size, config=None):
+    def fake_full(path, size, config=None, expected=None):
         calls.append(path)
         return None if path == "/dead" else "GOODFULL"
 
@@ -3494,7 +3598,11 @@ def test_retry_full_alias_uses_the_next_readable_sibling(monkeypatch):
 
 
 def test_retry_full_alias_returns_none_when_no_sibling_readable(monkeypatch):
-    monkeypatch.setattr(hr, "hash_full", lambda p, s, config=None: None)
+    monkeypatch.setattr(
+        hr,
+        "hash_full",
+        lambda p, s, config=None, expected=None: None,
+    )
     aliases = {("d", 0): ["/dead", "/alsodead"]}
     assert hr._retry_full_alias(("d", 0), "/dead", 1, aliases, None) is None
     assert hr._retry_full_alias(("d", 9), "/x", 1, {}, None) is None

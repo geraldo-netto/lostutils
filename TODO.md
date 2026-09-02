@@ -4,7 +4,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| hr-sec-07 | open | high | medium | hash-recursive-ai5.py:621-685 — [security; STRIDE Tampering, TOCTOU attack tree] Bind each hash to the walked identity: pass expected `(device, inode, size)`, compare `fstat` before and after reading, and reject mutation/path swaps. |
 | lq-sec-04 | open | high | high | link_queue.py:2100-2108,2133-2149,2467-2490 — [security; STRIDE Tampering/Elevation of privilege, OWASP ASVS command injection] Stop using POSIX `shlex.quote` for Windows `cmd.exe` shell mode; reject shell mode there or implement and adversarially test a correct host-shell quoting contract. |
 | oze-sec-04 | open | high | high | organize_by_extension.py:1741-1862 — [security; STRIDE Information disclosure/Tampering, TOCTOU] Pin cross-device source identity with a no-follow descriptor, copy from that descriptor, and identity-check again before unlink; current path-based compare/copy/unlink can follow a swapped source. |
 | rf-sec-50 | open | high | medium | relocate_folder.py:1883-1906,1991-2047,2241-2274 — [security; STRIDE Tampering, TOCTOU] Route backup/link publication through a genuinely no-replace rename on every supported POSIX host; both sites still gate then call clobbering `os.rename`, and the existing helper falls back to the same unsafe operation off Linux. |

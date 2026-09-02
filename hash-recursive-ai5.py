@@ -618,7 +618,7 @@ class FileWindow(NamedTuple):
     strict: bool = False
 
 
-def _hash_file_windows(path, windows, config=None):
+def _hash_file_windows(path, windows, config=None, expected=None):
     """BLAKE3 of one or more (offset, length, whence) windows of a file
     (hr-dup-01). Returns the hex digest or None on any OSError. Shared
     scaffold for hash_head and hash_tail_and_samples.
@@ -650,7 +650,14 @@ def _hash_file_windows(path, windows, config=None):
 
     hr-sec-06: ``O_CLOEXEC`` so any subprocess spawned from another
     thread (signal handler, daemon helper) does not inherit the hash
-    fd."""
+    fd.
+
+    hr-sec-07: when ``expected`` is the walked ``(device, inode, size)``,
+    verify the opened descriptor against it before reading and again after
+    reading. A path swap or concurrent size mutation therefore discards the
+    digest instead of attributing attacker-selected bytes to the walked file.
+    Direct callers without a walked identity still get before/after descriptor
+    consistency checking."""
     # hr-arch-03: normalise every window to FileWindow at the boundary
     # once. `FileWindow(*window)` accepts both raw 3-tuples (strict
     # defaults to False) and 4-tuples, so the read loop never arity-sniffs.
@@ -658,7 +665,7 @@ def _hash_file_windows(path, windows, config=None):
                for w in windows]
     try:
         with _open_hash_file(path) as file_obj:
-            return _digest_file_windows(file_obj, windows, config)
+            return _digest_file_windows(file_obj, windows, config, expected)
     except OSError as exc:
         _handle_hash_error(path, exc, config)
         return None
@@ -674,14 +681,35 @@ def _open_hash_file(path):
         raise
 
 
-def _digest_file_windows(file_obj, windows, config):
+def _stat_identity(stat_result) -> tuple[int, int, int]:
+    return stat_result.st_dev, stat_result.st_ino, stat_result.st_size
+
+
+def _require_hash_identity(stat_result, expected) -> None:
+    actual = _stat_identity(stat_result)
+    if actual != expected:
+        raise OSError(
+            errno.EBUSY,
+            f"file identity changed while hashing: expected {expected}, got {actual}",
+        )
+
+
+def _digest_file_windows(file_obj, windows, config, expected=None):
+    initial = os.fstat(file_obj.fileno())
+    pinned_identity = expected if expected is not None else _stat_identity(initial)
+    _require_hash_identity(initial, pinned_identity)
     hasher = _require_blake3().blake3()
+    complete = True
     for window in windows:
         file_obj.seek(window.offset, window.whence)
         if not _read_window_into(
                 hasher, file_obj, window.length, window.strict):
-            _tick_shrank(config)
-            return None
+            complete = False
+            break
+    _require_hash_identity(os.fstat(file_obj.fileno()), pinned_identity)
+    if not complete:
+        _tick_shrank(config)
+        return None
     return hasher.hexdigest()
 
 
@@ -692,7 +720,7 @@ def _handle_hash_error(path, exc: OSError, config) -> None:
         _log_hash_error(path, exc, config)
 
 
-def hash_head(path, config=None):
+def hash_head(path, config=None, expected=None):
     """Stage 1: BLAKE3 of the first block-size bytes (or whole file if
     smaller).
 
@@ -701,7 +729,12 @@ def hash_head(path, config=None):
     size comes from ``config.block_size`` (hr-dec-05) so hashing never
     depends on process-global state."""
     cap = config.block_size if config is not None else CAP
-    return _hash_file_windows(path, [FileWindow(0, cap, os.SEEK_SET)], config)
+    return _hash_file_windows(
+        path,
+        [FileWindow(0, cap, os.SEEK_SET)],
+        config,
+        expected,
+    )
 
 
 class SamplingStrategy:
@@ -772,7 +805,7 @@ class ThirdsStrategy(SamplingStrategy):
 _DEFAULT_SAMPLING: SamplingStrategy = ThirdsStrategy()
 
 
-def hash_tail_and_samples(path, size, strategy=None, config=None):
+def hash_tail_and_samples(path, size, strategy=None, config=None, expected=None):
     """Stage 2 (only when size > CAP): BLAKE3 of the last CAP bytes, a
     center CAP block at the file midpoint, plus two SAMPLE-byte windows
     around size/3 and 2*size/3 (hr-rel-05). Catches files that share a
@@ -790,15 +823,16 @@ def hash_tail_and_samples(path, size, strategy=None, config=None):
         sampler = ThirdsStrategy(config.block_size, config.sample_size)
     else:
         sampler = _DEFAULT_SAMPLING
-    return _hash_file_windows(path, sampler.windows(size), config)
+    return _hash_file_windows(path, sampler.windows(size), config, expected)
 
 
-def hash_full(path, size, config=None):
+def hash_full(path, size, config=None, expected=None):
     """Final confirmation: BLAKE3 every byte of a sampled candidate."""
     return _hash_file_windows(
         path,
         [FileWindow(0, size, os.SEEK_SET, strict=True)],
         config,
+        expected,
     )
 
 
@@ -825,10 +859,17 @@ def _readable_rep(paths):
     return paths[0]
 
 
+def _walked_identity(key, size) -> tuple[int, int, int]:
+    return key[0], key[1], size
+
+
 def _make_head_candidate_batch(rep, config):
     """Build a stage-1 batch closure keyed by inode, not path (hr-scal-07)."""
     def _head_batch(items):
-        return [(key, hash_head(rep[key], config)) for _size, key in items]
+        return [
+            (key, hash_head(rep[key], config, _walked_identity(key, size)))
+            for size, key in items
+        ]
     return _head_batch
 
 
@@ -836,7 +877,15 @@ def _make_tail_stage2_batch(config):
     """Build a stage-2 batch closure without projecting a second item list."""
     def _tail_batch(items):
         return [
-            (item, hash_tail_and_samples(item[1], item[0], config=config))
+            (
+                item,
+                hash_tail_and_samples(
+                    item[1],
+                    item[0],
+                    config=config,
+                    expected=_walked_identity(item[3], item[0]),
+                ),
+            )
             for item in items
         ]
     return _tail_batch
@@ -845,7 +894,15 @@ def _make_tail_stage2_batch(config):
 def _make_full_stage3_batch(config):
     def _full_batch(items):
         return [
-            (item, hash_full(item[0], item[1], config))
+            (
+                item,
+                hash_full(
+                    item[0],
+                    item[1],
+                    config,
+                    expected=_walked_identity(item[3], item[1]),
+                ),
+            )
             for item in items
         ]
     return _full_batch
@@ -1319,10 +1376,11 @@ def _retry_alias(key, tried, aliases, hash_alias, cancel_event=None):
     return None
 
 
-def _retry_head_alias(key, tried, aliases, config, cancel_event=None):
+def _retry_head_alias(key, tried, size, aliases, config, cancel_event=None):
     """Stage-1 head retry (hr-rel-02)."""
     return _retry_alias(
-        key, tried, aliases, lambda alias: hash_head(alias, config),
+        key, tried, aliases,
+        lambda alias: hash_head(alias, config, _walked_identity(key, size)),
         cancel_event)
 
 
@@ -1330,7 +1388,12 @@ def _retry_tail_alias(key, tried, size, aliases, config, cancel_event=None):
     """Stage-2 tail/sample retry (hr-rel-30)."""
     return _retry_alias(
         key, tried, aliases,
-        lambda alias: hash_tail_and_samples(alias, size, config=config),
+        lambda alias: hash_tail_and_samples(
+            alias,
+            size,
+            config=config,
+            expected=_walked_identity(key, size),
+        ),
         cancel_event)
 
 
@@ -1342,7 +1405,13 @@ def _retry_full_alias(key, tried, size, aliases, config, cancel_event=None):
     confirmation and the full hash was dropped from its confirmed duplicate
     group even though a readable hardlink sibling existed."""
     return _retry_alias(
-        key, tried, aliases, lambda alias: hash_full(alias, size, config),
+        key, tried, aliases,
+        lambda alias: hash_full(
+            alias,
+            size,
+            config,
+            expected=_walked_identity(key, size),
+        ),
         cancel_event)
 
 
@@ -1402,7 +1471,7 @@ def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashe
         head = head_by_key[key]
         if head is None and aliases is not None and len(aliases.get(key, ())) > 1:
             head = _retry_head_alias(
-                key, rep[key], aliases, config, cancel_event)
+                key, rep[key], size, aliases, config, cancel_event)
             recovered += head is not None
         if on_hashed is not None:
             on_hashed(done, total, head, key, aliases)
