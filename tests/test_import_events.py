@@ -5391,6 +5391,25 @@ def test_language_and_date_edge_helpers():
     assert import_events._split_time_explicit("23:59:60 Invalid", False) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "24 00 Invalid hour",
+        "23 60 Invalid minute",
+        "23 59 60 Invalid second",
+    ],
+)
+def test_split_time_columns_rejects_invalid_components(text):
+    assert import_events._split_time_columns(text) is None
+
+
+def test_split_time_columns_accepts_hour_minute_second_columns():
+    assert import_events._split_time_columns("23 59 58 Countdown") == (
+        "T23:59:58",
+        "Countdown",
+    )
+
+
 def test_cli_rejects_same_json_and_ics_target(tmp_path, caplog):
     source = tmp_path / "events"
     source.mkdir()
