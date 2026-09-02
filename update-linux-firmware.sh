@@ -32,6 +32,10 @@ KEYSERVER="${KEYSERVER:-hkps://keyserver.ubuntu.com}"
 # (~1.6GB) + extracted tree (~1.6GB); staging replaces the tar afterwards
 REQUIRED_WORK_MB="${REQUIRED_WORK_MB:-5120}"
 REQUIRED_LIB_MB="${REQUIRED_LIB_MB:-2048}"
+CURL_CONNECT_TIMEOUT="${CURL_CONNECT_TIMEOUT:-20}"
+CURL_LOW_SPEED_LIMIT="${CURL_LOW_SPEED_LIMIT:-1024}"
+CURL_LOW_SPEED_TIME="${CURL_LOW_SPEED_TIME:-60}"
+GPG_KEYSERVER_TIMEOUT="${GPG_KEYSERVER_TIMEOUT:-30}"
 
 FORCE=0
 usage() {
@@ -74,6 +78,26 @@ validate_space_threshold() {
 
 validate_space_threshold REQUIRED_WORK_MB "$REQUIRED_WORK_MB"
 validate_space_threshold REQUIRED_LIB_MB "$REQUIRED_LIB_MB"
+
+validate_positive_network_setting() {
+    local name=$1
+    local value=$2
+    validate_space_threshold "$name" "$value"
+    if [ "${!name}" -eq 0 ]; then
+        echo "ERROR: $name must be greater than zero" >&2
+        return 1
+    fi
+}
+
+validate_positive_network_setting CURL_CONNECT_TIMEOUT "$CURL_CONNECT_TIMEOUT"
+validate_positive_network_setting CURL_LOW_SPEED_LIMIT "$CURL_LOW_SPEED_LIMIT"
+validate_positive_network_setting CURL_LOW_SPEED_TIME "$CURL_LOW_SPEED_TIME"
+validate_positive_network_setting GPG_KEYSERVER_TIMEOUT "$GPG_KEYSERVER_TIMEOUT"
+CURL_NETWORK_ARGS=(
+    --connect-timeout "$CURL_CONNECT_TIMEOUT"
+    --speed-limit "$CURL_LOW_SPEED_LIMIT"
+    --speed-time "$CURL_LOW_SPEED_TIME"
+)
 
 if [ "$(id -u)" -eq 0 ]; then
     SUDO=()
@@ -181,7 +205,7 @@ cd "$WORK_DIR"
 # --- Discover latest release -------------------------------------------------
 
 echo "[1/7] Fetching latest firmware list..."
-if ! INDEX_HTML=$(curl -fsS "$FIRMWARE_URL"); then
+if ! INDEX_HTML=$(curl -fsS "${CURL_NETWORK_ARGS[@]}" "$FIRMWARE_URL"); then
     echo "ERROR: failed to fetch release index from $FIRMWARE_URL" >&2
     exit 1
 fi
@@ -228,7 +252,8 @@ echo "[2/7] Fetching signature and signer key..."
 # itself, which matters because staging runs copy-firmware.sh from it.
 SIG_FILE="${RELEASE}.tar.sign"
 SIG_PATH="$CACHE_DIR/$SIG_FILE"
-if ! curl -fsS --retry 3 -o "$SIG_PATH" "${FIRMWARE_URL}${SIG_FILE}"; then
+if ! curl -fsS "${CURL_NETWORK_ARGS[@]}" --retry 3 \
+        -o "$SIG_PATH" "${FIRMWARE_URL}${SIG_FILE}"; then
     echo "ERROR: Failed to download signature file $SIG_FILE" >&2
     exit 1
 fi
@@ -237,7 +262,9 @@ fi
 # keyserver only supplies key material that must hash to it
 if ! gpg --list-keys "$PINNED_FPR" >/dev/null 2>&1; then
     echo "Signer key not in keyring; importing $PINNED_FPR from $KEYSERVER..."
-    if ! gpg --keyserver "$KEYSERVER" --recv-keys "$PINNED_FPR"; then
+    if ! gpg --keyserver "$KEYSERVER" \
+            --keyserver-options "timeout=$GPG_KEYSERVER_TIMEOUT" \
+            --recv-keys "$PINNED_FPR"; then
         echo "ERROR: Could not import signing key $PINNED_FPR" >&2
         exit 1
     fi
@@ -262,7 +289,8 @@ decompress_to_tar() {
 if [ -f "$TARBALL" ] && decompress_to_tar 2>/dev/null; then
     echo "Using cached download: $TARBALL"
 else
-    if ! curl -fL --retry 5 --retry-all-errors -C - \
+    if ! curl -fL "${CURL_NETWORK_ARGS[@]}" \
+            --retry 5 --retry-all-errors -C - \
             -o "$TARBALL" "${FIRMWARE_URL}${LATEST_FIRMWARE}"; then
         echo "ERROR: Failed to download firmware" >&2
         echo "Partial download kept; rerun to resume: $TARBALL" >&2
