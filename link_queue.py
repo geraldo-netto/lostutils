@@ -3200,9 +3200,7 @@ class LogSink:
         # lq-rel-03: throttle open-failure warnings to one per path so a
         # flaky / unreachable log target doesn't drown the operator.
         self._open_fail_path: str | None = None
-        self._open_fail_first_t: float | None = None
         self._write_fail_path: str | None = None
-        self._write_fail_first_t: float | None = None
         self._drop_lock = threading.Lock()
         self._drop_count = 0
         # obs-04: monotonic timestamp of the first drop in the current
@@ -3316,7 +3314,6 @@ class LogSink:
                 self._close_locked()
                 return
             self._write_fail_path = None
-            self._write_fail_first_t = None
             if self._fh_size >= LOG_SINK_MAX_BYTES:
                 self._rotate_locked()
 
@@ -3353,7 +3350,6 @@ class LogSink:
             self._fh = os.fdopen(fd, "a", encoding="utf-8")
             self._fh_path = path
             self._open_fail_path = None   # lq-rel-03: success clears throttle
-            self._open_fail_first_t = None
             try:
                 self._fh_size = os.path.getsize(path)
             except OSError:  # pragma: no cover - OSError reading file size
@@ -3371,8 +3367,7 @@ class LogSink:
         print a stderr warning, drowning the operator in identical
         messages. Print the first warning, then suppress subsequent
         warnings for the SAME path until either it changes or the file
-        eventually opens. Track since-when so re-warnings can include
-        a duration in a follow-up message.
+        eventually opens.
 
         lq-obs-02: when the failure is ``ELOOP`` (sec-03 ``O_NOFOLLOW``
         rejected a symlink at `path`), surface a distinct
@@ -3382,7 +3377,6 @@ class LogSink:
         if path == getattr(self, "_open_fail_path", None):
             return   # already warned for this path this session
         self._open_fail_path = path
-        self._open_fail_first_t = time.monotonic()
         if isinstance(exc, OSError) and exc.errno == errno.ELOOP:
             print(
                 f"[warn] log file {path!r} is a symlink — rejected "
@@ -3402,7 +3396,6 @@ class LogSink:
         if path == getattr(self, "_write_fail_path", None):
             return
         self._write_fail_path = path
-        self._write_fail_first_t = time.monotonic()
         print(
             f"[warn] log file {path!r} write failed ({exc}). Lines in this "
             "batch were dropped; future lines will retry the file.",
