@@ -114,7 +114,12 @@ def _ensure_pyusb():
     global _USB_OK, _USB_ERR, usb
     if _USB_OK:
         return True
-    LOG.warning("pyusb not found; installing pinned dependency (%s)...", PYUSB_REQUIREMENT)
+    LOG.warning(
+        "Security warning: automatic installation downloads and executes "
+        "third-party package and build code from PyPI in this Python "
+        "environment. Proceed only if you trust %s and PyPI.",
+        PYUSB_REQUIREMENT,
+    )
     installed, transcript = _pip_install(PYUSB_REQUIREMENT)
     if not installed:
         tail = _tail_lines(transcript)

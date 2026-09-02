@@ -599,12 +599,17 @@ def test_ensure_pyusb_omits_the_pip_report_when_there_is_none(monkeypatch, caplo
     assert "pip reported" not in caplog.text
 
 
-def test_ensure_pyusb_installs_pinned_requirement(monkeypatch):
+def test_ensure_pyusb_installs_pinned_requirement(monkeypatch, caplog):
     monkeypatch.setattr(minikeypad, "_USB_OK", False)
     monkeypatch.setattr(minikeypad, "_USB_ERR", "missing")
     calls = []
-    monkeypatch.setattr(minikeypad, "_pip_install",
-                        lambda pkg: (calls.append(pkg), (False, ""))[1])
+
+    def record_install(pkg):
+        assert "downloads and executes third-party package and build code" in caplog.text
+        calls.append(pkg)
+        return False, ""
+
+    monkeypatch.setattr(minikeypad, "_pip_install", record_install)
 
     assert minikeypad._ensure_pyusb() is False
     assert calls == [minikeypad.PYUSB_REQUIREMENT]
