@@ -3290,9 +3290,9 @@ class SourceCollisionResolution(unittest.TestCase):
             (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             ctx = _oze.SniffContext(sniff=True, head_cache=None,
                                     extra_zip_family=frozenset())
-            result = _oze._preplan_resolve_collisions(
-                root, [root / "avi"], ctx,
-            )
+            result = list(_oze._spooled_plan_pairs(
+                root, [root / "avi"], ctx, preview=False,
+            ))
             # Rename still happened; just no cache update.
             self.assertNotEqual(result[0][0], root / "avi")
 
@@ -3492,8 +3492,8 @@ class ResolveSelfCollisionFallback(unittest.TestCase):
             self.assertTrue(result.name.startswith("avi.collision"))
 
 
-class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
-    """oze-rel-14: cover the preplan helper's race / non-file / head_cache paths."""
+class SpooledPlanCollisionsCoversBranches(unittest.TestCase):
+    """oze-rel-14: cover the production plan's race, non-file, and cache paths."""
 
     def test_preplan_skips_non_file_blocker(self):
         with TemporaryDirectory() as d:
@@ -3504,7 +3504,9 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             ctx = _oze.SniffContext(sniff=False, head_cache=None,
                                     extra_zip_family=frozenset())
             files = [root / "ext"]
-            result = _oze._preplan_resolve_collisions(root, files, ctx)
+            result = list(_oze._spooled_plan_pairs(
+                root, files, ctx, preview=False,
+            ))
             # Result is the same path (no rename because it's a directory).
             self.assertEqual(result[0][0], root / "ext")
 
@@ -3519,9 +3521,9 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
                                     extra_zip_family=frozenset())
             before = sorted(p.name for p in root.iterdir())
             with self.assertLogs("organize_by_extension", level="INFO") as cm:
-                result = _oze._preplan_resolve_collisions(
+                result = list(_oze._spooled_plan_pairs(
                     root, [blocker], ctx, preview=True,
-                )
+                ))
             after = sorted(p.name for p in root.iterdir())
             self.assertEqual(before, after)        # filesystem untouched
             self.assertTrue(blocker.exists())      # never renamed
@@ -3563,9 +3565,9 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             # direct os.lstat call inside the classifier.
             with patch("organize_by_extension.os.path.lexists", return_value=True):
                 with patch("organize_by_extension.os.lstat", side_effect=boom):
-                    result = _oze._preplan_resolve_collisions(
-                        root, [root / "avi"], ctx,
-                    )
+                    result = list(_oze._spooled_plan_pairs(
+                        root, [root / "avi"], ctx, preview=False,
+                    ))
             # lstat raised -> skipped rename -> path unchanged.
             self.assertEqual(result[0][0], root / "avi")
 
@@ -3577,9 +3579,9 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             (root / "ok.txt").write_text("x")
             ctx = _oze.SniffContext(sniff=False, head_cache=None,
                                     extra_zip_family=frozenset())
-            result = _oze._preplan_resolve_collisions(
-                root, [root / "ok.txt"], ctx,
-            )
+            result = list(_oze._spooled_plan_pairs(
+                root, [root / "ok.txt"], ctx, preview=False,
+            ))
             self.assertEqual(result[0][0], root / "ok.txt")
 
     def test_preplan_handles_rename_vanish_race(self):
@@ -3594,9 +3596,9 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
                 raise FileNotFoundError(a)
 
             with patch.object(_oze.os, "link", vanish):
-                result = _oze._preplan_resolve_collisions(
-                    root, [root / "avi"], ctx,
-                )
+                result = list(_oze._spooled_plan_pairs(
+                    root, [root / "avi"], ctx, preview=False,
+                ))
             # Link vanished -> source unchanged in plan.
             self.assertEqual(result[0][0], root / "avi")
 
@@ -3613,7 +3615,9 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             # Pass the avi DIR as a source — preplan probes is_file, gets
             # False (it's a dir), and the continue branch fires.
             files = [root / "avi", root / "avi" / "inner.bin"]
-            result = _oze._preplan_resolve_collisions(root, files, ctx)
+            result = list(_oze._spooled_plan_pairs(
+                root, files, ctx, preview=False,
+            ))
             # avi dir untouched; inner.bin untouched.
             paths = {p for p, _ in result}
             self.assertIn(root / "avi", paths)
@@ -3630,7 +3634,9 @@ class PreplanResolveCollisionsCoversBranches(unittest.TestCase):
             ctx = _oze.SniffContext(sniff=True, head_cache=cache,
                                     extra_zip_family=frozenset())
             cache[root / "avi"] = b"RIFF\x00\x00\x00\x00AVI "
-            result = _oze._preplan_resolve_collisions(root, [root / "avi"], ctx)
+            result = list(_oze._spooled_plan_pairs(
+                root, [root / "avi"], ctx, preview=False,
+            ))
             new_path = result[0][0]
             self.assertNotEqual(new_path, root / "avi")
             self.assertNotIn(new_path, cache)
@@ -4122,7 +4128,9 @@ def test_preplan_reserves_bucket_level_blocker(tmp_path):
     mover = root / "a_movie.avi"        # needs root/avi (prefix 'a')
     mover.write_bytes(b"y")
     ctx = oze.SniffContext(sniff=False, head_cache={})
-    pairs = oze._preplan_resolve_collisions(root, sorted([blocker, mover]), ctx)
+    pairs = list(oze._spooled_plan_pairs(
+        root, sorted([blocker, mover]), ctx, preview=False,
+    ))
     sources = {src for src, _ in pairs}
     assert blocker not in sources, "bucket-dir blocker left in plan unrenamed"
     assert not blocker.exists(), "bucket-dir blocker not renamed on disk"
@@ -4144,7 +4152,9 @@ def test_preplan_evicts_head_bytes_after_resolving(tmp_path):
         files.append(f)
     head_cache: dict = {}
     ctx = oze.SniffContext(sniff=True, head_cache=head_cache)
-    oze._preplan_resolve_collisions(root, sorted(files), ctx)
+    list(oze._spooled_plan_pairs(
+        root, sorted(files), ctx, preview=False,
+    ))
     assert head_cache == {}, "preplan primed head_cache for the whole tree"
 
 
@@ -4158,7 +4168,9 @@ def test_preplan_leaves_non_blocker_untouched(tmp_path):
     mover = root / "a_movie.avi"
     mover.write_bytes(b"y")
     ctx = oze.SniffContext(sniff=False, head_cache={})
-    pairs = oze._preplan_resolve_collisions(root, sorted([plain, mover]), ctx)
+    pairs = list(oze._spooled_plan_pairs(
+        root, sorted([plain, mover]), ctx, preview=False,
+    ))
     assert plain in {src for src, _ in pairs}, "non-bucket file wrongly renamed"
     assert plain.exists()
 
