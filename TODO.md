@@ -10,6 +10,7 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 | ie-arch-50 | blocked | low | high | import_events.py:1464-4142 — [architecture/modularity] Migrate model lifecycle and extraction behind OmniTensor's planned accelerator-only `event-extraction` workload only after that external workload proves file-format, privacy, partial-result, JSON/ICS, offline, and exit-code parity. |
+| rf-test-51 | blocked | low | low | tests/test_relocate_folder.py:1181-1190 — [test/reliability] Decide whether `_check_cross_device` must remain controllable through a global `Path.stat` monkeypatch or the legacy test should use the documented `stat_fn` injection seam; both expectations cannot hold under the current implementation, and the legacy test fails the full suite. |
 
 ## Rejected / Won't fix
 
