@@ -5,7 +5,7 @@
 # space checks) with update-linux-firmware.sh (idempotent stamp, staged
 # rsync install with root ownership, zstd compression, initramfs rebuild).
 #
-# Usage: update-firmware-unified.sh [--force]
+# Usage: update-linux-firmware.sh [--force]
 #   Works as a regular user (sudo is used only for the install steps) or as
 #   root (e.g. from cron/systemd). Signature trust comes from the pinned
 #   fingerprint below, not from keyring contents, so either keyring works.

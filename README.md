@@ -18,10 +18,11 @@ There is no repository-wide requirements file. Install only the third-party pack
 | `organize_by_extension.py` | Move files into extension buckets, using header sniffing by default. | None |
 | `relocate_folder.py` | Copy a directory to another filesystem and replace the source with a symlink. | None |
 | `remove-deduplv3.py` | Emit shell-safe `rm -f` commands for duplicate hash groups. | None |
+| `update-linux-firmware.sh` | Install the latest signed linux-firmware release and rebuild initramfs. | Bash; system tools listed below |
 
 ## Safety notes
 
-`organize_by_extension.py` and `relocate_folder.py` change the filesystem. Start with `--preview` or `--dry-run` respectively. `remove-deduplv3.py` prints commands but does not delete files by itself; review its output before running it through a shell.
+`organize_by_extension.py` and `relocate_folder.py` change the filesystem. Start with `--preview` or `--dry-run` respectively. `remove-deduplv3.py` prints commands but does not delete files by itself; review its output before running it through a shell. `update-linux-firmware.sh` performs privileged changes under `/lib/firmware`, writes release state under `/var/lib`, and rebuilds initramfs; read its backup and recovery notes before use.
 
 ## Duplicate and file utilities
 
@@ -100,6 +101,41 @@ python3 relocate_folder.py ~/.cache /mnt/large-disk/apps
 By default verification checks file and directory presence, sizes, symlinks, and per-file SHA-256 before deleting the moved-aside original. `--no-checksum` uses size-only verification, and `--no-verify` skips post-copy verification entirely. Use `python3 relocate_folder.py <source> --recover` to restore an orphaned `<source>.relocate-backup` left by an interrupted swap. Stop applications that hold files open under the source before running, or pass `--force` to skip the open-file precheck.
 
 Three environment variables tune the run, each falling back to its default on an unparseable value: `RELOCATE_STALE_PID_WARN_AT` (default `1`) is the stale-PID count at which the open-file precheck warns that its snapshot is not authoritative — raise it on noisy hosts; `RELOCATE_DISK_SPACE_HEADROOM` (default `1.05`) is how much destination free space the pre-flight check demands relative to the payload, clamped at `1.0`; `RELOCATE_SHA256_RETRY_ATTEMPTS` (default `2`) is how many times a verify hash is retried when the read hits a transient truncation, clamped to at least `1`.
+
+## Linux firmware maintenance
+
+### `update-linux-firmware.sh`
+
+Downloads the newest release tarball advertised by kernel.org, verifies its detached OpenPGP signature against the pinned linux-firmware signing fingerprint, stages the archive's `copy-firmware.sh` output, backs up the current firmware tree, installs the staged tree as `root:root`, removes stale compression variants, records the installed release, and rebuilds initramfs when a supported tool is available.
+
+```bash
+./update-linux-firmware.sh --help
+./update-linux-firmware.sh
+./update-linux-firmware.sh --force
+```
+
+The script supports Linux systems with Bash and GNU userland features (`grep -P`, `df --output`, `find -printf`, and `sort -V`). Required commands are `curl`, `gpg`, `tar`, `rsync`, and the decompressor matching the discovered release (`xz` or `gzip`). A non-root run also needs `sudo`. `zstd` is optional; without it firmware is staged uncompressed. Initramfs rebuilding supports Debian/Ubuntu-family `update-initramfs`, Fedora/RHEL-family `dracut`, and Arch-family `mkinitcpio`; if none is installed, the script completes with a warning and requires a manual rebuild for early-boot firmware.
+
+Allow at least 5 GiB free under `/var/tmp` for the archive, uncompressed tar, and staging tree, plus 2 GiB on the `/lib/firmware` filesystem. The default backup is `/lib/firmware.backup.<timestamp>` and is never overwritten. Backups are retained after success. If a failure occurs after backup creation but before the installed-release stamp is written, remove the incomplete firmware tree, move the backup back to `FW_DIR`, and rebuild initramfs with the detected tool. If only the post-install initramfs rebuild fails, do not restore the firmware backup; resolve the reported problem (often a full `/boot`) and rerun the displayed initramfs command. Do not delete the backup until the machine has booted and relevant hardware has been checked.
+
+Every runtime setting can be overridden through the environment:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `FIRMWARE_URL` | `https://www.kernel.org/pub/linux/kernel/firmware/` | Release index and download base URL. |
+| `FW_DIR` | `/lib/firmware` | Installed firmware tree. |
+| `STAMP_FILE` | `/var/lib/linux-firmware-release.version` | Installed release marker. |
+| `OLD_GIT_STAMP` | `/var/lib/linux-firmware-git.commit` | Obsolete marker removed after a successful install. |
+| `CACHE_DIR` | `/var/tmp/firmware-update-cache` | Persistent signature/archive cache used for resumable downloads. |
+| `BACKUP_DIR` | `${FW_DIR}.backup.<timestamp>` | Backup destination; the path must not already exist. |
+| `PINNED_FPR` | `4CDE8575E547BF835FE15807A31B6BD72486CFD6` | Trusted linux-firmware OpenPGP fingerprint. Verify any change independently against kernel.org. |
+| `KEYSERVER` | `hkps://keyserver.ubuntu.com` | Source used only to retrieve key material matching `PINNED_FPR`. |
+| `REQUIRED_WORK_MB` | `5120` | Minimum free MiB required on the work filesystem. |
+| `REQUIRED_LIB_MB` | `2048` | Minimum free MiB required on the firmware filesystem. |
+| `CURL_CONNECT_TIMEOUT` | `20` | Maximum seconds allowed to establish each curl connection. |
+| `CURL_LOW_SPEED_LIMIT` | `1024` | Minimum acceptable curl transfer rate in bytes per second. |
+| `CURL_LOW_SPEED_TIME` | `60` | Seconds below the minimum rate before curl aborts. |
+| `GPG_KEYSERVER_TIMEOUT` | `30` | Maximum seconds allowed for keyserver retrieval. |
 
 ## Bookmark organization
 
