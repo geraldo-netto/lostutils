@@ -23,6 +23,7 @@ This file defines the expected behavior and usage model for AI agents working in
   to a shared module. Third-party / stdlib imports are fine; intra-repo imports are not.
 - **Multiplatform by design.** Every script must run on Linux, macOS, and Windows unless the feature itself is inherently OS-specific (e.g. `relocate_folder.py` depends on symlinks). Reach for the portable option first: `pathlib` / `os.path` over hard-coded `/` separators, `shutil` over shelling out, `subprocess` argv lists over shell strings, `os`-level constants over POSIX-only calls. When a platform-specific path is genuinely unavoidable, keep it as small as possible, guard it at runtime, say in a comment why no portable equivalent works, and degrade gracefully — never crash — on the platforms it excludes. Portability gaps are `platform` findings in `TODO.md`.
 - Don't assume. Don't hide confusion. Surface tradeoffs and ask the user when unclear.
+- Report contradictory requirements or instructions as soon as they are found. Automatically block the affected item and do not implement it until an explicit decision resolves the contradiction.
 - Write the minimum code that solves the problem. Avoid speculative or unneeded changes.
 - Touch only what you must. Clean up only your own mess and leave the workspace cleaner than you found it.
 - Define success criteria before making changes. Verify against those criteria and iterate until satisfied.
