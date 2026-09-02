@@ -744,9 +744,9 @@ def test_atomic_swap_restore_failure_logs_recovery(tmp_path, monkeypatch, caplog
     (source / "f").write_text("x")
     target = tmp_path / "copy"; target.mkdir()
     (target / "f").write_text("x")
-    # First os.rename (source -> backup) succeeds; then symlink fails; then
+    # First no-replace rename (source -> backup) succeeds; symlink fails; then
     # the restore rename (backup -> source) also fails.
-    real_rename = rf.os.rename
+    real_rename = rf._rename_noreplace
     calls = {"n": 0}
 
     def flaky_rename(a, b):
@@ -757,7 +757,7 @@ def test_atomic_swap_restore_failure_logs_recovery(tmp_path, monkeypatch, caplog
 
     with mock.patch.object(rf.os, "symlink",
                            side_effect=OSError("symlink failed")), \
-         mock.patch.object(rf.os, "rename", side_effect=flaky_rename):
+         mock.patch.object(rf, "_rename_noreplace", side_effect=flaky_rename):
         with pytest.raises(OSError, match="symlink failed"):
             rf.atomic_swap(source, target)
     # Recovery line in the error log must mention the backup path and the
@@ -971,6 +971,27 @@ def test_create_symlink_refuses_preexisting_symlink(tmp_path):
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
         rf._create_symlink(link, target)
     assert os.readlink(link) == str(elsewhere)   # not clobbered
+
+
+def test_create_symlink_refuses_entry_raced_in_at_publication(
+        tmp_path, monkeypatch):
+    link = tmp_path / "the-link"
+    target = tmp_path / "target"; target.mkdir()
+    real_rename = rf._rename_noreplace
+
+    def race(_src, dst):
+        dst.write_text("attacker squat", encoding="utf-8")
+        return real_rename(_src, dst)
+
+    monkeypatch.setattr(rf, "_rename_noreplace", race)
+
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        rf._create_symlink(link, target)
+
+    assert link.read_text(encoding="utf-8") == "attacker squat"
+    assert not any(
+        path.name.startswith(rf.STAGING_PREFIX) for path in tmp_path.iterdir()
+    )
 
 
 def test_create_symlink_lchowns_link_to_owner(tmp_path, monkeypatch):
@@ -1489,6 +1510,27 @@ def test_backup_target_refuses_stale_backup(tmp_path):
             pass
 
 
+def test_backup_target_refuses_backup_raced_in_at_publication(
+        tmp_path, monkeypatch):
+    target = tmp_path / "target"; target.mkdir()
+    backup = target.with_name(target.name + rf.BACKUP_SUFFIX)
+    real_rename = rf._rename_noreplace
+
+    def race(src, dst):
+        dst.mkdir()
+        (dst / "attacker").write_text("keep", encoding="utf-8")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(rf, "_rename_noreplace", race)
+
+    with pytest.raises(FileExistsError, match="stale backup"):
+        with rf._backup_target(target):
+            pass
+
+    assert target.is_dir()
+    assert (backup / "attacker").read_text(encoding="utf-8") == "keep"
+
+
 def test_backup_identity_ok_matches_and_mismatches(tmp_path):
     # rf-sec-03: identity helper compares (st_dev, st_ino).
     d = tmp_path / "d"; d.mkdir()
@@ -1525,13 +1567,13 @@ def test_backup_target_refuses_restore_on_substituted_backup(tmp_path, monkeypat
     t = tmp_path / "target"; t.mkdir()
     (t / "f").write_text("real")
     rename_calls = {"n": 0}
-    real_rename = rf.os.rename
+    real_rename = rf._rename_noreplace
 
     def counting_rename(a, b):
         rename_calls["n"] += 1
         return real_rename(a, b)
 
-    monkeypatch.setattr(rf.os, "rename", counting_rename)
+    monkeypatch.setattr(rf, "_rename_noreplace", counting_rename)
     _spoof_changing_lstat(monkeypatch, t.name + rf.BACKUP_SUFFIX)
     import logging
 
@@ -4703,29 +4745,48 @@ def test_is_orphaned_staging_dir_ignores_entry_vanished_during_stat():
     assert not rf._is_orphaned_staging_dir(VanishedEntry())
 
 
-def test_rename_noreplace_falls_back_when_libc_has_no_symbol(
+def test_rename_noreplace_fails_closed_when_libc_has_no_symbol(
     tmp_path,
     monkeypatch,
 ):
     source = tmp_path / "source"
     target = tmp_path / "target"
     source.write_text("data", encoding="utf-8")
-    renamed = []
-
-    class OsProxy:
-        @staticmethod
-        def rename(src, dst):
-            renamed.append((src, dst))
-
-    monkeypatch.setattr(rf, "os", OsProxy())
     monkeypatch.setattr(
         "ctypes.CDLL",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("no libc")),
     )
 
+    with pytest.raises(RuntimeError, match="no-replace rename is unavailable"):
+        rf._rename_noreplace(source, target)
+
+    assert source.read_text(encoding="utf-8") == "data"
+    assert not target.exists()
+
+
+def test_rename_noreplace_uses_macos_exclusive_rename(
+        tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    calls = []
+
+    class Rename:
+        restype = None
+        argtypes = None
+
+        def __call__(self, *args):
+            calls.append(args)
+            return 0
+
+    class Libc:
+        renamex_np = Rename()
+
+    monkeypatch.setattr(rf.sys, "platform", "darwin")
+    monkeypatch.setattr("ctypes.CDLL", lambda *_args, **_kwargs: Libc())
+
     rf._rename_noreplace(source, target)
 
-    assert renamed == [(source, target)]
+    assert calls == [(os.fsencode(source), os.fsencode(target), rf._RENAME_EXCL)]
 
 
 def test_inventory_match_detects_an_entry_missing_from_the_copy(tmp_path):

@@ -1898,11 +1898,12 @@ def _backup_target(target: Path) -> Iterator[Path]:
     content. Both the restore path and the success rmtree path re-lstat the
     backup and refuse to act when the identity no longer matches."""
     backup = target.with_name(target.name + BACKUP_SUFFIX)
-    if _path_taken(backup):
+    try:
+        _rename_noreplace(target, backup)
+    except FileExistsError as exc:
         raise FileExistsError(
             f"stale backup exists, refusing to overwrite: {backup}"
-        )
-    os.rename(target, backup)
+        ) from exc
     backup_st = os.lstat(backup)
     backup_id = (backup_st.st_dev, backup_st.st_ino)
     try:
@@ -1922,7 +1923,7 @@ def _backup_target(target: Path) -> Iterator[Path]:
             )
             raise
         try:
-            os.rename(backup, target)
+            _rename_noreplace(backup, target)
             _fsync_directory(target.parent)
         except OSError as restore_exc:
             _log().exception(
@@ -1963,7 +1964,7 @@ def atomic_swap(source: Path, target: Path) -> None:
 
     The sequence is:
 
-      1. `os.rename(source, source<BACKUP_SUFFIX>)`  — move the real dir aside
+      1. no-replace rename to `source<BACKUP_SUFFIX>` — move the real dir aside
       2. `os.symlink(target, source)`                — only THIS step is atomic
       3. `shutil.rmtree(backup)`                      — delete the moved-aside dir
 
@@ -1994,8 +1995,8 @@ def _create_symlink(link: Path, target: Path, *,
 
     Symlink is staged inside a freshly-mkdtemp'd directory beside `link` so
     that the path used for `os.symlink` is one we just created — no other
-    process can have stamped a different inode onto it. The single
-    `os.rename` into place is then atomic on the parent filesystem.
+    process can have stamped a different inode onto it. The single no-replace
+    rename into place is then atomic on the parent filesystem.
 
     The older unlink/symlink/rename sequence on a fixed `.relocate-tmp`
     name allowed an attacker on a world-writable parent to win the unlink
@@ -2032,19 +2033,13 @@ def _create_symlink(link: Path, target: Path, *,
     try:
         tmp = staging / link.name
         os.symlink(target, tmp)
-        # rf-sec-02: refuse to clobber a pre-existing entry at `link`. The
-        # plain os.rename silently replaces a file/symlink an attacker may
-        # have pre-created at the link name on a world-writable parent, with
-        # no audit. Assert the name is absent first. A residual TOCTOU window
-        # remains between this lstat and the rename (renameat2 RENAME_NOREPLACE
-        # would close it, but stdlib `os` doesn't expose it); the check still
-        # turns a silent clobber into a loud refusal for the common case.
-        if _path_taken(link):
+        try:
+            _rename_noreplace(tmp, link)
+        except FileExistsError as exc:
             raise FileExistsError(
                 f"refusing to overwrite existing path at link target: {link} "
                 f"(an unexpected file/symlink is already there)"
-            )
-        os.rename(tmp, link)
+            ) from exc
         if owner is not None:
             # rf-sec-02: lchown the symlink itself (not its target) to the
             # captured source owner so a root-run migration doesn't leave a
@@ -2181,7 +2176,7 @@ def _cleanup_staging(staging: Path) -> None:
 def _orphaned_backup(source: Path) -> "Path | None":
     """Return the orphaned `<source>.relocate-backup` path, or None.
 
-    An orphan exists when `atomic_swap` died between `os.rename(source, backup)`
+    An orphan exists when `atomic_swap` died between renaming source to backup
     and the symlink creation: the real directory now lives at the backup name
     and `source` itself is gone. Detect that exact shape — source absent (not
     even a dangling symlink) AND the backup present as a real directory — so a
@@ -2235,43 +2230,51 @@ def _warn_stranded_backup(source: Path) -> None:
         )
 
 
-_RENAME_NOREPLACE = 1  # linux/fs.h: fail with EEXIST if the new path exists
+_RENAME_NOREPLACE = 1  # Linux/FreeBSD: fail if the destination exists
+_RENAME_EXCL = 0x00000004  # macOS renamex_np equivalent
 
 
 def _rename_noreplace(src: Path, dst: Path) -> None:
-    """Rename ``src`` -> ``dst`` failing with ``FileExistsError`` if ``dst``
-    exists (rf-dist-01). Uses ``renameat2(RENAME_NOREPLACE)`` on Linux to close
-    the gate→rename TOCTOU where a concurrently recreated ``dst`` would be
-    silently clobbered by plain ``os.rename``. Falls back to ``os.rename`` (with
-    the documented single-operator assumption) where the syscall/flag is
-    unavailable."""
+    """Atomically rename ``src`` to an absent ``dst`` or fail closed."""
     import ctypes
+
     try:
         libc = ctypes.CDLL(None, use_errno=True)
-        renameat2 = libc.renameat2
-    except (OSError, AttributeError):
-        os.rename(src, dst)  # no renameat2: single-operator assumption applies
-        return
-    # rf-sec-10: pin the prototype so ctypes marshals the args at the right
-    # widths (two int fds, two char* paths, one unsigned-int flag) instead of
-    # relying on default int marshalling, which can mis-pass pointers/flags.
-    renameat2.restype = ctypes.c_int
-    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
-                          ctypes.c_char_p, ctypes.c_uint]
-    AT_FDCWD = -100
-    res = renameat2(AT_FDCWD, os.fsencode(str(src)),
-                    AT_FDCWD, os.fsencode(str(dst)), _RENAME_NOREPLACE)
+        if sys.platform == "darwin":
+            rename = libc.renamex_np
+            rename.restype = ctypes.c_int
+            rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            res = rename(os.fsencode(src), os.fsencode(dst), _RENAME_EXCL)
+        else:
+            rename = libc.renameat2
+            rename.restype = ctypes.c_int
+            rename.argtypes = [
+                ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                ctypes.c_char_p, ctypes.c_uint,
+            ]
+            at_fdcwd = -100
+            res = rename(
+                at_fdcwd, os.fsencode(src), at_fdcwd, os.fsencode(dst),
+                _RENAME_NOREPLACE,
+            )
+    except (OSError, AttributeError) as exc:
+        raise RuntimeError(
+            "atomic no-replace rename is unavailable on this POSIX host"
+        ) from exc
     if res == 0:
         return
     err = ctypes.get_errno()
     if err == errno.EEXIST:
         raise FileExistsError(
-            f"refusing to recover: {dst} reappeared during recovery; "
-            f"resolve it manually before restoring {src}")
-    if err in (errno.ENOSYS, errno.EINVAL):
-        os.rename(src, dst)  # kernel/fs without RENAME_NOREPLACE: fall back
-        return
-    raise OSError(err, os.strerror(err))
+            err, f"destination already exists; refusing to replace {dst}", dst)
+    if err in {
+        errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP,
+        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+    }:
+        raise RuntimeError(
+            f"filesystem does not support atomic no-replace rename: {dst}"
+        )
+    raise OSError(err, os.strerror(err), dst)
 
 
 def recover(source: Path, *, force: bool = False) -> str:
