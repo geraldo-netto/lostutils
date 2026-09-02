@@ -38,23 +38,26 @@ CURL_LOW_SPEED_TIME="${CURL_LOW_SPEED_TIME:-60}"
 GPG_KEYSERVER_TIMEOUT="${GPG_KEYSERVER_TIMEOUT:-30}"
 
 FORCE=0
+ALLOW_DOWNGRADE=0
 usage() {
-    echo "Usage: $0 [--force]"
+    echo "Usage: $0 [--force] [--allow-downgrade]"
 }
 
-case "${1:-}" in
-    "") ;;
-    --force) FORCE=1 ;;
-    -h|--help)
-        usage
-        exit 0
-        ;;
-    *)
-        usage >&2
-        echo "Unknown argument: $1" >&2
-        exit 1
-        ;;
-esac
+for argument in "$@"; do
+    case "$argument" in
+        --force) FORCE=1 ;;
+        --allow-downgrade) ALLOW_DOWNGRADE=1 ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            echo "Unknown argument: $argument" >&2
+            exit 1
+            ;;
+    esac
+done
 
 validate_space_threshold() {
     local name=$1
@@ -146,6 +149,23 @@ validate_cached_file() {
         links=$(stat -c '%h' -- "$path")
         if [ "$owner" != "$RUN_UID" ] || [ "$links" -ne 1 ]; then
             echo "ERROR: cache output must be owned by uid $RUN_UID with one link: $path" >&2
+            return 1
+        fi
+    fi
+}
+
+validate_installed_stamp() {
+    if [ -L "$STAMP_FILE" ]; then
+        echo "ERROR: installed release stamp must not be a symlink: $STAMP_FILE" >&2
+        return 1
+    fi
+    if [ -e "$STAMP_FILE" ]; then
+        if [ ! -f "$STAMP_FILE" ]; then
+            echo "ERROR: installed release stamp is not a regular file: $STAMP_FILE" >&2
+            return 1
+        fi
+        if [ "$(stat -c '%u' -- "$STAMP_FILE")" -ne 0 ]; then
+            echo "ERROR: installed release stamp is not owned by root: $STAMP_FILE" >&2
             return 1
         fi
     fi
@@ -296,7 +316,21 @@ fi
 RELEASE="${LATEST_FIRMWARE%.tar.*}"
 echo "Latest firmware: $RELEASE"
 
+validate_installed_stamp
 INSTALLED=$(cat "$STAMP_FILE" 2>/dev/null || echo none)
+if [ "$INSTALLED" != none ] \
+        && [[ ! "$INSTALLED" =~ ^linux-firmware-[0-9]+$ ]]; then
+    echo "ERROR: installed release stamp is malformed: $STAMP_FILE" >&2
+    echo "Refusing to weaken rollback protection; inspect the stamp manually." >&2
+    exit 1
+fi
+if [ "$INSTALLED" != none ] && [ "$RELEASE" != "$INSTALLED" ] \
+        && [ "$(printf '%s\n%s\n' "$RELEASE" "$INSTALLED" | sort -V | head -1)" = "$RELEASE" ] \
+        && [ "$ALLOW_DOWNGRADE" -ne 1 ]; then
+    echo "ERROR: discovered release $RELEASE is older than installed $INSTALLED" >&2
+    echo "Refusing possible rollback; use --allow-downgrade only after verifying intent." >&2
+    exit 1
+fi
 if [ "$RELEASE" = "$INSTALLED" ] && [ "$FORCE" -ne 1 ]; then
     echo "Already at $INSTALLED — nothing to do (use --force to reinstall)."
     SUCCESS=1

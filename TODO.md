@@ -5,7 +5,6 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 | ulf-test-01 | open | medium | high | update-linux-firmware.sh:1-422 — [test/release engineering] Add hermetic failure-path/integration tests and CI `shellcheck`; the privileged updater currently has no automated coverage and the workflow only gates Python files. |
-| ulf-sec-02 | open | medium | low | update-linux-firmware.sh:152-177 — [security; STRIDE Tampering, rollback attack tree] Refuse a discovered release older than the root-owned installed stamp unless a separate explicit downgrade option is supplied; signed archives authenticate content but the unsigned index provides no freshness/rollback protection. |
 | ulf-rel-01 | open | medium | medium | update-linux-firmware.sh:173-177,391-404 — [reliability/state integrity] Persist and retry a pending initramfs rebuild separately from the installed-release stamp; after rebuild failure, later unattended runs report “nothing to do” and never repair early-boot firmware. |
 | ulf-rob-01 | open | high | high | update-linux-firmware.sh:343-404 — [robustness/recovery] Make installation rollback-safe or automatically restore the verified backup on pre-stamp failure; interrupted/failed `rsync`, stale-variant removal, or stamp writes leave a mixed firmware tree and some paths emit no recovery instructions. |
 

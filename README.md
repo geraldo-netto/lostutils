@@ -112,7 +112,10 @@ Downloads the newest release tarball advertised by kernel.org, verifies its deta
 ./update-linux-firmware.sh --help
 ./update-linux-firmware.sh
 ./update-linux-firmware.sh --force
+./update-linux-firmware.sh --allow-downgrade
 ```
+
+`--force` reinstalls the currently stamped release but does not weaken rollback protection. If the signed release advertised by the index is older than the installed root-owned stamp, the run is refused unless `--allow-downgrade` is supplied explicitly after the operator verifies that the downgrade is intentional.
 
 The script supports Linux systems with Bash and GNU userland features (`grep -P`, `df --output`, `find -printf`, and `sort -V`). Required commands are `curl`, `flock`, `gpg`, `tar`, `rsync`, and the decompressor matching the discovered release (`xz` or `gzip`). A non-root run also needs `sudo`. `zstd` is optional; without it firmware is staged uncompressed. Initramfs rebuilding supports Debian/Ubuntu-family `update-initramfs`, Fedora/RHEL-family `dracut`, and Arch-family `mkinitcpio`; if none is installed, the script completes with a warning and requires a manual rebuild for early-boot firmware.
 
