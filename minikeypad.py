@@ -53,6 +53,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -921,19 +922,30 @@ class ProfileStore:
         payload = {"version": PROFILE_VERSION, "assignments": [
             self._assignment_payload(layer, kid, rec)
             for (layer, kid), rec in self.assignments.items()]}
-        tmp = path + ".tmp"
+        path = os.fspath(path)
+        directory = os.path.dirname(path) or "."
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{os.path.basename(path)}.",
+            suffix=".tmp",
+            dir=directory,
+        )
         try:
-            with open(tmp, "w", encoding="utf-8") as fh:
+            fh = os.fdopen(fd, "w", encoding="utf-8")
+            fd = -1
+            with fh:
                 json.dump(payload, fh, indent=2, ensure_ascii=False)
                 # mkp-robust-21: without fsync a crash after the rename can
                 # atomically replace a good profile with a truncated one.
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, path)
-            self._fsync_dir(os.path.dirname(path) or ".")
+            self._fsync_dir(directory)
         except BaseException:
-            # mkp-robust-20: a failed/interrupted write must not leave an
-            # orphaned <path>.tmp behind.
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 os.unlink(tmp)
             except OSError:

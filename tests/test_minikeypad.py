@@ -2304,9 +2304,14 @@ def test_save_profile_fsyncs_before_rename(app, tmp_path, monkeypatch):
     calls = []
     real_replace = minikeypad.os.replace
     monkeypatch.setattr(minikeypad.os, "fsync", lambda _fd: calls.append("fsync"))
-    monkeypatch.setattr(
-        minikeypad.os, "replace",
-        lambda src, dst: (calls.append("replace"), real_replace(src, dst)))
+    replace_args = []
+
+    def tracked_replace(src, dst):
+        calls.append("replace")
+        replace_args.append((src, dst))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(minikeypad.os, "replace", tracked_replace)
     app._assignments = {(1, 1): {"data": bytes([1]) + bytes(64), "desc": "A"}}
 
     app._save_profile(str(tmp_path / "p.json"))
@@ -2314,10 +2319,14 @@ def test_save_profile_fsyncs_before_rename(app, tmp_path, monkeypatch):
     assert "fsync" in calls
     assert "replace" in calls
     assert calls.index("fsync") < calls.index("replace")
+    src, dst = replace_args[0]
+    assert os.path.dirname(src) == str(tmp_path)
+    assert dst == str(tmp_path / "p.json")
+    assert os.path.basename(src) != "p.json.tmp"
 
 
 def test_save_profile_cleans_tmp_on_write_failure(app, tmp_path, monkeypatch):
-    """mkp-robust-20: a json.dump failure must not orphan the <path>.tmp file."""
+    """mkp-robust-20: a json.dump failure must not orphan its random tempfile."""
     app._assignments = {(1, 1): {"data": bytes(range(65)), "desc": "A"}}
     path = str(tmp_path / "p.json")
 
@@ -2327,7 +2336,27 @@ def test_save_profile_cleans_tmp_on_write_failure(app, tmp_path, monkeypatch):
     monkeypatch.setattr(minikeypad.json, "dump", boom)
     with pytest.raises(RuntimeError):
         app._save_profile(path)
-    assert not (tmp_path / "p.json.tmp").exists(), "orphaned .tmp left behind"
+    assert not list(tmp_path.glob(".p.json.*.tmp")), "orphaned temp file left behind"
+
+
+def test_save_profile_does_not_follow_predictable_tmp_symlink(app, tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep", encoding="utf-8")
+    planted = tmp_path / "p.json.tmp"
+    try:
+        planted.symlink_to(victim)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    target = tmp_path / "p.json"
+    app._assignments = {(1, 1): {"data": bytes(65), "desc": "A"}}
+
+    app._save_profile(str(target))
+
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert planted.is_symlink()
+    assert target.exists()
+    if os.name != "nt":
+        assert target.stat().st_mode & 0o777 == 0o600
 
 
 def test_profile_fsync_dir_ignores_open_and_fsync_failures(tmp_path, monkeypatch):
