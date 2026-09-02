@@ -4,7 +4,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| rf-sec-04 | open | high | high | relocate_folder.py:2361-2391,2594-2608 — [security; STRIDE Tampering, TOCTOU] Traverse, copy, and verify from the pinned source directory descriptor; holding its fd while reopening `plan.source` by path still permits swap-copy-restore of attacker-selected content. |
 | ulf-test-01 | open | medium | high | update-linux-firmware.sh:1-422 — [test/release engineering] Add hermetic failure-path/integration tests and CI `shellcheck`; the privileged updater currently has no automated coverage and the workflow only gates Python files. |
 | ulf-doc-01 | open | medium | low | update-linux-firmware.sh:8,37-45 / README.md:1-196 — [documentation/product engineering] Document updater prerequisites, root/filesystem effects, backups, recovery, supported Linux families, and environment knobs; add it to the quick reference and fix the stale `update-firmware-unified.sh` usage name. |
 | ulf-sec-01 | open | high | medium | update-linux-firmware.sh:23,105-107,186-230 — [security; STRIDE Tampering/Denial of service] Create and verify the persistent cache as a private, owned, non-symlink directory before root execution; a local user can precreate `/var/tmp/firmware-update-cache` and planted output symlinks that root `curl -o` follows. |

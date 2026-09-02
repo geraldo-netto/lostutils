@@ -65,7 +65,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Sequence
+from typing import BinaryIO, Callable, Iterable, Iterator, Sequence
 
 LOG = logging.getLogger("relocate")
 
@@ -820,14 +820,223 @@ def _record_copy_progress(
         pass
 
 
+PinnedEntry = tuple[Path, int, str, os.stat_result]
+
+
+def _raise_walk_error(exc: OSError) -> None:
+    raise exc
+
+
+def _walk_pinned_entries(source_fd: int) -> Iterator[PinnedEntry]:
+    """Walk below ``source_fd`` without resolving the source pathname."""
+    for root, dir_names, names, directory_fd in os.fwalk(
+        ".", topdown=True, onerror=_raise_walk_error,
+        follow_symlinks=False, dir_fd=source_fd,
+    ):
+        relative_root = Path(root).relative_to(".")
+        for name in (*dir_names, *names):
+            entry_stat = os.stat(
+                name, dir_fd=directory_fd, follow_symlinks=False)
+            yield relative_root / name, directory_fd, name, entry_stat
+
+
+def _pinned_stat_snapshot(st: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        st.st_dev, st.st_ino, st.st_mode, st.st_size,
+        st.st_mtime_ns, st.st_ctime_ns,
+    )
+
+
+@contextmanager
+def _open_pinned_file(
+    directory_fd: int,
+    name: str,
+    expected: os.stat_result,
+) -> Iterator[BinaryIO]:
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_BINARY", 0)
+    fd = os.open(name, flags, dir_fd=directory_fd)
+    try:
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode)
+                or _pinned_stat_snapshot(opened) != _pinned_stat_snapshot(expected)):
+            raise RuntimeError(f"source entry changed while opening: {name}")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            yield stream
+            final = os.fstat(stream.fileno())
+            if _pinned_stat_snapshot(final) != _pinned_stat_snapshot(expected):
+                raise RuntimeError(f"source entry changed while reading: {name}")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _read_pinned_symlink(
+    directory_fd: int,
+    name: str,
+    expected: os.stat_result,
+) -> str:
+    target = os.readlink(name, dir_fd=directory_fd)
+    final = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    if _pinned_stat_snapshot(final) != _pinned_stat_snapshot(expected):
+        raise RuntimeError(f"source symlink changed while reading: {name}")
+    return target
+
+
+def _apply_pinned_metadata(
+    destination: Path,
+    source_stat: os.stat_result,
+    warning_limiter: "_ChownWarningLimiter",
+    *,
+    symlink: bool = False,
+) -> None:
+    try:
+        os.chown(
+            destination, source_stat.st_uid, source_stat.st_gid,
+            follow_symlinks=False,
+        )
+    except OSError as exc:
+        warning_limiter.warn(destination, exc)
+    if not symlink or os.chmod in os.supports_follow_symlinks:
+        os.chmod(
+            destination, stat.S_IMODE(source_stat.st_mode),
+            follow_symlinks=not symlink,
+        )
+    if not symlink or os.utime in os.supports_follow_symlinks:
+        os.utime(
+            destination,
+            ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns),
+            follow_symlinks=not symlink,
+        )
+
+
+def _copy_pinned_regular(
+    directory_fd: int,
+    name: str,
+    source_stat: os.stat_result,
+    destination: Path,
+    warning_limiter: "_ChownWarningLimiter",
+) -> None:
+    with _open_pinned_file(directory_fd, name, source_stat) as source_stream:
+        with open(destination, "xb") as target_stream:
+            shutil.copyfileobj(source_stream, target_stream)
+    _apply_pinned_metadata(destination, source_stat, warning_limiter)
+
+
+def _pinned_size_totals(source_fd: int) -> tuple[int, int]:
+    apparent = 0
+    allocated = 0
+    for _rel, _directory_fd, _name, entry_stat in _walk_pinned_entries(source_fd):
+        if stat.S_ISREG(entry_stat.st_mode):
+            apparent += entry_stat.st_size
+            allocated += entry_stat.st_blocks * 512
+    return apparent, allocated
+
+
+def _refuse_pinned_specials(
+    source_fd: int,
+    source_label: Path,
+    mode_cache: dict[Path, int],
+) -> None:
+    specials: list[Path] = []
+    for rel, _directory_fd, _name, entry_stat in _walk_pinned_entries(source_fd):
+        if _is_special_file(entry_stat.st_mode):
+            display_path = source_label / rel
+            mode_cache[display_path] = entry_stat.st_mode
+            specials.append(display_path)
+    _report_skipped(specials, strict=True, mode_cache=mode_cache)
+
+
+def _copy_pinned_entry(
+    source_label: Path,
+    destination: Path,
+    entry: PinnedEntry,
+    directories: list[tuple[Path, os.stat_result]],
+    skipped: list[Path],
+    mode_cache: dict[Path, int],
+    warning_limiter: "_ChownWarningLimiter",
+) -> int | None:
+    rel, directory_fd, name, entry_stat = entry
+    target = destination / rel
+    mode = entry_stat.st_mode
+    if stat.S_ISDIR(mode):
+        target.mkdir(mode=0o700)
+        directories.append((target, entry_stat))
+    elif stat.S_ISREG(mode):
+        _copy_pinned_regular(
+            directory_fd, name, entry_stat, target, warning_limiter)
+        return entry_stat.st_size
+    elif stat.S_ISLNK(mode):
+        os.symlink(_read_pinned_symlink(
+            directory_fd, name, entry_stat), target)
+        _apply_pinned_metadata(
+            target, entry_stat, warning_limiter, symlink=True)
+    else:
+        display_path = source_label / rel
+        skipped.append(display_path)
+        mode_cache[display_path] = mode
+    return None
+
+
+def _copy_tree_pinned(
+    source_label: Path,
+    source_fd: int,
+    destination: Path,
+    *,
+    mode_cache: dict[Path, int],
+    progress_cb: "Callable[[int, int], None] | None",
+    check_space: bool,
+) -> list[Path]:
+    if _path_taken(destination):
+        raise FileExistsError(
+            f"target already exists: {destination}; if a previous run was killed "
+            "during copy, this may be a stale partial target. Inspect and "
+            "remove it manually before re-running."
+        )
+    apparent = allocated = 0
+    if check_space or progress_cb is not None:
+        apparent, allocated = _pinned_size_totals(source_fd)
+    if check_space:
+        _check_disk_space(source_label, destination, total_bytes=allocated)
+    skipped: list[Path] = []
+    warning_limiter = _ChownWarningLimiter()
+    directories = [(destination, os.fstat(source_fd))]
+    copied = 0
+    watchdog = _OperationStallWatchdog("copytree")
+    try:
+        destination.mkdir(mode=0o700)
+        with watchdog:
+            for entry in _walk_pinned_entries(source_fd):
+                copied_size = _copy_pinned_entry(
+                    source_label, destination, entry, directories, skipped,
+                    mode_cache, warning_limiter,
+                )
+                if copied_size is not None:
+                    copied += copied_size
+                    if progress_cb is not None:
+                        progress_cb(copied, apparent)
+                watchdog.touch("copytree")
+        for target, entry_stat in reversed(directories):
+            _apply_pinned_metadata(target, entry_stat, warning_limiter)
+        warning_limiter.summarize()
+    except BaseException:
+        _rmtree_logging(destination, "failed descriptor-pinned copy")
+        raise
+    return skipped
+
+
 def copy_tree(src: Path, dst: Path, *,
               mode_cache: dict[Path, int] | None = None,
               jobs: int | None = None,
               progress_cb: "Callable[[int, int], None] | None" = None,
               check_space: bool = True,
+              source_fd: int | None = None,
               ) -> list[Path]:
     """Copy src -> dst recursively, skipping non-regular files. Returns
     skipped paths.
+
+    ``source_fd`` selects the descriptor-anchored implementation used by the
+    migration runtime; ``src`` then remains only the user-facing path label.
 
     When `mode_cache` is supplied, the `lstat().st_mode` looked up by the
     ignore-callback is cached into it so the post-copy classification in
@@ -846,6 +1055,12 @@ def copy_tree(src: Path, dst: Path, *,
     `shutil.copytree` does anyway; an ENOSPC mid-copy still triggers the
     same cleanup. The walk is also skipped entirely when neither the
     precheck nor a `progress_cb` needs the byte total."""
+    cache = mode_cache if mode_cache is not None else {}
+    if source_fd is not None:
+        return _copy_tree_pinned(
+            src, source_fd, dst, mode_cache=cache,
+            progress_cb=progress_cb, check_space=check_space,
+        )
     if _path_taken(dst):
         raise FileExistsError(
             f"target already exists: {dst}; if a previous run was killed "
@@ -864,7 +1079,6 @@ def copy_tree(src: Path, dst: Path, *,
         # rf-perf-06: size the precheck by allocated bytes, not apparent size.
         _check_disk_space(src, dst, total_bytes=alloc_total)
     skipped: list[Path] = []
-    cache = mode_cache if mode_cache is not None else {}
     watchdog = _OperationStallWatchdog("copytree")
     copy_function = _copytree_copy_function(progress_cb, apparent_total, watchdog)
     try:
@@ -1255,9 +1469,113 @@ def _pair_walk(src: Path, dst: Path) -> Iterable[tuple[Path, Path]]:
             yield Path(root) / name, dst / rel / name
 
 
+def _digest_pinned_file(
+    directory_fd: int,
+    name: str,
+    source_stat: os.stat_result,
+) -> str:
+    digest = hashlib.sha256()
+    with _open_pinned_file(directory_fd, name, source_stat) as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_pinned_file(
+    source_label: Path,
+    destination: Path,
+    rel: Path,
+    source_stat: os.stat_result,
+    expected_digest: str | None,
+) -> None:
+    try:
+        destination_stat = destination.lstat()
+    except OSError:
+        raise RuntimeError(
+            f"missing file in copy: {rel} (src={source_label})") from None
+    if not stat.S_ISREG(destination_stat.st_mode):
+        raise RuntimeError(f"missing file in copy: {rel} (src={source_label})")
+    if source_stat.st_size != destination_stat.st_size:
+        raise RuntimeError(
+            f"size mismatch for {rel} (src={source_label}): "
+            f"{source_stat.st_size} != {destination_stat.st_size}"
+        )
+    if expected_digest is not None and expected_digest != _hash()(destination):
+        raise RuntimeError(f"hash mismatch for {rel} (src={source_label})")
+
+
+def _verify_pinned_directory(
+    source_label: Path,
+    destination: Path,
+    rel: Path,
+) -> None:
+    try:
+        destination_mode = destination.lstat().st_mode
+    except OSError:
+        destination_mode = 0
+    if not stat.S_ISDIR(destination_mode):
+        raise RuntimeError(
+            f"missing directory in copy: {rel} (src={source_label})")
+
+
+def _verify_pinned_symlink(
+    source_label: Path,
+    source_target: str,
+    destination: Path,
+    rel: Path,
+) -> None:
+    if not destination.is_symlink():
+        raise RuntimeError(
+            f"missing symlink in copy: {rel} (src={source_label})")
+    destination_target = os.readlink(destination)
+    if source_target != destination_target:
+        raise RuntimeError(
+            f"symlink target mismatch for {rel} (src={source_label}): "
+            f"{source_target!r} != {destination_target!r}"
+        )
+
+
+def _iter_pinned_verify_tasks(
+    source_fd: int,
+    source_label: Path,
+    destination: Path,
+    checksum: bool,
+    verify_ownership: bool,
+) -> Iterator[Callable[[], None]]:
+    for rel, directory_fd, name, source_stat in _walk_pinned_entries(source_fd):
+        source_path = source_label / rel
+        target = destination / rel
+        mode = source_stat.st_mode
+        if stat.S_ISREG(mode):
+            digest = (
+                _digest_pinned_file(directory_fd, name, source_stat)
+                if checksum else None
+            )
+            task = partial(
+                _verify_pinned_file,
+                source_path, target, rel, source_stat, digest,
+            )
+        elif stat.S_ISDIR(mode):
+            task = partial(
+                _verify_pinned_directory, source_path, target, rel)
+        elif stat.S_ISLNK(mode):
+            task = partial(
+                _verify_pinned_symlink, source_path,
+                _read_pinned_symlink(directory_fd, name, source_stat),
+                target, rel,
+            )
+        else:
+            continue
+        yield task
+        if verify_ownership:
+            yield partial(
+                _verify_ownership, source_path, target, rel, source_stat)
+
+
 def verify_copy(src: Path, dst: Path, checksum: bool = False,
                 verify_ownership: bool = False,
-                *, jobs: int | None = None) -> None:
+                *, jobs: int | None = None,
+                source_fd: int | None = None) -> None:
     """Verify dst is a faithful copy of src in a SINGLE walk over src,
     comparing each entry against its counterpart on the fly — no full
     in-memory inventories and one tree traversal instead of two (rf-perf-01 /
@@ -1282,8 +1600,17 @@ def verify_copy(src: Path, dst: Path, checksum: bool = False,
     that list itself would be hundreds of MB of `partial` objects
     before the first hash even starts. The streaming shape keeps RSS
     bounded by the inflight cap regardless of tree size, at the cost
-    of giving up the ability to report a stable `len(tasks)` upfront."""
-    tasks = _iter_verify_tasks(src, dst, checksum, verify_ownership)
+    of giving up the ability to report a stable `len(tasks)` upfront.
+
+    ``source_fd`` anchors every source stat/read/inventory operation to the
+    already-open directory descriptor used by :func:`execute`.
+    """
+    tasks = (
+        _iter_pinned_verify_tasks(
+            source_fd, src, dst, checksum, verify_ownership)
+        if source_fd is not None
+        else _iter_verify_tasks(src, dst, checksum, verify_ownership)
+    )
     with _OperationStallWatchdog("verify_copy") as watchdog:
         if not checksum:
             # cheap stat-only / readlink ops: sequential is fast and keeps the
@@ -1293,7 +1620,7 @@ def verify_copy(src: Path, dst: Path, checksum: bool = False,
                 watchdog.touch("verify_copy")
         else:
             _run_verify_pool(tasks, jobs=jobs, watchdog=watchdog)
-        _assert_complete_inventory_match(src, dst)
+        _assert_complete_inventory_match(src, dst, source_fd=source_fd)
         watchdog.touch("complete inventory comparison")
 
 
@@ -1318,6 +1645,20 @@ def _load_inventory(
         database.execute(
             f"INSERT INTO {table} VALUES (?, ?)",
             (os.fsencode(path.relative_to(root)), kind),
+        )
+
+
+def _load_pinned_inventory(
+    database: sqlite3.Connection,
+    source_fd: int,
+) -> None:
+    for rel, _directory_fd, _name, entry_stat in _walk_pinned_entries(source_fd):
+        kind = _inventory_kind(entry_stat.st_mode)
+        if kind == 4:
+            continue
+        database.execute(
+            "INSERT INTO source_entries VALUES (?, ?)",
+            (os.fsencode(rel), kind),
         )
 
 
@@ -1377,7 +1718,12 @@ def _inventory_db() -> Iterator[sqlite3.Connection]:
         database.close()
 
 
-def _assert_complete_inventory_match(src: Path, dst: Path) -> None:
+def _assert_complete_inventory_match(
+    src: Path,
+    dst: Path,
+    *,
+    source_fd: int | None = None,
+) -> None:
     """Entry-for-entry comparison of the two trees immediately before the swap.
 
     This is the last gate before the source is deleted, so it must catch an
@@ -1385,7 +1731,10 @@ def _assert_complete_inventory_match(src: Path, dst: Path) -> None:
     with _inventory_db() as database:
         database.execute("CREATE TABLE source_entries (path BLOB, kind INTEGER)")
         database.execute("CREATE TABLE target_entries (path BLOB, kind INTEGER)")
-        _load_inventory(database, "source_entries", src, source=True)
+        if source_fd is None:
+            _load_inventory(database, "source_entries", src, source=True)
+        else:
+            _load_pinned_inventory(database, source_fd)
         _load_inventory(database, "target_entries", dst, source=False)
         missing = database.execute(_INVENTORY_MISSING_SQL).fetchone()
         extra = database.execute(_INVENTORY_EXTRA_SQL).fetchone()
@@ -2378,7 +2727,8 @@ def _execute_migration(plan: Plan,
             _assert_source_identity(plan.source, src_id)
             # rf-ddd-02: _copy_and_verify advances to COPIED between copy and
             # verify so a verify-failed run logs an honest intermediate state.
-            _copy_and_verify(plan, on_state=advance)
+            _copy_and_verify(
+                plan, on_state=advance, source_fd=src_fd, source_id=src_id)
             advance(MigrationState.VERIFIED)
             _swap_or_explain(plan)
             advance(MigrationState.SWAPPED)
@@ -2594,24 +2944,37 @@ def _refuse_specials_before_copy(src: Path,
     _report_skipped(specials, strict=True, mode_cache=mode_cache)
 
 
-def _copy_and_verify(plan: Plan, on_state: Callable[[MigrationState], None] | None = None) -> None:
+def _copy_and_verify(
+    plan: Plan,
+    on_state: Callable[[MigrationState], None] | None = None,
+    *,
+    source_fd: int | None = None,
+    source_id: tuple[int, int] | None = None,
+) -> None:
     mode_cache: dict[Path, int] = {}
     if plan.strict:
-        _refuse_specials_before_copy(plan.source, mode_cache)
+        if source_fd is None:
+            _refuse_specials_before_copy(plan.source, mode_cache)
+        else:
+            _refuse_pinned_specials(source_fd, plan.source, mode_cache)
     try:
         skipped = copy_tree(plan.source, plan.target, mode_cache=mode_cache,
                             jobs=plan.jobs, check_space=plan.check_space,
                             progress_cb=(_copy_progress_callback()
-                                         if plan.progress else None))
+                                         if plan.progress else None),
+                            source_fd=source_fd)
         if on_state is not None:
             on_state(MigrationState.COPIED)  # rf-ddd-02: data on disk, pre-verify
         _report_skipped(skipped, plan.strict, mode_cache=mode_cache)
         if plan.verify:
             verify_copy(plan.source, plan.target, plan.checksum,
-                        verify_ownership=plan.verify_ownership, jobs=plan.jobs)
+                        verify_ownership=plan.verify_ownership, jobs=plan.jobs,
+                        source_fd=source_fd)
         else:
             _log().warning("verification disabled (--no-verify): the source %s "
                            "will be deleted without checking the copy", plan.source)
+        if source_id is not None:
+            _assert_source_identity(plan.source, source_id)
     except BaseException:
         # rf-robust-02: BaseException (not just Exception) so a Ctrl+C during
         # verify also removes the partial target rather than blocking retry.
@@ -2835,7 +3198,7 @@ def _log_level(ns: argparse.Namespace) -> int:
 # which on a non-POSIX host would silently downgrade the anti-race open instead
 # of failing. Probe the capabilities themselves rather than `os.name` so an
 # unusual-but-capable runtime is not refused for its label.
-POSIX_REQUIRED_OS_ATTRS = ("chown", "O_NOFOLLOW", "O_DIRECTORY")
+POSIX_REQUIRED_OS_ATTRS = ("chown", "fwalk", "O_NOFOLLOW", "O_DIRECTORY")
 
 
 def _posix_capability_gaps() -> list[str]:

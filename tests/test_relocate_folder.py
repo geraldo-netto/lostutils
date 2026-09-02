@@ -4487,6 +4487,50 @@ def test_execute_aborts_when_source_swapped_before_copy(tmp_path, monkeypatch):
     assert not (tmp_path / "dst").exists()
 
 
+def test_execute_copy_and_verify_ignore_swap_copy_restore_attack(
+        tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    attacker = tmp_path / "attacker"
+    parked = tmp_path / "parked-source"
+    destination = tmp_path / "destination" / source.name
+    source.mkdir()
+    attacker.mkdir()
+    (source / "payload.txt").write_text("trusted", encoding="utf-8")
+    (attacker / "payload.txt").write_text("attacker", encoding="utf-8")
+    real_copy = rf.copy_tree
+    real_verify = rf.verify_copy
+
+    def while_source_is_swapped(operation, *args, **kwargs):
+        os.rename(source, parked)
+        os.rename(attacker, source)
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            os.rename(source, attacker)
+            os.rename(parked, source)
+
+    def swapped_copy(*args, **kwargs):
+        return while_source_is_swapped(real_copy, *args, **kwargs)
+
+    def swapped_verify(*args, **kwargs):
+        return while_source_is_swapped(real_verify, *args, **kwargs)
+
+    monkeypatch.setattr(rf, "copy_tree", swapped_copy)
+    monkeypatch.setattr(rf, "verify_copy", swapped_verify)
+
+    result = rf.execute(rf.Plan(
+        source=source,
+        target=destination,
+        force=True,
+        check_space=False,
+    ))
+
+    assert result.startswith("ok:")
+    assert destination.joinpath("payload.txt").read_text(encoding="utf-8") == "trusted"
+    assert attacker.joinpath("payload.txt").read_text(encoding="utf-8") == "attacker"
+    assert source.is_symlink()
+
+
 def test_plan_from_args_rejects_empty_basename(tmp_path):
     """rf-rel-30: a root-shaped source (empty basename) must be rejected, not
     proceed with target == dest_root."""
