@@ -1068,7 +1068,7 @@ def test_llama_categorizer_close_aborts_unresponsive_process():
     assert not chat._process.is_alive()
 
 
-def test_import_llama_missing_and_auto_install(monkeypatch):
+def test_import_llama_missing_and_auto_install(monkeypatch, caplog):
     real_import = builtins.__import__
     state = {"calls": 0}
     fake_module = types.ModuleType("llama_cpp")
@@ -1089,10 +1089,16 @@ def test_import_llama_missing_and_auto_install(monkeypatch):
 
     state["calls"] = 0
     calls = []
+    caplog.set_level(logging.WARNING, logger="bookmark-tidy")
+
+    def record_install(cmd, timeout):
+        assert "downloads and executes third-party package and build code" in caplog.text
+        calls.append((cmd, timeout))
+
     monkeypatch.setattr(
         bookmark_tidy.subprocess,
         "check_call",
-        lambda cmd, timeout: calls.append((cmd, timeout)),
+        record_install,
     )
     assert bookmark_tidy._import_llama(True) is FakeLlamaChat
     assert calls[0] == (

@@ -1255,7 +1255,12 @@ def _import_llama(auto_install: bool) -> Any:
     except ImportError as exc:
         if not auto_install:
             raise UserError("llama-cpp-python is missing; install it or pass --auto-install-llama") from exc
-    LOGGER.warning("Installing %s with pip because --auto-install-llama was provided.", LLAMA_CPP_PYTHON_REQUIREMENT)
+    LOGGER.warning(
+        "Security warning: --auto-install-llama downloads and executes third-party "
+        "package and build code from PyPI in this Python environment. Proceed only "
+        "if you trust %s and PyPI.",
+        LLAMA_CPP_PYTHON_REQUIREMENT,
+    )
     try:
         subprocess.check_call(
             [sys.executable, "-m", "pip", "install", LLAMA_CPP_PYTHON_REQUIREMENT],
