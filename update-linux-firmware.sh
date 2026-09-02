@@ -83,7 +83,7 @@ fi
 
 # --- Preflight ---------------------------------------------------------------
 
-for cmd in curl gpg tar rsync xz; do
+for cmd in curl gpg tar rsync; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: missing required command: $cmd" >&2
         exit 1
@@ -196,6 +196,18 @@ if [ -z "$LATEST_FIRMWARE" ]; then
     echo "(the index was fetched OK — kernel.org page format may have changed)" >&2
     exit 1
 fi
+case "$LATEST_FIRMWARE" in
+    *.tar.xz) DECOMPRESSOR=xz ;;
+    *.tar.gz) DECOMPRESSOR=gzip ;;
+    *)
+        echo "ERROR: Unknown compression format: $LATEST_FIRMWARE" >&2
+        exit 1
+        ;;
+esac
+if ! command -v "$DECOMPRESSOR" >/dev/null 2>&1; then
+    echo "ERROR: missing required decompressor for $LATEST_FIRMWARE: $DECOMPRESSOR" >&2
+    exit 1
+fi
 # Stamp stores the release name without compression extension so a .gz/.xz
 # variant flip on kernel.org's index can't force a spurious reinstall
 RELEASE="${LATEST_FIRMWARE%.tar.*}"
@@ -241,14 +253,7 @@ FW_TAR="$WORK_DIR/fw.tar"
 # gpg/tar tf/tar xf below run without three more full decompressions
 decompress_to_tar() {
     rm -f -- "$FW_TAR"
-    case "$LATEST_FIRMWARE" in
-        *.tar.xz) xz -cd -- "$TARBALL" > "$FW_TAR" ;;
-        *.tar.gz) gzip -cd -- "$TARBALL" > "$FW_TAR" ;;
-        *)
-            echo "ERROR: Unknown compression format: $LATEST_FIRMWARE" >&2
-            return 1
-            ;;
-    esac
+    "$DECOMPRESSOR" -cd -- "$TARBALL" > "$FW_TAR"
 }
 
 # The cache dir persists across runs, so -C - genuinely resumes an earlier
