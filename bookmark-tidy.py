@@ -924,10 +924,24 @@ def _group_mutable_bookmarks(
     for bookmark in bookmarks:
         key = _canonical_key(bookmark, options)
         if key in immutable_keys:
-            LOGGER.info("Removed mutable duplicate of immutable bookmark: %s", bookmark.url)
+            LOGGER.info(
+                "Removed mutable duplicate of immutable bookmark: %s",
+                _redacted_url(bookmark.url),
+            )
             continue
         grouped.setdefault(key, []).append(bookmark)
     return grouped
+
+
+def _redacted_url(url: str) -> str:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return "<redacted URL>" if "@" in url else url
+    if "@" not in parsed.netloc:
+        return url
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, f"[redacted]@{host}", parsed.path, parsed.query, parsed.fragment))
 
 
 def _canonical_key(bookmark: Bookmark, options: NormalizeOptions) -> str:

@@ -241,6 +241,31 @@ def test_immutable_folder_is_copied_and_mutable_duplicate_is_removed(caplog):
     assert "Removed mutable duplicate of immutable bookmark" in caplog.text
 
 
+def test_mutable_duplicate_log_redacts_url_userinfo(caplog):
+    immutable = bookmark_tidy.Bookmark(
+        "https://alice:secret@example.test/a",
+        "Locked",
+        ("Work",),
+    )
+    mutable = bookmark_tidy.Bookmark(
+        "https://alice:secret@example.test/a#copy",
+        "Mutable",
+        ("Inbox",),
+    )
+
+    caplog.set_level(logging.INFO, logger="bookmark-tidy")
+    bookmark_tidy.tidy_bookmarks(
+        [immutable, mutable],
+        immutable_roots=["work"],
+        options=bookmark_tidy.NormalizeOptions(),
+        categorizer=lambda batch: {},
+    )
+
+    assert "secret" not in caplog.text
+    assert "alice" not in caplog.text
+    assert "https://[redacted]@example.test/a#copy" in caplog.text
+
+
 def test_immutable_root_matches_only_browser_root_or_top_level_folder():
     top_level = bookmark_tidy.Bookmark("https://example.test/top", "Top", ("Work",))
     nested = bookmark_tidy.Bookmark("https://example.test/nested", "Nested", ("Archive", "Work"))

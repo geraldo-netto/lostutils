@@ -4,7 +4,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| bt-gov-01 | open | medium | low | bookmark-tidy.py:927 — [data governance] Redact URL userinfo before logging a mutable duplicate; the current INFO line exposes credentials embedded in `user:password@host`. |
 | bt-sec-01 | open | medium | low | bookmark-tidy.py:1237-1255 — [security; STRIDE Elevation of privilege / supply chain] Remove in-process `pip install` or add an explicit code-execution trust warning before `--auto-install-llama` runs pinned third-party package/build code. |
 | dnp-mem-01 | open | medium | medium | dedupl_numpy.py:79-83 — [memory/CPU] Process record starts in bounded chunks; broadcasting `line_starts[:, None] + np.arange(hash_width)` materializes an `(n_lines, hash_width)` int64 matrix plus gathered bytes. |
 | hr-sec-07 | open | high | medium | hash-recursive-ai5.py:621-685 — [security; STRIDE Tampering, TOCTOU attack tree] Bind each hash to the walked identity: pass expected `(device, inode, size)`, compare `fstat` before and after reading, and reject mutation/path swaps. |
