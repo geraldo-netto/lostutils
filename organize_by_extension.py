@@ -1896,18 +1896,24 @@ def _copy_cross_device_target(
         # log at debug so unexpected exception classes still surface. Once the
         # rename succeeded the target IS the completed file — never unlink it on
         # a late interrupt; leave it for the idempotent re-run above.
-        leftovers = (tmp,) if replaced else (target,)
-        if tmp_created and not replaced:
-            leftovers = (tmp, target)
-        for leftover in leftovers:
-            try:
-                os.unlink(leftover)
-            except OSError as unlink_exc:
-                logger.debug(
-                    "cross-device cleanup: could not unlink %s: %s",
-                    leftover, unlink_exc,
-                )
+        _cleanup_cross_device_copy(target, tmp, replaced, tmp_created)
         raise
+
+
+def _cleanup_cross_device_copy(
+    target: Path, tmp: Path, replaced: bool, tmp_created: bool,
+) -> None:
+    leftovers = (tmp,) if replaced else (target,)
+    if tmp_created and not replaced:
+        leftovers = (tmp, target)
+    for leftover in leftovers:
+        try:
+            os.unlink(leftover)
+        except OSError as unlink_exc:
+            logger.debug(
+                "cross-device cleanup: could not unlink %s: %s",
+                leftover, unlink_exc,
+            )
 
 
 def _unlink_cross_device_source(

@@ -5029,3 +5029,37 @@ def test_walk_subdirectory_records_failed_classification(tmp_path, caplog):
     assert result is None
     assert stats.skipped == 1
     assert "Skipped scan of" in caplog.text
+
+
+def test_cross_device_cleanup_preserves_unowned_temp_file(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    target = tmp_path / "target.txt"
+    source.write_text("source", encoding="utf-8")
+    foreign_temp = tmp_path / ".target.txt.existing.tmp"
+    foreign_temp.write_text("unrelated", encoding="utf-8")
+    monkeypatch.setattr(organize_by_extension.secrets, "token_hex", lambda _length: "existing")
+
+    with pytest.raises(FileExistsError):
+        organize_by_extension._move_cross_device(source, target)
+
+    assert source.read_text(encoding="utf-8") == "source"
+    assert foreign_temp.read_text(encoding="utf-8") == "unrelated"
+    assert not target.exists()
+
+
+def test_cross_device_cleanup_preserves_published_copy_after_interrupt(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    target = tmp_path / "target.txt"
+    source.write_text("source", encoding="utf-8")
+
+    def interrupt_after_publish(_directory):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(organize_by_extension, "_fsync_directory", interrupt_after_publish)
+
+    with pytest.raises(KeyboardInterrupt):
+        organize_by_extension._move_cross_device(source, target)
+
+    assert source.read_text(encoding="utf-8") == "source"
+    assert target.read_text(encoding="utf-8") == "source"
+    assert set(tmp_path.iterdir()) == {source, target}
