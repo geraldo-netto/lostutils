@@ -3464,8 +3464,8 @@ class ListFilesStatErrorSkipped(unittest.TestCase):
                 def is_file(self, follow_symlinks=False):
                     return self._e.is_file(follow_symlinks=follow_symlinks)
 
-            def fake_walk(r):
-                for e in real_walk(r):
+            def fake_walk(r, **kwargs):
+                for e in real_walk(r, **kwargs):
                     yield _StatFail(e)
 
             with patch.object(_oze, "_walk_scandir", fake_walk):
@@ -4938,3 +4938,94 @@ def test_move_file_falls_back_when_windows_reports_no_hardlinks(tmp_path):
 
     assert target.read_text(encoding="utf-8") == "payload"
     assert not source.exists()
+
+
+def test_main_reports_an_unreadable_subtree_and_moves_accessible_files(
+        tmp_path, monkeypatch, caplog):
+    inaccessible = tmp_path / "unreadable"
+    inaccessible.mkdir()
+    (inaccessible / "left.txt").write_text("keep", encoding="utf-8")
+    (tmp_path / "accessible.txt").write_text("move", encoding="utf-8")
+    real_scandir = organize_by_extension.os.scandir
+
+    def limited_scandir(path):
+        if Path(path) == inaccessible:
+            raise PermissionError(errno.EACCES, "permission denied", str(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(organize_by_extension.os, "scandir", limited_scandir)
+    monkeypatch.setattr(
+        sys, "argv", ["organize_by_extension.py", str(tmp_path), "--no-sniff"])
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(SystemExit) as exc:
+        organize_by_extension.main()
+
+    assert exc.value.code == organize_by_extension.EXIT_INCOMPLETE
+    assert "Skipped scan of" in caplog.text
+    assert "skipped 1 file(s)" in caplog.text
+    assert (inaccessible / "left.txt").read_text(encoding="utf-8") == "keep"
+    assert (tmp_path / "txt" / "a00000" / "accessible.txt").is_file()
+
+
+def test_main_reports_bucket_selection_failure_in_summary_and_exit(
+        tmp_path, monkeypatch, caplog):
+    source = tmp_path / "left.txt"
+    source.write_text("keep", encoding="utf-8")
+
+    def exhausted(*_args):
+        raise ValueError("bucket index exhausted")
+
+    monkeypatch.setattr(organize_by_extension.BucketManager, "choose", exhausted)
+    monkeypatch.setattr(
+        sys, "argv", ["organize_by_extension.py", str(tmp_path), "--no-sniff"])
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(SystemExit) as exc:
+        organize_by_extension.main()
+
+    assert exc.value.code == organize_by_extension.EXIT_INCOMPLETE
+    assert "bucket selection failed: bucket index exhausted" in caplog.text
+    assert "skipped 1 file(s)" in caplog.text
+    assert source.read_text(encoding="utf-8") == "keep"
+
+
+def test_runtime_scan_counts_entry_stat_failure(tmp_path, monkeypatch, caplog):
+    source = tmp_path / "left.txt"
+    source.write_text("keep", encoding="utf-8")
+
+    class UnreadableEntry:
+        path = str(source)
+
+        def stat(self, *, follow_symlinks):
+            raise PermissionError(errno.EACCES, "permission denied", self.path)
+
+    monkeypatch.setattr(
+        organize_by_extension, "_walk_scandir",
+        lambda _root, **_kwargs: iter([UnreadableEntry()]))
+    caplog.set_level(logging.WARNING)
+
+    stats = organize_by_extension.organize(tmp_path, sniff=False)
+
+    assert stats.skipped == 1
+    assert organize_by_extension._run_exit_code(stats) == 3
+    assert "Skipped scan of" in caplog.text
+    assert source.read_text(encoding="utf-8") == "keep"
+
+
+def test_walk_subdirectory_records_failed_classification(tmp_path, caplog):
+    class UnreadableDirectory:
+        path = str(tmp_path / "unreadable")
+
+        def is_dir(self, *, follow_symlinks):
+            assert follow_symlinks is False
+            raise PermissionError(errno.EACCES, "permission denied", self.path)
+
+    stats = organize_by_extension._RunStats()
+    caplog.set_level(logging.WARNING)
+
+    result = organize_by_extension._walk_subdirectory(UnreadableDirectory(), stats)
+
+    assert result is None
+    assert stats.skipped == 1
+    assert "Skipped scan of" in caplog.text

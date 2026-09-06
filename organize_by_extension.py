@@ -322,19 +322,31 @@ _HEAD_UNREADABLE: _Unreadable = _Unreadable()
 HeadBytes = bytes | _Unreadable
 
 
+def _record_scan_error(path: Path, exc: OSError, stats: _RunStats | None) -> None:
+    if stats is None:
+        logger.debug("scandir failed for %s: %s", path, exc)
+        return
+    # A failed subtree counts once; its inaccessible file count is unknown.
+    stats.skipped += 1
+    logger.warning("Skipped scan of %s: %s", path, exc)
+
+
 @contextmanager
-def _safe_scandir(path: Path) -> Iterator[Iterable[os.DirEntry]]:
+def _safe_scandir(
+    path: Path, stats: _RunStats | None = None,
+) -> Iterator[Iterable[os.DirEntry]]:
     """Yield ``os.scandir(path)`` entries, or an empty iterable on OSError
     (oze-dup-04). The same try/except/with pattern was open-coded in three
     callers; centralising it makes "scan and skip on permission denied" a
     one-line contract.
 
-    Errors are logged at debug so ``-v`` users see what was skipped (oze-rel-10).
+    Runtime scans pass their tally so failures are visible and mark the run
+    incomplete; optional bucket probes retain their empty-on-missing behavior.
     """
     try:
         scanner = os.scandir(path)
     except OSError as exc:
-        logger.debug("scandir failed for %s: %s", path, exc)
+        _record_scan_error(path, exc, stats)
         yield ()
         return
     try:
@@ -418,6 +430,7 @@ class SniffContext:
     sniff: bool = True
     head_cache: dict[Path, HeadBytes] | None = None
     extra_zip_family: frozenset[str] = frozenset()
+    stats: _RunStats | None = None
 
 
 # Module-level default — used when a caller omits ``ctx`` and doesn't need
@@ -671,6 +684,7 @@ def _scan_regular_path(
     skip: set[str],
     root: Path,
     symlink_resolve_cache: dict[Path, Path | None],
+    stats: _RunStats | None = None,
 ) -> Path | None:
     """Return the :class:`Path` for a regular, non-skipped file entry, else None.
 
@@ -680,7 +694,8 @@ def _scan_regular_path(
     as defence-in-depth (the file is never read or moved regardless)."""
     try:
         st = entry.stat(follow_symlinks=False)
-    except OSError:
+    except OSError as exc:
+        _record_scan_error(Path(entry.path), exc, stats)
         return None
     mode = st.st_mode
     if _stat.S_ISLNK(mode) or not _stat.S_ISREG(mode):
@@ -719,8 +734,9 @@ def _iter_files(
     scan_monitor = _ScanStallMonitor()
     scan_monitor.start()
     try:
-        for entry in _walk_scandir(root):
-            path = _scan_regular_path(entry, skip, root, symlink_resolve_cache)
+        for entry in _walk_scandir(root, stats=ctx.stats):
+            path = _scan_regular_path(
+                entry, skip, root, symlink_resolve_cache, ctx.stats)
             if path is None:
                 continue
             # oze-obs-04: the scan can run for minutes on a large tree (every file
@@ -823,14 +839,23 @@ def _warn_if_symlink_escapes_root(
         )
 
 
-def _walk_scandir(root: Path):
+def _walk_subdirectory(
+    entry: os.DirEntry, stats: _RunStats | None,
+) -> Path | None:
+    try:
+        return Path(entry.path) if entry.is_dir(follow_symlinks=False) else None
+    except OSError as exc:
+        _record_scan_error(Path(entry.path), exc, stats)
+        return None
+
+
+def _walk_scandir(root: Path, stats: _RunStats | None = None):
     """Iteratively yield `os.DirEntry` objects under `root` (depth-first).
 
     Generator-based so a 1M-file tree never sits in memory as a list, and so
     each entry carries its own cached stat for the caller (oze-perf-02 / oze-perf-03).
-    Permission/OS errors on a sub-directory are skipped via :func:`_safe_scandir`
-    (oze-dup-04) and logged at debug (oze-rel-10) — we'd rather organise what
-    we can than abort the whole run.
+    Permission/OS errors are skipped and counted when a runtime tally is
+    supplied, so accessible files can still be organized in an incomplete run.
 
     oze-rel-20: uses an explicit stack instead of `yield from _walk_scandir(...)`
     recursion so a tree deeper than the Python recursion limit (~1000 by
@@ -842,17 +867,15 @@ def _walk_scandir(root: Path):
     while stack:
         current = stack.pop()
         subdirs: list[Path] = []
-        with _safe_scandir(current) as it:
-            for entry in it:
-                yield entry
-                # Recurse into real subdirs only; symlinked dirs are not followed
-                # so the walk never escapes `root` or loops.
-                try:
-                    is_dir = entry.is_dir(follow_symlinks=False)
-                except OSError:
-                    continue
-                if is_dir:
-                    subdirs.append(Path(entry.path))
+        try:
+            with _safe_scandir(current, stats=stats) as it:
+                for entry in it:
+                    yield entry
+                    child = _walk_subdirectory(entry, stats)
+                    if child is not None:
+                        subdirs.append(child)
+        except OSError as exc:
+            _record_scan_error(current, exc, stats)
         # Reverse so popping the stack yields children in original scandir order.
         stack.extend(reversed(subdirs))
 
@@ -2164,6 +2187,8 @@ def plan_moves(
             bucket = manager.choose(source, ext_dir, prefix)
         except (ValueError, RuntimeError) as exc:
             logger.warning("Skipped %s: bucket selection failed: %s", source, exc)
+            if ctx.stats is not None:
+                ctx.stats.skipped += 1
             continue
         # oze-cmplx-01: the head_cache entry for this source is dropped by
         # `_drain_futures` once the move completes; popping it here too was a
@@ -2485,6 +2510,7 @@ def _run_moves(
     total_files: int | None,
     head_cache: dict[Path, HeadBytes],
     manager: BucketManager,
+    stats: _RunStats | None = None,
 ) -> _RunStats:
     """Execute stage (oze-cmplx-01): own the thread pool, the bounded-backlog
     submission loop, drain, and progress logging. Returns the run tally.
@@ -2494,7 +2520,8 @@ def _run_moves(
     managed manually so KeyboardInterrupt can cancel pending moves immediately
     (conc-01) instead of draining them via ``with`` __exit__.
     """
-    stats = _RunStats()
+    if stats is None:
+        stats = _RunStats()
     max_outstanding = max(1, num_threads * SUBMIT_BACKLOG_MULT)
     executor = ThreadPoolExecutor(max_workers=num_threads)
     futures: dict[Future, Path] = {}
@@ -2575,6 +2602,7 @@ def _run_move_stage(root: Path, files: Iterable[Path], ctx: SniffContext, *,
         total_files=None,
         head_cache=head_cache,
         manager=manager,
+        stats=ctx.stats,
     )
     summary = (
         f"Finished. Processed {stats.processed} file(s), "
@@ -2586,7 +2614,7 @@ def _run_move_stage(root: Path, files: Iterable[Path], ctx: SniffContext, *,
         logger.warning(summary)
     elif verbose or preview or stats.processed > 0:
         logger.info(summary)
-    if stats.planned == 0 and (preview or verbose):
+    if stats.planned == 0 and not stats.skipped and (preview or verbose):
         logger.info(f"No files to organize under {root} (already bucketed or empty).")
     _log_run_stats(head_cache, manager)
     return stats
@@ -2653,7 +2681,7 @@ def organize(
     if head_cache is None:
         head_cache = {}
     ctx = SniffContext(sniff=sniff, head_cache=head_cache,
-                       extra_zip_family=extra_zip_family)
+                       extra_zip_family=extra_zip_family, stats=_RunStats())
     files = _iter_files(
         root,
         skip_paths={Path(__file__).resolve()},
