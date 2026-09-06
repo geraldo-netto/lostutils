@@ -2755,3 +2755,126 @@ def test_key_state_ring_thickness_never_changes(app):
 
     assert int(app._phys_buttons[kid].cget("highlightthickness")) == int(before)
     assert int(before) == minikeypad.KEY_STATE_RING_PX
+
+
+class BlockingConnectDev(FakeDev):
+    def __init__(self):
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def connect(self):
+        self.started.set()
+        if not self.release.wait(2):
+            raise RuntimeError("test connect barrier timed out")
+        return True
+
+
+def test_timed_out_connect_cannot_probe_replacement_device(app, monkeypatch):
+    old_device = BlockingConnectDev()
+    replacement = BlockingConnectDev()
+    app.dev = old_device
+    app.kp.ReportID = 99
+    monitor = app._monitor
+    monkeypatch.setattr(monitor, "_on_stall", lambda: setattr(app, "dev", replacement))
+    monitor._start_probe_worker(monitor.try_connect, "Connect")
+    old_worker = monitor.probe_thread
+    new_worker = None
+    try:
+        assert old_device.started.wait(1)
+        monitor.probe_timeout(monitor.token, "Connect")
+        monitor._start_probe_worker(monitor.try_connect, "Connect")
+        new_worker = monitor.probe_thread
+        assert replacement.started.wait(1)
+        old_device.release.set()
+        old_worker.join(1)
+        assert not old_worker.is_alive()
+        _drain(app)
+        assert old_device.writes == []
+        assert replacement.writes == []
+        assert app.kp.ReportID == 99
+        assert monitor.io_busy is True
+    finally:
+        old_device.release.set()
+        replacement.release.set()
+        old_worker.join(1)
+        if new_worker is not None:
+            new_worker.join(1)
+        _drain(app)
+
+    assert app.kp.ReportID == 3
+    assert monitor.io_busy is False
+
+
+@pytest.mark.parametrize("accept_old_report", [False, True])
+def test_timed_out_version_probe_keeps_device_and_discards_stale_result(
+        app, monkeypatch, accept_old_report):
+    class BlockingVersionDev(FakeDev):
+        def __init__(self):
+            super().__init__()
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def write_device(self, rid, buf):
+            self.writes.append((rid, bytes(buf)))
+            self.started.set()
+            if not self.release.wait(2):
+                raise RuntimeError("test version barrier timed out")
+            return accept_old_report
+
+    old_device = BlockingVersionDev()
+    replacement = BlockingConnectDev()
+    app.dev = old_device
+    app.kp.ReportID = 99
+    monitor = app._monitor
+    monkeypatch.setattr(monitor, "_on_stall", lambda: setattr(app, "dev", replacement))
+    monitor._start_probe_worker(monitor.try_connect, "Connect")
+    old_worker = monitor.probe_thread
+    new_worker = None
+    try:
+        assert old_device.started.wait(1)
+        monitor.probe_timeout(monitor.token, "Connect")
+        monitor._start_probe_worker(monitor.try_connect, "Connect")
+        new_worker = monitor.probe_thread
+        assert replacement.started.wait(1)
+        old_device.release.set()
+        old_worker.join(1)
+        assert not old_worker.is_alive()
+        _drain(app)
+        assert len(old_device.writes) == 1
+        assert replacement.writes == []
+        assert app.kp.ReportID == 99
+        assert monitor.io_busy is True
+    finally:
+        old_device.release.set()
+        replacement.release.set()
+        old_worker.join(1)
+        if new_worker is not None:
+            new_worker.join(1)
+        _drain(app)
+
+    assert app.kp.ReportID == 3
+    assert monitor.io_busy is False
+
+
+def test_queued_version_result_checks_generation_even_for_same_device(app):
+    app.dev = FakeDev()
+    app.kp.ReportID = 99
+    token = app._probe_token
+    app._version_check(app.dev, token)
+    app._probe_token += 1
+
+    _drain(app)
+
+    assert app.kp.ReportID == 99
+
+
+def test_stale_connect_worker_does_not_open_current_device(app, monkeypatch):
+    app.dev = FakeDev()
+    connects = []
+    monkeypatch.setattr(app.dev, "connect", lambda: connects.append(True) or True)
+    app._try_connect(app._probe_token - 1)
+    _drain(app)
+
+    assert connects == []
+    assert app.dev.writes == []

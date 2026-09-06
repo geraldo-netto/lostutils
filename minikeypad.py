@@ -1048,6 +1048,9 @@ class ConnectionMonitor:
     lets a stalled probe be abandoned without a late result clobbering fresh
     state. All UI work goes through the injected callbacks; `dev` is a
     callable because the owner may swap the device instance at runtime.
+
+    Tokened probes call `on_connected(device, token)` with the captured device;
+    legacy direct calls without a token retain the no-argument callback.
     """
 
     def __init__(
@@ -1148,15 +1151,24 @@ class ConnectionMonitor:
 
     def try_connect(self, token=None):
         """Runs off the Tk thread so the connect/version probe never freezes UI."""
+        if token is not None and token != self.token:
+            return
+        device = self._dev()
         try:
-            ok = self._dev().connect()
-            if ok:
-                self._on_connected()
+            ok = device.connect()
+            if ok and self._connect_current(device, token):
+                if token is None:
+                    self._on_connected()
+                else:
+                    self._on_connected(device, token)
         except Exception as e:                 # never strand io_busy True
             LOG.exception("connect worker crashed")
             self._log("Connect error: %s" % e)
             ok = False
         self._post(lambda: self.connect_done(ok, token))
+
+    def _connect_current(self, device, token):
+        return device is self._dev() and (token is None or token == self.token)
 
     def connect_done(self, ok, token=None):
         del ok                                 # logged by the device layer
@@ -1770,19 +1782,29 @@ class App(tk.Tk):
         else:
             self.state_lbl.configure(text="Not connected", bg=COL_DISCONNECTED)
 
-    def _version_check(self):
+    def _version_check(self, device=None, token=None):
         """Port of KeyBoardVersion_Check (WriteMode==1): probe report IDs 3,0,2."""
+        device = self.dev if device is None else device
         zero = bytearray(8)
         for rid in (3, 0, 2):
-            if self.dev.write_device(rid, zero):
+            if not App._version_probe_current(self, device, token):
+                return
+            if device.write_device(rid, zero):
                 self._ui_q.put(lambda found=rid: self._apply_report_id(
-                    found, "Keyboard reportID = %d" % found))
+                    found, "Keyboard reportID = %d" % found,
+                    device=device, token=token))
                 return
         self._ui_q.put(lambda: self._apply_report_id(
             0, "Version check: no reportID accepted, defaulting to 0",
-            confirmed=False))
+            confirmed=False, device=device, token=token))
 
-    def _apply_report_id(self, report_id, message, confirmed=True):
+    def _version_probe_current(self, device, token):
+        return device is self.dev and (token is None or token == self._probe_token)
+
+    def _apply_report_id(
+            self, report_id, message, confirmed=True, *, device=None, token=None):
+        if device is not None and not App._version_probe_current(self, device, token):
+            return
         self.kp.ReportID = report_id
         # mkp-state-50: 0 is both a real report ID and the no-answer fallback.
         # Only the device-reported case says anything about the protocol.
