@@ -5625,3 +5625,241 @@ def test_failed_domain_cools_before_released_slot_can_be_claimed(headless_dispat
     assert claims == [None]
     assert list(dispatcher.queue_items) == [second]
     assert dispatcher.metrics["failures"] == 1
+
+
+def test_pidfile_stale_reclamation_holds_os_guard(tmp_path, monkeypatch):
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    monkeypatch.setattr(link_queue.StateFileLock, "_pid_is_running", staticmethod(lambda _pid: False))
+    first = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+    second = link_queue.StateFileLock(first.state_path)
+    Path(first.lock_path).write_text("pid=999999\n", encoding="utf-8")
+    checked, resume, owned, release = (threading.Event() for _ in range(4))
+    errors = []
+    stale_check = first._pidfile_is_stale
+
+    def delayed_check():
+        stale = stale_check()
+        checked.set()
+        assert resume.wait(3)
+        return stale
+
+    def owner():
+        try:
+            first.acquire()
+            first.acquire()
+            owned.set()
+            assert release.wait(3)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            first.release()
+
+    monkeypatch.setattr(first, "_pidfile_is_stale", delayed_check)
+    worker = threading.Thread(target=owner)
+    worker.start()
+    try:
+        assert checked.wait(3)
+        with pytest.raises(link_queue.StateFileLockError):
+            second.acquire()
+        resume.set()
+        assert owned.wait(3)
+        with pytest.raises(link_queue.StateFileLockError):
+            second.acquire()
+    finally:
+        resume.set()
+        release.set()
+        worker.join(3)
+    assert not worker.is_alive()
+    assert not errors
+    second.acquire()
+    second.release()
+    second.release()
+    assert Path(f"{first.lock_path}.guard").is_file()
+    assert not Path(first.lock_path).exists()
+
+
+def test_pidfile_guard_releases_after_process_death(tmp_path, monkeypatch):
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    lock = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+    ready = tmp_path / "ready"
+    code = (
+        "import sys,time; from pathlib import Path; import link_queue; "
+        "link_queue.fcntl=None; lock=link_queue.StateFileLock(sys.argv[1]); "
+        "lock.acquire(); Path(sys.argv[2]).touch(); time.sleep(30)"
+    )
+    environment = dict(os.environ, XDG_CONFIG_HOME=str(tmp_path / "config"))
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, lock.state_path, str(ready)], cwd=ROOT,
+        env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+        with pytest.raises(link_queue.StateFileLockError):
+            lock.acquire()
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=3)
+    lock.acquire()
+    lock.release()
+    assert Path(f"{lock.lock_path}.guard").is_file()
+
+
+@pytest.mark.parametrize("acquire", [True, False])
+def test_pidfile_windows_guard_locks_first_byte(tmp_path, monkeypatch, acquire):
+    calls = []
+    msvcrt = types.SimpleNamespace(
+        LK_NBLCK=20, LK_UNLCK=21,
+        locking=lambda fd, mode, count: calls.append((mode, count, os.lseek(fd, 0, os.SEEK_CUR))),
+    )
+    with (tmp_path / "guard").open("w+b") as handle:
+        handle.seek(3)
+        with monkeypatch.context() as patch:
+            patch.setattr(link_queue.sys, "platform", "win32")
+            patch.setitem(sys.modules, "msvcrt", msvcrt)
+            link_queue._set_file_lock(handle.fileno(), acquire=acquire)
+    assert calls == [(20 if acquire else 21, 1, 0)]
+    assert (tmp_path / "guard").read_bytes() == b""
+
+
+@pytest.mark.parametrize("error_number", [13, 5])
+def test_pidfile_guard_acquire_errors_close_descriptor(tmp_path, monkeypatch, error_number):
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    lock = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+    seen = []
+
+    def fail(fd, *, acquire):
+        seen.append(fd)
+        raise OSError(error_number, "guard unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(link_queue, "_set_file_lock", fail)
+        error = link_queue.StateFileLockError if error_number == 13 else OSError
+        with pytest.raises(error):
+            lock.acquire()
+    assert lock._guard_fd is None
+    with pytest.raises(OSError):
+        os.fstat(seen[0])
+    lock.acquire()
+    lock.release()
+
+
+def test_pidfile_guard_release_error_still_closes_descriptor(tmp_path, monkeypatch):
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    lock = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+    lock.acquire()
+    fd = lock._guard_fd
+
+    def fail(_fd, *, acquire):
+        assert not acquire
+        raise OSError("unlock failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(link_queue, "_set_file_lock", fail)
+        with pytest.raises(OSError, match="unlock failed"):
+            lock.release()
+    assert lock._guard_fd is None
+    assert lock._fd is None
+    with pytest.raises(OSError):
+        os.fstat(fd)
+    lock.acquire()
+    lock.release()
+
+
+def test_pidfile_open_failure_releases_guard(tmp_path, monkeypatch):
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    lock = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+    with monkeypatch.context() as patch:
+        patch.setattr(lock, "_open_pidfile", lambda: (_ for _ in ()).throw(OSError("disk full")))
+        with pytest.raises(OSError, match="disk full"):
+            lock.acquire()
+    assert lock._guard_fd is None
+    lock.acquire()
+    lock.release()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory", "fifo"])
+def test_lock_guard_rejects_nonregular_path_without_mutation(tmp_path, kind):
+    guard = tmp_path / "lock.guard"
+    target = tmp_path / "foreign-empty"
+    target.touch()
+    if kind == "symlink":
+        try:
+            guard.symlink_to(target)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+    elif kind == "directory":
+        guard.mkdir()
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO creation unavailable")
+        os.mkfifo(guard)
+    with pytest.raises(OSError, match="regular file"):
+        link_queue._open_guard_file(str(guard))
+    assert target.read_bytes() == b""
+    assert os.path.lexists(guard)
+
+
+@pytest.mark.parametrize("use_nofollow", [True, False])
+def test_lock_guard_rejects_symlink_swap_before_open(tmp_path, monkeypatch, use_nofollow):
+    guard = tmp_path / "lock.guard"
+    target = tmp_path / "foreign-empty"
+    target.touch()
+    opened = []
+    real_open = os.open
+    if not use_nofollow:
+        monkeypatch.delattr(link_queue.os, "O_NOFOLLOW", raising=False)
+
+    def swap(path, flags, mode):
+        assert path == str(guard)
+        try:
+            guard.symlink_to(target)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+        fd = real_open(path, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(link_queue.os, "open", swap)
+    with pytest.raises(OSError):
+        link_queue._open_guard_file(str(guard))
+    assert target.read_bytes() == b""
+    assert guard.is_symlink()
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_lock_guard_rejects_descriptor_path_identity_mismatch(tmp_path, monkeypatch):
+    guard = tmp_path / "lock.guard"
+    target = tmp_path / "foreign-empty"
+    guard.touch()
+    target.touch()
+    opened = []
+    real_open = os.open
+
+    def replaced_path(_path, flags, mode):
+        fd = real_open(target, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(link_queue.os, "open", replaced_path)
+    with pytest.raises(OSError, match="changed while opening"):
+        link_queue._open_guard_file(str(guard))
+    assert target.read_bytes() == b""
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+@pytest.mark.parametrize("contents", [b"", b"existing guard"])
+def test_pidfile_guard_preserves_existing_contents(tmp_path, monkeypatch, contents):
+    monkeypatch.setattr(link_queue, "fcntl", None)
+    lock = link_queue.StateFileLock(str(tmp_path / "state.yaml"))
+    guard = Path(f"{lock.lock_path}.guard")
+    guard.write_bytes(contents)
+    lock.acquire()
+    lock.release()
+    assert guard.read_bytes() == contents

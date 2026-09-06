@@ -32,6 +32,7 @@ import hashlib
 import itertools
 import json
 import os
+import stat
 import tempfile
 import queue
 import re
@@ -281,6 +282,42 @@ class StateFileLockError(RuntimeError):
     """Raised when another process already owns the queue state lock."""
 
 
+def _guard_file_stat(path: str) -> os.stat_result:
+    result = os.lstat(path)
+    if not stat.S_ISREG(result.st_mode):
+        raise OSError(errno.EINVAL, "Lock guard must be a regular file", path)
+    return result
+
+
+def _open_guard_file(path: str) -> int:
+    with contextlib.suppress(FileNotFoundError):
+        _guard_file_stat(path)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        path_stat, fd_stat = _guard_file_stat(path), os.fstat(fd)
+        if not stat.S_ISREG(fd_stat.st_mode) or not os.path.samestat(path_stat, fd_stat):
+            raise OSError(errno.EINVAL, "Lock guard changed while opening", path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _set_file_lock(fd: int, *, acquire: bool) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        mode = msvcrt.LK_NBLCK if acquire else msvcrt.LK_UNLCK
+        msvcrt.locking(fd, mode, 1)
+        return
+    import fcntl
+
+    mode = fcntl.LOCK_EX | fcntl.LOCK_NB if acquire else fcntl.LOCK_UN
+    fcntl.flock(fd, mode)
+
+
 class StateFileLock:
     """Single-instance guard for one queue state file."""
 
@@ -289,6 +326,7 @@ class StateFileLock:
         self.lock_path = f"{state_path}.lock"
         self._fh: TextIO | None = None
         self._fd: int | None = None
+        self._guard_fd: int | None = None
         self._owns_pidfile = False
 
     def acquire(self) -> None:
@@ -318,26 +356,47 @@ class StateFileLock:
         self._write_metadata(fh.fileno())
 
     def _acquire_pidfile(self) -> None:
+        self._acquire_pidfile_guard()
         try:
-            fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            self._fd = self._open_pidfile()
+            self._owns_pidfile = True
+            self._write_metadata(self._fd)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                self._release_pidfile()
+            raise
+
+    def _acquire_pidfile_guard(self) -> None:
+        # Keep this inode permanently: unlinking it could split ownership across
+        # different files. The kernel releases ownership if the process dies.
+        # Windows byte locks may extend past EOF, so this file can stay empty.
+        fd = _open_guard_file(f"{self.lock_path}.guard")
+        try:
+            self._lock_pidfile_guard(fd)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._guard_fd = fd
+
+    def _lock_pidfile_guard(self, fd: int) -> None:
+        try:
+            _set_file_lock(fd, acquire=True)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise self._locked_error() from exc
+            raise
+
+    def _open_pidfile(self) -> int:
+        try:
+            return os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError as exc:
             if not self._pidfile_is_stale():
                 raise self._locked_error() from exc
             self._unlink_lock_file()
             try:
-                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                return os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             except FileExistsError as retry_exc:
                 raise self._locked_error() from retry_exc
-        self._fd = fd
-        self._owns_pidfile = True
-        try:
-            self._write_metadata(fd)
-        except BaseException:
-            try:
-                self._release_pidfile()
-            except OSError:
-                pass
-            raise
 
     def _pidfile_is_stale(self) -> bool:
         pid = self._read_pidfile_pid()
@@ -415,15 +474,28 @@ class StateFileLock:
             self._fh = None
 
     def _release_pidfile(self) -> None:
-        if self._fd is None:
-            return
         try:
-            os.close(self._fd)
+            if self._fd is None:
+                return
+            try:
+                os.close(self._fd)
+            finally:
+                self._fd = None
+                if self._owns_pidfile:
+                    self._owns_pidfile = False
+                    self._unlink_lock_file()
         finally:
-            self._fd = None
-            if self._owns_pidfile:
-                self._owns_pidfile = False
-                self._unlink_lock_file()
+            self._release_pidfile_guard()
+
+    def _release_pidfile_guard(self) -> None:
+        if self._guard_fd is None:
+            return
+        fd = self._guard_fd
+        self._guard_fd = None
+        try:
+            _set_file_lock(fd, acquire=False)
+        finally:
+            os.close(fd)
 
     def _write_metadata(self, fd: int) -> None:
         payload = f"pid={os.getpid()}\nstate={self.state_path}\n".encode("utf-8")
