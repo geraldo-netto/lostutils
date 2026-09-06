@@ -60,3 +60,63 @@ def test_pinned_metadata_permission_failure_propagates_before_timestamp_changes(
     assert raised.value is failure
     assert destination.stat().st_mtime_ns == before.st_mtime_ns
     assert destination.stat().st_mode == before.st_mode
+
+
+@pytest.fixture
+def pinned_directory(tmp_path):
+    descriptor = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        yield tmp_path, descriptor
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("replacement", ["file", "directory"])
+def test_pinned_open_rejects_replacement_and_closes_descriptor(
+        pinned_directory, monkeypatch, replacement):
+    root, directory_fd = pinned_directory
+    payload = root / "payload"
+    payload.write_bytes(b"original")
+    expected = payload.stat()
+    payload.rename(root / "original")
+    if replacement == "file":
+        payload.write_bytes(b"replaced")
+    else:
+        payload.mkdir()
+    opened = []
+    real_open = os.open
+
+    def tracking_open(name, flags, *args, **kwargs):
+        descriptor = real_open(name, flags, *args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(rf.os, "open", tracking_open)
+    with pytest.raises(RuntimeError, match="source entry changed while opening"):
+        with rf._open_pinned_file(directory_fd, payload.name, expected):
+            pytest.fail("replacement must not become a trusted source stream")
+
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    assert (root / "original").read_bytes() == b"original"
+    assert os.fstat(directory_fd).st_ino == root.stat().st_ino
+
+
+def test_pinned_read_detects_same_size_mutation_and_closes_stream(pinned_directory):
+    root, directory_fd = pinned_directory
+    payload = root / "payload"
+    payload.write_bytes(b"original")
+    expected = payload.stat()
+
+    with pytest.raises(RuntimeError, match="source entry changed while reading"):
+        with rf._open_pinned_file(directory_fd, payload.name, expected) as stream:
+            descriptor = stream.fileno()
+            assert stream.read() == b"original"
+            payload.write_bytes(b"modified")
+            os.utime(payload, ns=(expected.st_atime_ns, expected.st_mtime_ns + 1_000_000_000))
+
+    assert stream.closed
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+    assert payload.read_bytes() == b"modified"
