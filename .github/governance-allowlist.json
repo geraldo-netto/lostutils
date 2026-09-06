@@ -1,0 +1,8 @@
+[
+  {
+    "path": "AGENTS.md",
+    "rule": "private-home-path",
+    "sha256": "c75af12227d3b30d04e07f1a312437d75019dc09729e42dcfa2cb6875cb3a192",
+    "reason": "Policy documentation uses an ellipsis as the generic home-directory placeholder."
+  }
+]

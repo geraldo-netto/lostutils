@@ -223,9 +223,12 @@ Untrusted inputs are size-bounded before they are read into memory: `--max-ics-b
 
 GitHub Actions runs Ruff and Pyright against root scripts, then executes unit, regression, integration, and Hypothesis fuzz tests on Python 3.12. CI requires at least 80% global branch coverage and at least 80% statement coverage for every measured function or method.
 
+Before installing dependencies, CI runs the standalone `.github/check_governance.py` guard over Git-tracked text, including tests, documentation, and configuration. It rejects common provider tokens, private-key headers, literal credential assignments, and private home-directory paths. Diagnostics contain only repository-relative filename, line number, and rule; matched values are never printed. Binary assets are skipped, while invalid encodings in source/configuration files fail the check. This is a targeted literal guard, not a complete secret-history scanner. Intentional fixtures or generic examples require an explicit `.github/governance-allowlist.json` entry containing the exact repository-relative `path`, `rule`, SHA-256 of the full matched text as `sha256`, and a nonempty `reason`; exceptions for a different value/file/rule do not apply, and unused exceptions fail CI.
+
 Run the same gates locally:
 
 ```bash
+python3 .github/check_governance.py
 python3 -m pip install -r requirements-ci.txt
 ruff check *.py
 pyright --pythonpath "$(command -v python3)" *.py
