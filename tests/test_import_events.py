@@ -23,11 +23,13 @@ import import_events
 
 @pytest.fixture(autouse=True)
 def _reset_paddle_runtime_state():
+    import_events.reset_model_verification_cache()
     import_events.reset_paddle_ocr_state()
     import_events._TESSERACT_PATH_CACHE.clear()
     import_events._STAGE_CACHE_COUNTS.clear()
     import_events.reset_stage_file_hash_cache()
     yield
+    import_events.reset_model_verification_cache()
     import_events.reset_paddle_ocr_state()
     import_events._TESSERACT_PATH_CACHE.clear()
     import_events._STAGE_CACHE_COUNTS.clear()
@@ -3017,6 +3019,144 @@ def test_verify_sha256_passes_on_match(tmp_path):
     import_events._verify_sha256(str(f), hashlib.sha256(data).hexdigest())
 
     assert f.exists()
+
+
+def test_live_llm_cache_hits_hash_unchanged_models_once(tmp_path, monkeypatch):
+    model, clip = tmp_path / "model.gguf", tmp_path / "clip.gguf"
+    model.write_bytes(b"model weights")
+    clip.write_bytes(valid_clip_bytes())
+    sha256 = import_events.hashlib.sha256
+    config = import_events.ModelConfig(
+        model_path=str(model), clip_path=str(clip),
+        model_sha256=sha256(model.read_bytes()).hexdigest(),
+        clip_sha256=sha256(clip.read_bytes()).hexdigest(),
+        model_managed=False, clip_managed=False,
+    )
+    client = object()
+    monkeypatch.setattr(import_events, "_LLM_CACHE", OrderedDict([
+        (import_events._llm_cache_key(config), client),
+    ]))
+    hashes = []
+
+    def count_hashes():
+        hashes.append(True)
+        return sha256()
+
+    monkeypatch.setattr(import_events.hashlib, "sha256", count_hashes)
+    for _ in range(3):
+        assert import_events.get_llm(config) is client
+    assert len(hashes) == 2
+    import_events.reset_model_verification_cache()
+    assert import_events.get_llm(config) is client
+    assert len(hashes) == 4
+
+
+@pytest.mark.parametrize("change", ["overwrite", "replace", "pin"])
+def test_model_verification_invalidates_changed_identity_or_pin(tmp_path, change):
+    path = tmp_path / "model.gguf"
+    path.write_bytes(b"original")
+    expected = import_events.hashlib.sha256(b"original").hexdigest()
+    import_events._verify_sha256(str(path), expected)
+    original = path.stat()
+    if change == "overwrite":
+        path.write_bytes(b"modified")
+        os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+    elif change == "replace":
+        replacement = tmp_path / "replacement.gguf"
+        replacement.write_bytes(b"modified")
+        os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
+        os.replace(replacement, path)
+    else:
+        expected = "0" * 64
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        import_events._verify_sha256(str(path), expected, delete_on_mismatch=False)
+    assert path.exists()
+
+
+def test_model_verification_cache_has_bounded_lru_and_reset(tmp_path, monkeypatch):
+    monkeypatch.setattr(import_events, "MODEL_VERIFICATION_CACHE_SIZE", 2)
+    expected = import_events.hashlib.sha256(b"weights").hexdigest()
+    paths = [tmp_path / f"model-{index}.gguf" for index in range(3)]
+    for path in paths:
+        path.write_bytes(b"weights")
+    for path in (paths[0], paths[1], paths[0], paths[2]):
+        import_events._verify_sha256(str(path), expected)
+
+    keys = list(import_events._MODEL_VERIFICATION_CACHE)
+    assert [key[0] for key in keys] == [str(paths[0]), str(paths[2])]
+    import_events.reset_model_verification_cache()
+    assert not import_events._MODEL_VERIFICATION_CACHE
+
+
+def test_model_changed_during_verification_is_preserved_and_not_cached(tmp_path, monkeypatch):
+    path = tmp_path / "model.gguf"
+    path.write_bytes(b"original")
+    sha256 = import_events.hashlib.sha256
+    expected = sha256(b"original").hexdigest()
+
+    class MutatingHasher:
+        def __init__(self):
+            self.digest = sha256()
+
+        def update(self, chunk):
+            self.digest.update(chunk)
+            path.write_bytes(b"modified")
+
+        def hexdigest(self):
+            return self.digest.hexdigest()
+
+    monkeypatch.setattr(import_events.hashlib, "sha256", MutatingHasher)
+    with pytest.raises(ValueError, match="changed during verification"):
+        import_events._verify_sha256(str(path), expected)
+    assert path.read_bytes() == b"modified"
+    assert not import_events._MODEL_VERIFICATION_CACHE
+
+
+def test_model_verification_without_change_time_does_not_reuse_cache(tmp_path, monkeypatch):
+    path = tmp_path / "model.gguf"
+    path.write_bytes(b"original")
+    expected = import_events.hashlib.sha256(b"original").hexdigest()
+    monkeypatch.setattr(import_events, "_model_change_time", lambda *_args: None)
+    import_events._verify_sha256(str(path), expected)
+    original = path.stat()
+    path.write_bytes(b"modified")
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        import_events._verify_sha256(str(path), expected, delete_on_mismatch=False)
+    assert not import_events._MODEL_VERIFICATION_CACHE
+
+
+@pytest.mark.parametrize("outcome", ["success", "false", "error", "missing"])
+def test_windows_model_change_time_queries_native_metadata(tmp_path, monkeypatch, outcome):
+    import ctypes
+    path = tmp_path / "model.gguf"
+    path.write_bytes(b"weights")
+    calls = []
+
+    class Query:
+        def __call__(self, handle, level, output, size):
+            calls.append((handle, level, size))
+            if outcome == "error":
+                raise OSError("metadata query failed")
+            output._obj.ChangeTime = 123456789
+            return outcome == "success"
+
+    query = Query()
+    kernel = types.SimpleNamespace(GetFileInformationByHandleEx=query)
+    runtime = types.SimpleNamespace(get_osfhandle=lambda _fd: 42)
+    with monkeypatch.context() as context:
+        context.setattr(import_events.sys, "platform", "win32")
+        context.setitem(sys.modules, "msvcrt", None if outcome == "missing" else runtime)
+        context.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: kernel, raising=False)
+        result = import_events._model_change_time(str(path), path.stat())
+
+    assert result == (123456789 if outcome == "success" else None)
+    assert bool(calls) is (outcome != "missing")
+    if calls:
+        assert calls[0][:2] == (42, 0)
+        assert len(query.argtypes) == 4
 
 
 def test_apply_default_tz_attaches_to_naive_datetime():

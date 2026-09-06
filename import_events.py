@@ -39,6 +39,7 @@ MODEL_FILENAME = "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
 CLIP_FILENAME = "mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf"
 CACHE_DIR_ENV = "IMPORT_EVENTS_CACHE_DIR"
 DEFAULT_LLM_CACHE_SIZE = 1
+MODEL_VERIFICATION_CACHE_SIZE = 16
 DEFAULT_LLM_CONTEXT_SIZE = 0
 DEFAULT_LLM_MAX_TOKENS = 512
 DEFAULT_LLM_GPU_LAYERS = 0
@@ -819,6 +820,7 @@ MAX_ICS_BYTES = 4 * 1024 * 1024
 # enough for vision OCR without the memory blow-up of full-resolution pixmaps.
 
 _LLM_CACHE: "OrderedDict[tuple, Any]" = OrderedDict()
+_MODEL_VERIFICATION_CACHE: "OrderedDict[tuple, None]" = OrderedDict()
 _FILE_SHA256_CACHE: "OrderedDict[tuple[str, int, int], Optional[str]]" = OrderedDict()
 _LLM_CACHE_LOCK = threading.RLock()
 _FILE_SHA256_CACHE_LOCK = threading.Lock()
@@ -1063,18 +1065,86 @@ def _quiet_output_context(verbose: bool):
 # --------------------------------------------------------------------------- #
 # Model bootstrap
 # --------------------------------------------------------------------------- #
+def reset_model_verification_cache() -> None:
+    with _LLM_CACHE_LOCK:
+        _MODEL_VERIFICATION_CACHE.clear()
+
+
+def _model_change_time(path: str, stat: os.stat_result) -> Optional[int]:
+    if sys.platform != "win32":
+        return stat.st_ctime_ns
+    # Windows st_ctime is creation time. FileBasicInfo supplies the actual
+    # change time, including writes whose modification timestamp is restored.
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class FileBasicInfo(ctypes.Structure):
+            _fields_ = [
+                ("CreationTime", ctypes.c_longlong),
+                ("LastAccessTime", ctypes.c_longlong),
+                ("LastWriteTime", ctypes.c_longlong),
+                ("ChangeTime", ctypes.c_longlong),
+                ("FileAttributes", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        query = kernel32.GetFileInformationByHandleEx
+        query.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        query.restype = wintypes.BOOL
+        info = FileBasicInfo()
+        with open(path, "rb") as handle:
+            found = query(
+                msvcrt.get_osfhandle(handle.fileno()), 0,
+                ctypes.byref(info), ctypes.sizeof(info),
+            )
+        return int(info.ChangeTime) if found else None
+    except (ImportError, AttributeError, OSError):
+        return None
+
+
+def _model_verification_key(path: str, expected: str) -> tuple:
+    stat = os.stat(path)
+    return (
+        os.path.realpath(path), expected, stat.st_dev, stat.st_ino, stat.st_size,
+        stat.st_mtime_ns, _model_change_time(path, stat),
+    )
+
+
+def _remember_model_verification(key: tuple) -> None:
+    if key[-1] is None:
+        return
+    with _LLM_CACHE_LOCK:
+        _MODEL_VERIFICATION_CACHE[key] = None
+        _MODEL_VERIFICATION_CACHE.move_to_end(key)
+        while len(_MODEL_VERIFICATION_CACHE) > MODEL_VERIFICATION_CACHE_SIZE:
+            _MODEL_VERIFICATION_CACHE.popitem(last=False)
+
+
 def _verify_sha256(
     path: str, expected: Optional[str], *, delete_on_mismatch: bool = True
 ) -> None:
-    """Verify a model digest, deleting only managed-cache files on mismatch."""
+    """Cache successful pins by path, digest, inode, size, and change timestamps.
+
+    The 16-entry LRU is invalidated by identity changes or the public
+    reset_model_verification_cache hook; mismatches are never cached.
+    """
     if not expected:
         logger.warning("No SHA-256 pinned for %s; skipping integrity check.", _display_path(path))
         return
+    key = _model_verification_key(path, expected)
+    with _LLM_CACHE_LOCK:
+        if key[-1] is not None and key in _MODEL_VERIFICATION_CACHE:
+            _MODEL_VERIFICATION_CACHE.move_to_end(key)
+            return
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     actual = h.hexdigest()
+    if key != _model_verification_key(path, expected):
+        raise ValueError(f"Model file changed during verification: {path}")
     if actual != expected:
         action = "deleting managed cache entry" if delete_on_mismatch else "leaving custom file unchanged"
         logger.warning(
@@ -1084,6 +1154,7 @@ def _verify_sha256(
         if delete_on_mismatch:
             os.remove(path)
         raise ValueError(f"SHA-256 mismatch for {path}: expected {expected}, got {actual}")
+    _remember_model_verification(key)
 
 
 def _clip_projector_supports_mtmd(path: str) -> bool:
@@ -1367,6 +1438,7 @@ def reset_llm_cache() -> None:
         while _LLM_CACHE:
             _key, client = _LLM_CACHE.popitem(last=False)
             _close_cached_llm(client)
+        reset_model_verification_cache()
 
 
 atexit.register(reset_llm_cache)
