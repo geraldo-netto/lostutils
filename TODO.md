@@ -4,7 +4,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| bt-test-61 | open | low | low | bookmark-tidy.py:940 — [test coverage] Add focused coverage for _redacted_url: the full suite plus fuzz reaches 75% statement coverage, below the enforced 80% per-function gate. Verify malformed URL redaction preserves privacy on parser errors. |
 | dnp-val-60 | open | medium | low | dedupl_numpy.py:140 — [input validation / command safety] Reject empty paths, embedded NULs, and unencodable JSON surrogates before emitting decoded paths; `"first\u0000second"` produces two operands under `--print0`, `"\ud800"` raises an uncaught UnicodeEncodeError, and a CRLF record with an empty path is accepted. Validate decoded and raw paths and report malformed records consistently. |
 | dnv3-api-60 | open | medium | low | deduplicate-by-namev3.py:219 — [API contract & compatibility] Make data records distinguishable from comment records when a cleaned input starts with `#`; input lines `#abc` and `#abd` emit `#abc;#abd;1`, which consumers following the documented instruction to skip `#` lines discard. Define escaping or an unambiguous comment marker and cover both emitters. |
 | dnv3-rob-60 | open | low | low | deduplicate-by-namev3.py:235 — [robustness / recovery] Flush output inside the BrokenPipeError guard and silence stdout after an early reader close; a real subprocess whose reader closes after one byte currently exits 120 with `Exception ignored while flushing sys.stdout`. `_emit_results` returns False but main ignores it. |

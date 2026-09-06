@@ -1622,3 +1622,11 @@ def test_distinct_query_octets_remain_distinct_bookmarks():
         [_sample_bookmark(url) for url in urls], set(), bookmark_tidy.NormalizeOptions())
     assert immutable == []
     assert [bookmark.url for bookmark in mutable] == urls
+
+
+@pytest.mark.parametrize("url,expected", [
+    ("https://user:synthetic@[broken", "<redacted URL>"),
+    ("https://[broken", "https://[broken"),
+])
+def test_malformed_url_redaction_never_exposes_credentials(url, expected):
+    assert bookmark_tidy._redacted_url(url) == expected
