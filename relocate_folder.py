@@ -1634,6 +1634,30 @@ def _verify_pinned_symlink(
         )
 
 
+def _pinned_kind_verify_task(
+    source_path: Path,
+    target: Path,
+    rel: Path,
+    directory_fd: int,
+    name: str,
+    source_stat: os.stat_result,
+    checksum: bool,
+) -> Callable[[], None] | None:
+    # Capture source data before the walker advances and closes directory_fd.
+    mode = source_stat.st_mode
+    if stat.S_ISREG(mode):
+        digest = _digest_pinned_file(directory_fd, name, source_stat) if checksum else None
+        return partial(_verify_pinned_file, source_path, target, rel, source_stat, digest)
+    if stat.S_ISDIR(mode):
+        return partial(_verify_pinned_directory, source_path, target, rel)
+    if stat.S_ISLNK(mode):
+        return partial(
+            _verify_pinned_symlink, source_path,
+            _read_pinned_symlink(directory_fd, name, source_stat), target, rel,
+        )
+    return None
+
+
 def _iter_pinned_verify_tasks(
     source_fd: int,
     source_label: Path,
@@ -1644,26 +1668,9 @@ def _iter_pinned_verify_tasks(
     for rel, directory_fd, name, source_stat in _walk_pinned_entries(source_fd):
         source_path = source_label / rel
         target = destination / rel
-        mode = source_stat.st_mode
-        if stat.S_ISREG(mode):
-            digest = (
-                _digest_pinned_file(directory_fd, name, source_stat)
-                if checksum else None
-            )
-            task = partial(
-                _verify_pinned_file,
-                source_path, target, rel, source_stat, digest,
-            )
-        elif stat.S_ISDIR(mode):
-            task = partial(
-                _verify_pinned_directory, source_path, target, rel)
-        elif stat.S_ISLNK(mode):
-            task = partial(
-                _verify_pinned_symlink, source_path,
-                _read_pinned_symlink(directory_fd, name, source_stat),
-                target, rel,
-            )
-        else:
+        task = _pinned_kind_verify_task(
+            source_path, target, rel, directory_fd, name, source_stat, checksum)
+        if task is None:
             continue
         yield task
         if verify_ownership:

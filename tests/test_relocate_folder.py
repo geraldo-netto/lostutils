@@ -5155,3 +5155,31 @@ def test_cleanup_preserves_replacement_that_wins_before_quarantine(
     assert (parked / "payload.txt").read_text(encoding="utf-8") == "source"
     if block_restore:
         assert (target / "new.txt").read_text(encoding="utf-8") == "new occupant"
+
+
+@pytest.mark.parametrize("checksum", [False, True])
+@pytest.mark.parametrize("ownership", [False, True])
+def test_pinned_verify_tasks_outlive_source_descriptors(tmp_path, checksum, ownership):
+    source, target = tmp_path / "source", tmp_path / "target"
+    _make_tree(source)
+    _copy_identical(source, target)
+    os.mkfifo(source / "skipped-fifo")
+    source_fd, _identity = rf._source_identity_fd(source)
+    try:
+        tasks = list(rf._iter_pinned_verify_tasks(
+            source_fd, source, target, checksum, ownership))
+    finally:
+        os.close(source_fd)
+
+    assert len(tasks) == 4 * (2 if ownership else 1)
+    for task in tasks:
+        task()
+
+    (target / "sub" / "file.txt").write_text("HELLO WORLD")
+    if checksum:
+        with pytest.raises(RuntimeError, match="hash mismatch"):
+            for task in tasks:
+                task()
+    else:
+        for task in tasks:
+            task()
