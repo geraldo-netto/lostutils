@@ -338,12 +338,32 @@ backup_identity_matches() {
 }
 
 print_restore_instructions() {
-    echo "  sudo rm -rf $FW_DIR"
-    echo "  sudo mv $BACKUP_DIR $FW_DIR"
-    echo "  sudo rm -f $PENDING_INITRAMFS_FILE"
+    print_restore_step '&&' "${SUDO[@]}" test -d "$BACKUP_DIR"
+    printf "  test \"\$("
+    printf '%q ' "${SUDO[@]}" stat -c '%d:%i' -- "$BACKUP_DIR"
+    printf ')" = %q &&\n' "$BACKUP_ID"
+    # Invalidate the installed version before changing firmware, so an interrupted
+    # manual restore cannot make the next run falsely skip an older/mixed tree.
+    print_restore_step '&&' "${SUDO[@]}" rm -f -- "$STAMP_FILE"
+    print_restore_step '&&' "${SUDO[@]}" sync -f -- "$(dirname -- "$STAMP_FILE")"
+    print_restore_step '&&' "${SUDO[@]}" rm -rf -- "$FW_DIR"
+    print_restore_step '&&' "${SUDO[@]}" cp -a -- "$BACKUP_DIR" "$FW_DIR"
+    print_restore_step '&&' "${SUDO[@]}" sync -f -- "$FW_DIR"
+    print_restore_step '&&' "${SUDO[@]}" rm -f -- "$PENDING_INITRAMFS_FILE" "$RECOVERY_FILE"
+    print_restore_step '&&' "${SUDO[@]}" sync -f -- "$(dirname -- "$PENDING_INITRAMFS_FILE")"
+    print_restore_step '&&' "${SUDO[@]}" sync -f -- "$(dirname -- "$RECOVERY_FILE")"
     if [ "${#INITRAMFS_CMD[@]}" -gt 0 ]; then
-        echo "  sudo ${INITRAMFS_CMD[*]}"
+        print_restore_step '&&' "${SUDO[@]}" "${INITRAMFS_CMD[@]}"
     fi
+    print_restore_step '' printf '%s\n' 'Backup restored; installed-release stamp invalidated.'
+}
+
+print_restore_step() {
+    local ending=$1
+    shift
+    printf '  '
+    printf '%q ' "$@"
+    printf '%s\n' "$ending"
 }
 
 restore_verified_backup() {

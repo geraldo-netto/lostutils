@@ -248,7 +248,7 @@ class UpdaterHarness:
             """,
         )
 
-    def run(self, *arguments: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+    def _environment(self, **overrides: str) -> dict[str, str]:
         environment = os.environ.copy()
         environment.update(
             {
@@ -274,16 +274,27 @@ class UpdaterHarness:
             }
         )
         environment.update(overrides)
+        return environment
+
+    def run(self, *arguments: str, **overrides: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", "-c", 'printf "%s\\n" "$$" > "$FAKE_UPDATER_PID"; exec bash "$@"',
              "firmware-fixture", str(UPDATER), *arguments],
             cwd=REPO_ROOT,
-            env=environment,
+            env=self._environment(**overrides),
             text=True,
             capture_output=True,
             start_new_session=True,
             timeout=20,
             check=False,
+        )
+
+    def restore(self, output: str, **overrides: str) -> subprocess.CompletedProcess[str]:
+        commands = output.split("To restore from backup if needed:\n", 1)[1].split("\n\n", 1)[0]
+        return subprocess.run(
+            ["bash"], input=commands, cwd=self.root,
+            env=self._environment(**overrides), text=True, capture_output=True,
+            timeout=20, check=False,
         )
 
 
@@ -636,3 +647,65 @@ def test_failed_commit_sync_rewrites_rollback_intent_before_restoring(tmp_path: 
     rewritten = next(i for i, event in enumerate(rollback) if event[1] == "installing")
     restored = next(i for i, event in enumerate(rollback) if event[0] == str(harness.firmware))
     assert rewritten < restored
+
+
+def test_printed_manual_restore_invalidates_stamp_and_allows_later_update(tmp_path: Path) -> None:
+    harness = UpdaterHarness(tmp_path)
+    download_fixture = tmp_path / "downloadable.tar.gz"
+    shutil.copyfile(harness.archive, download_fixture)
+    installed = harness.run()
+    assert installed.returncode == 0, installed.stderr
+
+    restored = harness.restore(installed.stdout)
+
+    assert restored.returncode == 0, restored.stderr
+    _assert_original_firmware(harness)
+    assert harness.backup.is_dir()
+    assert not harness.stamp.exists()
+    assert not harness.pending.exists()
+    assert harness.initramfs_log.read_text().splitlines() == ["-u -k all", "-u -k all"]
+    retried = harness.run(BACKUP_DIR=str(tmp_path / "next-backup"), FAKE_ARCHIVE=str(download_fixture))
+    assert retried.returncode == 0, retried.stderr
+    assert "nothing to do" not in retried.stdout
+    assert harness.stamp.read_text().strip() == harness.release
+
+
+def test_printed_manual_restore_quotes_shell_characters_in_paths(tmp_path: Path) -> None:
+    harness = UpdaterHarness(tmp_path / "spaces;$(touch INJECTED)")
+    installed = harness.run()
+    assert installed.returncode == 0, installed.stderr
+
+    restored = harness.restore(installed.stdout)
+
+    assert restored.returncode == 0, restored.stderr
+    _assert_original_firmware(harness)
+    assert not (harness.root / "INJECTED").exists()
+    assert not harness.stamp.exists()
+
+
+def test_printed_manual_restore_rejects_replaced_backup_before_invalidating_stamp(tmp_path: Path) -> None:
+    harness = UpdaterHarness(tmp_path)
+    installed = harness.run()
+    assert installed.returncode == 0, installed.stderr
+    harness.backup.rename(tmp_path / "original-backup")
+    shutil.copytree(tmp_path / "original-backup", harness.backup)
+
+    refused = harness.restore(installed.stdout)
+
+    assert refused.returncode != 0
+    assert harness.stamp.read_text().strip() == harness.release
+    assert (harness.firmware / "vendor" / "device.bin.zst").exists()
+
+
+def test_failed_manual_initramfs_rebuild_never_leaves_newer_release_stamp(tmp_path: Path) -> None:
+    harness = UpdaterHarness(tmp_path)
+    installed = harness.run()
+    assert installed.returncode == 0, installed.stderr
+
+    restored = harness.restore(installed.stdout, FAIL_INITRAMFS="1")
+
+    assert restored.returncode == 1
+    _assert_original_firmware(harness)
+    assert not harness.stamp.exists()
+    assert "Backup restored;" not in restored.stdout
+    assert harness.backup.exists()
