@@ -4265,7 +4265,8 @@ def test_copy_tree_cleans_partial_target_on_keyboardinterrupt(tmp_path, monkeypa
     from pathlib import Path as _P
 
     def boom_copytree(s, d, **kw):
-        assert kw["dirs_exist_ok"] is True
+        assert not kw.get("dirs_exist_ok", False)
+        _P(d).mkdir()
         (_P(d) / "partial").write_text("x")
         raise KeyboardInterrupt
 
@@ -5075,7 +5076,9 @@ def test_copy_refuses_target_created_during_publication(
     replacement_identity = []
 
     def race_publication(original, destination):
-        if destination == target and original.name.startswith(".relocate-copy-"):
+        if destination == target and (
+                original.name.startswith(".relocate-copy-")
+                or original.parent.name.startswith(".relocate-copy-")):
             target.mkdir()
             replacement_identity.append(target.stat().st_ino)
             if not empty_replacement:
@@ -5155,6 +5158,41 @@ def test_cleanup_preserves_replacement_that_wins_before_quarantine(
     assert (parked / "payload.txt").read_text(encoding="utf-8") == "source"
     if block_restore:
         assert (target / "new.txt").read_text(encoding="utf-8") == "new occupant"
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_unpinned_copy_preserves_destination_created_before_population(
+        tmp_path, monkeypatch, replacement):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    (source / "valuable.txt").write_text("copied source", encoding="utf-8")
+    source.chmod(0o750)
+    foreign = tmp_path / "foreign" if replacement == "symlink" else target
+    original_copytree = rf.shutil.copytree
+    identities = []
+
+    def competing_destination(src, dst, **kwargs):
+        if Path(src) == source:
+            if target.exists():
+                target.rename(tmp_path / "replaced-copy")
+            foreign.mkdir()
+            (foreign / "valuable.txt").write_text("unrelated content", encoding="utf-8")
+            foreign.chmod(0o755)
+            if replacement == "symlink":
+                target.symlink_to(foreign, target_is_directory=True)
+            identities.append(target.lstat().st_ino)
+        return original_copytree(src, dst, **kwargs)
+
+    monkeypatch.setattr(rf.shutil, "copytree", competing_destination)
+    with pytest.raises(FileExistsError):
+        rf.copy_tree(source, target, check_space=False)
+
+    assert target.lstat().st_ino == identities[0]
+    assert (foreign / "valuable.txt").read_text(encoding="utf-8") == "unrelated content"
+    assert foreign.stat().st_mode & 0o777 == 0o755
+    assert (source / "valuable.txt").read_text(encoding="utf-8") == "copied source"
+    assert not list(tmp_path.glob(".relocate-copy-*"))
 
 
 @pytest.mark.parametrize("checksum", [False, True])

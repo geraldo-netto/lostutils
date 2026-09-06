@@ -790,13 +790,16 @@ class _CopyTargetOwner:
         staging = Path(tempfile.mkdtemp(prefix=".relocate-copy-", dir=self.path.parent))
         try:
             # Pin the privately created inode before publishing its name.
-            self.descriptor = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            opened = os.fstat(self.descriptor)
-            self.identity = (opened.st_dev, opened.st_ino)
+            self.pin(staging)
             _rename_noreplace(staging, self.path)
         finally:
             if staging.exists():
                 _swallow_or_warn(f"remove empty copy staging {staging}", staging.rmdir)
+
+    def pin(self, path: Path) -> None:
+        self.descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        opened = os.fstat(self.descriptor)
+        self.identity = (opened.st_dev, opened.st_ino)
 
     def matches(self, path: Path) -> bool:
         return self.identity is not None and _backup_identity_ok(path, self.identity)
@@ -1179,16 +1182,11 @@ def _copy_tree_owned(
     watchdog = _OperationStallWatchdog("copytree")
     copy_function = _copytree_copy_function(progress_cb, apparent_total, watchdog)
     try:
-        owner.create()
         with watchdog:
-            shutil.copytree(
-                src, dst,
-                symlinks=True,
-                copy_function=copy_function,
-                ignore=_make_ignore_specials(skipped, cache),
-                dirs_exist_ok=True,
+            _copy_tree_unpublished(
+                src, dst, owner, copy_function=copy_function,
+                skipped=skipped, mode_cache=cache, jobs=jobs,
             )
-        _replicate_ownership(src, dst, jobs=jobs)
     except BaseException:
         # rf-robust-02: catch BaseException (not just Exception) so a
         # KeyboardInterrupt mid-copy also cleans the half-written `dst` instead
@@ -1200,6 +1198,37 @@ def _copy_tree_owned(
         owner.cleanup("failed copy")
         raise
     return skipped
+
+
+@contextmanager
+def _copy_staging_envelope(parent: Path) -> Iterator[Path]:
+    private = Path(tempfile.mkdtemp(prefix=".relocate-copy-", dir=parent))
+    try:
+        yield private
+    except BaseException:
+        _rmtree_logging(private, "failed copy")
+        raise
+    else:
+        _swallow_or_warn(f"remove empty copy staging {private}", private.rmdir)
+
+
+def _copy_tree_unpublished(
+    src: Path, dst: Path, owner: _CopyTargetOwner, *,
+    copy_function: Callable[..., Path], skipped: list[Path], mode_cache: dict[Path, int],
+    jobs: int | None,
+) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # Keep the populated tree inside a private envelope even when source
+    # metadata gives its eventual owner access to the completed copy.
+    with _copy_staging_envelope(dst.parent) as private:
+        staged = private / "target"
+        shutil.copytree(
+            src, staged, symlinks=True, copy_function=copy_function,
+            ignore=_make_ignore_specials(skipped, mode_cache),
+        )
+        _replicate_ownership(src, staged, jobs=jobs)
+        owner.pin(staged)
+        _rename_noreplace(staged, dst)
 
 
 # Headroom factor: filesystems need a little slack for metadata, journals, and
