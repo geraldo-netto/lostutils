@@ -4384,7 +4384,7 @@ def _parse_iso(value: str) -> Optional[Any]:
     if not isinstance(value, str):
         return None
     normalized = _normalize_iso(value)
-    for parser in (datetime.fromisoformat, date.fromisoformat):
+    for parser in (date.fromisoformat, datetime.fromisoformat):
         try:
             return parser(normalized)
         except (ValueError, TypeError):

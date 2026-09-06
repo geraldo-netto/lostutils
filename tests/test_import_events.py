@@ -2870,19 +2870,11 @@ def test_match_end_to_start_leaves_matching_types():
     assert import_events._match_end_to_start(sd, ed) is ed
 
 
-def test_build_ics_keeps_all_day_end_as_date(monkeypatch):
+def test_build_ics_keeps_all_day_end_as_date():
     pytest.importorskip("icalendar")
     # A date (all-day) end against a timed start must stay an all-day DTEND so a
     # multi-day span is preserved rather than collapsed to midnight.
-    real_parse = import_events._parse_iso
-
-    def fake_parse(value):
-        if value == "END":
-            return date(2026, 6, 25)
-        return real_parse(value)
-
-    monkeypatch.setattr(import_events, "_parse_iso", fake_parse)
-    events = [{"title": "Mix", "start": "2026-06-22T10:00", "end": "END",
+    events = [{"title": "Mix", "start": "2026-06-22T10:00", "end": "2026-06-25",
                "location": "", "source": "s", "type": "x"}]
 
     ics = import_events.build_ics(events).decode("utf-8")
@@ -2948,9 +2940,29 @@ def test_parse_iso_accepts_time_without_seconds_with_offset():
 
 
 def test_parse_iso_date_only_and_full_datetime():
-    # datetime.fromisoformat is tried first, so a bare date yields midnight.
-    assert import_events._parse_iso("2026-06-22") == datetime(2026, 6, 22, 0, 0)
+    assert type(import_events._parse_iso("2026-06-22")) is date
+    assert import_events._parse_iso("2026-06-22") == date(2026, 6, 22)
     assert import_events._parse_iso("2026-06-22T14:00:30") == datetime(2026, 6, 22, 14, 0, 30)
+
+
+@pytest.mark.parametrize("start,end", [
+    ("DTSTART;VALUE=DATE:20260907", "DTEND;VALUE=DATE:20260908"),
+    ("DTSTART:20260907T000000", "DTEND:20260908T000000"),
+])
+def test_ics_roundtrip_preserves_all_day_and_timed_midnight(start, end, tmp_path):
+    pytest.importorskip("icalendar")
+    source = tmp_path / "calendar.ics"
+    source.write_text("\r\n".join([
+        "BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT",
+        "UID:roundtrip@example.test", start, end, "SUMMARY:Calendar event",
+        "END:VEVENT", "END:VCALENDAR", "",
+    ]), encoding="utf-8")
+
+    events = import_events.extract_from_ics(source)
+    serialized = import_events.build_ics(events).decode("utf-8")
+
+    assert start in serialized.splitlines()
+    assert end in serialized.splitlines()
 
 
 def test_parse_iso_rejects_garbage():
