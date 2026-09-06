@@ -120,3 +120,36 @@ def test_pinned_read_detects_same_size_mutation_and_closes_stream(pinned_directo
     with pytest.raises(OSError):
         os.fstat(descriptor)
     assert payload.read_bytes() == b"modified"
+
+
+def test_pinned_copy_surfaces_directory_walk_error_and_removes_owned_target(
+        tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    blocked = source / "blocked"
+    blocked.mkdir(parents=True)
+    (blocked / "valuable.txt").write_bytes(b"untouched")
+    target = tmp_path / "target"
+    source_inode = source.stat().st_ino
+    failure = PermissionError("access denied during source walk")
+    real_open = os.open
+
+    def denied(name, flags, *args, **kwargs):
+        directory_fd = kwargs.get("dir_fd")
+        if (name == "blocked" and directory_fd is not None
+                and os.fstat(directory_fd).st_ino == source_inode):
+            raise failure
+        return real_open(name, flags, *args, **kwargs)
+
+    source_fd = os.open(source, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        monkeypatch.setattr(rf.os, "open", denied)
+        with pytest.raises(PermissionError) as raised:
+            rf.copy_tree(source, target, source_fd=source_fd, check_space=False)
+        assert raised.value is failure
+        assert os.fstat(source_fd).st_ino == source_inode
+    finally:
+        os.close(source_fd)
+
+    assert (blocked / "valuable.txt").read_bytes() == b"untouched"
+    assert not target.exists()
+    assert not list(tmp_path.glob(".relocate-*"))
