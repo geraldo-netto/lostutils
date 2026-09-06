@@ -16,6 +16,7 @@ set -euo pipefail
 FIRMWARE_URL="${FIRMWARE_URL:-https://www.kernel.org/pub/linux/kernel/firmware/}"
 FW_DIR="${FW_DIR:-/lib/firmware}"
 STAMP_FILE="${STAMP_FILE:-/var/lib/linux-firmware-release.version}"
+RECOVERY_FILE="${STAMP_FILE}.recovery"
 PENDING_INITRAMFS_FILE="${PENDING_INITRAMFS_FILE:-/var/lib/linux-firmware-initramfs.pending}"
 # Stamp left behind by the superseded update-linux-firmware.sh; removed on
 # success so the two installers can't disagree about who manages FW_DIR
@@ -59,6 +60,12 @@ for argument in "$@"; do
             ;;
     esac
 done
+
+# Firmware layout and syncfs durability barriers are Linux-specific.
+if [ "$(uname -s)" != Linux ]; then
+    echo "ERROR: firmware updates require Linux" >&2
+    exit 1
+fi
 
 validate_space_threshold() {
     local name=$1
@@ -201,7 +208,7 @@ retry_pending_initramfs() {
         echo "ERROR: pending initramfs rebuild failed again; marker retained: $PENDING_INITRAMFS_FILE" >&2
         return 1
     fi
-    "${SUDO[@]}" rm -f -- "$PENDING_INITRAMFS_FILE"
+    remove_root_state "$PENDING_INITRAMFS_FILE"
     echo "Pending initramfs rebuild completed."
 }
 
@@ -218,6 +225,9 @@ acquire_process_lock() {
 
 validate_rollback_paths() {
     FW_DIR=$(realpath -m -- "$FW_DIR")
+    STAMP_FILE=$(realpath -m -s -- "$STAMP_FILE")
+    PENDING_INITRAMFS_FILE=$(realpath -m -s -- "$PENDING_INITRAMFS_FILE")
+    RECOVERY_FILE="${STAMP_FILE}.recovery"
     BACKUP_DIR=$(realpath -m -- "$BACKUP_DIR")
     if [ "$FW_DIR" = / ] || [ "$BACKUP_DIR" = / ]; then
         echo "ERROR: firmware and backup paths must not resolve to filesystem root" >&2
@@ -235,11 +245,29 @@ validate_rollback_paths() {
             return 1
             ;;
     esac
+    validate_state_paths
+}
+
+validate_state_paths() {
+    local path
+    for path in "$STAMP_FILE" "$PENDING_INITRAMFS_FILE" "$RECOVERY_FILE"; do
+        case "$path" in
+            "$FW_DIR"|"$FW_DIR"/*|"$BACKUP_DIR"|"$BACKUP_DIR"/*)
+                echo "ERROR: release/recovery state must be outside firmware and backup trees: $path" >&2
+                return 1
+                ;;
+        esac
+    done
+    if [ "$STAMP_FILE" = "$PENDING_INITRAMFS_FILE" ] \
+            || [ "$RECOVERY_FILE" = "$PENDING_INITRAMFS_FILE" ]; then
+        echo "ERROR: release, pending, and recovery state paths must be distinct" >&2
+        return 1
+    fi
 }
 
 # --- Preflight ---------------------------------------------------------------
 
-for cmd in curl flock gpg realpath stat tar rsync; do
+for cmd in curl flock gpg realpath stat sync tar rsync; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: missing required command: $cmd" >&2
         exit 1
@@ -309,6 +337,15 @@ backup_identity_matches() {
         && [ "$(stat -c '%d:%i' -- "$BACKUP_DIR" 2>/dev/null)" = "$BACKUP_ID" ]
 }
 
+print_restore_instructions() {
+    echo "  sudo rm -rf $FW_DIR"
+    echo "  sudo mv $BACKUP_DIR $FW_DIR"
+    echo "  sudo rm -f $PENDING_INITRAMFS_FILE"
+    if [ "${#INITRAMFS_CMD[@]}" -gt 0 ]; then
+        echo "  sudo ${INITRAMFS_CMD[*]}"
+    fi
+}
+
 restore_verified_backup() {
     echo "Automatic rollback: restoring verified backup $BACKUP_DIR" >&2
     if ! backup_identity_matches; then
@@ -316,22 +353,154 @@ restore_verified_backup() {
         print_restore_instructions >&2
         return 1
     fi
+    # A failed commit sync may still have published the committed record.
+    # Restore the installing phase durably before beginning any rollback.
+    if ! write_recovery_record installing; then
+        echo "CRITICAL: could not persist rollback intent; firmware and backup retained." >&2
+        return 1
+    fi
+    # Keep the backup intact until rollback and its journal removal are durable:
+    # a second crash during restoration must remain recoverable on the next run.
     if ! "${SUDO[@]}" rm -rf -- "$FW_DIR" \
-            || ! "${SUDO[@]}" mv -- "$BACKUP_DIR" "$FW_DIR"; then
-        echo "CRITICAL: automatic rollback failed; firmware may be incomplete." >&2
-        print_restore_instructions >&2
+            || ! "${SUDO[@]}" cp -a -- "$BACKUP_DIR" "$FW_DIR" \
+            || ! "${SUDO[@]}" sync -f -- "$FW_DIR"; then
+        echo "CRITICAL: automatic rollback failed; recovery journal and backup retained." >&2
         return 1
     fi
-    "${SUDO[@]}" rm -f -- "$PENDING_INITRAMFS_FILE"
+    if ! restore_previous_stamp \
+            || ! remove_root_state "$PENDING_INITRAMFS_FILE" \
+            || ! remove_root_state "$RECOVERY_FILE"; then
+        echo "CRITICAL: firmware was restored, but recovery state could not be committed; rerun." >&2
+        return 1
+    fi
     FW_MUTATION_STARTED=0
+    "${SUDO[@]}" rm -rf -- "$BACKUP_DIR"
+    echo "Automatic rollback completed; original firmware restored." >&2
+}
+
+restore_previous_stamp() {
     if [ "$INSTALLED" = none ]; then
-        "${SUDO[@]}" rm -f -- "$STAMP_FILE"
-    elif ! write_root_state "$STAMP_FILE" "$INSTALLED"; then
-        echo "CRITICAL: firmware was restored, but the previous release stamp could not be restored." >&2
-        print_restore_instructions >&2
+        remove_root_state "$STAMP_FILE"
+    else
+        write_root_state "$STAMP_FILE" "$INSTALLED"
+    fi
+}
+
+write_root_stream() {
+    local path=$1 temporary
+    if ! temporary=$("${SUDO[@]}" mktemp "${path}.tmp.XXXXXX"); then
         return 1
     fi
-    echo "Automatic rollback completed; original firmware restored." >&2
+    if ! "${SUDO[@]}" tee "$temporary" >/dev/null \
+            || ! "${SUDO[@]}" chmod 0644 -- "$temporary" \
+            || ! "${SUDO[@]}" sync -f -- "$temporary" \
+            || ! "${SUDO[@]}" mv -fT -- "$temporary" "$path" \
+            || ! "${SUDO[@]}" sync -f -- "$(dirname -- "$path")"; then
+        "${SUDO[@]}" rm -f -- "$temporary"
+        return 1
+    fi
+}
+
+write_root_state() {
+    printf '%s\n' "$2" | write_root_stream "$1"
+}
+
+remove_root_state() {
+    "${SUDO[@]}" rm -f -- "$1" \
+        && "${SUDO[@]}" sync -f -- "$(dirname -- "$1")"
+}
+
+root_path_is_protected() {
+    local owner mode
+    owner=$(stat -c '%u' -- "$1") || return 1
+    mode=$(stat -c '%a' -- "$1") || return 1
+    [[ "$owner" = 0 && "$mode" =~ ^[0-7]{3,4}$ ]] \
+        && (( (8#$mode & 0022) == 0 ))
+}
+
+validate_recovery_location() {
+    local parent
+    parent=$(dirname -- "$RECOVERY_FILE")
+    if [ -L "$parent" ] || [ ! -d "$parent" ] \
+            || ! root_path_is_protected "$parent"; then
+        echo "ERROR: recovery journal needs a root-owned parent without group/other write access: $parent" >&2
+        return 1
+    fi
+    if [ -L "$RECOVERY_FILE" ]; then
+        echo "ERROR: recovery journal must not be a symlink: $RECOVERY_FILE" >&2
+        return 1
+    fi
+}
+
+read_recovery_record() {
+    local value=
+    RECOVERY_FIELDS=()
+    if [ ! -f "$RECOVERY_FILE" ] || ! root_path_is_protected "$RECOVERY_FILE" \
+            || [ "$(stat -c '%h' -- "$RECOVERY_FILE")" -ne 1 ] \
+            || [ "$(stat -c '%s' -- "$RECOVERY_FILE")" -gt 65536 ]; then
+        echo "ERROR: recovery journal must be a protected root-owned regular file with one link and at most 64 KiB" >&2
+        return 1
+    fi
+    while IFS= read -r -d '' value; do
+        RECOVERY_FIELDS+=("$value")
+        [ "${#RECOVERY_FIELDS[@]}" -le 9 ] || return 1
+    done < "$RECOVERY_FILE"
+    [ -z "$value" ] && [ "${#RECOVERY_FIELDS[@]}" -eq 9 ]
+}
+
+validate_recovery_record() {
+    [ "${RECOVERY_FIELDS[0]}" = firmware-update-v1 ] \
+        && [[ "${RECOVERY_FIELDS[1]}" =~ ^(installing|committed)$ ]] \
+        && [ "${RECOVERY_FIELDS[2]}" = "$FW_DIR" ] \
+        && [ "${RECOVERY_FIELDS[5]}" = "$STAMP_FILE" ] \
+        && [ "${RECOVERY_FIELDS[6]}" = "$PENDING_INITRAMFS_FILE" ] \
+        && [[ "${RECOVERY_FIELDS[4]}" =~ ^[0-9]+:[0-9]+$ ]] \
+        && [[ "${RECOVERY_FIELDS[7]}" =~ ^(none|linux-firmware-[0-9]+)$ ]] \
+        && [[ "${RECOVERY_FIELDS[8]}" =~ ^linux-firmware-[0-9]+$ ]]
+}
+
+write_recovery_record() {
+    printf '%s\0' firmware-update-v1 "$1" "$FW_DIR" "$BACKUP_DIR" "$BACKUP_ID" \
+        "$STAMP_FILE" "$PENDING_INITRAMFS_FILE" "$INSTALLED" "$RELEASE" \
+        | write_root_stream "$RECOVERY_FILE"
+}
+
+recover_interrupted_install() {
+    # Isolate recorded paths/state from the next requested installation.
+    local BACKUP_DIR BACKUP_ID INSTALLED RELEASE
+    local FW_DIR="$FW_DIR" STAMP_FILE="$STAMP_FILE"
+    local PENDING_INITRAMFS_FILE="$PENDING_INITRAMFS_FILE" RECOVERY_FILE="$RECOVERY_FILE"
+    local FW_MUTATION_STARTED=0
+    local -a RECOVERY_FIELDS
+    validate_recovery_location || return 1
+    [ -e "$RECOVERY_FILE" ] || return 0
+    if ! read_recovery_record || ! validate_recovery_record; then
+        echo "ERROR: invalid recovery journal or configured paths disagree: $RECOVERY_FILE" >&2
+        return 1
+    fi
+    BACKUP_DIR=${RECOVERY_FIELDS[3]}
+    BACKUP_ID=${RECOVERY_FIELDS[4]}
+    INSTALLED=${RECOVERY_FIELDS[7]}
+    RELEASE=${RECOVERY_FIELDS[8]}
+    validate_rollback_paths || return 1
+    if [ "$BACKUP_DIR" != "${RECOVERY_FIELDS[3]}" ]; then
+        echo "ERROR: recorded backup path has changed; refusing recovery" >&2
+        return 1
+    fi
+    validate_installed_stamp && validate_pending_initramfs_file || return 1
+    if [ "${RECOVERY_FIELDS[1]}" = committed ]; then
+        finish_committed_recovery
+    else
+        restore_verified_backup
+    fi
+}
+
+finish_committed_recovery() {
+    if [ "$(cat "$STAMP_FILE" 2>/dev/null)" != "$RELEASE" ]; then
+        echo "ERROR: committed journal disagrees with installed stamp; inspect recovery state" >&2
+        return 1
+    fi
+    remove_root_state "$RECOVERY_FILE"
 }
 
 cleanup() {
@@ -362,6 +531,8 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
+
+recover_interrupted_install
 
 # A failing df must fail the check, not silently skip it: an empty result
 # would make '[ "" -lt N ]' exit 2, which an if-condition treats as false
@@ -640,31 +811,11 @@ echo "Backup verified"
 
 # --- Install -----------------------------------------------------------------
 
-print_restore_instructions() {
-    echo "  sudo rm -rf $FW_DIR"
-    echo "  sudo mv $BACKUP_DIR $FW_DIR"
-    echo "  sudo rm -f $PENDING_INITRAMFS_FILE"
-    if [ "${#INITRAMFS_CMD[@]}" -gt 0 ]; then
-        echo "  sudo ${INITRAMFS_CMD[*]}"
-    fi
-}
-
-write_root_state() {
-    local path=$1
-    local value=$2
-    local temporary
-    if ! temporary=$("${SUDO[@]}" mktemp "${path}.tmp.XXXXXX"); then
-        return 1
-    fi
-    if ! printf '%s\n' "$value" | "${SUDO[@]}" tee "$temporary" >/dev/null \
-            || ! "${SUDO[@]}" chmod 0644 -- "$temporary" \
-            || ! "${SUDO[@]}" mv -f -- "$temporary" "$path"; then
-        "${SUDO[@]}" rm -f -- "$temporary"
-        return 1
-    fi
-}
-
 echo "[7/7] Installing (staging -> $FW_DIR, root:root, 0644/0755)..."
+if ! "${SUDO[@]}" sync -f -- "$BACKUP_DIR" || ! write_recovery_record installing; then
+    echo "ERROR: could not persist recovery journal; firmware was not modified" >&2
+    exit 1
+fi
 PENDING_STATE_STARTED=1
 if ! write_root_state "$PENDING_INITRAMFS_FILE" "$RELEASE"; then
     echo "ERROR: could not persist pending initramfs state; firmware was not modified" >&2
@@ -703,11 +854,16 @@ fi
 
 # Commit success before the initramfs rebuild: the firmware install itself is
 # now complete, and a rebuild failure must not force a 600MB reinstall.
-if ! write_root_state "$STAMP_FILE" "$RELEASE"; then
+if ! "${SUDO[@]}" sync -f -- "$FW_DIR" || ! write_root_state "$STAMP_FILE" "$RELEASE"; then
     echo "ERROR: could not commit installed release stamp; rolling back" >&2
     exit 1
 fi
+if ! write_recovery_record committed; then
+    echo "ERROR: could not durably commit installation; rolling back" >&2
+    exit 1
+fi
 INSTALL_COMMITTED=1
+remove_root_state "$RECOVERY_FILE"
 "${SUDO[@]}" rm -f -- "$OLD_GIT_STAMP" 2>/dev/null || true
 
 if [ "${#INITRAMFS_CMD[@]}" -gt 0 ]; then
@@ -719,7 +875,7 @@ if [ "${#INITRAMFS_CMD[@]}" -gt 0 ]; then
         echo "  sudo ${INITRAMFS_CMD[*]}" >&2
         exit 1
     fi
-    "${SUDO[@]}" rm -f -- "$PENDING_INITRAMFS_FILE"
+    remove_root_state "$PENDING_INITRAMFS_FILE"
 fi
 
 rm -f -- "$TARBALL" "$SIG_PATH"
