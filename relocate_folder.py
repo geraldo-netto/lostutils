@@ -779,6 +779,75 @@ def _rmtree_logging(path: Path, context: str) -> None:
             "removal may be needed before re-running", path)
 
 
+@dataclass
+class _CopyTargetOwner:
+    path: Path
+    descriptor: int = -1
+    identity: tuple[int, int] | None = None
+
+    def create(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".relocate-copy-", dir=self.path.parent))
+        try:
+            # Pin the privately created inode before publishing its name.
+            self.descriptor = os.open(staging, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            opened = os.fstat(self.descriptor)
+            self.identity = (opened.st_dev, opened.st_ino)
+            _rename_noreplace(staging, self.path)
+        finally:
+            if staging.exists():
+                _swallow_or_warn(f"remove empty copy staging {staging}", staging.rmdir)
+
+    def matches(self, path: Path) -> bool:
+        return self.identity is not None and _backup_identity_ok(path, self.identity)
+
+    def close(self) -> None:
+        if self.descriptor >= 0:
+            os.close(self.descriptor)
+            self.descriptor = -1
+
+    def cleanup(self, context: str) -> None:
+        if not self.matches(self.path):
+            return
+        _log().warning("removing target %s after %s", self.path, context)
+        quarantine = None
+        try:
+            quarantine = Path(tempfile.mkdtemp(
+                prefix=".relocate-cleanup-", dir=self.path.parent))
+            held = quarantine / "target"
+            _rename_noreplace(self.path, held)
+            _dispose_quarantined_copy(self, held, context)
+        except (OSError, RuntimeError) as exc:
+            _log().warning("cleanup after %s failed: %s", context, exc)
+        finally:
+            if quarantine is not None:
+                _swallow_or_warn(f"remove cleanup staging {quarantine}", quarantine.rmdir)
+
+
+def _dispose_quarantined_copy(owner: _CopyTargetOwner, held: Path, context: str) -> None:
+    if owner.matches(held):
+        _rmtree_logging(held, context)
+        return
+    # A replacement can win between the precheck and rename. Restore it;
+    # an occupied original name leaves the replacement safely quarantined.
+    try:
+        _rename_noreplace(held, owner.path)
+    except (OSError, RuntimeError) as exc:
+        _log().error("replacement preserved at %s; restore to %s failed: %s",
+                     held, owner.path, exc)
+    else:
+        _log().warning("replacement restored at %s; refusing to remove it", owner.path)
+
+
+@contextmanager
+def _copy_target_owner(path: Path) -> Iterator[_CopyTargetOwner]:
+    owner = _CopyTargetOwner(path)
+    try:
+        yield owner
+    finally:
+        owner.close()
+
+
 def _copytree_copy_function(
     progress_cb: "Callable[[int, int], None] | None",
     total: int,
@@ -986,6 +1055,7 @@ def _copy_tree_pinned(
     mode_cache: dict[Path, int],
     progress_cb: "Callable[[int, int], None] | None",
     check_space: bool,
+    owner: _CopyTargetOwner,
 ) -> list[Path]:
     if _path_taken(destination):
         raise FileExistsError(
@@ -998,30 +1068,41 @@ def _copy_tree_pinned(
         apparent, allocated = _pinned_size_totals(source_fd)
     if check_space:
         _check_disk_space(source_label, destination, total_bytes=allocated)
+    watchdog = _OperationStallWatchdog("copytree")
+    try:
+        owner.create()
+        with watchdog:
+            return _populate_pinned_copy(
+                source_label, source_fd, destination, mode_cache,
+                progress_cb, apparent, watchdog,
+            )
+    except BaseException:
+        owner.cleanup("failed descriptor-pinned copy")
+        raise
+
+
+def _populate_pinned_copy(
+    source_label: Path, source_fd: int, destination: Path,
+    mode_cache: dict[Path, int], progress_cb: Callable[[int, int], None] | None,
+    apparent: int, watchdog: _OperationStallWatchdog,
+) -> list[Path]:
     skipped: list[Path] = []
     warning_limiter = _ChownWarningLimiter()
     directories = [(destination, os.fstat(source_fd))]
     copied = 0
-    watchdog = _OperationStallWatchdog("copytree")
-    try:
-        destination.mkdir(mode=0o700)
-        with watchdog:
-            for entry in _walk_pinned_entries(source_fd):
-                copied_size = _copy_pinned_entry(
-                    source_label, destination, entry, directories, skipped,
-                    mode_cache, warning_limiter,
-                )
-                if copied_size is not None:
-                    copied += copied_size
-                    if progress_cb is not None:
-                        progress_cb(copied, apparent)
-                watchdog.touch("copytree")
-        for target, entry_stat in reversed(directories):
-            _apply_pinned_metadata(target, entry_stat, warning_limiter)
-        warning_limiter.summarize()
-    except BaseException:
-        _rmtree_logging(destination, "failed descriptor-pinned copy")
-        raise
+    for entry in _walk_pinned_entries(source_fd):
+        copied_size = _copy_pinned_entry(
+            source_label, destination, entry, directories, skipped,
+            mode_cache, warning_limiter,
+        )
+        if copied_size is not None:
+            copied += copied_size
+            if progress_cb is not None:
+                progress_cb(copied, apparent)
+        watchdog.touch("copytree")
+    for target, entry_stat in reversed(directories):
+        _apply_pinned_metadata(target, entry_stat, warning_limiter)
+    warning_limiter.summarize()
     return skipped
 
 
@@ -1031,6 +1112,7 @@ def copy_tree(src: Path, dst: Path, *,
               progress_cb: "Callable[[int, int], None] | None" = None,
               check_space: bool = True,
               source_fd: int | None = None,
+              _target_owner: _CopyTargetOwner | None = None,
               ) -> list[Path]:
     """Copy src -> dst recursively, skipping non-regular files. Returns
     skipped paths.
@@ -1055,11 +1137,26 @@ def copy_tree(src: Path, dst: Path, *,
     `shutil.copytree` does anyway; an ENOSPC mid-copy still triggers the
     same cleanup. The walk is also skipped entirely when neither the
     precheck nor a `progress_cb` needs the byte total."""
+    ownership = (
+        _copy_target_owner(dst) if _target_owner is None else nullcontext(_target_owner)
+    )
+    with ownership as owner:
+        return _copy_tree_owned(
+            src, dst, mode_cache=mode_cache, jobs=jobs, progress_cb=progress_cb,
+            check_space=check_space, source_fd=source_fd, owner=owner,
+        )
+
+
+def _copy_tree_owned(
+    src: Path, dst: Path, *, mode_cache: dict[Path, int] | None,
+    jobs: int | None, progress_cb: Callable[[int, int], None] | None,
+    check_space: bool, source_fd: int | None, owner: _CopyTargetOwner,
+) -> list[Path]:
     cache = mode_cache if mode_cache is not None else {}
     if source_fd is not None:
         return _copy_tree_pinned(
             src, source_fd, dst, mode_cache=cache,
-            progress_cb=progress_cb, check_space=check_space,
+            progress_cb=progress_cb, check_space=check_space, owner=owner,
         )
     if _path_taken(dst):
         raise FileExistsError(
@@ -1082,12 +1179,14 @@ def copy_tree(src: Path, dst: Path, *,
     watchdog = _OperationStallWatchdog("copytree")
     copy_function = _copytree_copy_function(progress_cb, apparent_total, watchdog)
     try:
+        owner.create()
         with watchdog:
             shutil.copytree(
                 src, dst,
                 symlinks=True,
                 copy_function=copy_function,
                 ignore=_make_ignore_specials(skipped, cache),
+                dirs_exist_ok=True,
             )
         _replicate_ownership(src, dst, jobs=jobs)
     except BaseException:
@@ -1098,7 +1197,7 @@ def copy_tree(src: Path, dst: Path, *,
         # half-written `dst` survived a failed copy (read-only mount,
         # permission-denied target). The original exception is still
         # raised — the warning is informational.
-        _rmtree_logging(dst, "failed copy")
+        owner.cleanup("failed copy")
         raise
     return skipped
 
@@ -2951,6 +3050,18 @@ def _copy_and_verify(
     source_fd: int | None = None,
     source_id: tuple[int, int] | None = None,
 ) -> None:
+    with _copy_target_owner(plan.target) as owner:
+        _copy_and_verify_owned(
+            plan, owner, on_state=on_state, source_fd=source_fd, source_id=source_id)
+
+
+def _copy_and_verify_owned(
+    plan: Plan,
+    owner: _CopyTargetOwner,
+    on_state: Callable[[MigrationState], None] | None,
+    source_fd: int | None,
+    source_id: tuple[int, int] | None,
+) -> None:
     mode_cache: dict[Path, int] = {}
     if plan.strict:
         if source_fd is None:
@@ -2962,7 +3073,7 @@ def _copy_and_verify(
                             jobs=plan.jobs, check_space=plan.check_space,
                             progress_cb=(_copy_progress_callback()
                                          if plan.progress else None),
-                            source_fd=source_fd)
+                            source_fd=source_fd, _target_owner=owner)
         if on_state is not None:
             on_state(MigrationState.COPIED)  # rf-ddd-02: data on disk, pre-verify
         _report_skipped(skipped, plan.strict, mode_cache=mode_cache)
@@ -2976,29 +3087,10 @@ def _copy_and_verify(
         if source_id is not None:
             _assert_source_identity(plan.source, source_id)
     except BaseException:
-        # rf-robust-02: BaseException (not just Exception) so a Ctrl+C during
-        # verify also removes the partial target rather than blocking retry.
-        # rf-rel-03 / rf-conc-01: rmtree(plan.target) is reached only AFTER
-        # `verify_copy` has returned or raised. The rmtree-vs-read join
-        # guarantee is specific to the CHECKSUM branch: there `verify_copy`
-        # -> `_run_verify_pool` joins every still-running SHA-256 worker
-        # (shutdown(wait=True)) before propagating, so no hash thread is
-        # mid-read of a file under `plan.target` when we delete it. The
-        # size-only / ownership branch (checksum=False) runs its tasks
-        # sequentially with no pool, so there is no worker thread to race in
-        # the first place.
-        #
-        # rf-rel-06: log the destruction. A transient verify failure otherwise
-        # silently wipes a half-good target with no audit trail. The operator
-        # needs to know the partial copy is being removed before re-running.
-        _log().warning(
-            "removing target %s after verification failed or copy failed; the source is "
-            "untouched — re-run to retry", plan.target,
-        )
-        # rf-obs-02: record rmtree failures (like the copy_tree cleanup) instead
-        # of ignore_errors=True silently dropping them and the log above claiming
-        # a deletion that may not have happened.
-        _rmtree_logging(plan.target, "verify failure")
+        # Verification joins its readers before raising, including interrupts.
+        # The shared owner also distinguishes refused/preexisting targets from
+        # this attempt's copy and protects replacements during cleanup.
+        owner.cleanup("verification failed or copy failed")
         raise
 
 

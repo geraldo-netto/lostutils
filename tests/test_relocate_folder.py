@@ -1930,7 +1930,7 @@ def test_injected_blocking_hash_is_joined_before_rmtree(tmp_path, monkeypatch):
         raise RuntimeError("hash mismatch injected")
 
     def tracking_rmtree(p, *a, **k):
-        rmtree_seen.append((str(p), slow_finished.is_set()))
+        rmtree_seen.append((set(os.listdir(p)), slow_finished.is_set()))
         return real_rmtree(p, *a, **k)
 
     monkeypatch.setattr(rf.shutil, "rmtree", tracking_rmtree)
@@ -1938,7 +1938,9 @@ def test_injected_blocking_hash_is_joined_before_rmtree(tmp_path, monkeypatch):
     with rf.with_hash_fn(blocking_hash):
         with pytest.raises(RuntimeError):
             rf._copy_and_verify(plan)
-    target_deletes = [done for p, done in rmtree_seen if p == str(target)]
+    target_deletes = [
+        done for names, done in rmtree_seen if names == {"slow.txt", "boom.txt"}
+    ]
     assert target_deletes
     assert all(target_deletes)   # every target rmtree happened post-join
 
@@ -4049,7 +4051,7 @@ def test_copy_and_verify_rmtree_after_pool_joined(tmp_path, monkeypatch):
 
     def tracking_rmtree(p, *a, **k):
         # rf-rel-03: by the time we delete target, the slow hash must be done.
-        rmtree_calls.append((str(p), hash_finished.is_set()))
+        rmtree_calls.append((set(os.listdir(p)), hash_finished.is_set()))
         return real_rmtree(p, *a, **k)
 
     monkeypatch.setattr(rf, "_sha256", slow_then_fail_sha)
@@ -4059,7 +4061,9 @@ def test_copy_and_verify_rmtree_after_pool_joined(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError):
         rf._copy_and_verify(plan)
 
-    target_deletes = [done for p, done in rmtree_calls if p == str(target)]
+    target_deletes = [
+        done for names, done in rmtree_calls if names == {"a.txt", "b.txt"}
+    ]
     assert target_deletes  # target was cleaned up
     assert all(target_deletes)  # every target rmtree happened post-join
 
@@ -4261,7 +4265,7 @@ def test_copy_tree_cleans_partial_target_on_keyboardinterrupt(tmp_path, monkeypa
     from pathlib import Path as _P
 
     def boom_copytree(s, d, **kw):
-        _P(d).mkdir()
+        assert kw["dirs_exist_ok"] is True
         (_P(d) / "partial").write_text("x")
         raise KeyboardInterrupt
 
@@ -5041,3 +5045,113 @@ def test_help_states_the_documented_defaults(capsys):
     assert rf._disk_space_headroom() == rf._DISK_SPACE_HEADROOM
     assert rf._sha256_retry_attempts() == rf._SHA256_RETRY_ATTEMPTS
     assert rf._stale_pid_warn_threshold() == 1
+
+
+def test_main_preserves_preexisting_destination_after_copy_refusal(tmp_path):
+    source = tmp_path / "original" / "cache"
+    target = tmp_path / "destination" / "cache"
+    source.mkdir(parents=True)
+    target.mkdir(parents=True)
+    (source / "source.txt").write_text("source", encoding="utf-8")
+    (target / "valuable.txt").write_text("unrelated", encoding="utf-8")
+
+    result = rf.main([
+        str(source), str(target.parent), "--force", "--no-space-check"])
+
+    assert result == 1
+    assert (source / "source.txt").read_text(encoding="utf-8") == "source"
+    assert (target / "valuable.txt").read_text(encoding="utf-8") == "unrelated"
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("empty_replacement", [False, True])
+def test_copy_refuses_target_created_during_publication(
+        tmp_path, monkeypatch, pinned, empty_replacement):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    (source / "payload.txt").write_text("source", encoding="utf-8")
+    real_rename = rf._rename_noreplace
+    replacement_identity = []
+
+    def race_publication(original, destination):
+        if destination == target and original.name.startswith(".relocate-copy-"):
+            target.mkdir()
+            replacement_identity.append(target.stat().st_ino)
+            if not empty_replacement:
+                (target / "valuable.txt").write_text("unrelated", encoding="utf-8")
+        return real_rename(original, destination)
+
+    monkeypatch.setattr(rf, "_rename_noreplace", race_publication)
+    with pytest.raises(FileExistsError):
+        if pinned:
+            rf.execute(rf.Plan(source=source, target=target, force=True, check_space=False))
+        else:
+            rf.copy_tree(source, target, check_space=False)
+
+    assert target.stat().st_ino == replacement_identity[0]
+    assert not (target / "payload.txt").exists()
+    assert (source / "payload.txt").read_text(encoding="utf-8") == "source"
+    if not empty_replacement:
+        assert (target / "valuable.txt").read_text(encoding="utf-8") == "unrelated"
+    assert not list(tmp_path.glob(".relocate-copy-*"))
+
+
+def test_execute_preserves_target_replaced_during_verification(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    parked = tmp_path / "parked-copy"
+    source.mkdir()
+    (source / "payload.txt").write_text("source", encoding="utf-8")
+
+    def replace_target(*_args, **_kwargs):
+        target.rename(parked)
+        target.mkdir()
+        (target / "valuable.txt").write_text("unrelated", encoding="utf-8")
+        raise RuntimeError("verification failed")
+
+    monkeypatch.setattr(rf, "verify_copy", replace_target)
+    with pytest.raises(RuntimeError, match="verification failed"):
+        rf.execute(rf.Plan(source=source, target=target, force=True, check_space=False))
+
+    assert (source / "payload.txt").read_text(encoding="utf-8") == "source"
+    assert (target / "valuable.txt").read_text(encoding="utf-8") == "unrelated"
+    assert (parked / "payload.txt").read_text(encoding="utf-8") == "source"
+
+
+@pytest.mark.parametrize("block_restore", [False, True])
+def test_cleanup_preserves_replacement_that_wins_before_quarantine(
+        tmp_path, monkeypatch, block_restore):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    parked = tmp_path / "parked-copy"
+    source.mkdir()
+    (source / "payload.txt").write_text("source", encoding="utf-8")
+    real_rename = rf._rename_noreplace
+
+    def raced_rename(original, destination):
+        if original == target and destination.parent.name.startswith(".relocate-cleanup-"):
+            target.rename(parked)
+            target.mkdir()
+            (target / "valuable.txt").write_text("unrelated", encoding="utf-8")
+        if (block_restore and destination == target
+                and original.parent.name.startswith(".relocate-cleanup-")):
+            target.mkdir()
+            (target / "new.txt").write_text("new occupant", encoding="utf-8")
+        return real_rename(original, destination)
+
+    monkeypatch.setattr(rf, "_rename_noreplace", raced_rename)
+    monkeypatch.setattr(rf, "verify_copy", mock.Mock(side_effect=RuntimeError("verify failure")))
+    with pytest.raises(RuntimeError, match="verify failure"):
+        rf.execute(rf.Plan(source=source, target=target, force=True, check_space=False))
+
+    preserved = (
+        list(tmp_path.glob(".relocate-cleanup-*/target/valuable.txt"))
+        if block_restore else [target / "valuable.txt"]
+    )
+    assert len(preserved) == 1
+    assert preserved[0].read_text(encoding="utf-8") == "unrelated"
+    assert (source / "payload.txt").read_text(encoding="utf-8") == "source"
+    assert (parked / "payload.txt").read_text(encoding="utf-8") == "source"
+    if block_restore:
+        assert (target / "new.txt").read_text(encoding="utf-8") == "new occupant"
