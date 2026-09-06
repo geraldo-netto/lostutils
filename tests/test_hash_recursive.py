@@ -3847,3 +3847,82 @@ def test_walk_still_reports_real_inodes_when_the_cheap_stat_is_empty(
     assert len(results) == 2
     assert (0, 0) not in keys
     assert len(keys) == 2       # two distinct files, two distinct inode keys
+
+
+@pytest.mark.parametrize("function,args", [
+    ("hash_head", ()), ("hash_tail_and_samples", (8,)), ("hash_full", (8,)),
+])
+@pytest.mark.parametrize("walked", [False, True])
+def test_hash_rejects_same_size_write_during_read(
+        tmp_path, monkeypatch, capsys, function, args, walked):
+    path = tmp_path / "candidate.bin"
+    path.write_bytes(b"original")
+    before = path.stat()
+    expected = hr._stat_identity(before) if walked else None
+    config = hr.RunConfig(block_size=2, sample_size=1)
+    real_read = hr._read_window_into
+
+    def mutate_after_read(hasher, file_obj, length, strict):
+        complete = real_read(hasher, file_obj, length, strict)
+        path.write_bytes(b"modified")
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        return complete
+
+    monkeypatch.setattr(hr, "_read_window_into", mutate_after_read)
+
+    digest = getattr(hr, function)(str(path), *args, config=config, expected=expected)
+
+    assert digest is None
+    assert hr._stat_identity(path.stat()) == hr._stat_identity(before)
+    assert config.hash_error_logged == 1
+    assert "file timestamps changed while hashing" in capsys.readouterr().err
+
+
+def test_hash_rejects_change_timestamp_even_when_modification_time_is_unchanged(
+        tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    path = tmp_path / "candidate.bin"
+    path.write_bytes(b"original")
+    real_fstat = os.fstat
+    calls = 0
+
+    def changed_ctime(descriptor):
+        nonlocal calls
+        result = real_fstat(descriptor)
+        calls += 1
+        return SimpleNamespace(
+            st_dev=result.st_dev, st_ino=result.st_ino, st_size=result.st_size,
+            st_mtime_ns=result.st_mtime_ns,
+            st_ctime_ns=result.st_ctime_ns + (1 if calls > 1 else 0),
+        )
+
+    monkeypatch.setattr(hr.os, "fstat", changed_ctime)
+
+    assert hr.hash_head(str(path)) is None
+    assert "file timestamps changed while hashing" in capsys.readouterr().err
+
+
+def test_pipeline_never_confirms_duplicate_changed_after_hash_read(tmp_path, monkeypatch):
+    candidate, stable = tmp_path / "candidate.bin", tmp_path / "stable.bin"
+    candidate.write_bytes(b"original")
+    stable.write_bytes(b"original")
+    before = candidate.stat()
+    records = [_walk_record(candidate), _walk_record(stable)]
+    real_read = hr._read_window_into
+
+    def mutate_candidate(hasher, file_obj, length, strict):
+        complete = real_read(hasher, file_obj, length, strict)
+        if os.fstat(file_obj.fileno()).st_ino == before.st_ino:
+            candidate.write_bytes(b"modified")
+            os.utime(candidate, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+        return complete
+
+    monkeypatch.setattr(hr, "_read_window_into", mutate_candidate)
+    config = hr.RunConfig()
+
+    result = hr.find_duplicate_groups(records, jobs=1, config=config)
+
+    assert not result.groups
+    assert result.info["stage1_errors"] == 1
+    assert hr._run_exit_code(threading.Event(), {}, result.info, config) == 1

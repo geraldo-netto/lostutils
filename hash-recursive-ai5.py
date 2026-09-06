@@ -657,7 +657,8 @@ def _hash_file_windows(path, windows, config=None, expected=None):
     reading. A path swap or concurrent size mutation therefore discards the
     digest instead of attributing attacker-selected bytes to the walked file.
     Direct callers without a walked identity still get before/after descriptor
-    consistency checking."""
+    consistency checking. Modification/change timestamps are pinned within each
+    read so detectable same-size writes also invalidate the digest."""
     # hr-arch-03: normalise every window to FileWindow at the boundary
     # once. `FileWindow(*window)` accepts both raw 3-tuples (strict
     # defaults to False) and 4-tuples, so the read loop never arity-sniffs.
@@ -698,6 +699,7 @@ def _digest_file_windows(file_obj, windows, config, expected=None):
     initial = os.fstat(file_obj.fileno())
     pinned_identity = expected if expected is not None else _stat_identity(initial)
     _require_hash_identity(initial, pinned_identity)
+    timestamps = initial.st_mtime_ns, initial.st_ctime_ns
     hasher = _require_blake3().blake3()
     complete = True
     for window in windows:
@@ -706,7 +708,10 @@ def _digest_file_windows(file_obj, windows, config, expected=None):
                 hasher, file_obj, window.length, window.strict):
             complete = False
             break
-    _require_hash_identity(os.fstat(file_obj.fileno()), pinned_identity)
+    final = os.fstat(file_obj.fileno())
+    _require_hash_identity(final, pinned_identity)
+    if (final.st_mtime_ns, final.st_ctime_ns) != timestamps:
+        raise OSError(errno.EBUSY, "file timestamps changed while hashing")
     if not complete:
         _tick_shrank(config)
         return None
