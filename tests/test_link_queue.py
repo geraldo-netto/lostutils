@@ -5604,3 +5604,24 @@ def test_queue_renumber_does_not_recompute_command(app, monkeypatch):
         app._apply_queue_rows([("pending", number, item, (), "")], app.queue_tree)
     assert calls == [item]
     assert app.queue_tree.set("pending", "idx") == "2"
+
+
+def test_failed_domain_cools_before_released_slot_can_be_claimed(headless_dispatcher, monkeypatch):
+    dispatcher = headless_dispatcher
+    dispatcher.config.update(max_per_domain=1, failure_sleep_seconds=300, sleep_between_items=0)
+    first, second = q("http://same.test/first"), q("http://same.test/second")
+    dispatcher.queue_items[:] = [first, second]
+    monkeypatch.setattr(dispatcher, "_run_item", lambda *_args: 1)
+    release = dispatcher._release_item
+    claims = []
+
+    def competing_release(index, item):
+        release(index, item)
+        with dispatcher._dispatch_cv:
+            claims.append(dispatcher._try_claim_item(1))
+
+    monkeypatch.setattr(dispatcher, "_release_item", competing_release)
+    dispatcher._worker_step(0, threading.Event())
+    assert claims == [None]
+    assert list(dispatcher.queue_items) == [second]
+    assert dispatcher.metrics["failures"] == 1

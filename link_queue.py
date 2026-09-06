@@ -3008,14 +3008,10 @@ class Dispatcher:
         exit_code = -1
         try:
             exit_code = self._run_item(item, f"queue#{idx}")
+            # Publish before releasing the domain slot and waking another worker.
+            if exit_code not in (0, -1, COMMAND_TIMEOUT_EXIT):
+                self._trigger_failure_cooldown(idx, item, exit_code)
         finally:
-            # conc-05: release first, THEN observe pool saturation under
-            # the same queue_lock acquisition. The prior order (sample
-            # `other_free` before `_release_item`) sampled a stale view
-            # of `current_items` — between sample and release another
-            # worker could mutate it, leaving `other_free` desynced from
-            # the actual post-release state. Combining the release and
-            # the count into one critical section closes that race.
             self._release_item(idx, item)
             with self.queue_lock:
                 other_free = sum(
@@ -3028,8 +3024,6 @@ class Dispatcher:
             self._record_metric("completions")
         elif exit_code != COMMAND_TIMEOUT_EXIT:
             self._record_metric("failures")
-            if exit_code != -1:
-                self._trigger_failure_cooldown(idx, item, exit_code)  # pragma: no cover - trigger cooldown after failure
         self._update_status()
         self._maybe_inter_item_sleep(stop_self, other_free)
 
