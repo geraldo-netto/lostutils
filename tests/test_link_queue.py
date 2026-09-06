@@ -6038,3 +6038,22 @@ def test_double_click_selects_pointer_row_before_opening_editor(app, monkeypatch
     )
 
     assert opened == [("clicked-row", ("clicked-row",))]
+
+
+@pytest.mark.parametrize("path,expected", [
+    (r"D:\data\state.yaml", r"D:\data\state.yaml"),
+    (r"C:\outside\state.yaml", r"C:\outside\state.yaml"),
+    (r"C:\Example", "~"),
+])
+def test_home_relative_path_handles_windows_drives_and_outside_paths(monkeypatch, path, expected):
+    import ntpath
+
+    windows_path = types.SimpleNamespace(
+        abspath=ntpath.abspath, relpath=ntpath.relpath,
+        expanduser=lambda _path: r"C:\Example",
+    )
+    monkeypatch.setattr(link_queue, "os", types.SimpleNamespace(
+        path=windows_path, pardir=ntpath.pardir, curdir=ntpath.curdir, sep=ntpath.sep,
+    ))
+
+    assert link_queue._home_relative_path(path) == expected
