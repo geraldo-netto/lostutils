@@ -2224,7 +2224,11 @@ def test_shutdown_terminates_active_processes_before_join(app, monkeypatch):
 def test_register_process_during_shutdown_terminates_it(
         headless_dispatcher, monkeypatch):
     disp = headless_dispatcher
-    proc = object()
+    class Proc:
+        def poll(self):
+            return None
+
+    proc = Proc()
     terminated = []
     monkeypatch.setattr(
         disp,
@@ -5102,6 +5106,9 @@ def test_terminate_active_processes_handles_graceful_and_forced_cleanup(
         def __init__(self, timeouts):
             self.timeouts = timeouts
 
+        def poll(self):
+            return None
+
         def wait(self, timeout):
             assert timeout >= 0
             if self.timeouts:
@@ -5615,8 +5622,8 @@ def test_failed_domain_cools_before_released_slot_can_be_claimed(headless_dispat
     release = dispatcher._release_item
     claims = []
 
-    def competing_release(index, item):
-        release(index, item)
+    def competing_release(index, item, **kwargs):
+        release(index, item, **kwargs)
         with dispatcher._dispatch_cv:
             claims.append(dispatcher._try_claim_item(1))
 
@@ -5863,3 +5870,156 @@ def test_pidfile_guard_preserves_existing_contents(tmp_path, monkeypatch, conten
     lock.acquire()
     lock.release()
     assert guard.read_bytes() == contents
+
+
+def _spawn_shutdown_test_child(item, _label, _cwd, _cwd_note):
+    program = "pass" if "/completed" in item.url else "import time; time.sleep(60)"
+    return subprocess.Popen(
+        [sys.executable, "-c", program], stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+        start_new_session=True,
+    )
+
+
+def test_shutdown_retains_interrupted_work_once_and_keeps_pending_backlogs(app, monkeypatch):
+    stop_bg_workers(app)
+    dispatcher = app.dispatcher
+    dispatcher.config.update(worker_count=1, immediate_worker_count=1, command_timeout_seconds=0)
+    dispatcher._immediate_pool_size = 1
+    monkeypatch.setattr(dispatcher, "_get_sleep", lambda: 0)
+    monkeypatch.setattr(dispatcher, "_spawn_proc", _spawn_shutdown_test_child)
+    queued_done = q("http://done.test/completed-queue")
+    immediate_done = q("http://done.test/completed-immediate")
+    dispatcher.queue_items.append(queued_done)
+    dispatcher._worker_step(0, threading.Event())
+    dispatcher._dispatch_immediate(immediate_done)
+    assert _spin_until(lambda: dispatcher.metrics["completions"] == 2)
+
+    queued_running = q("http://queue.test/running")
+    queued_pending = q("http://queue.test/pending")
+    immediate_running = q("http://immediate.test/running")
+    immediate_pending = q("http://immediate.test/pending")
+    with dispatcher.queue_lock:
+        dispatcher.queue_items[:] = [queued_running, queued_pending]
+    dispatcher._ensure_worker_count(1)
+    dispatcher._dispatch_immediate(immediate_running)
+    dispatcher._dispatch_immediate(immediate_pending)
+
+    def two_children_active():
+        with dispatcher._active_processes_lock:
+            return len(dispatcher._active_processes) == 2
+
+    assert _spin_until(two_children_active)
+    app._shutdown(timeout=3)
+
+    in_flight, pending = dispatcher._load_state_items()
+    immediate = dispatcher._load_immediate_items()
+    assert in_flight == [queued_running]
+    assert pending == [queued_pending]
+    assert immediate == [immediate_running, immediate_pending]
+    assert dispatcher.metrics == {"timeouts": 0, "failures": 0, "completions": 2}
+    assert dispatcher._cooldown_until == {}
+    assert dispatcher._interrupted_queue == [queued_running]
+    assert dispatcher._interrupted_immediate == [immediate_running]
+    assert not any(thread.is_alive() for thread in app._snapshot_worker_threads())
+    assert not any(thread.is_alive() for thread in app._snapshot_immediate_threads())
+
+    restored = link_queue.Dispatcher.headless(
+        config=dict(dispatcher.config), state_path=dispatcher.state_path)
+    immediate_retries = []
+    monkeypatch.setattr(restored, "_dispatch_immediate", immediate_retries.append)
+    try:
+        restored._restore_queue_from_state()
+        assert list(restored.queue_items) == [queued_running, queued_pending]
+        assert immediate_retries == [immediate_running, immediate_pending]
+    finally:
+        restored.stop_event.set()
+        restored.close()
+
+
+def test_run_item_does_not_spawn_after_shutdown(headless_dispatcher, monkeypatch):
+    dispatcher = headless_dispatcher
+    calls = []
+    monkeypatch.setattr(dispatcher, "_spawn_proc", lambda *_args: calls.append(True))
+    dispatcher.stop_event.set()
+
+    outcome = dispatcher._run_item(q("http://example.test/pending"), "test")
+
+    assert outcome == link_queue.COMMAND_INTERRUPTED_EXIT
+    assert calls == []
+
+
+def test_late_process_registration_marks_interruption_before_termination(
+        headless_dispatcher, monkeypatch):
+    dispatcher = headless_dispatcher
+    spawned = []
+    real_terminate = dispatcher._terminate_process_tree
+    marked_before_termination = []
+
+    def spawn_then_stop(*args):
+        child = _spawn_shutdown_test_child(*args)
+        spawned.append(child)
+        dispatcher.stop_event.set()
+        return child
+
+    def verify_then_terminate(child):
+        marked_before_termination.append(getattr(child, "_link_queue_interrupted", False))
+        real_terminate(child)
+
+    monkeypatch.setattr(dispatcher, "_spawn_proc", spawn_then_stop)
+    monkeypatch.setattr(dispatcher, "_terminate_process_tree", verify_then_terminate)
+    try:
+        outcome = dispatcher._run_item(q("http://example.test/running"), "test")
+        assert outcome == link_queue.COMMAND_INTERRUPTED_EXIT
+        assert marked_before_termination == [True]
+        assert not dispatcher._active_processes
+    finally:
+        for child in spawned:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=2)
+
+
+def test_shutdown_does_not_interrupt_a_child_that_already_completed(
+        headless_dispatcher, monkeypatch):
+    dispatcher = headless_dispatcher
+    terminated = []
+    monkeypatch.setattr(dispatcher, "_terminate_process_tree", terminated.append)
+    child = _spawn_shutdown_test_child(q("http://example.test/completed"), "test", None, "")
+    try:
+        child.wait(timeout=2)
+        dispatcher.stop_event.set()
+        dispatcher._register_process(child)
+        dispatcher._terminate_active_processes(time.monotonic() + 1)
+        assert dispatcher._process_outcome(child, True) == 0
+        assert not getattr(child, "_link_queue_interrupted", False)
+        assert terminated == []
+    finally:
+        dispatcher._unregister_process(child)
+        child.stdout.close()
+
+
+@pytest.mark.parametrize("interrupted, timed_out, streamed, expected", [
+    (True, True, False, link_queue.COMMAND_INTERRUPTED_EXIT),
+    (True, False, True, link_queue.COMMAND_INTERRUPTED_EXIT),
+    (False, True, True, link_queue.COMMAND_TIMEOUT_EXIT),
+    (False, False, False, -1),
+    (False, False, True, 0),
+])
+def test_interruption_takes_precedence_over_stream_and_timeout_failures(
+        interrupted, timed_out, streamed, expected):
+    proc = types.SimpleNamespace(
+        _link_queue_interrupted=interrupted, _link_queue_timed_out=timed_out, returncode=0)
+    assert link_queue.Dispatcher._process_outcome(proc, streamed) == expected
+
+
+def test_releasing_interrupted_queue_slot_twice_retains_one_retry(headless_dispatcher):
+    dispatcher = headless_dispatcher
+    item = q("http://example.test/running")
+    dispatcher.current_items[0] = item
+    dispatcher.stop_event.set()
+
+    dispatcher._release_item(0, item, interrupted=True)
+    dispatcher._release_item(0, item, interrupted=True)
+
+    assert dispatcher._build_state_snapshot()["in_flight"] == [dispatcher._serialize_item(item)]

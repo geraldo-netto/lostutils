@@ -587,6 +587,7 @@ def _template_has_bare_url(template: str) -> bool:
 QueueItem = namedtuple("QueueItem", "url protocol template shell extra")
 QueueItem.__new__.__defaults__ = ((),)
 COMMAND_TIMEOUT_EXIT = -124
+COMMAND_INTERRUPTED_EXIT = -125
 
 # lq-scal-03: default threshold for the opportunistic stale-key sweep
 # in `_pick_next_item`. The sweep runs only when `len(seq_of) - len(urls)`
@@ -1319,6 +1320,8 @@ class Dispatcher:
         self._batch_dispatch_depth = 0
         self._batch_save_dirty = False
         self.current_items: dict[int, QueueItem | None] = {}
+        # Shutdown stops further claims, bounding these lists by active workers.
+        self._interrupted_queue: list[QueueItem] = []
         self.metrics = {"timeouts": 0, "failures": 0, "completions": 0}
         self._metrics_lock = threading.Lock()
         self._active_processes: set = set()
@@ -1353,6 +1356,7 @@ class Dispatcher:
         # monotonic consumer id, guarded by _immediate_lock, and folded into the
         # serialized "immediate" state bucket so a restart re-enqueues them.
         self._immediate_current: dict[int, QueueItem | None] = {}
+        self._interrupted_immediate: list[QueueItem] = []
         self._immediate_consumer_seq = 0
         self._immediate_lock = threading.Lock()
         self._immediate_cv = threading.Condition(self._immediate_lock)
@@ -1459,8 +1463,8 @@ class Dispatcher:
             t.cancel()
 
     def _build_state_snapshot(self) -> dict:
-        """Snapshot the pending queue, in-flight consumer items, and the
-        immediate-pool backlog under the appropriate locks (lq-cx-02).
+        """Snapshot pending, in-flight, and shutdown-interrupted items under
+        the appropriate locks, including the immediate backlog (lq-cx-02).
 
         lq-rel-01: the immediate work-queue backlog AND items in flight on a
         consumer are captured so neither is lost on shutdown. lq-conc-10: the
@@ -1474,9 +1478,10 @@ class Dispatcher:
                 self._serialize_item(it)
                 for it in self.current_items.values() if it is not None
             ]
+            in_flight.extend(self._serialize_item(it) for it in self._interrupted_queue)
         with self._immediate_lock:
-            inflight = [it for it in self._immediate_current.values()
-                        if it is not None]
+            inflight = self._interrupted_immediate + [
+                it for it in self._immediate_current.values() if it is not None]
             with self._immediate_q.mutex:
                 backlog = list(self._immediate_q.queue)
         immediate = [self._serialize_item(it) for it in inflight + backlog]
@@ -1851,14 +1856,17 @@ class Dispatcher:
             return 0
         return n if n > 0 else 0
 
-    def _run_immediate_item(self, item: QueueItem) -> None:
+    def _run_immediate_item(self, item: QueueItem) -> int:
         """Run one immediate item and record a failure/completion metric on its
         exit (rel-01) so immediate failures aren't invisible."""
         exit_code = self._run_item(item, "immediate")
+        if exit_code == COMMAND_INTERRUPTED_EXIT:
+            return exit_code
         if exit_code != 0:
             self._record_metric("failures")
         else:
             self._record_metric("completions")
+        return exit_code
 
     def _immediate_consumer(self, cid: int, stop_self: threading.Event) -> None:
         """Bounded-pool consumer (conc-02): pull items off the immediate work
@@ -1871,7 +1879,7 @@ class Dispatcher:
         so a shutdown snapshot can persist it (and a restart re-enqueue it)
         instead of losing it."""
         while True:
-            if stop_self.is_set():
+            if stop_self.is_set() or self.stop_event.is_set():
                 return
             work_q, item = self._take_immediate_item(cid)
             if item is None:
@@ -1905,14 +1913,18 @@ class Dispatcher:
         return stop_self.is_set() or self.stop_event.is_set()
 
     def _consume_immediate_item(self, cid: int, work_q, item: QueueItem) -> None:
+        exit_code = -1
         try:
-            self._run_immediate_item(item)
+            exit_code = self._run_immediate_item(item)
         except Exception as exc:
             # A bad item must remain visible without permanently shrinking the pool.
             self._record_metric("failures")
             self._log(f"[immediate error] {item.protocol}: {item.url}: {exc}")
         finally:
             with self._immediate_lock:
+                if (exit_code == COMMAND_INTERRUPTED_EXIT
+                        and self._immediate_current.get(cid) is item):
+                    self._interrupted_immediate.append(item)
                 self._immediate_current[cid] = None
             self._request_save_state()
             work_q.task_done()
@@ -2513,8 +2525,18 @@ class Dispatcher:
     def _register_process(self, proc) -> None:
         with self._active_processes_lock:
             self._active_processes.add(proc)
-        if self.stop_event.is_set():
+            interrupted = self.stop_event.is_set() and self._mark_process_interrupted(proc)
+        if interrupted:
             self._terminate_process_tree(proc)
+
+    @staticmethod
+    def _mark_process_interrupted(proc) -> bool:
+        # Completed children must not become retries merely because shutdown
+        # overlaps their worker's final bookkeeping.
+        if proc.poll() is not None:
+            return False
+        setattr(proc, "_link_queue_interrupted", True)
+        return True
 
     def _unregister_process(self, proc) -> None:
         with self._active_processes_lock:
@@ -2527,7 +2549,10 @@ class Dispatcher:
         spawns between shutdown's snapshot and this method.
         """
         with self._active_processes_lock:
-            processes = list(self._active_processes)
+            processes = [
+                proc for proc in self._active_processes
+                if self._mark_process_interrupted(proc)
+            ]
         for proc in processes:
             self._terminate_process_tree(proc)
         for proc in processes:
@@ -2635,6 +2660,8 @@ class Dispatcher:
         stderr-only code path here must drop the merge first; otherwise the
         new handler will never see anything.
         """
+        if self.stop_event.is_set():
+            return COMMAND_INTERRUPTED_EXIT
         url = item.url
         # obs-02: weave a short per-item id into the label so the run/done/
         # error/stuck lines (and the streamed output prefix) for one item can
@@ -2669,22 +2696,30 @@ class Dispatcher:
             # lq-obs-01: snapshot verbosity once per item so a mid-item
             # config edit can't fragment the stream between modes.
             verbosity = self._command_log_verbosity()
-            if not self._stream_and_wait(proc, label, url, timeout, verbosity):
-                return -1
-            self._log(f"[{label} done] exit={proc.returncode}  url={url}")
-            if getattr(proc, "_link_queue_timed_out", False):
-                return COMMAND_TIMEOUT_EXIT
-            return proc.returncode
+            streamed = self._stream_and_wait(proc, label, url, timeout, verbosity)
+            if streamed:
+                self._log(f"[{label} done] exit={proc.returncode}  url={url}")
+            return self._process_outcome(proc, streamed)
         except FileNotFoundError as e:
             # Common cause: the first argv element isn't on PATH.
             self._log(f"[{label} error] command not found: {e}  url={url}")
-            return -1
+            return self._process_outcome(proc, False)
         except Exception as e:  # pragma: no cover - worker step caught exception
             self._log(f"[{label} error] {e}  url={url}")  # pragma: no cover - log + return -1 after exception
-            return -1  # pragma: no cover - log + return -1 after exception
+            return self._process_outcome(proc, False)
         finally:
             if proc is not None:
                 self._unregister_process(proc)
+
+    @staticmethod
+    def _process_outcome(proc, streamed: bool) -> int:
+        if getattr(proc, "_link_queue_interrupted", False):
+            return COMMAND_INTERRUPTED_EXIT
+        if not streamed:
+            return -1
+        if getattr(proc, "_link_queue_timed_out", False):
+            return COMMAND_TIMEOUT_EXIT
+        return proc.returncode
 
     def _resolve_item_cwd(self, folder: str) -> "tuple[str | None, str]":
         """Resolve the configured output folder to a subprocess cwd (lq-cx-05),
@@ -3021,11 +3056,15 @@ class Dispatcher:
             return _SEQ_OF_SWEEP_GAP
         return max(1, value)
 
-    def _release_item(self, idx: int, item: "QueueItem") -> None:
+    def _release_item(
+        self, idx: int, item: "QueueItem", *, interrupted: bool = False,
+    ) -> None:
         """Decrement domain_active and clear our current_items slot. Notify
         the cv so any other waiting worker can re-evaluate."""
         domain = self._domain_of(item)
         with self._dispatch_cv:
+            if interrupted and self.current_items.get(idx) is item:
+                self._interrupted_queue.append(item)
             self._domain_active[domain] = max(
                 0, self._domain_active.get(domain, 0) - 1
             )
@@ -3081,10 +3120,10 @@ class Dispatcher:
         try:
             exit_code = self._run_item(item, f"queue#{idx}")
             # Publish before releasing the domain slot and waking another worker.
-            if exit_code not in (0, -1, COMMAND_TIMEOUT_EXIT):
+            if exit_code not in (0, -1, COMMAND_TIMEOUT_EXIT, COMMAND_INTERRUPTED_EXIT):
                 self._trigger_failure_cooldown(idx, item, exit_code)
         finally:
-            self._release_item(idx, item)
+            self._release_item(idx, item, interrupted=exit_code == COMMAND_INTERRUPTED_EXIT)
             with self.queue_lock:
                 other_free = sum(
                     1 for i, v in self.current_items.items()
@@ -3094,7 +3133,7 @@ class Dispatcher:
 
         if exit_code == 0:
             self._record_metric("completions")
-        elif exit_code != COMMAND_TIMEOUT_EXIT:
+        elif exit_code not in (COMMAND_TIMEOUT_EXIT, COMMAND_INTERRUPTED_EXIT):
             self._record_metric("failures")
         self._update_status()
         self._maybe_inter_item_sleep(stop_self, other_free)
