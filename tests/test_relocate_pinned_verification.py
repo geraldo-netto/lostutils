@@ -1,6 +1,7 @@
 """Destination validation for descriptor-pinned directory relocation."""
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -61,3 +62,40 @@ def test_pinned_file_accepts_matching_content(tmp_path):
     rf._verify_pinned_file(
         source, destination, Path("payload.bin"), source.stat(),
         hashlib.sha256(b"original").hexdigest())
+
+
+@pytest.mark.parametrize("kind", ["missing", "regular file"])
+def test_pinned_symlink_rejects_missing_or_wrong_kind(tmp_path, kind):
+    source = tmp_path / "source-link"
+    destination = tmp_path / "copy-link"
+    if kind == "regular file":
+        destination.write_bytes(b"not a symlink")
+
+    with pytest.raises(RuntimeError, match="missing symlink in copy: link") as error:
+        rf._verify_pinned_symlink(source, "../target", destination, Path("link"))
+
+    assert str(source) in str(error.value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="relocation requires POSIX symlink support")
+def test_pinned_symlink_rejects_changed_target(tmp_path):
+    source = tmp_path / "source-link"
+    destination = tmp_path / "copy-link"
+    destination.symlink_to("../changed-target")
+
+    with pytest.raises(RuntimeError, match="symlink target mismatch for link") as error:
+        rf._verify_pinned_symlink(source, "../expected-target", destination, Path("link"))
+
+    assert "'../expected-target' != '../changed-target'" in str(error.value)
+    assert str(source) in str(error.value)
+    assert os.readlink(destination) == "../changed-target"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="relocation requires POSIX symlink support")
+def test_pinned_symlink_accepts_matching_relative_target_without_dereferencing(tmp_path):
+    destination = tmp_path / "copy-link"
+    destination.symlink_to("../absent-target")
+    assert not destination.exists()
+
+    rf._verify_pinned_symlink(
+        tmp_path / "source-link", "../absent-target", destination, Path("link"))
