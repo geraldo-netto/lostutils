@@ -6023,3 +6023,18 @@ def test_releasing_interrupted_queue_slot_twice_retains_one_retry(headless_dispa
     dispatcher._release_item(0, item, interrupted=True)
 
     assert dispatcher._build_state_snapshot()["in_flight"] == [dispatcher._serialize_item(item)]
+
+
+def test_double_click_selects_pointer_row_before_opening_editor(app, monkeypatch):
+    tree = app.proto_tree
+    tree.selection_set("http")
+    tree.insert("", "end", iid="clicked-row", values=("clicked-row",))
+    monkeypatch.setattr(tree, "identify_row", lambda _y: "clicked-row")
+    opened = []
+
+    app._crud_double_click(
+        tree, types.SimpleNamespace(y=17),
+        lambda row: opened.append((row, tree.selection())),
+    )
+
+    assert opened == [("clicked-row", ("clicked-row",))]
