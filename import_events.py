@@ -3312,6 +3312,8 @@ def _llm_response_text(
         text = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         _log_llm_request_done(file_path, event_type, runtime_config, text)
         return text
+    except ModelUnavailableError:
+        raise
     except Exception as e:
         _record_extraction_failure(file_path, e, "LLM Error processing")
         return None
@@ -3780,6 +3782,8 @@ def extract_from_file(
                                     model_config=model_config)
         if suffix in PDF_EXTENSIONS:
             return extract_from_pdf(file, llm_client=llm_client, model_config=model_config)
+    except ModelUnavailableError:
+        raise
     except Exception as e:
         _record_extraction_failure(file, e, "Could not extract events from")
     return []

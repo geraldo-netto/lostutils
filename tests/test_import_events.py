@@ -5107,6 +5107,38 @@ def test_run_main_emits_partial_json_on_model_unavailable(monkeypatch, tmp_path)
     assert data == partial, "partial events not emitted on model-unavailable abort"
 
 
+def test_run_main_aborts_real_extraction_on_unavailable_model(tmp_path, monkeypatch):
+    pytest.importorskip("icalendar")
+    folder = tmp_path / "input"
+    folder.mkdir()
+    (folder / "0.ics").write_text("\r\n".join([
+        "BEGIN:VCALENDAR", "VERSION:2.0", "BEGIN:VEVENT", "UID:kept@example.test",
+        "DTSTART;VALUE=DATE:20260907", "SUMMARY:Before failure",
+        "END:VEVENT", "END:VCALENDAR", "",
+    ]), encoding="utf-8")
+    for name in ("1.txt", "2.txt"):
+        (folder / name).write_text("Meeting details", encoding="utf-8")
+    attempts = []
+
+    def unavailable(_config):
+        attempts.append(True)
+        raise import_events.ModelUnavailableError("model unavailable")
+
+    monkeypatch.setattr(import_events, "get_llm", unavailable)
+    output = tmp_path / "events.json"
+    calendar = tmp_path / "events.ics"
+
+    code = import_events._run_main([
+        str(folder), "-o", str(output), "--emit-ics", str(calendar),
+        "--workers", "1", "--deterministic-order",
+    ])
+
+    assert code == 2
+    assert len(attempts) == 1
+    assert [event["title"] for event in json.loads(output.read_text())] == ["Before failure"]
+    assert "SUMMARY:Before failure" in calendar.read_text()
+
+
 # --- ie-gov-01: download/cache logs redact the home directory ----------------
 
 def test_download_logs_redact_home_path(tmp_path, monkeypatch, caplog):
