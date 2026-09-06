@@ -5063,3 +5063,60 @@ def test_cross_device_cleanup_preserves_published_copy_after_interrupt(tmp_path,
     assert source.read_text(encoding="utf-8") == "source"
     assert target.read_text(encoding="utf-8") == "source"
     assert set(tmp_path.iterdir()) == {source, target}
+
+
+def test_open_pinned_regular_rejects_directory_before_open(tmp_path, monkeypatch):
+    def forbidden_open(*_args, **_kwargs):
+        pytest.fail("non-regular paths must be rejected before opening")
+
+    monkeypatch.setattr(organize_by_extension.os, "open", forbidden_open)
+
+    with pytest.raises(ValueError, match="refusing non-regular file"):
+        with organize_by_extension._open_pinned_regular(tmp_path):
+            pytest.fail("directory must never yield a readable stream")
+
+
+@pytest.mark.parametrize("change", ["modify", "replace"])
+def test_open_pinned_regular_rejects_raced_file_and_closes_descriptor(
+        tmp_path, monkeypatch, change):
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"original")
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_bytes(b"replaced")
+    real_open = os.open
+    descriptors = []
+
+    def change_before_open(path, flags):
+        if change == "replace":
+            replacement.replace(source)
+        else:
+            source.write_bytes(b"changed contents")
+        fd = real_open(path, flags)
+        descriptors.append(fd)
+        return fd
+
+    monkeypatch.setattr(organize_by_extension.os, "open", change_before_open)
+
+    try:
+        with pytest.raises(OSError, match="file changed while being opened") as caught:
+            with organize_by_extension._open_pinned_regular(source):
+                pytest.fail("raced source must never yield a readable stream")
+
+        assert caught.value.errno == errno.EBUSY
+        expected = b"replaced" if change == "replace" else b"changed contents"
+        assert source.read_bytes() == expected
+        assert len(descriptors) == 1
+        with pytest.raises(OSError) as closed:
+            os.fstat(descriptors[0])
+        assert closed.value.errno == errno.EBADF
+        descriptors.clear()
+    finally:
+        _close_pinned_test_descriptors(descriptors)
+
+
+def _close_pinned_test_descriptors(descriptors):
+    for fd in descriptors:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
