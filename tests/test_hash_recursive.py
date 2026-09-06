@@ -1327,9 +1327,7 @@ def test_main_clamps_huge_jobs_before_pipeline(tmp_path, monkeypatch):
 
 def _run_main_with_stage_stub(tmp_path, monkeypatch, capsys, *, none_tails,
                               cfg_mutate):
-    # Helper: two big files forced through stage 2, every tail None, with a
-    # RunConfig whose skip counters are pre-seeded so we can assert the
-    # summary's hash_errors subtraction.
+    # Unknown failed outcomes must remain failures regardless of attempt totals.
     big = b"q" * (hr.HEAD_TAIL_THRESHOLD + 200)
     (tmp_path / "a.bin").write_bytes(big)
     (tmp_path / "b.bin").write_bytes(big)
@@ -1358,33 +1356,27 @@ def _run_main_with_stage_stub(tmp_path, monkeypatch, capsys, *, none_tails,
     return capsys.readouterr().err
 
 
-def test_main_summary_subtracts_vanished_from_hash_errors(tmp_path, monkeypatch, capsys):
-    # hr-obs-02: stage2 reports 2 errors, but both are vanished skips, so
-    # the printed hash_errors must be 0 while hash_skipped shows 2.
+def test_main_summary_keeps_vanished_attempts_separate_from_failures(tmp_path, monkeypatch, capsys):
     def mutate(cfg):
         cfg.hash_skipped_vanished = 2
     err = _run_main_with_stage_stub(
         tmp_path, monkeypatch, capsys, none_tails=True, cfg_mutate=mutate)
-    assert "hash_errors=0 " in err
+    assert "hash_errors=2 " in err
     assert "hash_skipped=2" in err
 
 
-def test_main_summary_subtracts_shrank_from_hash_errors(tmp_path, monkeypatch, capsys):
-    # hr-obs-02: stage2 reports 2 errors; one vanished + one shrank → net
-    # real hash_errors = 0.
+def test_main_summary_keeps_short_read_attempts_separate_from_failures(tmp_path, monkeypatch, capsys):
     def mutate(cfg):
         cfg.hash_skipped_vanished = 1
         cfg.hash_skipped_shrank = 1
     err = _run_main_with_stage_stub(
         tmp_path, monkeypatch, capsys, none_tails=True, cfg_mutate=mutate)
-    assert "hash_errors=0 " in err
+    assert "hash_errors=2 " in err
     assert "hash_skipped=1" in err
     assert "hash_shrank=1" in err
 
 
-def test_main_summary_real_errors_survive_subtraction(tmp_path, monkeypatch, capsys):
-    # hr-obs-02: a genuine error (no vanished/shrank) is NOT subtracted —
-    # stage2 reports 2 errors, 0 skipped → hash_errors=2.
+def test_main_summary_reports_unclassified_hash_failures(tmp_path, monkeypatch, capsys):
     def mutate(cfg):
         pass
     err = _run_main_with_stage_stub(
@@ -1392,14 +1384,12 @@ def test_main_summary_real_errors_survive_subtraction(tmp_path, monkeypatch, cap
     assert "hash_errors=2 " in err
 
 
-def test_main_summary_hash_errors_clamps_at_zero(tmp_path, monkeypatch, capsys):
-    # hr-obs-02: an over-count of skips never produces a negative printed
-    # hash_errors (defensive max(0, ...)).
+def test_main_summary_attempt_counters_cannot_mask_failures(tmp_path, monkeypatch, capsys):
     def mutate(cfg):
         cfg.hash_skipped_vanished = 99
     err = _run_main_with_stage_stub(
         tmp_path, monkeypatch, capsys, none_tails=True, cfg_mutate=mutate)
-    assert "hash_errors=0 " in err
+    assert "hash_errors=2 " in err
     assert "hash_errors=-" not in err
 
 
@@ -3926,3 +3916,39 @@ def test_pipeline_never_confirms_duplicate_changed_after_hash_read(tmp_path, mon
     assert not result.groups
     assert result.info["stage1_errors"] == 1
     assert hr._run_exit_code(threading.Event(), {}, result.info, config) == 1
+
+
+@pytest.mark.parametrize("quiet", [False, True])
+def test_main_recovered_alias_cannot_hide_independent_read_failure(
+        tmp_path, monkeypatch, capsys, quiet):
+    import errno
+
+    gone, live = tmp_path / "a-gone.bin", tmp_path / "b-live.bin"
+    gone.write_bytes(b"original")
+    os.link(gone, live)
+    (tmp_path / "c-denied.bin").write_bytes(b"original")
+    (tmp_path / "d-healthy.bin").write_bytes(b"original")
+    real_open = hr._open_hash_file
+
+    def changing_open(path):
+        if Path(path).name == "a-gone.bin":
+            gone.unlink()
+        if Path(path).name == "c-denied.bin":
+            raise PermissionError(errno.EACCES, "injected read denial", path)
+        return real_open(path)
+
+    monkeypatch.setattr(hr, "_readable_rep", lambda paths: sorted(paths)[0])
+    monkeypatch.setattr(hr, "_open_hash_file", changing_open)
+    arguments = ["hr", str(tmp_path), "--jobs", "1"] + (["--quiet"] if quiet else [])
+    monkeypatch.setattr(hr.sys, "argv", arguments)
+
+    assert hr.main() == 1
+
+    captured = capsys.readouterr()
+    assert "injected read denial" in captured.err
+    assert "ERROR: run incomplete" in captured.err
+    assert str(live) in captured.out
+    assert str(tmp_path / "d-healthy.bin") in captured.out
+    if not quiet:
+        assert "hash_errors=1 " in captured.err
+        assert "hash_skipped=1 " in captured.err

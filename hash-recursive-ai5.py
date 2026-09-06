@@ -152,21 +152,13 @@ class RunConfig:
         "alias_cap_hits",
         "hash_error_logged",
         "hash_error_suppressed",
-        # hr-obs-01 / hr-obs-02: count benign vanished-file (ENOENT/ESTALE)
-        # skips separately from real EACCES/EIO/... hash errors. The
-        # per-stage `*_errors` totals count every None digest and so
-        # include these; the summary line subtracts this counter (and
-        # hash_skipped_shrank) from the printed `hash_errors` so the
-        # printed figure is the real-failure count, while the raw skip
-        # subset is still reported alongside as `hash_skipped`.
+        # Attempt counters include aliases later recovered; they cannot be
+        # subtracted from final per-inode failure counts.
         "hash_skipped_vanished",
-        # hr-rel-01: a strict-window short read (the file was truncated
-        # between walk and hash) yields None just like a real hash error.
-        # Counting it separately here lets the summary subtract it from the
-        # printed hash_errors so a mid-run shrink doesn't masquerade as an
-        # EACCES/EIO failure worth investigating, and the operator still
-        # sees that a file changed under them.
         "hash_skipped_shrank",
+        # Failed (device, inode, size) attempts in the current stage. True
+        # means at least one real failure; entries are consumed after retries.
+        "_hash_failures",
         # hr-conc-06: lock for the cross-thread `+= 1` counters above.
         # CPython's GIL makes the bytecode effectively atomic today but
         # py3.13 free-threaded builds drop the GIL and the increments
@@ -195,6 +187,7 @@ class RunConfig:
         self.hash_error_suppressed = 0
         self.hash_skipped_vanished = 0
         self.hash_skipped_shrank = 0
+        self._hash_failures: dict[tuple[int, int, int], bool] = {}
         self._counter_lock = threading.Lock()
 
     @property
@@ -666,10 +659,34 @@ def _hash_file_windows(path, windows, config=None, expected=None):
                for w in windows]
     try:
         with _open_hash_file(path) as file_obj:
-            return _digest_file_windows(file_obj, windows, config, expected)
+            digest = _digest_file_windows(file_obj, windows, config, expected)
+        if digest is None:
+            _record_hash_failure(config, expected, real=False)
+        return digest
     except OSError as exc:
+        _record_hash_failure(config, expected, real=exc.errno not in _VANISHED_ERRNOS)
         _handle_hash_error(path, exc, config)
         return None
+
+
+def _record_hash_failure(config, expected, *, real: bool) -> None:
+    if config is None or expected is None:
+        return
+    with config._counter_lock:
+        config._hash_failures[expected] = real or config._hash_failures.get(expected, False)
+
+
+def _unresolved_hash_failures(outcomes, config) -> int:
+    if config is None:
+        return sum(digest is None for _identity, digest in outcomes)
+    failures = 0
+    with config._counter_lock:
+        for identity, digest in outcomes:
+            # Consume recovered entries too, so a later stage starts clean.
+            # Missing classifications fail closed (e.g. a custom hash returns None).
+            real = config._hash_failures.pop(identity, True)
+            failures += digest is None and real
+    return failures
 
 
 def _open_hash_file(path):
@@ -1211,6 +1228,9 @@ class DedupResult(NamedTuple):
     Provides named attribute access and a typed repr. `aliases` stays on
     the result for `emit_groups` to expand inode keys back to paths.
 
+    `info` keeps ``stageN_errors`` as unresolved inode totals after retries;
+    ``stageN_real_errors`` excludes benign-only failures and drives exit status.
+
     `overflow` (hr-arch-01): the per-inode ingest-elided alias counts
     (``{(dev, ino): n_elided}``), or ``None`` when the alias cap was
     disabled. It is returned EXPLICITLY here instead of being smuggled on
@@ -1441,7 +1461,7 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
     file without the pipeline doing I/O. Live progress is driven by
     ``on_progress`` as batches complete."""
     if not candidates:
-        return defaultdict(list), {"stage1": 0, "stage1_errors": 0}
+        return defaultdict(list), {"stage1": 0, "stage1_errors": 0, "stage1_real_errors": 0}
     cap = config.block_size if config is not None else CAP
     stage1_bytes = _capped_byte_total(
         min(size, cap) for size, _key in candidates)
@@ -1456,6 +1476,9 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
     return by_head, {
         "stage1": len(head_by_key),
         "stage1_errors": max(0, errors - recovered),
+        "stage1_real_errors": _unresolved_hash_failures(
+            ((_walked_identity(key, size), head_by_key[key])
+             for size, key in candidates if key in head_by_key), config),
     }
 
 
@@ -1478,6 +1501,7 @@ def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashe
             head = _retry_head_alias(
                 key, rep[key], size, aliases, config, cancel_event)
             recovered += head is not None
+        head_by_key[key] = head
         if on_hashed is not None:
             on_hashed(done, total, head, key, aliases)
         if head is None:
@@ -1497,16 +1521,11 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     `cancel_event` (hr-conc-01) is forwarded to :func:`_run_stage` so a
     Ctrl-C aborts the tail-hash phase between batches.
 
-    hr-obs-01: a None tail has a SINGLE source of truth — it is counted
-    once in ``stage2_errors`` (the count :func:`_run_stage` returns) and
-    then skipped from the regroup below as pure control flow, never
-    re-counted. The benign subset (vanished / truncated) is tracked apart
-    on the :class:`RunConfig` and subtracted by :func:`main` to derive the
-    real-failure figure. The former ``stage2_skipped`` field duplicated
-    ``stage2_errors`` (identical except under cancellation) with no
-    reconciliation, so it has been removed."""
+    ``stage2_errors`` counts unresolved inodes after retries, including benign
+    skips. ``stage2_real_errors`` excludes only inodes whose attempts all had
+    benign failures; global skip counters remain attempt counts."""
     if not stage2_items:
-        return {}, {"stage2": 0, "stage2_errors": 0}
+        return {}, {"stage2": 0, "stage2_errors": 0, "stage2_real_errors": 0}
     # Stage 2 reads up to tail block + center block + two sample windows.
     cap = config.block_size if config is not None else CAP
     sample = config.sample_size if config is not None else SAMPLE
@@ -1531,6 +1550,9 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     return regrouped, {
         "stage2": len(tail_by_item),
         "stage2_errors": max(0, errors - recovered),
+        "stage2_real_errors": _unresolved_hash_failures(
+            ((_walked_identity(item[3], item[0]), digest)
+             for item, digest in tail_by_item.items()), config),
     }
 
 
@@ -1548,6 +1570,7 @@ def _stage2_tail(item, tail_by_item, aliases, config, cancel_event=None):
         return tail, False
     if aliases is not None and len(aliases.get(key, ())) > 1:
         tail = _retry_tail_alias(key, path, size, aliases, config, cancel_event)
+    tail_by_item[item] = tail
     return tail, tail is not None
 
 
@@ -1566,7 +1589,7 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
         for key in keys
     ]
     if not items:
-        return {}, {"stage3": 0, "stage3_errors": 0}
+        return {}, {"stage3": 0, "stage3_errors": 0, "stage3_real_errors": 0}
     run_kwargs = {"cancel_event": cancel_event}
     if on_progress is not None:
         run_kwargs["on_progress"] = on_progress
@@ -1588,6 +1611,9 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
     return by_full, {
         "stage3": len(full_by_item),
         "stage3_errors": max(0, errors - recovered),
+        "stage3_real_errors": _unresolved_hash_failures(
+            ((_walked_identity(item[3], item[1]), digest)
+             for item, digest in full_by_item.items()), config),
     }
 
 
@@ -1605,6 +1631,7 @@ def _stage3_digest(item, full_by_item, aliases, config, cancel_event=None):
         return digest, False
     if aliases is not None and len(aliases.get(key, ())) > 1:
         digest = _retry_full_alias(key, path, size, aliases, config, cancel_event)
+    full_by_item[item] = digest
     return digest, digest is not None
 
 
@@ -2225,14 +2252,9 @@ def _emit_run_warnings(config, cancel_event, quiet) -> None:
 
 
 def _real_hash_error_count(info, config) -> int:
-    total = (
-        info["stage1_errors"]
-        + info["stage2_errors"]
-        + info.get("stage3_errors", 0)
-    )
-    return max(
-        0,
-        total - config.hash_skipped_vanished - config.hash_skipped_shrank,
+    return sum(
+        info.get(f"stage{stage}_real_errors", info.get(f"stage{stage}_errors", 0))
+        for stage in (1, 2, 3)
     )
 
 
@@ -2260,10 +2282,8 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
                        walk_seconds, hash_seconds) -> None:
     """Emit the end-of-run summary line on stderr (the user's safety net).
 
-    hr-obs-02: the per-stage ``*_errors`` totals count EVERY None digest,
-    including benign vanished (ENOENT/ESTALE) and shrank (truncated mid-run)
-    skips. Subtract those subsets so the printed ``hash_errors`` is the count of
-    REAL failures worth investigating, matching the counter's contract."""
+    ``hash_errors`` counts final per-inode failures after alias recovery;
+    ``hash_skipped`` and ``hash_shrank`` report benign attempts separately."""
     f = _fmt_count
     real_hash_errors = _real_hash_error_count(info, config)
     worker_failure_suffix = ""
