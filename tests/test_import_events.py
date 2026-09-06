@@ -58,6 +58,38 @@ def valid_clip_bytes():
     return b"GGUF..." + import_events.MTMD_PROJECTOR_METADATA + b"..."
 
 
+@pytest.mark.parametrize("title", [[], {}, ["Meeting"], {"name": "Meeting"}, 42, True])
+def test_llm_title_validation_preserves_other_events(title, monkeypatch, caplog):
+    monkeypatch.setattr(import_events, "_extraction_failures", 0)
+    payload = json.dumps({"events": [
+        {"title": title, "start": "2026-09-07"},
+        {"title": "Valid meeting", "start": "2026-09-08"},
+    ]})
+
+    events = import_events.parse_llm_events(payload, Path("events.txt"), "Text/LLM")
+    unique = import_events.dedupe_events(events)
+
+    assert [event["title"] for event in unique] == ["Valid meeting"]
+    assert import_events.extraction_failure_count() == 1
+    assert "LLM event title must be a string" in caplog.text
+
+
+def test_run_main_reports_invalid_llm_title_without_losing_valid_events(tmp_path, monkeypatch):
+    source = tmp_path / "events.txt"
+    source.write_text("Meetings in September", encoding="utf-8")
+    output = tmp_path / "events.json"
+    client = FakeLlm(json.dumps({"events": [
+        {"title": ["Invalid"], "start": "2026-09-07"},
+        {"title": "Valid meeting", "start": "2026-09-08"},
+    ]}))
+    monkeypatch.setattr(import_events, "get_llm", lambda _config: client)
+
+    code = import_events._run_main([str(tmp_path), "-o", str(output), "--workers", "1"])
+
+    assert code == 1
+    assert [event["title"] for event in json.loads(output.read_text())] == ["Valid meeting"]
+
+
 def _pdf_literal(text):
     out = bytearray()
     for byte in text.encode("latin-1"):

@@ -2290,6 +2290,16 @@ def _merge_layout_events(llm_events: List[Dict[str, Any]],
     return merged
 
 
+def _llm_event_title(value: Any, file_path: Path) -> Optional[str]:
+    if value is None or isinstance(value, str):
+        return value or UNTITLED_EVENT
+    _record_extraction_failure(
+        file_path, ValueError("LLM event title must be a string"),
+        "Ignoring malformed event from",
+    )
+    return None
+
+
 def parse_llm_events(text_output: str, file_path: Path, event_type: str) -> List[Dict[str, Any]]:
     clean_json = text_output.replace("```json", "").replace("```", "").strip()
     decoded_events = _decode_event_payload_or_none(clean_json)
@@ -2302,8 +2312,11 @@ def parse_llm_events(text_output: str, file_path: Path, event_type: str) -> List
     for e in raw_events:
         if not isinstance(e, dict):
             continue
+        title = _llm_event_title(e.get("title"), file_path)
+        if title is None:
+            continue
         formatted_events.append({
-            "title": e.get("title") or UNTITLED_EVENT,
+            "title": title,
             "start": _coerce_start(e),
             "end": str(e.get("end") or ""),
             "location": str(e.get("location") or ""),
