@@ -4713,6 +4713,31 @@ def test_main_exits_zero_on_a_fully_applied_run(tmp_path, monkeypatch):
     assert (tmp_path / "txt").is_dir()
 
 
+@pytest.mark.parametrize("duplicate_names", [False, True])
+def test_organize_preserves_capacity_and_names_when_filling_bucket_gap(
+        tmp_path, duplicate_names):
+    existing = tmp_path / "txt" / "a00002"
+    existing.mkdir(parents=True)
+    (existing / "already.txt").write_text("existing", encoding="utf-8")
+    for index in range(3):
+        source_dir = tmp_path / f"source{index}"
+        source_dir.mkdir()
+        name = "apple.txt" if duplicate_names else f"apple{index}.txt"
+        (source_dir / name).write_text(f"payload{index}", encoding="utf-8")
+
+    stats = organize_by_extension.organize(
+        tmp_path, sniff=False, num_threads=1, bucket_size=2)
+
+    assert (stats.processed, stats.skipped, stats.partial) == (3, 0, 0)
+    buckets = list((tmp_path / "txt").iterdir())
+    assert all(len(list(bucket.iterdir())) <= 2 for bucket in buckets)
+    contents = {
+        path.read_text(encoding="utf-8")
+        for bucket in buckets for path in bucket.iterdir()
+    }
+    assert contents == {"existing", "payload0", "payload1", "payload2"}
+
+
 def test_organize_returns_the_move_tally(tmp_path):
     (tmp_path / "a.txt").write_text("x", encoding="utf-8")
 

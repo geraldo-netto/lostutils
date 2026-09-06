@@ -25,6 +25,7 @@ import stat as _stat
 import re
 import threading
 import time
+from bisect import insort
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -1040,7 +1041,7 @@ def _allocate_new_bucket(
     later by ensure_directory on the actual move."""
     new_path = ext_dir / bucket_name(prefix, index)
     state_cache[new_path] = set()
-    indices.append(index)
+    insort(indices, index)
     return new_path
 
 
@@ -1172,7 +1173,7 @@ class BucketManager:
         """
         indices = self._indices_for(ext_dir, prefix)
         # oze-obs-01 / oze-hyg-01: tell reuse from fresh allocation for the
-        # stats counter. oze-perf-11: only `_allocate_new_bucket` appends to
+        # stats counter. oze-perf-11: only `_allocate_new_bucket` inserts into
         # `indices`, so a length delta is an O(1) signal — the old
         # `set(state_cache.keys())` snapshot copied the whole keyset per file,
         # O(files × buckets) on the hot planning path.
