@@ -2878,3 +2878,46 @@ def test_stale_connect_worker_does_not_open_current_device(app, monkeypatch):
 
     assert connects == []
     assert app.dev.writes == []
+
+
+@pytest.mark.parametrize("resources_already_released", [False, True])
+def test_profile_save_fdopen_failure_preserves_file_and_releases_resources(
+        tmp_path, monkeypatch, resources_already_released):
+    target = tmp_path / "profile.json"
+    original = b'{"version": 1, "assignments": []}\n'
+    target.write_bytes(original)
+    failure = RuntimeError("profile stream initialization failed")
+    descriptors = []
+
+    def fail_fdopen(fd, *_args, **_kwargs):
+        descriptors.append(fd)
+        if resources_already_released:
+            # A failed stream wrapper may already own/close the descriptor;
+            # another cleanup actor may also have removed its temporary path.
+            os.close(fd)
+            next(tmp_path.glob(".profile.json.*.tmp")).unlink()
+        raise failure
+
+    monkeypatch.setattr(minikeypad.os, "fdopen", fail_fdopen)
+
+    try:
+        with pytest.raises(RuntimeError) as caught:
+            minikeypad.ProfileStore().save(target)
+
+        assert caught.value is failure
+        assert target.read_bytes() == original
+        assert set(tmp_path.iterdir()) == {target}
+        assert len(descriptors) == 1
+        with pytest.raises(OSError):
+            os.fstat(descriptors[0])
+        descriptors.clear()
+    finally:
+        _close_profile_test_descriptors(descriptors)
+
+
+def _close_profile_test_descriptors(descriptors):
+    for fd in descriptors:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
