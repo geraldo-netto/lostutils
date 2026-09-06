@@ -1602,3 +1602,23 @@ def test_opaque_bookmark_payload_survives_normalization(url):
     key, display = bookmark_tidy.normalize_url(url, options)
     assert key == display == url
     assert bookmark_tidy.normalize_url(display, options) == (key, display)
+
+
+@pytest.mark.parametrize("query", [
+    "token=%FF", "token=%FE", "q=a%20b&q=a+b", "q=%2f&q=%2F",
+    "flag&empty=&repeat=1&repeat=2", "%FF=value&&tail=",
+])
+@pytest.mark.parametrize("strip_tracking", [False, True])
+def test_query_normalization_preserves_retained_raw_fields(query, strip_tracking):
+    options = bookmark_tidy.NormalizeOptions(strip_tracking_params=strip_tracking)
+    raw = query + "&%75tm_source=campaign"
+    expected = query if strip_tracking else raw
+    assert bookmark_tidy._normalized_query(raw, options) == expected
+
+
+def test_distinct_query_octets_remain_distinct_bookmarks():
+    urls = ["https://example.test?token=%FF", "https://example.test?token=%FE"]
+    immutable, mutable = bookmark_tidy.deduplicate_bookmarks(
+        [_sample_bookmark(url) for url in urls], set(), bookmark_tidy.NormalizeOptions())
+    assert immutable == []
+    assert [bookmark.url for bookmark in mutable] == urls

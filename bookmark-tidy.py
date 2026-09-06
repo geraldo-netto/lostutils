@@ -19,7 +19,7 @@ from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 
 LOGGER = logging.getLogger("bookmark-tidy")
@@ -862,12 +862,13 @@ def _normalized_path(path: str, options: NormalizeOptions) -> str:
 
 
 def _normalized_query(query: str, options: NormalizeOptions) -> str:
-    if not query:
-        return ""
-    pairs = parse_qsl(query, keep_blank_values=True)
-    if options.strip_tracking_params:
-        pairs = [(key, value) for key, value in pairs if not _is_tracking_param(key)]
-    return urlencode(pairs, doseq=True)
+    if not options.strip_tracking_params:
+        return query
+    # Decode only names for matching; retained fields must keep their original octets.
+    return "&".join(
+        field for field in query.split("&")
+        if not _is_tracking_param(unquote_plus(field.partition("=")[0], errors="surrogateescape"))
+    )
 
 
 def _is_tracking_param(name: str) -> bool:
