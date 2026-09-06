@@ -28,9 +28,12 @@ Dependencies:
     manager.
 Linux note:
     Accessing the device needs permission.  The recommended way is a udev rule
-    (avoid running the whole GUI as root) -- e.g.
+    (avoid running the whole GUI as root). Create a dedicated access group:
+        sudo groupadd --force minikeypad
+        sudo usermod -aG minikeypad "$USER"
+    Log out and back in after joining the group. Install this rule:
     /etc/udev/rules.d/99-minikeypad.rules :
-        SUBSYSTEM=="usb", ATTRS{idVendor}=="1189", ATTRS{idProduct}=="8890", MODE="0666"
+        SUBSYSTEM=="usb", ATTRS{idVendor}=="1189", ATTRS{idProduct}=="8890", MODE="0660", GROUP="minikeypad"
     then: sudo udevadm control --reload && sudo udevadm trigger
     The usbhid kernel driver is auto-detached from interface 1 when needed and
     re-attached on exit so the keypad keeps working as a normal HID device.
