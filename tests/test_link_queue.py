@@ -33,6 +33,7 @@ import gc
 import os
 import queue
 import sys
+import subprocess
 import threading
 import time
 import types
@@ -5525,18 +5526,19 @@ def test_missing_pyyaml_exits_two_even_without_a_console(monkeypatch):
 # --- lq-plat-06: the shipped defaults must run on the host that ships them --
 
 
-def test_placeholder_command_is_a_bare_echo_here():
+def test_placeholder_command_is_a_bare_echo_here(monkeypatch):
+    monkeypatch.setattr(link_queue.os, "name", "posix")
     assert link_queue._placeholder_command() == "echo {url}"
     assert link_queue._placeholder_command("http") == "echo [http] {url}"
 
 
 def test_placeholder_command_is_resolvable_on_windows(monkeypatch):
-    """`echo` is a cmd.exe builtin, not an executable, and the shipped
-    protocols run with shell=False — CreateProcess cannot resolve it."""
     monkeypatch.setattr(link_queue.os, "name", "nt")
 
-    assert link_queue._placeholder_command() == "cmd /c echo {url}"
-    assert link_queue._placeholder_command("magnet") == "cmd /c echo [magnet] {url}"
+    for tag in ("", "magnet"):
+        command = link_queue._placeholder_command(tag)
+        argv = LinkQueueApp._build_argv(command, "https://example.test", tag)
+        assert argv[:3] == [sys.executable, "-c", "import sys; print(*sys.argv[1:])"]
 
 
 def test_shipped_defaults_build_a_runnable_argv_on_windows(monkeypatch):
@@ -5547,7 +5549,7 @@ def test_shipped_defaults_build_a_runnable_argv_on_windows(monkeypatch):
 
     argv = LinkQueueApp._build_argv(template, "http://example.com/x", "http")
 
-    assert argv[:3] == ["cmd", "/c", "echo"]
+    assert argv[:3] == [sys.executable, "-c", "import sys; print(*sys.argv[1:])"]
     assert argv[-1] == "http://example.com/x"
 
 
@@ -5559,3 +5561,25 @@ def test_system_shell_label_names_the_real_shell(monkeypatch):
 
     monkeypatch.setattr(link_queue.os, "name", "nt")
     assert link_queue._system_shell_label() == "cmd.exe /c"
+
+
+@pytest.mark.parametrize("template", [None, "cmd /c echo {url}", "cmd /c echo [https] {url}"])
+@pytest.mark.parametrize("url", [
+    "https://example.test/&whoami", "https://example.test/a|echo surprise",
+    'https://example.test/"&echo surprise', "https://example.test/%COMSPEC%^",
+])
+def test_windows_placeholder_prints_metacharacters_literally(monkeypatch, template, url):
+    with monkeypatch.context() as context:
+        context.setattr(link_queue.os, "name", "nt")
+        selected = template or link_queue._placeholder_command("https")
+        argv = LinkQueueApp._build_argv(selected, url, "https")
+    completed = subprocess.run(argv, capture_output=True, text=True, timeout=10)
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == ("[https] " if "[https]" in selected else "") + url
+    assert completed.stderr == ""
+
+
+def test_legacy_placeholder_migration_leaves_custom_commands(monkeypatch):
+    monkeypatch.setattr(link_queue.os, "name", "nt")
+    custom = 'custom.exe --url {url}'
+    assert link_queue._safe_placeholder_template(custom) == custom

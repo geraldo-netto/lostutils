@@ -531,16 +531,22 @@ DEFAULT_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
 
 
 def _placeholder_command(tag: str = "") -> str:
-    """The shipped do-nothing command template, in a form the host can run.
-
-    lq-plat-06: `echo` is a cmd.exe builtin, not an executable, and the shipped
-    protocols all set shell=False — so on Windows CreateProcess cannot resolve
-    it and every link fails with WinError 2 out of the box, each failure arming
-    the per-domain cooldown. `cmd /c echo` is the resolvable equivalent.
-    """
+    """Print the URL without passing it through a command interpreter."""
     body = f"[{tag}] {{url}}" if tag else "{url}"
-    prefix = "cmd /c echo" if os.name == "nt" else "echo"
+    prefix = (
+        f'"{sys.executable}" -c "import sys; print(*sys.argv[1:])"'
+        if os.name == "nt" else "echo"
+    )
     return f"{prefix} {body}"
+
+
+def _safe_placeholder_template(template: str) -> str:
+    # Saved profiles and in-flight items can still contain the previous shipped default.
+    if os.name == "nt":
+        match = re.fullmatch(r"cmd /c echo(?: \[([\w+.-]+)\])? \{url\}", template)
+        if match is not None:
+            return _placeholder_command(match.group(1) or "")
+    return template
 
 
 def _system_shell_label() -> str:
@@ -2115,7 +2121,7 @@ class Dispatcher:
         argument list is structurally impossible regardless of what special
         characters the URL contains.
         """
-        parts = _split_command_template(template)
+        parts = _split_command_template(_safe_placeholder_template(template))
         return [cls._resolve_command(p, url, protocol) for p in parts]
 
     @staticmethod
