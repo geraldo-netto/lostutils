@@ -129,7 +129,7 @@ def test_tracked_symlink_scans_link_target_without_reading_external_file(reposit
     external.write_text("ghp_" + "a" * 36)
     link = repository / "link.txt"
     try:
-        link.symlink_to(external)
+        link.symlink_to(external.name)
     except OSError:
         pytest.skip("symlink creation unavailable")
     _git(repository, "add", "--", "link.txt")

@@ -56,3 +56,34 @@ jobs:
           coverage report
           coverage json
           python tests/check_function_coverage.py coverage.json --minimum 80
+
+  portable:
+    name: Portable Python 3.12 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, macos-15]
+    env:
+      PYTHONUTF8: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.lock
+
+      - name: Reject tracked secrets and private machine paths
+        run: python .github/check_governance.py
+
+      - name: Install CI dependencies
+        run: python -m pip install --disable-pip-version-check --require-hashes -r requirements-ci.lock
+
+      - name: Run native standalone CLI, GUI, and OS contracts
+        run: python -m pytest -q tests/test_portable_contracts.py tests/test_repository_governance.py
