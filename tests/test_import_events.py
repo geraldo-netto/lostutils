@@ -2631,6 +2631,123 @@ def test_output_lock_releases_on_write_error(tmp_path):
     assert not lock.exists()  # cleaned up on the error path
 
 
+def test_stale_lock_reclamation_is_guarded_before_pid_check(tmp_path, monkeypatch):
+    lock = tmp_path / "events.lock"
+    lock.write_text(f"pid={_dead_pid()}\n")
+    checked, proceed = threading.Event(), threading.Event()
+    acquired, release = threading.Event(), threading.Event()
+    errors = []
+    is_stale = import_events._lock_is_stale
+
+    def delayed_check(path):
+        result = is_stale(path)
+        checked.set()
+        assert proceed.wait(3)
+        return result
+
+    def owner():
+        try:
+            with import_events._exclusive_lock(lock, "test output"):
+                acquired.set()
+                assert release.wait(3)
+        except Exception as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(import_events, "_lock_is_stale", delayed_check)
+    worker = threading.Thread(target=owner)
+    worker.start()
+    try:
+        assert checked.wait(3)
+        with pytest.raises(FileExistsError):
+            with import_events._exclusive_lock(lock, "test output"):
+                pytest.fail("second contender stole the lock")
+        proceed.set()
+        assert acquired.wait(3)
+        with pytest.raises(FileExistsError):
+            with import_events._exclusive_lock(lock, "test output"):
+                pytest.fail("second contender entered the owner's section")
+    finally:
+        proceed.set()
+        release.set()
+        worker.join(3)
+    assert not worker.is_alive()
+    assert errors == []
+    assert lock.with_name(lock.name + ".guard").exists()
+    with import_events._exclusive_lock(lock, "test output"):
+        assert lock.exists()
+
+
+def test_output_guard_releases_after_process_death(tmp_path):
+    lock, ready = tmp_path / "events.lock", tmp_path / "ready"
+    code = (
+        "import sys,time; from pathlib import Path; import import_events; "
+        "lock=Path(sys.argv[1]); ready=Path(sys.argv[2]); "
+        "context=import_events._exclusive_lock(lock, 'child output'); "
+        "context.__enter__(); ready.write_text('held'); time.sleep(30)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(lock), str(ready)],
+        cwd=Path(import_events.__file__).parent,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), "child did not acquire its lock"
+        with pytest.raises(FileExistsError):
+            with import_events._exclusive_lock(lock, "parent output"):
+                pytest.fail("entered while child held the guard")
+        child.kill()
+        child.wait(timeout=3)
+        with import_events._exclusive_lock(lock, "parent output"):
+            assert lock.exists()
+        assert lock.with_name(lock.name + ".guard").exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=3)
+
+
+@pytest.mark.parametrize("acquire", [True, False])
+def test_file_lock_uses_windows_byte_locking(tmp_path, monkeypatch, acquire):
+    path = tmp_path / "guard"
+    path.touch()
+    calls = []
+
+    def locking(fd, mode, count):
+        calls.append((mode, count, os.lseek(fd, 0, os.SEEK_CUR)))
+
+    runtime = types.SimpleNamespace(LK_NBLCK=11, LK_UNLCK=12, locking=locking)
+    with path.open("r+b") as handle, monkeypatch.context() as context:
+        handle.seek(3)
+        context.setitem(sys.modules, "msvcrt", runtime)
+        context.setattr(import_events.sys, "platform", "win32")
+        import_events._set_file_lock(handle.fileno(), acquire=acquire)
+    assert calls == [(11 if acquire else 12, 1, 0)]
+    assert path.read_bytes() == b""
+
+
+@pytest.mark.parametrize("code,expected", [(13, FileExistsError), (5, OSError)])
+def test_ownership_guard_reports_busy_and_other_lock_errors(tmp_path, monkeypatch, code, expected):
+    closed = []
+    close = os.close
+
+    def fail_lock(_fd, *, acquire):
+        raise OSError(code, "test lock error")
+
+    def close_guard(fd):
+        closed.append(fd)
+        close(fd)
+
+    monkeypatch.setattr(import_events, "_set_file_lock", fail_lock)
+    monkeypatch.setattr(import_events.os, "close", close_guard)
+    with pytest.raises(expected):
+        with import_events._ownership_guard(tmp_path / "events.lock", "test output"):
+            pytest.fail("lock error should prevent entry")
+    assert len(closed) == 1
+
+
 def test_llm_heartbeat_warns_while_running_and_stops(caplog):
     import logging
     import threading as _threading
@@ -6660,3 +6777,86 @@ def test_run_main_still_rejects_a_non_directory_input(tmp_path, caplog):
 
     assert code == 2
     assert "not a directory" in caplog.text
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory", "fifo"])
+def test_lock_guard_rejects_nonregular_path_without_mutation(tmp_path, kind):
+    guard = tmp_path / "lock.guard"
+    target = tmp_path / "foreign-empty"
+    target.touch()
+    if kind == "symlink":
+        try:
+            guard.symlink_to(target)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+    elif kind == "directory":
+        guard.mkdir()
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO creation unavailable")
+        os.mkfifo(guard)
+    with pytest.raises(OSError, match="regular file"):
+        import_events._open_guard_file(str(guard))
+    assert target.read_bytes() == b""
+    assert os.path.lexists(guard)
+
+
+@pytest.mark.parametrize("use_nofollow", [True, False])
+def test_lock_guard_rejects_symlink_swap_before_open(tmp_path, monkeypatch, use_nofollow):
+    guard = tmp_path / "lock.guard"
+    target = tmp_path / "foreign-empty"
+    target.touch()
+    opened = []
+    real_open = os.open
+    if not use_nofollow:
+        monkeypatch.delattr(import_events.os, "O_NOFOLLOW", raising=False)
+
+    def swap(path, flags, mode):
+        assert path == str(guard)
+        try:
+            guard.symlink_to(target)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+        fd = real_open(path, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(import_events.os, "open", swap)
+    with pytest.raises(OSError):
+        import_events._open_guard_file(str(guard))
+    assert target.read_bytes() == b""
+    assert guard.is_symlink()
+    for fd in opened:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_lock_guard_rejects_descriptor_path_identity_mismatch(tmp_path, monkeypatch):
+    guard = tmp_path / "lock.guard"
+    target = tmp_path / "foreign-empty"
+    guard.touch()
+    target.touch()
+    opened = []
+    real_open = os.open
+
+    def replaced_path(_path, flags, mode):
+        fd = real_open(target, flags, mode)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(import_events.os, "open", replaced_path)
+    with pytest.raises(OSError, match="changed while opening"):
+        import_events._open_guard_file(str(guard))
+    assert target.read_bytes() == b""
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+@pytest.mark.parametrize("contents", [b"", b"existing guard"])
+def test_ownership_guard_preserves_existing_contents(tmp_path, contents):
+    path = tmp_path / "events.lock"
+    guard = tmp_path / "events.lock.guard"
+    guard.write_bytes(contents)
+    with import_events._ownership_guard(path, "test output"):
+        pass
+    assert guard.read_bytes() == contents

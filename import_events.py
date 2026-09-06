@@ -4,6 +4,8 @@
 # parse uniformly across 3.9/3.10 (where datetime.fromisoformat is stricter)
 # and 3.11+; build_ics therefore never silently skips such valid events.
 import os
+import errno
+import stat
 import re
 import sys
 import json
@@ -4341,10 +4343,73 @@ def _lock_busy_message(lock_path: Path, description: str) -> str:
     )
 
 
+def _guard_file_stat(path: str) -> os.stat_result:
+    result = os.lstat(path)
+    if not stat.S_ISREG(result.st_mode):
+        raise OSError(errno.EINVAL, "Lock guard must be a regular file", path)
+    return result
+
+
+def _open_guard_file(path: str) -> int:
+    with contextlib.suppress(FileNotFoundError):
+        _guard_file_stat(path)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        path_stat, fd_stat = _guard_file_stat(path), os.fstat(fd)
+        if not stat.S_ISREG(fd_stat.st_mode) or not os.path.samestat(path_stat, fd_stat):
+            raise OSError(errno.EINVAL, "Lock guard changed while opening", path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _set_file_lock(fd: int, *, acquire: bool) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        mode = msvcrt.LK_NBLCK if acquire else msvcrt.LK_UNLCK
+        msvcrt.locking(fd, mode, 1)
+        return
+    import fcntl
+
+    mode = fcntl.LOCK_EX | fcntl.LOCK_NB if acquire else fcntl.LOCK_UN
+    fcntl.flock(fd, mode)
+
+
+def _acquire_ownership_guard(fd: int, lock_path: Path, description: str) -> None:
+    try:
+        _set_file_lock(fd, acquire=True)
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+            raise FileExistsError(_lock_busy_message(lock_path, description)) from exc
+        raise
+
+
+@contextlib.contextmanager
+def _ownership_guard(lock_path: Path, description: str):
+    # Never unlink this inode: replacing it would let contenders lock different
+    # files. OS ownership expires on process death, regardless of file contents.
+    # Windows byte locks may extend past EOF, so this file can stay empty.
+    guard_path = lock_path.with_name(f"{lock_path.name}.guard")
+    fd = _open_guard_file(str(guard_path))
+    try:
+        _acquire_ownership_guard(fd, lock_path, description)
+        try:
+            yield
+        finally:
+            _set_file_lock(fd, acquire=False)
+    finally:
+        os.close(fd)
+
+
 def _create_lock_file(lock_path: Path, description: str) -> int:
     """Reserve `lock_path` with O_CREAT|O_EXCL, reclaiming it once when the
     recorded owner is gone (ie-dist-01). Raises FileExistsError when a live
-    run holds it."""
+    run holds it. The caller holds _ownership_guard across this operation and
+    the resulting PID file's lifetime."""
     try:
         return os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     except FileExistsError as exc:
@@ -4374,18 +4439,19 @@ def _exclusive_lock(lock_path: Path, description: str):
     hand. The pid is now consulted, and a lock whose owner is gone is reclaimed
     once, with a warning.
     """
-    fd = _create_lock_file(lock_path, description)
-    try:
+    with _ownership_guard(lock_path, description):
+        fd = _create_lock_file(lock_path, description)
         try:
-            os.write(fd, f"pid={os.getpid()}\n".encode("utf-8"))
+            try:
+                os.write(fd, f"pid={os.getpid()}\n".encode("utf-8"))
+            finally:
+                os.close(fd)
+            yield
         finally:
-            os.close(fd)
-        yield
-    finally:
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
 
 
 def _output_lock(output_path: Path):
