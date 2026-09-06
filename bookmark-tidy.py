@@ -667,6 +667,15 @@ def _json_bookmark_format(data: Any, path: Path) -> str:
     raise UserError(f"unrecognized JSON bookmark format: {path}")
 
 
+def _read_json_bookmark_data(
+    path: Path,
+    data: Any,
+    convert: Callable[[Any, str], list[Bookmark]],
+    reader: Callable[[Path], list[Bookmark]],
+) -> list[Bookmark]:
+    return reader(path) if data is None else convert(data, str(path))
+
+
 def read_bookmark_file(path: Path) -> list[Bookmark]:
     fmt, data = _detect_bookmark_format_with_data(path)
     if fmt == "plain-text":
@@ -674,15 +683,13 @@ def read_bookmark_file(path: Path) -> list[Bookmark]:
             raise UserError(f"could not parse plain-text URL list: {path}")
         return data
     if fmt == "chromium":
-        if data is not None:
-            return chromium_json_data_to_bookmarks(data, str(path))
-        return read_chromium_bookmarks(path)
+        return _read_json_bookmark_data(
+            path, data, chromium_json_data_to_bookmarks, read_chromium_bookmarks)
     if fmt == "firefox-sqlite":
         return read_firefox_sqlite_bookmarks(path)
     if fmt == "firefox-json":
-        if data is not None:
-            return firefox_json_data_to_bookmarks(data, str(path))
-        return read_firefox_json_bookmarks(path)
+        return _read_json_bookmark_data(
+            path, data, firefox_json_data_to_bookmarks, read_firefox_json_bookmarks)
     if fmt == "firefox-jsonlz4":
         return read_firefox_jsonlz4_bookmarks(path)
     if isinstance(data, str):
