@@ -767,7 +767,7 @@ def test_normalize_url_option_edges():
 
     assert key == display
     assert display == "https://User:pw@Example.test:443/a/?utm_source=x#frag"
-    assert bookmark_tidy.normalize_url("/relative#x", bookmark_tidy.NormalizeOptions()) == ("/relative", "/relative")
+    assert bookmark_tidy.normalize_url("/relative#x", bookmark_tidy.NormalizeOptions()) == ("/relative#x", "/relative#x")
     assert bookmark_tidy.normalize_url(
         "http://example.test:bad/a",
         bookmark_tidy.NormalizeOptions(),
@@ -1590,3 +1590,15 @@ def test_llm_batch_size_is_bookmarks_per_request_not_n_batch(monkeypatch):
     bookmark_tidy._assign_categories(bookmarks, RecordingCategorizer(), "Fallback", 3)
 
     assert seen == [3, 3, 1]      # bookmarks per request, not tokens per batch
+
+
+@pytest.mark.parametrize("url", [
+    "javascript:document.querySelector('#target').click()",
+    "data:text/html,<h1 id='target'>Title</h1>#target",
+    "mailto:person@example.test?subject=Issue%20#42",
+])
+def test_opaque_bookmark_payload_survives_normalization(url):
+    options = bookmark_tidy.NormalizeOptions()
+    key, display = bookmark_tidy.normalize_url(url, options)
+    assert key == display == url
+    assert bookmark_tidy.normalize_url(display, options) == (key, display)

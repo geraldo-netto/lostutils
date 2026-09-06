@@ -792,17 +792,13 @@ def normalize_url(url: str, options: NormalizeOptions) -> tuple[str, str]:
         parsed = urlsplit(raw)
         parsed.port
     except ValueError:
-        return _normalize_opaque_url(raw, options)
+        return raw, raw
     if not parsed.scheme or not parsed.netloc:
-        return _normalize_opaque_url(raw, options)
+        # Script/data payloads can contain literal '#'; web fragment rules do not apply.
+        return raw, raw
     display = _normalized_display_url(parsed, options)
     key = _normalized_key_url(display, options)
     return key, display
-
-
-def _normalize_opaque_url(url: str, options: NormalizeOptions) -> tuple[str, str]:
-    clean = url.split("#", 1)[0] if options.strip_fragment else url
-    return clean, clean
 
 
 def _normalized_display_url(parsed: Any, options: NormalizeOptions) -> str:
