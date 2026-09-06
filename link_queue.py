@@ -4839,7 +4839,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         # enqueue dedupes) let remove/re-run map a selection back to the exact
         # item by identity (rel-01) AND let this refresh DIFF the tree instead
         # of rebuilding it: only changed rows are touched, and the costly
-        # _item_display() is computed only for genuinely new rows (perf-04).
+        # _item_display() is computed only for new or changed items (perf-04).
         desired = self._desired_queue_rows(shown, running, total, limit)
         self._apply_queue_rows(desired, self.queue_tree)
 
@@ -4852,7 +4852,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         (claims/removals never reorder the rest), so inserting each new row at
         its target position and refreshing only the leading number column
         reconstitutes the order without any per-row move() or full rebuild. The
-        number/note is only pushed to Tcl when it differs from our cache
+        number/item state is only pushed to Tcl when it differs from our cache
         (perf-06)."""
         self._remove_stale_queue_rows(tree, {row[0] for row in desired})
         prev_numbers = self._row_numbers
@@ -4871,20 +4871,24 @@ class LinkQueueApp(metaclass=_FacadeMeta):
 
     def _apply_queue_row(self, tree, pos: int, row, prev_numbers: dict):
         iid, idx_text, item, tags, note = row
-        cached = note if item is None else idx_text
+        cached = (idx_text, item, tags, note)
         if tree.exists(iid):
-            if prev_numbers.get(iid) == cached:
+            previous = prev_numbers.get(iid)
+            if previous == cached:
                 return iid, cached
-            column, value = ("url", note) if item is None else ("idx", idx_text)
-            tree.set(iid, column, value)
+            if previous is not None and previous[1:] == cached[1:]:
+                tree.set(iid, "idx", idx_text)
+            else:
+                tree.item(iid, tags=tags, values=self._queue_row_values(idx_text, item, note))
             return iid, cached
-        if item is None:
-            values = (idx_text, "", note, "")
-        else:
-            values = (
-                idx_text, item.protocol, item.url, self._item_display(item))
+        values = self._queue_row_values(idx_text, item, note)
         tree.insert("", pos, iid=iid, tags=tags, values=values)
         return iid, cached
+
+    def _queue_row_values(self, idx_text, item, note):
+        if item is None:
+            return (idx_text, "", note, "")
+        return (idx_text, item.protocol, item.url, self._item_display(item))
 
     def _render_limit(self) -> int:
         try:

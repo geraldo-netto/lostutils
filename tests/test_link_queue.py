@@ -5583,3 +5583,24 @@ def test_legacy_placeholder_migration_leaves_custom_commands(monkeypatch):
     monkeypatch.setattr(link_queue.os, "name", "nt")
     custom = 'custom.exe --url {url}'
     assert link_queue._safe_placeholder_template(custom) == custom
+
+
+def test_running_queue_row_refreshes_replacement_item(app):
+    first = q("https://example.test/first", template="first.exe {url}")
+    second = q("https://example.test/second", template="second.exe {url}")
+    app._apply_queue_rows([("r:0", "0", first, ("running",), "")], app.queue_tree)
+    app._apply_queue_rows([("r:0", "0", second, ("running",), "")], app.queue_tree)
+    values = app.queue_tree.item("r:0", "values")
+    assert values[2] == second.url
+    assert "second.exe" in values[3]
+    assert "first.exe" not in values[3]
+
+
+def test_queue_renumber_does_not_recompute_command(app, monkeypatch):
+    item = q("https://example.test/item")
+    calls = []
+    monkeypatch.setattr(app, "_item_display", lambda item: calls.append(item) or "command")
+    for number in ("1", "1", "2"):
+        app._apply_queue_rows([("pending", number, item, (), "")], app.queue_tree)
+    assert calls == [item]
+    assert app.queue_tree.set("pending", "idx") == "2"
