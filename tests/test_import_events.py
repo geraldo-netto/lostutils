@@ -1544,6 +1544,72 @@ def test_reset_paddle_ocr_state_uses_release_fallback(monkeypatch):
     assert released == ["release"]
 
 
+@pytest.mark.parametrize("operation", ["evict", "reset"])
+def test_paddle_lifecycle_waits_for_active_and_queued_users(monkeypatch, operation):
+    started, release = threading.Event(), threading.Event()
+    attempted, finished = threading.Event(), threading.Event()
+    closed, results, errors = [], [], []
+
+    class Engine:
+        def __init__(self, language):
+            self.language = language
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+            closed.append(self.language)
+
+    def build(_class, language, device):
+        return Engine(language), device
+
+    def infer(engine, _path):
+        if threading.current_thread().name == "paddle-active":
+            started.set()
+            assert release.wait(3)
+        assert not engine.closed
+        return {"rec_texts": [engine.language]}
+
+    def run():
+        results.append(import_events._ocr_with_paddle(Path("image.png"), "en"))
+
+    def change_cache():
+        attempted.set()
+        try:
+            if operation == "reset":
+                import_events.reset_paddle_ocr_state()
+            else:
+                import_events._get_paddle_ocr("fr")
+                import_events._get_paddle_ocr("de")
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(import_events, "_load_paddle_ocr_runtime",
+                        lambda _config: (types.SimpleNamespace(__version__="test"), Engine, "cpu"))
+    monkeypatch.setattr(import_events, "_build_paddle_ocr", build)
+    monkeypatch.setattr(import_events, "_run_paddle_ocr", infer)
+    active = threading.Thread(target=run, name="paddle-active")
+    queued = threading.Thread(target=run, name="paddle-queued")
+    changer = threading.Thread(target=change_cache)
+    active.start()
+    assert started.wait(3)
+    queued.start()
+    changer.start()
+    try:
+        assert attempted.wait(3)
+        assert not finished.wait(0.1)
+        assert closed == []
+    finally:
+        release.set()
+        for thread in (active, queued, changer):
+            thread.join(3)
+    assert not any(thread.is_alive() for thread in (active, queued, changer))
+    assert errors == []
+    assert results == ["en", "en"]
+    assert "en" in closed
+
+
 def test_ocr_warning_summary_counts_suppressed_repeats(caplog):
     import logging
 

@@ -833,12 +833,14 @@ _OUTPUT_REDIRECT_LOCK = threading.RLock()
 _OCR_WARNING_LOCK = threading.Lock()
 _PADDLE_OCR_LOCK = threading.Lock()
 # ie-scal-01: INTENTIONAL process-wide serialization. PaddleOCR's predictor is
-# not reliably thread-safe, so every Paddle run holds this single lock. The
+# not reliably thread-safe, so every Paddle run holds this single lock. Cache
+# publication and teardown share it; queued runs look up engines only after
+# acquiring it. Reentrancy lets a run initialize its own missing engine. The
 # consequence is deliberate: the --workers pool gives NO Paddle-OCR
 # parallelism (one image is OCR'd at a time process-wide); workers still
 # parallelize file I/O, Tesseract, and LLM stages. Do not scope this per engine
 # unless the backend is confirmed thread-safe.
-_PADDLE_RUN_LOCK = threading.Lock()
+_PADDLE_RUN_LOCK = threading.RLock()
 _TESSERACT_PATH_LOCK = threading.Lock()
 _EXTRACTION_FAILURE_LOCK = threading.Lock()
 _PADDLE_OCR: Optional[Any] = None
@@ -969,13 +971,14 @@ def _trim_paddle_ocr_cache(
 
 def reset_paddle_ocr_state() -> None:
     global _PADDLE_OCR, _PADDLE_OCR_DISABLED, _PADDLE_OCR_MISSING
-    with _PADDLE_OCR_LOCK:
-        engines = _cached_paddle_engines(_PADDLE_OCR)
-        _PADDLE_OCR = None
-        _PADDLE_OCR_DISABLED = False
-        _PADDLE_OCR_MISSING = False
-    for engine in engines:
-        _close_paddle_ocr_engine(engine)
+    with _PADDLE_RUN_LOCK:
+        with _PADDLE_OCR_LOCK:
+            engines = _cached_paddle_engines(_PADDLE_OCR)
+            _PADDLE_OCR = None
+            _PADDLE_OCR_DISABLED = False
+            _PADDLE_OCR_MISSING = False
+        for engine in engines:
+            _close_paddle_ocr_engine(engine)
 
 
 def _disable_paddle_ocr() -> None:
@@ -2976,12 +2979,12 @@ def _get_paddle_ocr(
                    paddle_lang, device, exc)
         return None
     effective_key = (paddle_lang, effective_device)
-    resolved, to_close = _store_or_reuse_paddle_ocr(cache_key, effective_key, engine)
-    for redundant in to_close:
-        # ie-mt-01: another thread won the build race (or OCR was disabled)
-        # while we constructed our own engine; close the redundant one instead
-        # of leaking hundreds of MB. Done outside the lock — close() may block.
-        _close_paddle_ocr_engine(redundant)
+    with _PADDLE_RUN_LOCK:
+        resolved, to_close = _store_or_reuse_paddle_ocr(cache_key, effective_key, engine)
+        for redundant in to_close:
+            # Native cleanup must wait for inference, without holding the
+            # cache mutex needed by otherwise independent cached lookups.
+            _close_paddle_ocr_engine(redundant)
     if resolved is engine:
         version = getattr(paddleocr_module, "__version__", "unknown")
         logger.info("Using PaddleOCR %s with language %s on %s.",
@@ -3031,19 +3034,19 @@ def _ocr_with_paddle(
     """Run PaddleOCR on ``image_path``. Serialized process-wide via
     ``_PADDLE_RUN_LOCK`` (ie-scal-01): Paddle runs one image at a time across
     all workers because the predictor is not reliably thread-safe."""
-    engine = _get_paddle_ocr(language, config)
-    if engine is None:
-        return ""
-    try:
-        with _PADDLE_RUN_LOCK:
+    with _PADDLE_RUN_LOCK:
+        engine = _get_paddle_ocr(language, config)
+        if engine is None:
+            return ""
+        try:
             if _PADDLE_OCR_DISABLED:
                 return ""
             result = _run_paddle_ocr(engine, image_path)
-    except Exception as exc:
-        _disable_paddle_ocr()
-        _warn_once("paddle-error", "PaddleOCR failed; skipping Paddle OCR: %s", exc)
-        return ""
-    return "\n".join(_paddle_texts(result))
+        except Exception as exc:
+            _disable_paddle_ocr()
+            _warn_once("paddle-error", "PaddleOCR failed; skipping Paddle OCR: %s", exc)
+            return ""
+        return "\n".join(_paddle_texts(result))
 
 
 def _display_path(path: str) -> str:
