@@ -707,6 +707,7 @@ def make_usb(find_dev=None, ep=None):
     util.find_descriptor = lambda intf, custom_match=None: ep
     util.disposed = []
     util.dispose_resources = util.disposed.append
+    util.release_interface = lambda dev, number: None
     ns.core = core
     ns.util = util
     return ns, USBError
@@ -894,6 +895,44 @@ def test_close_dispose_exception_is_logged(monkeypatch):
     d.close()
     assert d.dev is None
     assert any("dispose_resources failed" in m for m in logs)
+
+
+def test_close_releases_claim_before_reattaching_driver(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    calls = []
+    dev = FakeUsbDev()
+    device = minikeypad.KeypadDevice()
+    device.dev = dev
+    device.intf = FakeIntf(1)
+    device._detached = True
+
+    def attach(number):
+        assert calls == [("release", dev, number)]
+        calls.append("attach")
+
+    usb.util.release_interface = lambda handle, number: calls.append(("release", handle, number))
+    dev.attach_kernel_driver = attach
+    usb.util.dispose_resources = lambda handle: calls.append("dispose")
+    device.close()
+    assert calls == [("release", dev, 1), "attach", "dispose"]
+
+
+def test_close_still_disposes_when_release_fails(monkeypatch):
+    usb, _ = make_usb()
+    _install_usb(monkeypatch, usb)
+    logs = []
+    device = minikeypad.KeypadDevice(log=logs.append)
+    dev = FakeUsbDev()
+    device.dev = dev
+
+    def fail_release(handle, number):
+        raise RuntimeError("device vanished")
+
+    usb.util.release_interface = fail_release
+    device.close()
+    assert usb.util.disposed == [dev]
+    assert logs == ["release_interface failed: device vanished"]
 
 
 def test_reattach_failure_is_logged(monkeypatch):

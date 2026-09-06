@@ -345,6 +345,7 @@ class KeypadDevice:
     def close(self):
         with self._lock:
             if self.dev is not None:
+                self._release_interface()
                 self._reattach_kernel_driver()
                 try:
                     usb.util.dispose_resources(self.dev)
@@ -353,6 +354,14 @@ class KeypadDevice:
             self.dev = None
             self.ep_out = None
             self.intf = None
+
+    def _release_interface(self):
+        # PyUSB claims lazily on transfer; libusb cannot reattach a claimed interface.
+        number = self.intf.bInterfaceNumber if self.intf is not None else HID_INTERFACE
+        try:
+            usb.util.release_interface(self.dev, number)
+        except Exception as e:
+            self.log(f"release_interface failed: {e}")
 
     def _reattach_kernel_driver(self):
         """Re-bind usbhid so the keypad works as a normal HID after we exit."""
