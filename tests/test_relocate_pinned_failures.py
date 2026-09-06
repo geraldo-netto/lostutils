@@ -153,3 +153,54 @@ def test_pinned_copy_surfaces_directory_walk_error_and_removes_owned_target(
     assert (blocked / "valuable.txt").read_bytes() == b"untouched"
     assert not target.exists()
     assert not list(tmp_path.glob(".relocate-*"))
+
+
+def test_strict_pinned_copy_rejects_fifo_before_publication_and_closes_source(
+        tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "regular.txt").write_bytes(b"preserved")
+    pipe = source / "pipe"
+    os.mkfifo(pipe)
+    target = tmp_path / "target"
+    opened, publications = [], []
+    real_source_open = rf._source_identity_fd
+    real_rename = rf._rename_noreplace
+
+    def track_source(path):
+        descriptor, identity = real_source_open(path)
+        opened.append(descriptor)
+        return descriptor, identity
+
+    def track_publication(src, dst):
+        publications.append(dst)
+        return real_rename(src, dst)
+
+    monkeypatch.setattr(rf, "_source_identity_fd", track_source)
+    monkeypatch.setattr(rf, "_rename_noreplace", track_publication)
+    plan = rf.Plan(source=source, target=target, strict=True, force=True, check_space=False)
+    with pytest.raises(RuntimeError, match="strict mode: refusing to migrate, 1 special file"):
+        rf.execute(plan)
+
+    assert target not in publications
+    assert not target.exists()
+    assert (source / "regular.txt").read_bytes() == b"preserved"
+    assert pipe.exists()
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+
+
+def test_pinned_special_preflight_allows_regular_files_directories_and_symlinks(
+        pinned_directory):
+    root, directory_fd = pinned_directory
+    (root / "directory").mkdir()
+    (root / "regular.txt").write_bytes(b"ordinary")
+    (root / "link").symlink_to("regular.txt")
+    cache = {}
+
+    rf._refuse_pinned_specials(directory_fd, root, cache)
+
+    assert cache == {}
+    assert (root / "regular.txt").read_bytes() == b"ordinary"
+    assert (root / "link").is_symlink()
