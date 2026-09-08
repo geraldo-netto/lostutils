@@ -84,7 +84,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| rf-test-70 | open | medium | medium | tests/test_relocate_folder.py:1 — [test coverage] The 5,223-line main suite makes 70 `copy_tree`/`verify_copy` calls and none pass `source_fd=`, so every copy/verify/space/progress/ownership/cleanup assertion exercises the legacy path the CLI never runs, while the runtime path has ~300 dedicated lines; rf-rel-70, rf-rob-70, and rf-perf-70 are exactly the behaviours the legacy tests assert correctly for the dead path (e.g. `test_src_size_totals_sparse_alloc_under_apparent` at 4234). Port the copy/verify tests to drive `execute`/`copy_tree(source_fd=...)` and add a subprocess SIGKILL test. |
 
 ### `remove-deduplv3.py`
 

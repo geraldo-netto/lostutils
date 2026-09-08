@@ -16,6 +16,13 @@ import relocate_folder as rf
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="relocation requires POSIX descriptors")
 
 
+def _wait_for_marker(process, marker):
+    deadline = time.monotonic() + 5
+    while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert marker.exists(), "migration did not reach its controlled interruption point"
+
+
 def test_sigkill_during_copy_leaves_private_artifact_and_allows_retry(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
@@ -44,10 +51,7 @@ def test_sigkill_during_copy_leaves_private_artifact_and_allows_retry(tmp_path):
         cwd=Path(rf.__file__).parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:
-        deadline = time.monotonic() + 5
-        while not marker.exists() and process.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert marker.exists(), "copy did not reach its controlled interruption point"
+        _wait_for_marker(process, marker)
         assert not target.exists()
         process.kill()
         process.communicate(timeout=5)
@@ -66,6 +70,72 @@ def test_sigkill_during_copy_leaves_private_artifact_and_allows_retry(tmp_path):
     assert rf.main([str(source), str(destination), "--force"]) == 0
     assert (target / "payload").read_bytes() == payload
     assert artifacts[0].exists()
+
+
+def test_sigkill_after_backup_rename_is_recoverable_by_fresh_cli(tmp_path):
+    source = tmp_path / "source"
+    nested = source / "nested"
+    nested.mkdir(parents=True)
+    payload = b"recover the original bytes" * 4096
+    original_file = nested / "payload"
+    original_file.write_bytes(payload)
+    original_file.chmod(0o640)
+    (source / "link").symlink_to("nested/payload")
+    original_identity = source.stat().st_ino
+    destination = tmp_path / "destination"
+    target = destination / source.name
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    marker = tmp_path / "backup-renamed"
+    code = textwrap.dedent("""\
+        import sys
+        import threading
+        from pathlib import Path
+        import relocate_folder as rf
+
+        source, destination, marker = map(Path, sys.argv[1:])
+        original_rename = rf._rename_noreplace
+        def interrupted_rename(before, after):
+            original_rename(before, after)
+            if before == source and after == source.with_name(source.name + rf.BACKUP_SUFFIX):
+                marker.write_text("ready")
+                threading.Event().wait(30)
+        rf._rename_noreplace = interrupted_rename
+        raise SystemExit(rf.main([str(source), str(destination), "--force", "--verify-ownership"]))
+    """)
+    process = subprocess.Popen(
+        [sys.executable, "-c", code, str(source), str(destination), str(marker)],
+        cwd=Path(rf.__file__).parent, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_marker(process, marker)
+        assert not source.exists()
+        assert backup.stat().st_ino == original_identity
+        process.kill()
+        process.communicate(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate(timeout=5)
+
+    assert process.returncode < 0
+    assert (backup / "nested" / "payload").read_bytes() == payload
+    assert (target / "nested" / "payload").read_bytes() == payload
+    assert not list(destination.glob(".relocate-copy-*"))
+    command = [sys.executable, rf.__file__, str(source), "--recover", "--force"]
+    preview = subprocess.run(command + ["--dry-run"], capture_output=True, text=True, timeout=10)
+    assert preview.returncode == 0, preview.stderr
+    assert "dry-run: would recover" in preview.stderr
+    assert not source.exists()
+    assert backup.stat().st_ino == original_identity
+
+    restored = subprocess.run(command, capture_output=True, text=True, timeout=10)
+    assert restored.returncode == 0, restored.stderr
+    assert source.stat().st_ino == original_identity
+    assert not source.is_symlink()
+    assert not backup.exists()
+    assert (source / "link").read_bytes() == payload
+    assert (source / "nested" / "payload").stat().st_mode & 0o777 == 0o640
+    assert (target / "link").read_bytes() == payload
 
 
 @pytest.mark.parametrize("replacement", ["directory", "symlink"])
