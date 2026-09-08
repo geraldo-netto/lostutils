@@ -2,7 +2,7 @@
 
 Standalone Python CLI and Tk utilities for local file, link, hardware, and calendar-event workflows. Each root script is self-contained: scripts do not import helpers from sibling files in this repository.
 
-There is no repository-wide requirements file. Install only the third-party packages needed by the script you run. Most CLI scripts support `--help`; `link_queue.py` opens its GUI immediately.
+There is no repository-wide requirements file. Install only the third-party packages needed by the script you run. Most CLI scripts support `--help`; `link_queue.py` supports `--help` and `--version` without opening its GUI.
 
 ## Quick reference
 
