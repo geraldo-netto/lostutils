@@ -18,8 +18,8 @@ Command templates support the following placeholders:
 
 Config is persisted as YAML to $XDG_CONFIG_HOME/link_queue/link_queue_config.yaml
 (or ~/.config/link_queue/link_queue_config.yaml). A legacy
-link_queue_config.json in that directory, or beside the script as a fallback,
-is migrated to YAML once on first run.
+link_queue_config.json in that per-user directory is migrated to YAML once.
+Files beside the script are never adopted automatically.
 """
 
 from __future__ import annotations
@@ -195,17 +195,6 @@ STATE_FILE_NAME = "link_queue_state.yaml"
 LOG_SINK_MAX_BYTES = 10 * 1024 * 1024
 
 
-def _script_dir() -> str:
-    """Directory the script lives in. Tests can monkey-patch this by
-    overriding CONFIG_FILE / LEGACY_CONFIG_FILE / STATE_FILE directly on
-    the module."""
-    try:
-        return os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        # __file__ is missing if run via an embedded interpreter.
-        return os.getcwd()
-
-
 def _user_config_dir() -> str:
     """lq-sec-02: per-user config directory ($XDG_CONFIG_HOME/link_queue or
     ~/.config/link_queue), created with mode 0o700 so a co-tenant on a
@@ -216,9 +205,8 @@ def _user_config_dir() -> str:
     the read-only bit — the equivalent protection comes instead from the
     user-profile ACL this directory inherits, which grants other standard
     users no access. Neither mechanism covers an $XDG_CONFIG_HOME aimed at
-    a shared writable base. Falls back to the script dir only if the user
-    dir cannot be created (read-only $HOME, etc.) so legacy single-user
-    installs keep working."""
+    a shared writable base. An inaccessible per-user directory stays selected:
+    startup reports its error instead of adopting shared commands."""
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
         os.path.expanduser("~"), ".config"
     )
@@ -230,21 +218,10 @@ def _user_config_dir() -> str:
             os.chmod(target, 0o700)
         except OSError:
             pass
-        return target
-    except OSError:
-        return _script_dir()
-
-
-def _resolve_state_path(name: str) -> str:
-    """Prefer the per-user dir; fall back to a pre-existing file in the
-    script dir so an upgrade doesn't orphan an in-flight queue."""
-    user_path = os.path.join(_user_config_dir(), name)
-    if os.path.exists(user_path):
-        return user_path
-    legacy_path = os.path.join(_script_dir(), name)
-    if os.path.exists(legacy_path):
-        return legacy_path
-    return user_path
+    except OSError as exc:
+        print(f"[warn] could not prepare per-user configuration directory {target}: {exc}",
+              file=sys.stderr)
+    return target
 
 
 def _sweep_temp_siblings(path: str) -> None:
@@ -272,9 +249,10 @@ def _temporary_sibling_path(directory: str, prefix: str, name: str) -> "str | No
     return path if os.path.isfile(path) or os.path.islink(path) else None
 
 
-CONFIG_FILE = _resolve_state_path(CONFIG_FILE_NAME)
-LEGACY_CONFIG_FILE = _resolve_state_path(LEGACY_CONFIG_FILE_NAME)
-STATE_FILE = _resolve_state_path(STATE_FILE_NAME)
+_CONFIG_DIRECTORY = _user_config_dir()
+CONFIG_FILE = os.path.join(_CONFIG_DIRECTORY, CONFIG_FILE_NAME)
+LEGACY_CONFIG_FILE = os.path.join(_CONFIG_DIRECTORY, LEGACY_CONFIG_FILE_NAME)
+STATE_FILE = os.path.join(_CONFIG_DIRECTORY, STATE_FILE_NAME)
 INVALID_PIDFILE_GRACE_SECONDS = 5.0
 
 
@@ -6043,7 +6021,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _report_state_lock_error(root, error: StateFileLockError) -> None:
+def _report_state_lock_error(root, error: Exception) -> None:
     print(f"error: {error}", file=sys.stderr)
     try:
         messagebox.showerror("Queue unavailable", str(error), parent=root)
@@ -6071,7 +6049,7 @@ def main(argv: "list[str] | None" = None) -> None:
         pass
     try:
         LinkQueueApp(root)
-    except StateFileLockError as exc:
+    except (StateFileLockError, OSError) as exc:
         _report_state_lock_error(root, exc)
         raise SystemExit(1) from exc
     root.mainloop()

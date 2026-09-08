@@ -2936,11 +2936,6 @@ def test_on_close_destroy_error(app, monkeypatch):
     assert app.stop_event.is_set()
 
 
-def test_script_dir_no_dunder_file(monkeypatch):
-    monkeypatch.delattr(link_queue, "__file__", raising=False)
-    assert link_queue._script_dir() == os.getcwd()  # NameError -> cwd fallback
-
-
 def test_settings_dialog_is_open_states(app):
     app._open_settings_dialog()
     app._settings_dialog_visible = True
@@ -4918,7 +4913,7 @@ def test_shutdown_sets_stop_event_before_presave(app, monkeypatch):
     assert observed.get("first_stop_set") is True
 
 
-def test_user_config_dir_falls_back_when_creation_fails(monkeypatch):
+def test_user_config_dir_stays_selected_when_creation_fails(monkeypatch, capsys):
     class OsProxy:
         environ = {"XDG_CONFIG_HOME": "/unwritable"}
         path = os.path
@@ -4932,7 +4927,8 @@ def test_user_config_dir_falls_back_when_creation_fails(monkeypatch):
 
     monkeypatch.setattr(link_queue, "os", OsProxy())
 
-    assert link_queue._user_config_dir() == link_queue._script_dir()
+    assert link_queue._user_config_dir() == os.path.join("/unwritable", "link_queue")
+    assert "could not prepare per-user configuration directory" in capsys.readouterr().err
 
 
 def test_sweep_temp_siblings_ignores_unreadable_directory(monkeypatch):
@@ -5312,7 +5308,9 @@ def test_stream_deadline_closes_inherited_output_pipe(
 
 
 @pytest.mark.parametrize("dialog_fails", [False, True])
-def test_main_reports_state_lock_error(monkeypatch, capsys, dialog_fails):
+@pytest.mark.parametrize("error", [link_queue.StateFileLockError("locked"),
+                                  PermissionError("directory inaccessible")])
+def test_main_reports_state_lock_error(monkeypatch, capsys, dialog_fails, error):
     prompts = []
 
     class Root:
@@ -5329,15 +5327,15 @@ def test_main_reports_state_lock_error(monkeypatch, capsys, dialog_fails):
     monkeypatch.setattr(
         link_queue,
         "LinkQueueApp",
-        lambda _root: (_ for _ in ()).throw(link_queue.StateFileLockError("locked")),
+        lambda _root: (_ for _ in ()).throw(error),
     )
 
     with pytest.raises(SystemExit) as exc:
         link_queue.main([])
 
     assert exc.value.code == 1
-    assert "locked" in capsys.readouterr().err
-    assert prompts[0][:2] == ("Queue unavailable", "locked")
+    assert str(error) in capsys.readouterr().err
+    assert prompts[0][:2] == ("Queue unavailable", str(error))
     assert isinstance(prompts[0][2]["parent"], Root)
 
 
@@ -6280,3 +6278,46 @@ def test_config_warns_on_quoted_shell_placeholder(capsys):
            "default_shell": True, "default_command": "echo {url_quoted}"}
     link_queue.ConfigStore._warn_shell_injection(cfg)
     assert "unquoted, standalone" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("user_directory_available", [False, True])
+def test_script_directory_commands_are_never_adopted(tmp_path, user_directory_available):
+    import json
+    import shutil
+
+    scripts = tmp_path / "shared scripts"
+    scripts.mkdir()
+    shutil.copyfile(Path(link_queue.__file__), scripts / "link_queue.py")
+    marker = tmp_path / "INJECTED"
+    entry = {"url": "https://example.invalid", "protocol": "https", "shell": True,
+             "template": f"true {{url_quoted}}; touch {link_queue.shlex.quote(str(marker))}"}
+    (scripts / "link_queue_state.yaml").write_text(json.dumps({"queue": [entry]}))
+    (scripts / "link_queue_config.yaml").write_text(json.dumps({"protocols": {"planted": {}}}))
+    (scripts / "link_queue_config.json").write_text(json.dumps({"protocols": {"planted": {}}}))
+    base = tmp_path / "user config"
+    if not user_directory_available:
+        base.write_text("not a directory")
+    env = dict(os.environ, XDG_CONFIG_HOME=str(base))
+    child = '''
+import json
+import link_queue as lq
+config = lq.ConfigStore(lq.CONFIG_FILE, lq.LEGACY_CONFIG_FILE)
+dispatcher = lq.Dispatcher.headless(config=config)
+try:
+    dispatcher._restore_queue_from_state()
+    print(json.dumps({"config": lq.CONFIG_FILE, "legacy": lq.LEGACY_CONFIG_FILE,
+                      "state": lq.STATE_FILE, "pending": len(dispatcher.queue_items),
+                      "planted": "planted" in config["protocols"]}))
+finally:
+    dispatcher.close()
+'''
+    result = subprocess.run([sys.executable, "-c", child], cwd=scripts, env=env,
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["pending"] == 0
+    assert not report["planted"]
+    assert all(Path(report[name]).parent == base / "link_queue"
+               for name in ("config", "legacy", "state"))
+    assert not marker.exists()
+    assert (scripts / "link_queue_state.yaml").exists()
