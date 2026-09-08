@@ -342,22 +342,16 @@ class IterBatchesFreshLists(unittest.TestCase):
         self.assertEqual(src, original)   # source untouched
 
 
-# --- hr-hyg-02 boundary: _expand_keys_to_paths sentinel always typed ----
+# --- Alias caps retain real paths without fabricating records ------------
 
-class ExpandKeysSentinelTyped(unittest.TestCase):
+class ExpandKeysRealPaths(unittest.TestCase):
     @settings(parent=FUZZ, max_examples=40)
     @given(st.integers(min_value=1, max_value=200),   # n paths
            st.integers(min_value=1, max_value=100))   # cap
-    def test_sentinel_only_when_truncated(self, n, cap):
+    def test_cap_preserves_only_the_requested_real_paths(self, n, cap):
         aliases = {("d", 0): [f"/p/{i}" for i in range(n)]}
         out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=cap)
-        if n > cap:
-            self.assertEqual(len(out), cap + 1)
-            self.assertIsInstance(out[-1], hr._MoreSentinel)
-            self.assertEqual(hr._count_real_paths(out), cap)
-        else:
-            self.assertEqual(len(out), n)
-            self.assertEqual(hr._count_real_paths(out), n)
+        self.assertEqual(out, aliases[("d", 0)][:cap])
 
 
 if __name__ == "__main__":
