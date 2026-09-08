@@ -781,12 +781,18 @@ def discover_browser_bookmarks() -> list[Path]:
 
 def _linux_browser_patterns(home: Path) -> list[Path]:
     config_home = home / ".config"
+    flatpak_home = home / ".var" / "app"
     return [
         config_home / "google-chrome" / "*" / "Bookmarks",
         config_home / "chromium" / "*" / "Bookmarks",
         config_home / "microsoft-edge" / "*" / "Bookmarks",
         config_home / "microsoft-edge-beta" / "*" / "Bookmarks",
         home / ".mozilla" / "firefox" / "*" / FIREFOX_DATABASE_NAME,
+        home / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / "*" / FIREFOX_DATABASE_NAME,
+        flatpak_home / "org.mozilla.firefox" / ".mozilla" / "firefox" / "*" / FIREFOX_DATABASE_NAME,
+        flatpak_home / "com.google.Chrome" / "config" / "google-chrome" / "*" / "Bookmarks",
+        flatpak_home / "org.chromium.Chromium" / "config" / "chromium" / "*" / "Bookmarks",
+        flatpak_home / "com.microsoft.Edge" / "config" / "microsoft-edge" / "*" / "Bookmarks",
     ]
 
 
@@ -809,6 +815,7 @@ def _windows_browser_patterns() -> list[Path]:
         patterns.extend(
             [
                 base / "Google" / "Chrome" / "User Data" / "*" / "Bookmarks",
+                base / "Chromium" / "User Data" / "*" / "Bookmarks",
                 base / "Microsoft" / "Edge" / "User Data" / "*" / "Bookmarks",
             ]
         )

@@ -6,7 +6,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| bt-prod-70 | open | low | low | bookmark-tidy.py:758-766 — [product engineering] Auto-discovery globs only `~/.mozilla/firefox` and `~/.config/{google-chrome,chromium,microsoft-edge}`; snap Firefox (`~/snap/firefox/common/.mozilla/firefox`) and Flatpak browsers (`~/.var/app/<id>/`) on stock Ubuntu are missed, and Windows lacks `Chromium\User Data`, so the documented no-argument mode reports `no bookmark inputs found`. Add snap/flatpak/Chromium pattern roots. |
 
 ### `dedupl_numpy.py`
 

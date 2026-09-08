@@ -828,6 +828,32 @@ def test_expand_inputs_and_discovery_helpers(tmp_path, monkeypatch):
     assert bookmark_tidy._mac_browser_patterns(tmp_path)
 
 
+def test_discover_browser_bookmarks_finds_sandboxed_profiles(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    snap_profile = home / "snap" / "firefox" / "common" / ".mozilla" / "firefox" / "snap-profile"
+    flatpak_profile = home / ".var" / "app" / "org.chromium.Chromium" / "config" / "chromium" / "Default"
+    windows_profile = home / "Windows" / "Chromium" / "User Data" / "Default"
+    for directory in (snap_profile, flatpak_profile, windows_profile):
+        directory.mkdir(parents=True)
+    snap_path = snap_profile / bookmark_tidy.FIREFOX_DATABASE_NAME
+    flatpak_path = flatpak_profile / "Bookmarks"
+    windows_path = windows_profile / "Bookmarks"
+    snap_path.write_bytes(b"")
+    flatpak_path.write_text("{}", encoding="utf-8")
+    windows_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(bookmark_tidy.Path, "home", lambda: home)
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "Windows"))
+    monkeypatch.setenv("APPDATA", str(home / "Windows" / "Roaming"))
+
+    discovered = bookmark_tidy.discover_browser_bookmarks()
+
+    assert snap_path.resolve() in discovered
+    assert flatpak_path.resolve() in discovered
+    assert windows_path.resolve() in discovered
+    assert all(str(home) in str(path) for path in discovered)
+
+
 def test_explicit_unsupported_file_is_retained_for_content_sniff(tmp_path, caplog):
     path = tmp_path / "Bookmarks.bak"
     path.write_text("plain", encoding="utf-8")
