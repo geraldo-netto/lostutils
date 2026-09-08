@@ -976,7 +976,7 @@ def _merge_bookmark_group(group: Sequence[Bookmark], options: NormalizeOptions) 
             len(item.title.strip()),
         ),
     )
-    display_url = _preferred_display_url(group, options)
+    display_url = _preferred_original_url(group, options)
     return Bookmark(
         url=display_url,
         title=_bookmark_title(title_source.title, display_url),
@@ -988,9 +988,12 @@ def _merge_bookmark_group(group: Sequence[Bookmark], options: NormalizeOptions) 
     )
 
 
-def _preferred_display_url(group: Sequence[Bookmark], options: NormalizeOptions) -> str:
-    displays = [normalize_url(bookmark.url, options)[1] for bookmark in group]
-    return max(displays, key=_display_url_score)
+def _preferred_original_url(group: Sequence[Bookmark], options: NormalizeOptions) -> str:
+    preferred = max(
+        group,
+        key=lambda item: _display_url_score(normalize_url(item.url, options)[1]),
+    )
+    return preferred.url
 
 
 def _display_url_score(url: str) -> tuple[int, int]:

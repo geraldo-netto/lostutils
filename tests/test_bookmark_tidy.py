@@ -229,6 +229,18 @@ def test_merge_bookmark_group_prefers_human_title_to_url_placeholder():
     assert merged.title == "Docs"
 
 
+def test_merge_bookmark_group_preserves_preferred_original_url():
+    original = "https://example.test/a?utm_source=news#settings"
+    group = [
+        bookmark_tidy.Bookmark("http://www.example.test/a/", "HTTP"),
+        bookmark_tidy.Bookmark(original, "HTTPS"),
+    ]
+    options = bookmark_tidy.NormalizeOptions()
+
+    assert bookmark_tidy._canonical_key(group[0], options) == bookmark_tidy._canonical_key(group[1], options)
+    assert bookmark_tidy._merge_bookmark_group(group, options).url == original
+
+
 def test_immutable_folder_is_copied_and_mutable_duplicate_is_removed(caplog):
     immutable = bookmark_tidy.Bookmark(
         "https://example.test/a#locked",
