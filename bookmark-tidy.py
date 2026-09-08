@@ -187,6 +187,14 @@ def _attrs_to_dict(attrs: Iterable[tuple[str, str | None]]) -> dict[str, str]:
     return {key.casefold(): value or "" for key, value in attrs}
 
 
+def _netscape_root_marker(attrs: Mapping[str, str]) -> str | None:
+    if attrs.get("personal_toolbar_folder", "").casefold() == "true":
+        return "bookmark_bar"
+    if attrs.get("unfiled_bookmarks_folder", "").casefold() == "true":
+        return "other"
+    return None
+
+
 class NetscapeBookmarkParser(HTMLParser):
     def __init__(self, source: str) -> None:
         super().__init__(convert_charrefs=True)
@@ -194,6 +202,7 @@ class NetscapeBookmarkParser(HTMLParser):
         self._source = source
         self._folders: list[str] = []
         self._pending_folder: str | None = None
+        self._pending_folder_root: str | None = None
         self._pending_folder_text: list[str] = []
         self._active_link_attrs: dict[str, str] | None = None
         self._active_link_text: list[str] = []
@@ -201,14 +210,19 @@ class NetscapeBookmarkParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.casefold()
         if tag == "h3":
+            self._pending_folder_root = _netscape_root_marker(_attrs_to_dict(attrs))
             self._pending_folder = ""
             self._pending_folder_text = []
         elif tag == "a":
             self._active_link_attrs = _attrs_to_dict(attrs)
             self._active_link_text = []
         elif tag == "dl" and self._pending_folder is not None:
-            self._folders.append(_clean_folder_part("".join(self._pending_folder_text)))
+            folder = _clean_folder_part("".join(self._pending_folder_text))
+            if self._pending_folder_root is not None and not self._folders:
+                folder = _root_display(self._pending_folder_root)
+            self._folders.append(folder)
             self._pending_folder = None
+            self._pending_folder_root = None
             self._pending_folder_text = []
 
     def handle_data(self, data: str) -> None:

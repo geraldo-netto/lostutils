@@ -329,6 +329,27 @@ def test_read_netscape_bookmarks_parses_roots_and_folders(tmp_path):
     assert bookmarks[0].last_modified == 20
 
 
+def test_read_netscape_bookmarks_honours_localized_root_markers():
+    text = """<!DOCTYPE NETSCAPE-Bookmark-file-1>
+    <DL><p>
+      <DT><H3 PERSONAL_TOOLBAR_FOLDER="TrUe">Favoritenleiste</H3>
+      <DL><p><DT><A HREF="https://example.test/bar">Bar</A></DL><p>
+      <DT><H3 UNFILED_BOOKMARKS_FOLDER="true">Nicht abgelegt</H3>
+      <DL><p><DT><A HREF="https://example.test/other">Other</A></DL><p>
+    </DL><p>
+    """
+
+    bookmarks = bookmark_tidy.netscape_html_to_bookmarks(text, "localized.html")
+
+    assert [(item.root, item.folder_path) for item in bookmarks] == [
+        ("bookmark_bar", ()),
+        ("other", ()),
+    ]
+    assert bookmark_tidy.is_immutable_bookmark(
+        bookmarks[1], bookmark_tidy._immutable_names(["Other Bookmarks"])
+    )
+
+
 def test_read_chromium_bookmarks_parses_nested_folders(tmp_path):
     path = tmp_path / "Bookmarks"
     path.write_text(
