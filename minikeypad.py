@@ -2087,6 +2087,8 @@ class App(tk.Tk):
         if not self._confirm_layer_collapse():
             self._dl_note("Write-all cancelled.")
             return
+        if not self._precheck_write("Write-all"):
+            return
         jobs = []
         for (layer, kid), rec in self._assignments.items():
             built = self._reports_for(layer, rec["data"])

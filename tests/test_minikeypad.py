@@ -1947,6 +1947,40 @@ def test_write_all_cancelled_sends_nothing(app, monkeypatch):
     assert "cancelled" in app.log_box.get("1.0", "end").lower()
 
 
+def test_write_all_rechecks_busy_after_confirmation(app, monkeypatch):
+    _collapsing_write_all(app, monkeypatch, answer=True)
+    sent = []
+
+    def confirm_busy(*_args, **_kwargs):
+        app._io_busy = True
+        return True
+
+    monkeypatch.setattr(minikeypad.messagebox, "askyesno", confirm_busy)
+    monkeypatch.setattr(app, "_run_write_all", lambda jobs: sent.append(jobs))
+
+    app._write_all()
+
+    assert sent == []
+    assert "busy" in app.dl_status.cget("text").lower()
+
+
+def test_write_all_rechecks_connection_after_confirmation(app, monkeypatch):
+    _collapsing_write_all(app, monkeypatch, answer=True)
+    sent = []
+
+    def confirm_disconnected(*_args, **_kwargs):
+        app.dev._connected = False
+        return True
+
+    monkeypatch.setattr(minikeypad.messagebox, "askyesno", confirm_disconnected)
+    monkeypatch.setattr(app, "_run_write_all", lambda jobs: sent.append(jobs))
+
+    app._write_all()
+
+    assert sent == []
+    assert "failed" in app.dl_status.cget("text").lower()
+
+
 def test_collapse_prompt_flags_an_unconfirmed_report_id(app, monkeypatch):
     """0 is also the no-answer fallback, so the prompt says which case it is."""
     prompts = _collapsing_write_all(app, monkeypatch, answer=False)

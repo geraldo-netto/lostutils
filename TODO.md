@@ -83,7 +83,6 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 | mkp-ux-70 | open | low | low | minikeypad.py:1822-1829 — [UI / UX] `_flash_status` schedules an unconditional clear 2.5 s after each call and never cancels the previous timer, so "Write success" shown 2 s after "Busy, try again" is blanked 0.5 s later by the stale timer (traced). Keep the `after` id and `after_cancel` it before rescheduling. Laws of UX: Doherty Threshold (feedback must persist long enough to be read). |
-| mkp-sm-70 | open | low | low | minikeypad.py:2040-2047 — [state machine integrity] `_precheck_write` runs before the modal `askyesno` at 2092-2101, and Tk keeps servicing `after` callbacks inside the nested loop, so the 1 s poller can take `io_busy` for a liveness probe or drop the device while the dialog is up; "Yes" then calls `_spawn_io_worker` on top of the probe's ownership, and `_probe_settled` clears `io_busy` mid write-all, or write-all runs against a dropped device reporting "0/N written" (traced). Re-run `_precheck_write` after the dialog returns. |
 | mkp-prod-70 | open | low | low | minikeypad.py:2184 — [product engineering] `App()` is constructed outside any handler, so running without a display (SSH, headless CI, `DISPLAY` unset) prints a raw `_tkinter.TclError: couldn't connect to display ""` traceback (reproduced with `DISPLAY= python minikeypad.py --no-auto-install`). Catch `tk.TclError` around `App()`, log a one-line "no display available" hint, and exit non-zero. |
 
 ### `organize_by_extension.py`
