@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 
 import pytest
 from hypothesis import given, settings, strategies as st
@@ -799,6 +799,36 @@ class PerfScanTests(unittest.TestCase):
             self.assertIn("loop", names)
             # If we'd followed the loop, "real" would appear many times.
             self.assertEqual(names.count("real"), 1)
+
+    def test_scan_skips_looping_symlink_and_continues(self):
+        """oze-rob-80: an unresolvable link cannot abort valid-file scanning."""
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            valid = self.make_file(root, "a.txt")
+            loop = root / "loop"
+            loop.symlink_to(loop.name)
+
+            try:
+                loop.resolve()
+            except RuntimeError:
+                resolve_context = nullcontext()
+            else:
+                real_resolve = Path.resolve
+
+                def resolve_loop_as_error(path, strict=False):
+                    if path == loop:
+                        raise RuntimeError("symlink loop")
+                    return real_resolve(path, strict=strict)
+
+                resolve_context = patch.object(Path, "resolve", resolve_loop_as_error)
+
+            with resolve_context, self.assertLogs(
+                "organize_by_extension", level="WARNING"
+            ) as cm:
+                files = list_files(root, [], ctx=SniffContext(sniff=False))
+
+            self.assertEqual(files, [valid])
+            self.assertTrue(any("skipping symlink loop" in line for line in cm.output))
 
     def test_list_files_with_oserror_on_dirent_is_safe(self):
         # oze-perf-02: classification calls use follow_symlinks=False; a stat

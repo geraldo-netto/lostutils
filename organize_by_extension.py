@@ -812,9 +812,8 @@ def _warn_if_symlink_escapes_root(
     case where someone introduced a symlink into the tree by mistake,
     helping the operator notice it before it accumulates.
 
-    Failure of `resolve()` itself (broken link, NUL byte) is swallowed
-    — there's nothing actionable for the operator and the skip
-    semantics already protect them."""
+    Failure of `resolve()` itself (broken link, NUL byte, or a symlink loop)
+    skips the link while allowing the rest of the scan to continue."""
     if resolve_cache is None:
         resolve_cache = {}
     if link_path in resolve_cache:
@@ -824,6 +823,10 @@ def _warn_if_symlink_escapes_root(
     else:
         try:
             target = link_path.resolve()
+        except RuntimeError:
+            resolve_cache[link_path] = None
+            logger.warning("skipping symlink loop: %s", link_path)
+            return
         except (OSError, ValueError):
             resolve_cache[link_path] = None
             return
