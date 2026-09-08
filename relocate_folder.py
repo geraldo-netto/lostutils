@@ -785,22 +785,42 @@ class _CopyTargetOwner:
     path: Path
     descriptor: int = -1
     identity: tuple[int, int] | None = None
+    staging: Path | None = None
 
-    def create(self) -> None:
+    def create(self) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=".relocate-copy-", dir=self.path.parent))
+        self.staging = Path(tempfile.mkdtemp(prefix=".relocate-copy-", dir=self.path.parent))
+        self.path = self.staging / "pending"
+        self.path.mkdir(mode=0o700)
+        self.pin(self.path)
+        staged = self.staging / "target"
         try:
-            # Pin the privately created inode before publishing its name.
-            self.pin(staging)
-            _rename_noreplace(staging, self.path)
-        finally:
-            if staging.exists():
-                _swallow_or_warn(f"remove empty copy staging {staging}", staging.rmdir)
+            # Probe destination no-replace support before copying any data.
+            _rename_noreplace(self.path, staged)
+        except BaseException:
+            if self.matches(staged):
+                self.path = staged
+            if self.matches(self.path):
+                _swallow_or_warn(f"remove empty copy slot {self.path}", self.path.rmdir)
+            raise
+        self.path = staged
+        return self.path
+
+    def publish(self, destination: Path) -> None:
+        if not self.matches(self.path):
+            raise RuntimeError(f"copy directory was substituted before publication: {self.path}")
+        _rename_noreplace(self.path, destination)
+        self.path = destination
+        if not self.matches(destination):
+            raise RuntimeError(f"copy directory was substituted during publication: {destination}")
 
     def pin(self, path: Path) -> None:
+        initial = os.lstat(path)
+        self.identity = (initial.st_dev, initial.st_ino)
         self.descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         opened = os.fstat(self.descriptor)
-        self.identity = (opened.st_dev, opened.st_ino)
+        if (opened.st_dev, opened.st_ino) != self.identity:
+            raise RuntimeError(f"copy directory changed while opening: {path}")
 
     def matches(self, path: Path) -> bool:
         return self.identity is not None and _backup_identity_ok(path, self.identity)
@@ -809,6 +829,8 @@ class _CopyTargetOwner:
         if self.descriptor >= 0:
             os.close(self.descriptor)
             self.descriptor = -1
+        if self.staging is not None:
+            _swallow_or_warn(f"remove copy staging {self.staging}", self.staging.rmdir)
 
     def cleanup(self, context: str) -> None:
         if not self.matches(self.path):
@@ -1151,9 +1173,8 @@ def _copy_tree_pinned(
 ) -> list[Path]:
     if _path_taken(destination):
         raise FileExistsError(
-            f"target already exists: {destination}; if a previous run was killed "
-            "during copy, this may be a stale partial target. Inspect and "
-            "remove it manually before re-running."
+            f"target already exists: {destination}; existing targets are never "
+            "overwritten. Inspect it before re-running."
         )
     apparent = allocated = 0
     if check_space or progress_cb is not None:
@@ -1162,13 +1183,17 @@ def _copy_tree_pinned(
         _check_disk_space(source_label, destination, total_bytes=allocated)
     watchdog = _OperationStallWatchdog("copytree")
     try:
-        owner.create()
+        staged = owner.create()
         with watchdog:
-            return _populate_pinned_copy(
-                source_label, source_fd, destination, mode_cache,
+            skipped = _populate_pinned_copy(
+                source_label, source_fd, staged, mode_cache,
                 progress_cb, apparent, watchdog,
             )
+            owner.publish(destination)
+        return skipped
     except BaseException:
+        if owner.matches(destination):
+            owner.path = destination
         owner.cleanup("failed descriptor-pinned copy")
         raise
 
@@ -2559,10 +2584,9 @@ def _swap_or_explain(plan: Plan, *, source_fd: int) -> None:
     """Run the swap; on failure say that the target is a COMPLETE copy (rf-rob-50).
 
     Everything up to here succeeded, so `_copy_and_verify`'s cleanup no longer
-    applies and the finished target survives on the destination volume. Without
-    this line the operator's only clue is the NEXT run failing in `copy_tree`
-    with "may be a stale partial target" — the opposite of the truth. Name both
-    ways out instead."""
+    applies and the finished target survives on the destination volume. Name
+    that verified copy and both possible source paths for manual inspection.
+    """
     try:
         atomic_swap(plan.source, plan.target, source_fd=source_fd)
     except BaseException:
@@ -2617,15 +2641,16 @@ def _log_failed_hint(plan: Plan) -> None:
     backup = plan.source.with_name(plan.source.name + BACKUP_SUFFIX)
     if _orphaned_backup(plan.source) is not None:
         _log().warning(
-            "failed after the source was renamed aside: the original is at %s "
-            "and %s is missing — re-run with --recover to restore it",
+            "failed after the source was renamed aside: a preserved directory is at %s "
+            "and %s is missing — inspect it before using --recover",
             backup, plan.source,
         )
     else:
         _log().info(
-            "failed with source %s left intact (no orphaned backup at %s); "
-            "any partial target was cleaned up",
-            plan.source, backup,
+            "migration failed; inspect source %s, target %s, and any private "
+            ".relocate-copy-* artifacts before retrying. Cleanup failures are "
+            "reported separately",
+            plan.source, plan.target,
         )
 
 

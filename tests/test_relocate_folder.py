@@ -341,7 +341,7 @@ def test_copy_tree_skips_specials_and_rejects_existing_target(tmp_path):
     assert not (dst / "f.fifo").exists()
     assert fifo in skipped
     # second call into an existing target -> FileExistsError
-    with pytest.raises(FileExistsError, match="stale partial target"):
+    with pytest.raises(FileExistsError, match="target already exists"):
         _pinned_call(rf.copy_tree, src, dst)
 
 
@@ -1682,15 +1682,15 @@ def test_execute_logs_failure_state(tmp_path, caplog):
     assert any("state=failed" in r.message for r in caplog.records)
 
 
-def test_execute_failed_logs_source_intact_hint(tmp_path, caplog):
-    # rf-obs-01: a FAILED run with the source still present logs an
-    # "source left intact" hint mentioning the (absent) backup path.
+def test_execute_failed_names_paths_without_claiming_source_integrity(tmp_path, caplog):
     plan = rf.Plan(source=tmp_path / "nope", target=tmp_path / "dst" / "nope")
     import logging
     with caplog.at_level(logging.INFO, logger="relocate"):
         with pytest.raises(FileNotFoundError):
             rf.execute(plan)
-    assert any("left intact" in r.message for r in caplog.records)
+    assert "inspect source" in caplog.text
+    assert str(plan.target) in caplog.text
+    assert "left intact" not in caplog.text
 
 
 def test_execute_failed_logs_recover_hint_when_orphan(tmp_path, caplog):
@@ -1706,12 +1706,13 @@ def test_execute_failed_logs_recover_hint_when_orphan(tmp_path, caplog):
                and str(backup) in r.message for r in caplog.records)
 
 
-def test_log_failed_hint_intact_branch(tmp_path, caplog):
+def test_log_failed_hint_identifies_possible_retained_artifacts(tmp_path, caplog):
     plan = rf.Plan(source=tmp_path / "x", target=tmp_path / "y")
     import logging
     with caplog.at_level(logging.INFO, logger="relocate"):
         rf._log_failed_hint(plan)
-    assert any("left intact" in r.message for r in caplog.records)
+    assert ".relocate-copy-* artifacts" in caplog.text
+    assert "any partial target was cleaned up" not in caplog.text
 
 
 def test_execute_logs_dry_run_state(tmp_path, caplog):
