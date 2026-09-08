@@ -969,7 +969,13 @@ def _canonical_key(bookmark: Bookmark, options: NormalizeOptions) -> str:
 
 
 def _merge_bookmark_group(group: Sequence[Bookmark], options: NormalizeOptions) -> Bookmark:
-    title_source = max(group, key=lambda item: len(item.title.strip()))
+    title_source = max(
+        group,
+        key=lambda item: (
+            item.title.strip() != item.url.strip(),
+            len(item.title.strip()),
+        ),
+    )
     display_url = _preferred_display_url(group, options)
     return Bookmark(
         url=display_url,

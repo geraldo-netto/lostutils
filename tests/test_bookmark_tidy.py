@@ -216,6 +216,19 @@ def test_tidy_bookmarks_deduplicates_and_keeps_longest_title():
     assert tidied[0].folder_path == ("Reference", "Docs")
 
 
+def test_merge_bookmark_group_prefers_human_title_to_url_placeholder():
+    url_placeholder = "http://www.example.test/a/"
+    merged = bookmark_tidy._merge_bookmark_group(
+        [
+            bookmark_tidy.Bookmark(url_placeholder, url_placeholder),
+            bookmark_tidy.Bookmark("https://example.test/a", "Docs"),
+        ],
+        bookmark_tidy.NormalizeOptions(),
+    )
+
+    assert merged.title == "Docs"
+
+
 def test_immutable_folder_is_copied_and_mutable_duplicate_is_removed(caplog):
     immutable = bookmark_tidy.Bookmark(
         "https://example.test/a#locked",
