@@ -379,6 +379,40 @@ def test_run_stage_threaded_reports_progress(monkeypatch):
     assert progress[-1] == (3, 3)
 
 
+def test_stage3_hashes_small_candidates_concurrently(monkeypatch):
+    import threading as _t
+
+    monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0)
+    keys = [(1, i) for i in range(4)]
+    regrouped = {("head", "tail"): keys}
+    rep = {key: f"/candidate/{key[1]}" for key in keys}
+    sizes = {key: 1 for key in keys}
+    barrier = _t.Barrier(2)
+    lock = _t.Lock()
+    state = {"active": 0, "peak": 0}
+
+    def fake_full(path, size, config=None, expected=None, cancel_event=None,
+                  on_chunk=None):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+        try:
+            barrier.wait(timeout=1.0)
+            return f"full:{path}"
+        finally:
+            with lock:
+                state["active"] -= 1
+
+    monkeypatch.setattr(hr, "hash_full", fake_full)
+    by_full, info = hr._stage3_hash(
+        regrouped, rep, sizes, jobs=4, config=None)
+
+    assert len(by_full) == len(keys)
+    assert info["stage3"] == len(keys)
+    assert info["stage3_errors"] == 0
+    assert state["peak"] >= 2
+
+
 def test_run_stage_windowed_bounds_inflight_submission(monkeypatch):
     # hr-scal-02: the threaded path must NOT submit every batch up front.
     # Track concurrent in-flight batch_fn calls and assert the peak never

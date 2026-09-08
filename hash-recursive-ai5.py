@@ -63,6 +63,10 @@ HEAD_TAIL_THRESHOLD = CAP      # at-or-below this, the head IS the full file
 # their first CAP bytes but differ in the tail would be reported as duplicates
 # falsely — hr-rel-03.)
 HASH_BATCH = 64
+# hr-perf-70: sampled and full-file candidates are expensive enough that a
+# 64-item future can leave most requested workers idle. Dispatch those stages
+# one item per future while retaining HASH_BATCH for cheap head hashes.
+HASH_ITEM_BATCH = 1
 # hr-scal-02: the threaded stage keeps at most ``jobs * SUBMIT_WINDOW``
 # batch futures in flight at once (a sliding window) instead of submitting
 # every batch up front. 2 keeps every worker fed (one running + one queued)
@@ -1023,9 +1027,13 @@ def _notify_stage_progress(on_progress, done: int, total: int) -> None:
         on_progress(done, total)
 
 
+def _batch_size_or_default(batch_size):
+    return HASH_BATCH if batch_size is None else batch_size
+
+
 def _run_stage_serial(items, batch_fn, out, cancel_event,
-                      on_progress=None) -> int:
-    """Serial hash dispatch in HASH_BATCH chunks (hr-scal-07).
+                      on_progress=None, batch_size=None) -> int:
+    """Serial hash dispatch in bounded item chunks (hr-scal-07).
 
     The old serial branch handed the entire item list to one batch call.
     That was cheap for a handful of files, but pathological for hundreds
@@ -1034,7 +1042,8 @@ def _run_stage_serial(items, batch_fn, out, cancel_event,
     errors = 0
     done = 0
     total = len(items)
-    for batch in _iter_batches(items, HASH_BATCH):
+    batch_size = _batch_size_or_default(batch_size)
+    for batch in _iter_batches(items, batch_size):
         if _cancelled(cancel_event):
             break
         batch_errors, count = _collect_batch(batch_fn(batch), out)
@@ -1074,7 +1083,7 @@ def _drain_stage_futures_after_error(first_exc, done, inflight) -> NoReturn:
 
 
 def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event,
-                        on_progress=None) -> int:
+                        on_progress=None, batch_size=None) -> int:
     """Threaded hash dispatch with BOUNDED submission (hr-scal-02).
 
     At most ``jobs * SUBMIT_WINDOW`` batch futures are kept in flight at
@@ -1092,7 +1101,8 @@ def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event,
     done_count = 0
     total = len(items)
     window = max(1, jobs) * SUBMIT_WINDOW
-    batches = _iter_batches(items, HASH_BATCH)
+    batch_size = _batch_size_or_default(batch_size)
+    batches = _iter_batches(items, batch_size)
     with ThreadPoolExecutor(max_workers=jobs) as ex:
         inflight: set = set()
         exhausted = _fill_window(
@@ -1118,10 +1128,12 @@ def _run_stage_windowed(items, batch_fn, jobs, out, cancel_event,
 
 
 def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None,
-               on_progress=None):
+               on_progress=None, batch_size=None):
     """Dispatch a hash stage either serially or via ThreadPoolExecutor,
     depending on total work. Returns (digest_by_item, error_count).
 
+    ``batch_size`` defaults to ``HASH_BATCH``; expensive stages can request
+    one item per future so large files use all available workers (hr-perf-70).
     Stage 2 on huge trees streams batches lazily through `_iter_batches`
     (hr-perf-04) and the threaded path bounds submission to a sliding
     window of ``jobs * SUBMIT_WINDOW`` futures (hr-scal-02) so peak memory
@@ -1139,13 +1151,13 @@ def _run_stage(items, batch_fn, total_bytes, jobs, cancel_event=None,
     errors = 0
     if total_bytes < THREAD_THRESHOLD_BYTES:
         return out, _run_stage_serial(
-            items, batch_fn, out, cancel_event, on_progress)
+            items, batch_fn, out, cancel_event, on_progress, batch_size)
     # hr-rel-13: wrap the pool loop in try/finally so a mid-iteration
     # exception (e.g. `batch_fn` raises) doesn't return a silently
     # partial `out` dict to the caller.
     try:
         errors = _run_stage_windowed(
-            items, batch_fn, jobs, out, cancel_event, on_progress)
+            items, batch_fn, jobs, out, cancel_event, on_progress, batch_size)
     except Exception as exc:
         # hr-rel-14: surface partial progress on EVERY Python (3.10 and
         # 3.11+). `__partial__` is set unconditionally so 3.10 callers
@@ -1600,6 +1612,7 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
         _make_tail_stage2_batch(config, cancel_event, on_chunk),
         stage2_bytes,
         jobs,
+        batch_size=HASH_ITEM_BATCH,
         **run_kwargs)
     regrouped: dict = {}
     recovered = 0
@@ -1664,6 +1677,7 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
         _make_full_stage3_batch(config, cancel_event, on_chunk),
         _capped_byte_total(item[1] for item in items),
         jobs,
+        batch_size=HASH_ITEM_BATCH,
         **run_kwargs,
     )
     by_full: dict = {}
