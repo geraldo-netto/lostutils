@@ -2755,6 +2755,38 @@ def test_reaper_close_failure_does_not_stop_the_drain(app):
     assert released == [True]
 
 
+def test_destroy_does_not_wait_for_stalled_device_cleanup(app):
+    class StalledDevice:
+        def __init__(self):
+            self.gate = threading.Event()
+            self.released = threading.Event()
+
+        def close(self):
+            self.gate.wait(5.0)
+            self.released.set()
+
+    stalled = StalledDevice()
+    app.dev = stalled
+    app._monitor.token = 7
+    app._monitor.probe_thread = object()
+    app._monitor.io_busy = True
+
+    started = time.monotonic()
+    app.destroy()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert app._destroyed is True
+    assert app.dev is not stalled
+    assert app._monitor.token == 8
+    assert app._monitor.probe_thread is None
+    assert app._monitor.io_busy is False
+    assert stalled.released.is_set() is False
+
+    stalled.gate.set()
+    assert stalled.released.wait(1.0)
+
+
 def test_ensure_device_reaper_survives_a_thread_start_failure(app, monkeypatch):
     def refuse(*_a, **_k):
         raise RuntimeError("no threads")

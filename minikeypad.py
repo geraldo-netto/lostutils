@@ -2176,8 +2176,11 @@ class App(tk.Tk):
         if self._destroyed:
             return
         self._destroyed = True
+        self._monitor.token += 1
+        self._monitor.probe_thread = None
+        self._monitor.io_busy = False
         try:
-            self.dev.close()
+            self._replace_stalled_device()
         finally:
             super().destroy()
 
