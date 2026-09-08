@@ -596,8 +596,8 @@ class OpenFileSnapshot:
 
 def find_open_file_holders(source: Path) -> OpenFileSnapshot:
     """Return :class:`OpenFileSnapshot` for processes holding a
-    regular-file FD inside `source`. Linux only; returns an empty
-    snapshot elsewhere.
+    regular-file FD inside `source`. Linux only; warns that the check is
+    unavailable and returns an empty snapshot when `/proc` is absent.
 
     Without root, only the current user's processes are visible — that's
     exactly what matters for ~/.cache anyway.
@@ -619,6 +619,11 @@ def find_open_file_holders(source: Path) -> OpenFileSnapshot:
     with _OperationStallWatchdog("open-file precheck") as watchdog:
         proc_dir = Path("/proc")
         if not proc_dir.is_dir():
+            _log().warning(
+                "open-file precheck unavailable: /proc is not accessible; "
+                "continuing without checking for open files. Stop applications "
+                "using the source directory before migration or recovery."
+            )
             return OpenFileSnapshot(holders=(), stale_pids=0)
         src_resolved = source.resolve()
         watchdog.touch("open-file precheck resolve")

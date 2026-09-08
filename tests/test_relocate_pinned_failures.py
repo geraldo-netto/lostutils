@@ -16,6 +16,29 @@ import relocate_folder as rf
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="relocation requires POSIX descriptors")
 
 
+@pytest.mark.parametrize("proc_available", [False, True])
+@pytest.mark.parametrize("force", [False, True])
+def test_runtime_warns_only_when_open_file_check_is_unavailable(
+        tmp_path, monkeypatch, caplog, proc_available, force):
+    source = tmp_path / "source"
+    source.mkdir()
+    proc = tmp_path / "proc"
+    if proc_available:
+        proc.mkdir()
+    original_path = rf.Path
+    monkeypatch.setattr(
+        rf, "Path", lambda value: proc if str(value) == "/proc" else original_path(value))
+    plan = rf.Plan(source=source, target=tmp_path / "target", force=force, dry_run=True)
+
+    assert rf.execute(plan).startswith("dry-run:")
+
+    warnings = [record for record in caplog.records if "open-file precheck unavailable" in record.message]
+    assert len(warnings) == int(not proc_available and not force)
+    if warnings:
+        assert warnings[0].levelno == logging.WARNING
+        assert "continuing without checking for open files" in warnings[0].message
+
+
 def test_pinned_metadata_reports_chown_failure_and_preserves_other_metadata(
         tmp_path, monkeypatch, caplog):
     source = tmp_path / "source"

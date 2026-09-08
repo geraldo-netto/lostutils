@@ -2561,7 +2561,7 @@ def test_verify_copy_honours_jobs_kwarg(tmp_path):
 
 # --- 100% coverage: edge branches not exercised by other tests --------------
 
-def test_find_open_file_holders_returns_empty_when_no_proc(monkeypatch, tmp_path):
+def test_find_open_file_holders_warns_when_no_proc(monkeypatch, tmp_path, caplog):
     class FakePath:
         def __init__(self, p): self._p = p
         def is_dir(self): return False
@@ -2579,6 +2579,8 @@ def test_find_open_file_holders_returns_empty_when_no_proc(monkeypatch, tmp_path
     snap = rf.find_open_file_holders(tmp_path)
     assert snap.holders == ()
     assert snap.stale_pids == 0
+    assert "open-file precheck unavailable" in caplog.text
+    assert "Stop applications" in caplog.text
 
 
 def test_find_open_file_holders_records_pid_with_files(monkeypatch, tmp_path):
