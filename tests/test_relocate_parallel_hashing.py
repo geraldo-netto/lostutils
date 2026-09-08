@@ -1,5 +1,6 @@
 """Pinned source hashes run concurrently with bounded descriptor ownership."""
 
+import errno
 import os
 import sys
 import threading
@@ -192,6 +193,7 @@ def test_runtime_releases_walk_and_task_descriptors(tmp_path, monkeypatch, failu
     original_task = rf._pinned_kind_verify_task
     original_walk = rf._walk_pinned_entries
     created = []
+    walk_descriptors = set()
     walked = threading.Event()
 
     def recorded_task(*args):
@@ -204,6 +206,7 @@ def test_runtime_releases_walk_and_task_descriptors(tmp_path, monkeypatch, failu
         try:
             with closing(original_walk(descriptor)) as entries:
                 for entry in entries:
+                    walk_descriptors.add(entry[1])
                     yield entry
                     if failure == "walk":
                         raise RuntimeError("walk failure")
@@ -225,6 +228,10 @@ def test_runtime_releases_walk_and_task_descriptors(tmp_path, monkeypatch, failu
         with outcome:
             rf.verify_copy(source, target, checksum=True, jobs=2, source_fd=source_fd)
         assert walked.is_set()
+        for descriptor in walk_descriptors:
+            with pytest.raises(OSError) as closed:
+                os.fstat(descriptor)
+            assert closed.value.errno == errno.EBADF
         assert all(task.directory_fd == -1 for task in created)
         assert os.fstat(source_fd).st_ino == identity[1]
     finally:

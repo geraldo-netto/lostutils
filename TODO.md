@@ -77,7 +77,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| rf-rob-82 | open | medium | low | relocate_folder.py:1579 — [robustness / recovery] Explicitly close the pinned walk iterator when verification aborts; under Python 3.12 a hash-worker failure leaves the nested walk suspended after the outer task generator closes, retaining its descriptors until later collection. The real cleanup regression in tests/test_relocate_parallel_hashing.py:227 fails. |
 
 ### `remove-deduplv3.py`
 

@@ -66,7 +66,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import BinaryIO, Callable, Generator, Iterable, Iterator, Sequence
+from typing import BinaryIO, Callable, Generator, Iterable, Iterator, Sequence, cast
 
 LOG = logging.getLogger("relocate")
 
@@ -889,17 +889,23 @@ def _raise_walk_error(exc: OSError) -> None:
     raise exc
 
 
-def _walk_pinned_entries(source_fd: int) -> Iterator[PinnedEntry]:
+def _walk_pinned_entries(source_fd: int) -> Generator[PinnedEntry, None, None]:
     """Walk below ``source_fd`` without resolving the source pathname."""
-    for root, dir_names, names, directory_fd in os.fwalk(
-        ".", topdown=True, onerror=_raise_walk_error,
-        follow_symlinks=False, dir_fd=source_fd,
-    ):
-        relative_root = Path(root).relative_to(".")
-        for name in (*dir_names, *names):
-            entry_stat = os.stat(
-                name, dir_fd=directory_fd, follow_symlinks=False)
-            yield relative_root / name, directory_fd, name, entry_stat
+    # fwalk owns directory fds; close its generator even if a traceback retains it.
+    walk = cast(
+        Generator[tuple[str, list[str], list[str], int], None, None],
+        os.fwalk(
+            ".", topdown=True, onerror=_raise_walk_error,
+            follow_symlinks=False, dir_fd=source_fd,
+        ),
+    )
+    with closing(walk):
+        for root, dir_names, names, directory_fd in walk:
+            relative_root = Path(root).relative_to(".")
+            for name in (*dir_names, *names):
+                entry_stat = os.stat(
+                    name, dir_fd=directory_fd, follow_symlinks=False)
+                yield relative_root / name, directory_fd, name, entry_stat
 
 
 def _pinned_stat_snapshot(st: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -1575,22 +1581,23 @@ def _iter_pinned_verify_tasks(
     verify_ownership: bool,
 ) -> Generator[Callable[[], None], None, None]:
     """Yield one-shot tasks; checksum tasks own fds until run or pool cancellation."""
-    for rel, directory_fd, name, source_stat in _walk_pinned_entries(source_fd):
-        source_path = source_label / rel
-        target = destination / rel
-        task = _pinned_kind_verify_task(
-            source_path, target, rel, directory_fd, name, source_stat, checksum)
-        if task is None:
-            continue
-        yield task
-        if not stat.S_ISLNK(source_stat.st_mode):
-            yield partial(
-                _verify_target_xattrs, target,
-                _entry_xattrs(directory_fd, name, source_stat),
-            )
-        if verify_ownership:
-            yield partial(
-                _verify_ownership, source_path, target, rel, source_stat)
+    with closing(_walk_pinned_entries(source_fd)) as entries:
+        for rel, directory_fd, name, source_stat in entries:
+            source_path = source_label / rel
+            target = destination / rel
+            task = _pinned_kind_verify_task(
+                source_path, target, rel, directory_fd, name, source_stat, checksum)
+            if task is None:
+                continue
+            yield task
+            if not stat.S_ISLNK(source_stat.st_mode):
+                yield partial(
+                    _verify_target_xattrs, target,
+                    _entry_xattrs(directory_fd, name, source_stat),
+                )
+            if verify_ownership:
+                yield partial(
+                    _verify_ownership, source_path, target, rel, source_stat)
 
 
 def _verify_target_xattrs(target: Path, expected: dict[str, bytes]) -> None:
