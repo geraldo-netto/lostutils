@@ -1162,10 +1162,9 @@ def test_browse_log_file(app, tmp_path, monkeypatch):
     assert app.config["log_file"] == target
 
 
-def test_protocol_shell_url_warns_and_saves(app):
-    # shell=True + bare {url} -> warning (askyesno patched True in fixture) -> saved
+def test_protocol_shell_url_cannot_be_saved(app):
     _drive_proto_editor(app, "wsh", "wget {url}", shell=True)
-    assert "wsh" in app.config["protocols"]
+    assert "wsh" not in app.config["protocols"]
 
 
 def test_protocol_shell_url_declined(app, monkeypatch):
@@ -1747,16 +1746,11 @@ def _drive_proto_editor(app, name, command, mode="queue", shell=False, existing=
     return dlg
 
 
-def test_protocol_new_save(app, monkeypatch):
-    prompts = []
-    monkeypatch.setattr(
-        messagebox, "askyesno",
-        lambda *args, **kwargs: prompts.append(kwargs) or True)
-    dlg = _drive_proto_editor(
-        app, "ftps", "echo {url}", mode="immediate", shell=True)
+def test_protocol_new_save(app):
+    _drive_proto_editor(
+        app, "ftps", "echo {url_quoted}", mode="immediate", shell=True)
     assert "ftps" in app.config["protocols"]
     assert app.config["protocols"]["ftps"]["shell"] is True
-    assert prompts[0]["parent"] is dlg
 
 
 def test_protocol_save_invalid_quoting(app, monkeypatch):
@@ -6215,3 +6209,74 @@ def test_failed_legacy_config_load_does_not_create_replacement_yaml(tmp_path):
         store.save()
     assert legacy.read_text() == original
     assert not replacement.exists()
+
+
+@pytest.mark.parametrize("template", [
+    'printf "%s" "{url_quoted}"',
+    "printf '%s' '{url_quoted}'",
+    r"printf '%s' \{url_quoted}",
+    "printf '%s' prefix{url_quoted}",
+    "printf '%s' {url_quoted}suffix",
+    'printf "%s" "{protocol}"',
+    "printf '%s' {url}",
+    "printf '%s' `echo {url_quoted}`",
+    "cat <<EOF\n{url_quoted}\nEOF",
+    'printf "unterminated {url_quoted}',
+])
+def test_shell_placeholder_context_is_rejected_by_editor_and_runner(
+        app, monkeypatch, template):
+    calls = []
+    monkeypatch.setattr(link_queue.subprocess, "Popen", lambda *a, **kw: calls.append(a))
+    _drive_proto_editor(app, "unsafe", template, shell=True)
+    assert "unsafe" not in app.config["protocols"]
+    assert app.dispatcher._spawn_shell_proc(
+        q("https://example.invalid/$(printf INJECTED)", template=template, shell=True),
+        "test", None, "") is None
+    assert calls == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shell mode is POSIX-only")
+@pytest.mark.parametrize("template", [
+    "printf '%s\\n' {url_quoted} {protocol}",
+    "printf '%s\\n' $(printf '%s' fixed) >/dev/null; printf '%s\\n' {url_quoted} {protocol}",
+])
+def test_shell_values_remain_literal_arguments(
+        headless_dispatcher, tmp_path, template):
+    marker = tmp_path / "INJECTED"
+    payload = f"https://example.invalid/$(touch {link_queue.shlex.quote(str(marker))})`false`'\";\n* {{url_quoted}}"
+    protocol = "https;$(printf INJECTED)"
+    item = QueueItem(payload, protocol, template, True, ())
+    proc = headless_dispatcher._spawn_shell_proc(item, "test", str(tmp_path), "")
+    try:
+        output, _ = proc.communicate(timeout=5)
+        assert proc.returncode == 0
+        assert output == payload + "\n" + protocol + "\n"
+        assert not marker.exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shell mode is POSIX-only")
+def test_shell_mapped_values_remain_literal(headless_dispatcher, tmp_path):
+    payload = "$(printf INJECTED) ' \" *"
+    item = QueueItem("https://example.invalid", "https", "printf '%s\\n' {url_quoted}",
+                     True, (("--output", payload),))
+    proc = headless_dispatcher._spawn_shell_proc(item, "test", str(tmp_path), "")
+    output, _ = proc.communicate(timeout=5)
+    assert proc.returncode == 0
+    assert output.splitlines() == [item.url, "--output", payload]
+
+
+def test_unsafe_default_shell_context_rejects_unknown_protocol(headless_dispatcher):
+    headless_dispatcher.config.update(default_shell=True,
+                                     default_command='printf "%s" "{url_quoted}"')
+    assert headless_dispatcher._resolve_protocol("unregistered")[-1] == "rejected"
+
+
+def test_config_warns_on_quoted_shell_placeholder(capsys):
+    cfg = {"protocols": {"https": {"shell": True, "command": 'echo "{url_quoted}"'}},
+           "default_shell": True, "default_command": "echo {url_quoted}"}
+    link_queue.ConfigStore._warn_shell_injection(cfg)
+    assert "unquoted, standalone" in capsys.readouterr().err

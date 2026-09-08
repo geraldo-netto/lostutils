@@ -13,7 +13,7 @@ bindings for Python (e.g. `sudo apt install python3-tk`).
 
 Command templates support the following placeholders:
     {url}          the raw URL
-    {url_quoted}   the URL, POSIX-shell-quoted (for shell=True on POSIX only)
+    {url_quoted}   one URL argument in POSIX shell mode; leave it unquoted
     {protocol}     the URL scheme (http, https, ftp, magnet, ...)
 
 Config is persisted as YAML to $XDG_CONFIG_HOME/link_queue/link_queue_config.yaml
@@ -577,6 +577,32 @@ def _template_has_bare_url(template: str) -> bool:
     used by sec-02 checks to flag shell-injection-prone configurations."""
     return any(m.group(1) == "url" for m in _PLACEHOLDER_RE.finditer(template or ""))
 
+
+def _shell_template_error(template: str) -> str | None:
+    """Validate the restricted placeholder syntax shared by editor and runner."""
+    if _template_has_bare_url(template):
+        return "bare {url} is unsafe; use an unquoted {url_quoted} word"
+    if "`" in template or "<<" in template:
+        return "shell templates cannot use backticks or here-documents; use argv mode or $(...)"
+    lexer = shlex.shlex(template, posix=False, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        words = list(lexer)
+    except ValueError as exc:
+        return f"invalid shell quoting: {exc}"
+    for word in words:
+        if _PLACEHOLDER_RE.search(word) and word not in ("{url_quoted}", "{protocol}"):
+            return "{url_quoted} and {protocol} must be unquoted, standalone shell words"
+    return None
+
+
+def _shell_command_argv(template: str, url: str, protocol: str) -> list[str]:
+    # Values never become shell source, even inside nested shell constructs.
+    references = {"url_quoted": '"${1}"', "protocol": '"${2}"'}
+    command = _PLACEHOLDER_RE.sub(lambda match: references[match.group(1)], template)
+    return ["/bin/sh", "-c", command, "link_queue", url, protocol]
+
 # One item in the processing queue. Templates + shell flag are kept in full so
 # the worker always has the source of truth (the resolved display string is
 # recomputed for the tree at render time).
@@ -1108,18 +1134,15 @@ class ConfigStore(dict):
 
     @staticmethod
     def _warn_shell_injection(cfg: dict) -> None:
-        """Warn at load time (sec-02) on shell=True + bare {url}: the URL would be
-        substituted UNQUOTED into the /bin/sh -c string, a shell-injection path
-        for a crafted URL. Catches hand-edited configs and the shipped default."""
+        """Expose saved templates that the runner will refuse."""
         for name, pc in cfg["protocols"].items():
-            if pc.get("shell") and _template_has_bare_url(pc.get("command", "")):
-                print(f"[warn] protocol '{name}' uses shell=True with bare "
-                      "{url} — prefer {url_quoted} (shell-injection risk)",
-                      file=sys.stderr)
-        if cfg.get("default_shell") and _template_has_bare_url(cfg.get("default_command", "")):
-            print("[warn] default_command uses shell=True with bare "
-                  "{url} — prefer {url_quoted} (shell-injection risk)",
-                  file=sys.stderr)
+            error = _shell_template_error(pc.get("command", "")) if pc.get("shell") else None
+            if error:
+                print(f"[warn] protocol '{name}': {error}", file=sys.stderr)
+        if cfg.get("default_shell"):
+            error = _shell_template_error(cfg.get("default_command", ""))
+            if error:
+                print(f"[warn] default_command: {error}", file=sys.stderr)
 
     @staticmethod
     def _normalize_config_schema(cfg: dict) -> None:
@@ -1821,14 +1844,10 @@ class Dispatcher:
             mode = self.config.get("default_mode", "queue")
             cmd_tpl = self.config.get("default_command", _placeholder_command())
             shell = bool(self.config.get("default_shell", False))
-            if shell and _template_has_bare_url(cmd_tpl):
-                # sec-01: mirror the per-item runtime reject (_run_item) at
-                # routing time so an unknown scheme can't be run through a
-                # default_command that interpolates {url} UNQUOTED into the
-                # shell. The reject is hard, not a warning.
+            if shell and (error := _shell_template_error(cmd_tpl)):
                 self._log(
-                    f"[error] refusing default_command with shell=True and bare "
-                    f"{{url}} for unknown protocol '{protocol}' — use {{url_quoted}}"
+                    f"[error] refusing default_command with shell=True for "
+                    f"unknown protocol '{protocol}': {error}"
                 )
                 return mode, cmd_tpl, shell, "rejected"
             self._log(f"[warn] unknown protocol '{protocol}' — using default ({mode})")
@@ -2585,8 +2604,7 @@ class Dispatcher:
     def _spawn_shell_proc(self, item: QueueItem, label: str, cwd, cwd_note: str):
         """Run an opt-in POSIX shell command after enforcing its quote contract.
 
-        Refuse Windows because shlex.quote does not protect cmd.exe. On POSIX,
-        refuse bare {url}, which would be interpolated unquoted into /bin/sh -c.
+        Pass URL values as shell parameters, never as executable source.
         """
         url, protocol, template = item.url, item.protocol, item.template
         if os.name == "nt":
@@ -2596,20 +2614,20 @@ class Dispatcher:
                 f"{template}  url={url}"
             )
             return None
-        if _template_has_bare_url(template):
+        error = _shell_template_error(template)
+        if error:
             self._log(
-                f"[{label} error] refusing shell=True template "
-                f"with bare {{url}} — use {{url_quoted}} or shell=False:"
+                f"[{label} error] refusing shell=True template: {error};"
                 f" {template}  url={url}"
             )
             return None
         self._warn_shell_template_trusted(template)
-        resolved = self._resolve_command(template, url, protocol)
+        argv = _shell_command_argv(template, url, protocol)
         if item.extra:
-            resolved += " " + self._extra_shell(item.extra)  # pragma: no cover - extra-shell concat branch with non-falsy extra
-        self._log(f"[{label} run] (shell) $ {resolved}{cwd_note}")
+            argv[2] += " " + self._extra_shell(item.extra)
+        self._log(f"[{label} run] (shell) $ {template}  url={url}{cwd_note}")
         return subprocess.Popen(
-            resolved, shell=True,
+            argv, shell=False,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
             bufsize=1, cwd=cwd, start_new_session=True,
@@ -5864,7 +5882,7 @@ class ProtocolEditor(_FormDialog):
             frm,
             text=(
                 "Placeholders: {url} (safe as a direct argv), "
-                "{url_quoted} (shell-quoted, for use inside shell contexts), "
+                "{url_quoted} (one shell argument; leave it unquoted), "
                 "{protocol}"
             ),
             foreground="#666", wraplength=520, justify="left",
@@ -5874,9 +5892,7 @@ class ProtocolEditor(_FormDialog):
         self.cmd_text.focus_set()
 
     def _validate(self, command: str, shell: bool) -> bool:
-        """True if the template is OK to save. exec mode must shlex-split;
-        shell mode with a bare {url} prompts (sec-01) and returns the user's
-        choice."""
+        """Apply the dispatcher's parsing and shell placeholder rules."""
         probe = command or _placeholder_command()
         if not shell:
             try:
@@ -5890,13 +5906,11 @@ class ProtocolEditor(_FormDialog):
                     "Either fix the quoting or enable the Shell option.",
                     parent=self.dlg)
                 return False
-        elif _template_has_bare_url(probe):
-            return messagebox.askyesno(
+        elif error := _shell_template_error(probe):
+            messagebox.showerror(
                 "Unsafe shell template",
-                "This command runs via the shell and uses {url}, which is "
-                "substituted UNQUOTED — a malicious URL could inject shell "
-                "commands.\n\nUse {url_quoted} for a shell-safe value.\n\n"
-                "Save anyway?", parent=self.dlg)
+                error, parent=self.dlg)
+            return False
         return True
 
     def _on_save(self) -> None:
