@@ -1862,6 +1862,30 @@ def test_refresh_queue_list_coalesced(app):
     app._refresh_pending = False
 
 
+def test_queue_refresh_recovers_after_full_ui_queue(app):
+    stop_bg_workers(app)
+    app._tk_jobs = queue.Queue(maxsize=1)
+    app._tk_jobs.put_nowait((lambda: None, ()))
+    app._refresh_pending = False
+    worker = threading.Thread(target=app._refresh_queue_list)
+    worker.start()
+    worker.join(1)
+
+    assert not worker.is_alive()
+    assert not app._refresh_pending
+    assert app._dropped_tk_jobs >= 1
+    app._tk_jobs.get_nowait()
+    with app.queue_lock:
+        app.queue_items[:] = [q("https://example.test/recovered")]
+    app._refresh_queue_list()
+    pump(app, 0.1)
+
+    rows = app.queue_tree.get_children()
+    assert len(rows) == 1
+    assert "https://example.test/recovered" in app.queue_tree.set(rows[0], "url")
+    assert not app._refresh_pending
+
+
 def test_remove_selected(app):
     stop_bg_workers(app)
     with app._dispatch_cv:

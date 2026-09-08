@@ -4925,7 +4925,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         if self._refresh_pending:
             return
         self._refresh_pending = True
-        self._safe_after(0, self._do_refresh_queue_list)
+        if not self._safe_after(0, self._do_refresh_queue_list):
+            self._refresh_pending = False
 
     def _do_refresh_queue_list(self) -> None:
         # Clear the flag FIRST so any mutation that lands while we're
@@ -5267,8 +5268,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
 
     # -- logging ------------------------------------------------------------
 
-    def _safe_after(self, ms, func, *args) -> None:
-        """Schedule a UI-thread callback, silently tolerating shutdown races.
+    def _safe_after(self, ms, func, *args) -> bool:
+        """Return whether a UI-thread callback was scheduled successfully.
 
         From the main thread, schedules via `root.after()` directly. From any
         other thread (worker, immediate-runner), this CANNOT call into Tk
@@ -5280,12 +5281,12 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         drains every 50 ms (see `_poll_tk_jobs`).
         """
         if self.stop_event.is_set():
-            return
+            return False
         if threading.current_thread() is threading.main_thread():
             try:
                 self.root.after(ms, func, *args)
             except (RuntimeError, tk.TclError):  # pragma: no cover - Tk teardown defensive
-                pass
+                return False
         else:
             # Cross-thread path — never touches Tk directly.
             try:
@@ -5297,8 +5298,10 @@ class LinkQueueApp(metaclass=_FacadeMeta):
                 # the UI — that's the whole point of the queue.
                 with self._dropped_lock:
                     self._dropped_tk_jobs += 1
+                return False
             except Exception:  # pragma: no cover - defensive exception in tk poll
-                pass  # pragma: no cover - defensive exception in tk poll
+                return False  # pragma: no cover - defensive exception in tk poll
+        return True
 
     def _poll_tk_jobs(self) -> None:
         """Drain queued cross-thread UI jobs on the main thread (every 50 ms).
