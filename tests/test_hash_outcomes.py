@@ -17,6 +17,21 @@ _SPEC.loader.exec_module(hr)
 _ERRORS = {"vanished": errno.ENOENT, "denied": errno.EACCES}
 
 
+def test_cancelled_batch_keeps_prior_results_and_stops_subsequent_work():
+    visited = []
+
+    def hash_item(item):
+        visited.append(item)
+        if item == "cancel":
+            raise hr._HashCancelled
+        return f"hashed:{item}"
+
+    result = hr._run_cancelable_batch(["first", "cancel", "later"], hash_item, None)
+
+    assert result == ["hashed:first"]
+    assert visited == ["first", "cancel"]
+
+
 @pytest.fixture(params=[False, True], ids=["serial", "threaded"])
 def threaded_dispatch(request, monkeypatch):
     monkeypatch.setattr(hr, "THREAD_THRESHOLD_BYTES", 0 if request.param else 10**9)
