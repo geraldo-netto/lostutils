@@ -225,6 +225,27 @@ def test_trailing_fun_modifier_applies_to_last_written_group():
     assert kp.download_description() == "A Ctrl"
 
 
+def test_shift_and_merges_pending_modifier_into_sent_group():
+    kp = _select(KeyParam())
+    kp.fun_modifier(1, "Ctrl")
+    assert kp.shift_and(30, "!") is True
+
+    reports, _flash, _ = _built(kp)
+    assert kp.data[KeyParam.KeyGroupCharNum] == 1
+    assert kp.data[4:6] == bytearray((3, 30))
+    assert reports[1][4:6] == bytearray((3, 30))
+
+
+def test_modifier_after_shift_and_updates_same_group():
+    kp = _select(KeyParam())
+    assert kp.shift_and(30, "!") is True
+    kp.fun_modifier(1, "Ctrl")
+
+    reports, _flash, _ = _built(kp)
+    assert kp.data[4:6] == bytearray((3, 30))
+    assert reports[1][4:6] == bytearray((3, 30))
+
+
 def test_download_description_falls_back_for_non_keyboard_payload():
     kp = _select(KeyParam())
     kp.multimedia("Vol +", (0, 2), (0, 64), (0, 233))

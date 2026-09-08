@@ -536,8 +536,6 @@ class KeyParam:
     def shift_and(self, keycode, label):
         """Shift+<symbol> buttons."""
         kc = self.KEY_Char_Num
-        if self.data[kc - 1] != 0:
-            kc += 2
         if not self._fits(kc):
             return False
         self.KEY_Char_Num = kc
