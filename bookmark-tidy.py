@@ -278,6 +278,8 @@ def chromium_json_data_to_bookmarks(data: Any, source: str) -> list[Bookmark]:
     roots = data.get("roots", {})
     bookmarks: list[Bookmark] = []
     for root_key, node in roots.items():
+        if not isinstance(node, Mapping):
+            continue
         root = root_key if root_key in ROOT_DISPLAY else "other"
         for child in node.get("children", []):
             if isinstance(child, Mapping):

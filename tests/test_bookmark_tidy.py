@@ -365,6 +365,33 @@ def test_read_chromium_bookmarks_parses_nested_folders(tmp_path):
     assert bookmarks[1].title == "https://example.test/b"
 
 
+def test_read_chromium_bookmarks_skips_non_mapping_root_metadata(tmp_path):
+    path = tmp_path / "Bookmarks"
+    path.write_text(
+        json.dumps(
+            {
+                "roots": {
+                    "sync_transaction_version": "1",
+                    "bookmark_bar": {
+                        "children": [
+                            {
+                                "type": "url",
+                                "name": "Alpha",
+                                "url": "https://example.test/a",
+                            }
+                        ]
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    bookmarks = bookmark_tidy.read_chromium_bookmarks(path)
+
+    assert [bookmark.url for bookmark in bookmarks] == ["https://example.test/a"]
+
+
 def test_read_firefox_sqlite_bookmarks(tmp_path):
     path = tmp_path / "places.sqlite"
     conn = sqlite3.connect(path)
