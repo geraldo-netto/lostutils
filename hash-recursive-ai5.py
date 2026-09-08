@@ -27,6 +27,7 @@ an efficient rejection filter before the definitive full-file comparison.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import hashlib
 import io
@@ -35,11 +36,13 @@ import os
 import queue
 import signal
 import stat
+import struct
 import sys
 import threading
 import time
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from datetime import datetime
 from functools import partial
 from typing import NamedTuple, NoReturn
@@ -276,7 +279,14 @@ class _WalkState(NamedTuple):
     cancel_event: "threading.Event | None"
     # hr-log-04: (dev, ino) of the run's own hashes dump to exclude, or None.
     skip_ino: "tuple | None"
+    root_guard: "tuple[int, _WindowsDirectoryAPI | None]"
 
+
+class _DirectoryTicket(NamedTuple):
+    """Path plus the identity captured before it enters the work queue."""
+    path: str
+    identity: tuple[int, int]
+    parent: "_DirectoryTicket | None"
 
 def _walk_worker(idx, state: "_WalkState") -> None:
     """One walk worker: pop a directory, scandir it, push subdirs back
@@ -288,26 +298,27 @@ def _walk_worker(idx, state: "_WalkState") -> None:
     (hr-rel-18)."""
     wstats = state.per_worker_stats[idx]
     while True:
-        d = state.pending.get()
-        if d is state.sentinel:
+        ticket = state.pending.get()
+        if ticket is state.sentinel:
             return
-        scanned, worker_failed = _process_walk_dir(idx, d, state, wstats)
+        scanned, worker_failed = _process_walk_dir(
+            idx, ticket, state, wstats)
         _finish_walk_dir(scanned, state, wstats)
         if worker_failed:
             return
 
 
-def _process_walk_dir(idx, directory, state: "_WalkState", wstats) -> tuple[bool, bool]:
+def _process_walk_dir(idx, ticket, state: "_WalkState", wstats) -> tuple[bool, bool]:
     try:
         if state.cancel_event is not None and state.cancel_event.is_set():
             return False, False
-        _scan_dir(directory, state, wstats)
+        _scan_dir(ticket, state, wstats)
         return True, False
     except (OSError, ValueError):
         wstats["dir_errors"] += 1
         return False, False
     except BaseException as exc:  # NOSONAR -- worker failures must always be reported to the coordinator.
-        _record_walk_worker_failure(idx, directory, exc, state)
+        _record_walk_worker_failure(idx, ticket, exc, state)
         return False, True
 
 
@@ -330,49 +341,256 @@ def _finish_walk_dir(scanned: bool, state: "_WalkState", wstats) -> None:
                 state.pending.put(state.sentinel)
 
 
-def _identity_stat(entry, st):
-    """Return a stat for `entry` that carries a real (st_dev, st_ino).
+def _identity_stat(entry, st, parent_fd):
+    """Recover missing POSIX entry IDs relative to the pinned directory only.
 
-    hr-plat-06: os.DirEntry.stat() is served from the directory scan on
-    Windows, where CPython documents st_dev, st_ino and st_nlink as always
-    zero. Every file would then share the inode key (0, 0): index_inodes folds
-    the whole tree into one alias set, size_collision_candidates never sees a
-    second key, and the run hashes nothing and reports zero duplicates on any
-    input — silently, with exit 0. Costs one extra os.stat per regular file,
-    and only where the cheap stat came back empty.
+    Windows native entries already use fstat; missing native IDs cannot safely
+    be recovered by reopening a pathname through potentially changed ancestors.
     """
     if st.st_dev or st.st_ino:
         return st
-    return os.stat(entry.path, follow_symlinks=False)
+    if os.name == "nt":
+        raise OSError(errno.EIO, "Windows entry has no usable file identity")
+    return os.stat(entry.name, dir_fd=parent_fd, follow_symlinks=False)
 
 
-def _scan_dir(d, state: "_WalkState", wstats) -> None:
+def _is_guarded_directory(st) -> bool:
+    if not stat.S_ISDIR(st.st_mode):
+        return False
+    return not (getattr(st, "st_file_attributes", 0) & 0x400
+                or getattr(st, "st_reparse_tag", 0))
+
+
+def _ticket_chain(ticket):
+    chain = []
+    while ticket is not None:
+        chain.append(ticket)
+        ticket = ticket.parent
+    return list(reversed(chain))
+
+
+def _check_directory_identity(st, identity=None) -> None:
+    if not _is_guarded_directory(st):
+        raise OSError(errno.ELOOP, "refusing symlink, reparse point, or non-directory")
+    if identity is not None and (st.st_dev, st.st_ino) != identity:
+        raise OSError(errno.EBUSY, "directory identity changed")
+
+
+class _NativeUnicode(ctypes.Structure):
+    _fields_ = [("length", ctypes.c_uint16), ("maximum", ctypes.c_uint16),
+                ("buffer", ctypes.c_void_p)]
+
+
+class _NativeObjectAttributes(ctypes.Structure):
+    _fields_ = [("length", ctypes.c_uint32), ("root", ctypes.c_void_p),
+                ("name", ctypes.POINTER(_NativeUnicode)),
+                ("attributes", ctypes.c_uint32), ("security", ctypes.c_void_p),
+                ("quality", ctypes.c_void_p)]
+
+
+class _NativeIOStatus(ctypes.Structure):
+    _fields_ = [("status", ctypes.c_void_p), ("information", ctypes.c_size_t)]
+
+
+def _windows_function(library, name, result, arguments):
+    function = getattr(library, name)
+    function.restype = result
+    function.argtypes = arguments
+    return function
+
+
+class _WindowsDirectoryAPI:
+    """Windows lacks dir_fd/scandir(fd); use native relative opens and enumeration.
+
+    CRT descriptors own the native handles, allowing os.fstat to supply exactly
+    the same volume/file identities as os.stat (including 128-bit ReFS IDs).
+    Enumeration never resolves a pathname, even if a junction is rewritten.
+    """
+
+    def __init__(self):
+        import msvcrt
+        self.crt = msvcrt
+        kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        native = getattr(ctypes, "WinDLL")("ntdll", use_last_error=True)
+        ptr, word = ctypes.c_void_p, ctypes.c_uint32
+        self.create = _windows_function(kernel, "CreateFileW", ptr,
+            [ctypes.c_wchar_p, word, word, ptr, word, word, ptr])
+        self.reopen = _windows_function(kernel, "ReOpenFile", ptr, [ptr, word, word, word])
+        self.close = _windows_function(kernel, "CloseHandle", ctypes.c_int, [ptr])
+        self.query = _windows_function(kernel, "GetFileInformationByHandleEx",
+            ctypes.c_int, [ptr, ctypes.c_int, ptr, word])
+        self.last_error = _windows_function(kernel, "GetLastError", word, [])
+        self.create_relative = _windows_function(native, "NtCreateFile", ctypes.c_int32,
+            [ctypes.POINTER(ptr), word, ctypes.POINTER(_NativeObjectAttributes),
+             ctypes.POINTER(_NativeIOStatus), ptr, word, word, word, word, ptr, word])
+
+    def _own(self, handle):
+        try:
+            return getattr(self.crt, "open_osfhandle")(handle, os.O_RDONLY)
+        except BaseException:
+            self.close(handle)
+            raise
+
+    def open_root(self, path):
+        # READ_ATTRIBUTES | LIST_DIRECTORY | SYNCHRONIZE; share all operations.
+        handle = self.create(path, 0x100081, 7, None, 3, 0x02200000, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise OSError(errno.EACCES, "cannot pin Windows walk root", path)
+        return self._own(handle)
+
+    def reopen_root(self, fd):
+        handle = self.reopen(getattr(self.crt, "get_osfhandle")(fd), 0x100081, 7, 0x02200000)
+        if handle == ctypes.c_void_p(-1).value:
+            raise OSError(errno.EACCES, "cannot reopen pinned Windows root")
+        return self._own(handle)
+
+    def open_relative(self, parent_fd, name, directory=True):
+        if not name or any(c in name for c in "\\/:\0") or name in (".", ".."):
+            raise ValueError("directory entry must be a single component")
+        encoded = name.encode("utf-16-le", errors="surrogatepass")
+        buffer = ctypes.create_string_buffer(encoded)
+        string = _NativeUnicode(len(encoded), len(encoded), ctypes.addressof(buffer))
+        attributes = _NativeObjectAttributes(
+            ctypes.sizeof(_NativeObjectAttributes), getattr(self.crt, "get_osfhandle")(parent_fd),
+            ctypes.pointer(string), 0, None, None)
+        handle, status = ctypes.c_void_p(), _NativeIOStatus()
+        result = self.create_relative(ctypes.byref(handle), 0x100080 | int(directory),
+            ctypes.byref(attributes), ctypes.byref(status), None, 0, 7, 1,
+            0x200020 | int(directory), None, 0)
+        if result < 0:
+            raise OSError(errno.EACCES, "cannot open pinned Windows entry", name)
+        return self._own(handle.value)
+
+    def names(self, fd):
+        # FileFullDirectoryInfo resumes the handle's cursor; a fresh relative
+        # open gives each worker/retry its own cursor. Fixed 64 KiB buffer.
+        buffer = ctypes.create_string_buffer(65536)
+        handle = getattr(self.crt, "get_osfhandle")(fd)
+        while self.query(handle, 14, buffer, len(buffer)):
+            yield from _windows_directory_names(buffer.raw)
+        if self.last_error() != 18:  # ERROR_NO_MORE_FILES
+            raise OSError(errno.EIO, "cannot enumerate pinned Windows directory")
+
+
+def _windows_directory_record(data, offset):
+    if offset + 68 > len(data):
+        raise OSError(errno.EIO, "invalid Windows directory record offset")
+    following, = struct.unpack_from("<I", data, offset)
+    length, = struct.unpack_from("<I", data, offset + 60)
+    end = offset + 68 + length
+    if length % 2 or end > len(data) or (following and following < 68 + length):
+        raise OSError(errno.EIO, "invalid Windows directory record")
+    return following, data[offset + 68:end].decode("utf-16-le", errors="surrogatepass")
+
+
+def _windows_directory_names(data):
+    offset = 0
+    while True:
+        following, name = _windows_directory_record(data, offset)
+        if name not in (".", ".."):
+            yield name
+        if not following:
+            return
+        offset += following
+
+
+class _WindowsEntry(NamedTuple):
+    name: str
+    parent_fd: int
+    api: _WindowsDirectoryAPI
+
+    def stat(self, *, follow_symlinks=False):
+        fd = self.api.open_relative(self.parent_fd, self.name, directory=False)
+        try:
+            return os.fstat(fd)
+        finally:
+            os.close(fd)
+
+
+@contextmanager
+def _pin_walk_root(ticket):
+    api = _WindowsDirectoryAPI() if os.name == "nt" else None
+    fd = (api.open_root(ticket.path) if api else
+          os.open(ticket.path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
+    try:
+        _check_directory_identity(os.fstat(fd), ticket.identity)
+        yield (fd, api)
+    finally:
+        os.close(fd)
+
+
+def _open_walk_directory(parent_fd, name, api):
+    if api is not None:
+        return api.reopen_root(parent_fd) if name == "." else api.open_relative(parent_fd, name)
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+
+
+def _open_ticket_chain(chain, root_fd, api):
+    # A fresh open gets its own enumeration position, including root retries.
+    fd = _open_walk_directory(root_fd, ".", api)
+    try:
+        for item in chain:
+            if item is not chain[0]:
+                child = _open_walk_directory(fd, os.path.basename(item.path), api)
+                os.close(fd)
+                fd = child
+            _check_directory_identity(os.fstat(fd), item.identity)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+@contextmanager
+def _open_directory_ticket(ticket, root_guard):
+    root_fd, api = root_guard
+    chain = _ticket_chain(ticket)
+    fd = _open_ticket_chain(chain, root_fd, api)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _directory_entries(fd, api):
+    if api is not None:
+        yield (_WindowsEntry(name, fd, api) for name in api.names(fd))
+    else:
+        with os.scandir(fd) as entries:
+            yield entries
+
+
+def _scan_entry(entry, ticket, state, wstats, parent_fd) -> None:
+    try:
+        entry_path = os.path.join(ticket.path, entry.name)
+        # hr-perf-02: single lstat covers classification AND (size, dev, ino).
+        st = entry.stat(follow_symlinks=False)
+        st = _identity_stat(entry, st, parent_fd)
+        if _is_guarded_directory(st):
+            child = _DirectoryTicket(
+                entry_path, (st.st_dev, st.st_ino), ticket)
+            with state.lock:
+                state.inflight[0] += 1
+            state.pending.put(child)
+        elif stat.S_ISREG(st.st_mode) and not getattr(st, "st_file_attributes", 0) & 0x400:
+            if (state.skip_ino is not None
+                    and (st.st_dev, st.st_ino) == state.skip_ino):
+                return
+            state.out_q.put((entry_path, st.st_size, st.st_dev, st.st_ino))
+            wstats["files"] += 1
+    except (OSError, ValueError):
+        # ValueError: NUL byte in entry name (hr-sec-03 family).
+        wstats["entry_errors"] += 1
+
+
+def _scan_dir(ticket, state: "_WalkState", wstats) -> None:
     """Scan one directory: enqueue subdirs, emit regular files
     (hr-cx-02). Per-entry errors are counted, never raised."""
-    with os.scandir(d) as it:
-        for e in it:
-            try:
-                # hr-perf-02: single lstat covers classification AND
-                # (size, dev, ino).
-                st = e.stat(follow_symlinks=False)
-                mode = st.st_mode
-                if stat.S_ISDIR(mode):
-                    with state.lock:
-                        state.inflight[0] += 1
-                    state.pending.put(e.path)
-                elif stat.S_ISREG(mode):
-                    st = _identity_stat(e, st)
-                    # hr-log-04: drop the run's own hashes dump (matched by
-                    # inode) so it is never counted, hashed, or self-listed.
-                    if (state.skip_ino is not None
-                            and (st.st_dev, st.st_ino) == state.skip_ino):
-                        continue
-                    state.out_q.put(
-                        (e.path, st.st_size, st.st_dev, st.st_ino))
-                    wstats["files"] += 1
-            except (OSError, ValueError):
-                # ValueError: NUL byte in entry name (hr-sec-03 family).
-                wstats["entry_errors"] += 1
+    with _open_directory_ticket(ticket, state.root_guard) as scan_target:
+        with _directory_entries(scan_target, state.root_guard[1]) as it:
+            for e in it:
+                _scan_entry(e, ticket, state, wstats, scan_target)
 
 
 def _post_walk_sentinel(threads, out_q, sentinel_out) -> None:
@@ -418,7 +636,7 @@ class _WalkIter:
     unblock from ``out_q.get()`` and then merge stats safely."""
 
     def __init__(self, root, jobs, cancel_event, skip_ino=None):
-        self._root = root
+        self._root = os.path.realpath(os.path.abspath(root))
         # jobs=0/negative would spawn no workers; huge job counts exhaust
         # threads / file descriptors. Clamp both ends at the boundary.
         self._jobs = _clamp_jobs(jobs)
@@ -434,6 +652,23 @@ class _WalkIter:
         }
 
     def __iter__(self):
+        try:
+            root_stat = os.stat(self._root, follow_symlinks=False)
+        except (OSError, ValueError):
+            self.stats["dir_errors"] = 1
+            return
+        if not _is_guarded_directory(root_stat):
+            self.stats["dir_errors"] = 1
+            return
+        root_ticket = _DirectoryTicket(
+            self._root, (root_stat.st_dev, root_stat.st_ino), None)
+        try:
+            with _pin_walk_root(root_ticket) as root_guard:
+                yield from self._iterate(root_ticket, root_guard)
+        except (OSError, ValueError):
+            self.stats["dir_errors"] += 1
+
+    def _iterate(self, root_ticket, root_guard):
         jobs = self._jobs
         SENTINEL_OUT = object()    # signals end of output stream
         per_worker_stats: "list[dict]" = [
@@ -451,8 +686,9 @@ class _WalkIter:
             sentinel=object(),     # signals worker termination
             cancel_event=self._cancel,
             skip_ino=self._skip_ino,
+            root_guard=root_guard,
         )
-        state.pending.put(self._root)
+        state.pending.put(root_ticket)
 
         coord_thread = _start_walk_coordinator(state, SENTINEL_OUT)
 

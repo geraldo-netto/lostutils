@@ -739,6 +739,33 @@ def test_threaded_walk_results_complete_with_many_workers():
         assert len(names) == 1000
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX symlink replacement")
+def test_walk_rejects_directory_substitution_before_scan(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    nested = root / "nested"
+    outside = tmp_path / "outside"
+    nested.mkdir(parents=True)
+    outside.mkdir()
+    (nested / "inside.txt").write_text("inside")
+    (outside / "secret.txt").write_text("secret")
+    real_open = hr._open_directory_ticket
+    swapped = {"done": False}
+
+    def swap_before_open(ticket, root_guard):
+        if ticket.path == str(nested) and not swapped["done"]:
+            swapped["done"] = True
+            nested.rename(root / "nested-old")
+            nested.symlink_to(outside, target_is_directory=True)
+        return real_open(ticket, root_guard)
+
+    monkeypatch.setattr(hr, "_open_directory_ticket", swap_before_open)
+    results, stats = _drain_walk(root, 2)
+
+    assert swapped["done"]
+    assert stats["dir_errors"] >= 1
+    assert all(Path(path).name != "secret.txt" for path, *_ in results)
+
+
 def test_walk_iterator_no_results_lock_attr():
     """Sanity: the new design has no shared `results_lock` to take per-entry."""
     import inspect
@@ -3259,7 +3286,7 @@ def test_scan_dir_base_exception_preserves_siblings_and_stats(
 
     def flaky_scan_dir(d, st, wstats):
         with lock:
-            if str(d) == sub_str and not state["boomed"]:
+            if d.path == sub_str and not state["boomed"]:
                 state["boomed"] = True
                 raise _ScanBoom("transient failure scanning sub")
         return real_scan_dir(d, st, wstats)
@@ -4290,9 +4317,13 @@ def test_identity_stat_restats_when_dev_and_ino_are_zero(tmp_path):
     real = os.stat(target)
 
     class Entry:
-        path = str(target)
+        name = target.name
 
-    got = hr._identity_stat(Entry(), _ZeroedStat(real))
+    fd = os.open(tmp_path, os.O_RDONLY)
+    try:
+        got = hr._identity_stat(Entry(), _ZeroedStat(real), fd)
+    finally:
+        os.close(fd)
 
     assert (got.st_dev, got.st_ino) == (real.st_dev, real.st_ino)
 
@@ -4305,7 +4336,7 @@ def test_identity_stat_keeps_a_populated_stat(tmp_path):
     class Entry:
         path = "/must/not/be/stat-ed"
 
-    assert hr._identity_stat(Entry(), real) is real
+    assert hr._identity_stat(Entry(), real, -1) is real
 
 
 def _zeroing_scandir(real_scandir):
@@ -4560,3 +4591,295 @@ def test_broken_pipe_still_finalizes_requested_dump(tmp_path, monkeypatch):
 def test_broken_pipe_silencing_tolerates_stream_without_descriptor(monkeypatch):
     monkeypatch.setattr(hr.sys, "stdout", io.StringIO())
     hr._silence_stdout_after_broken_pipe()
+
+# hr-sec-80: queued identity tickets must never redirect native enumeration.
+@pytest.mark.parametrize('attack', ['leaf', 'ancestor', 'root', 'restore'])
+def test_walk_pinned_substitution_boundaries(tmp_path, monkeypatch, attack):
+    from contextlib import contextmanager
+    root = tmp_path / 'root'
+    leaf = root / 'parent' / 'leaf'
+    leaf.mkdir(parents=True)
+    (leaf / 'inside').write_bytes(b'original')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'secret').write_bytes(b'secret')
+    original = hr._open_directory_ticket
+    changed = []
+
+    @contextmanager
+    def substitute(ticket, guard):
+        if ticket.path != str(leaf) or changed:
+            with original(ticket, guard) as fd:
+                yield fd
+            return
+        victim = {'leaf': leaf, 'ancestor': leaf.parent, 'root': root,
+                  'restore': leaf}[attack]
+        saved = victim.with_name(victim.name + '-saved')
+        if attack == 'restore':
+            with original(ticket, guard) as fd:
+                victim.rename(saved)
+                victim.symlink_to(outside, target_is_directory=True)
+                changed.append(True)
+                try:
+                    yield fd
+                finally:
+                    victim.unlink()
+                    saved.rename(victim)
+            return
+        victim.rename(saved)
+        victim.symlink_to(outside, target_is_directory=True)
+        changed.append(True)
+        with original(ticket, guard) as fd:
+            yield fd
+
+    monkeypatch.setattr(hr, '_open_directory_ticket', substitute)
+    results, stats = _drain_walk(root, 1)
+    assert changed
+    assert all(Path(path).name != 'secret' for path, *_ in results)
+    if attack in ('root', 'restore'):
+        assert [Path(path).name for path, *_ in results] == ['inside']
+    else:
+        assert stats['dir_errors'] == 1
+
+
+def test_walk_open_descriptor_bound_and_cancel(tmp_path, monkeypatch):
+    import threading
+    root = tmp_path / 'root'
+    root.mkdir()
+    for n in range(20):
+        leaf = root / str(n)
+        for depth in range(8):
+            leaf /= str(depth)
+        leaf.mkdir(parents=True)
+        (leaf / 'data').write_bytes(b'x')
+    original_open, original_close = hr.os.open, hr.os.close
+    held, peak = set(), [0]
+    lock = threading.Lock()
+
+    def tracked_open(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        with lock:
+            held.add(fd)
+            peak[0] = max(peak[0], len(held))
+        return fd
+
+    def tracked_close(fd):
+        with lock:
+            held.discard(fd)
+            return original_close(fd)
+
+    monkeypatch.setattr(hr.os, 'open', tracked_open)
+    monkeypatch.setattr(hr.os, 'close', tracked_close)
+    results, stats = _drain_walk(root, 3)
+    assert len(results) == 20 and stats['dir_errors'] == 0
+    assert peak[0] <= 1 + 2 * 3
+    assert not held
+    iterator = iter(hr.iter_threaded_walk(str(root), 3))
+    next(iterator)
+    iterator.close()
+    assert not held
+
+
+@pytest.fixture
+def native_api(monkeypatch):
+    import types
+    from unittest.mock import Mock
+    kernel = types.SimpleNamespace(**{name: Mock(return_value=1) for name in
+        ('CreateFileW', 'ReOpenFile', 'CloseHandle', 'GetFileInformationByHandleEx', 'GetLastError')})
+    native = types.SimpleNamespace(NtCreateFile=Mock(return_value=0))
+    crt = types.SimpleNamespace(open_osfhandle=Mock(return_value=42),
+                                get_osfhandle=Mock(return_value=123))
+    monkeypatch.setitem(sys.modules, 'msvcrt', crt)
+    monkeypatch.setattr(hr.ctypes, 'WinDLL',
+                        lambda name, **kw: kernel if name == 'kernel32' else native,
+                        raising=False)
+    return hr._WindowsDirectoryAPI(), kernel, native, crt
+
+
+def test_windows_native_open_flags_and_ownership(native_api):
+    import ctypes
+    api, kernel, native, crt = native_api
+    assert api.open_root('root') == 42
+    assert api.reopen_root(42) == 42
+    assert kernel.ReOpenFile.call_args.args == (123, 0x100081, 7, 0x02200000)
+    kernel.ReOpenFile.return_value = ctypes.c_void_p(-1).value
+    with pytest.raises(OSError):
+        api.reopen_root(42)
+    assert kernel.CreateFileW.call_args.args == ('root', 0x100081, 7, None, 3, 0x02200000, None)
+
+    def create_relative(handle, access, attributes, status, *rest):
+        attrs = ctypes.cast(attributes, ctypes.POINTER(hr._NativeObjectAttributes)).contents
+        assert attrs.root == 123
+        assert ctypes.string_at(attrs.name.contents.buffer, attrs.name.contents.length) == 'café'.encode('utf-16-le')
+        assert access == 0x100081
+        assert rest == (None, 0, 7, 1, 0x200021, None, 0)
+        ctypes.cast(handle, ctypes.POINTER(ctypes.c_void_p))[0] = 456
+        return 0
+
+    native.NtCreateFile.side_effect = create_relative
+    assert api.open_relative(42, 'café') == 42
+    crt.open_osfhandle.assert_called_with(456, os.O_RDONLY)
+    native.NtCreateFile.side_effect = None
+    native.NtCreateFile.return_value = -1
+    with pytest.raises(OSError):
+        api.open_relative(42, 'gone')
+    for name in ('', '..', 'a/b', 'a\\b', 'a:b', 'a\0b'):
+        with pytest.raises(ValueError):
+            api.open_relative(42, name)
+    kernel.CreateFileW.return_value = ctypes.c_void_p(-1).value
+    with pytest.raises(OSError):
+        api.open_root('missing')
+    crt.open_osfhandle.side_effect = OSError('no descriptors')
+    with pytest.raises(OSError):
+        api._own(789)
+    kernel.CloseHandle.assert_called_once_with(789)
+
+
+def _native_directory_record(name, following=0):
+    import struct
+    encoded = name.encode('utf-16-le')
+    data = bytearray(68 + len(encoded))
+    struct.pack_into('<I', data, 0, following)
+    struct.pack_into('<I', data, 60, len(encoded))
+    data[68:] = encoded
+    return bytes(data)
+
+
+def test_windows_native_enumeration_and_record_errors(native_api):
+    import ctypes
+    import struct
+    api, kernel, _, _ = native_api
+    first = _native_directory_record('.', 72) + b'\0\0'
+    payload = first + _native_directory_record('café')
+    calls = []
+
+    def query(handle, information, buffer, size):
+        assert handle == 123 and information == 14 and size == 65536
+        calls.append(True)
+        if len(calls) > 1:
+            return 0
+        ctypes.memmove(buffer, payload, len(payload))
+        return 1
+
+    kernel.GetFileInformationByHandleEx.side_effect = query
+    kernel.GetLastError.return_value = 18
+    assert list(api.names(42)) == ['café']
+    kernel.GetLastError.return_value = 5
+    with pytest.raises(OSError):
+        list(api.names(42))
+    for data in (b'', _native_directory_record('x', 999),
+                 _native_directory_record('abc', 4)):
+        with pytest.raises(OSError):
+            list(hr._windows_directory_names(data))
+    malformed = bytearray(_native_directory_record('x'))
+    struct.pack_into('<I', malformed, 60, 3)
+    with pytest.raises(OSError):
+        list(hr._windows_directory_names(malformed))
+
+
+def test_windows_entry_stat_closes_and_reparse_rejected(native_api, monkeypatch):
+    from types import SimpleNamespace
+    api, _, native, _ = native_api
+    closed = []
+    monkeypatch.setattr(hr.os, 'close', closed.append)
+    monkeypatch.setattr(hr.os, 'fstat', lambda fd: SimpleNamespace(st_mode=hr.stat.S_IFDIR,
+        st_file_attributes=0x400, st_dev=1, st_ino=2))
+    entry = hr._WindowsEntry('junction', 5, api)
+    assert not hr._is_guarded_directory(entry.stat())
+    assert native.NtCreateFile.call_args.args[1] == 0x100080
+    assert native.NtCreateFile.call_args.args[8] == 0x200020
+    assert closed == [42]
+    with pytest.raises(OSError):
+        hr._check_directory_identity(entry.stat(), (1, 2))
+    monkeypatch.setattr(hr.os, 'fstat', lambda fd: (_ for _ in ()).throw(OSError('stat failed')))
+    with pytest.raises(OSError):
+        entry.stat()
+    assert closed == [42, 42, 42]
+
+
+def test_windows_walk_adapter_uses_only_native_handles(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    root = tmp_path / 'root'
+    root.mkdir()
+    (root / 'file').write_bytes(b'x')
+    root_fd = os.open(root, os.O_RDONLY)
+    opened = []
+
+    class API:
+        def reopen_root(self, fd):
+            return self.open_relative(fd, '.')
+        def open_relative(self, fd, name, directory=True):
+            opened.append(name)
+            return os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        def names(self, fd):
+            return iter(['file'])
+
+    api = API()
+    ticket = hr._DirectoryTicket(str(root), (root.stat().st_dev, root.stat().st_ino), None)
+    try:
+        with hr._open_directory_ticket(ticket, (root_fd, api)) as fd:
+            with hr._directory_entries(fd, api) as entries:
+                entry = next(entries)
+                assert entry.stat().st_size == 1
+        assert opened == ['.', 'file']
+        with pytest.raises(OSError):
+            hr._check_directory_identity(SimpleNamespace(st_mode=hr.stat.S_IFDIR, st_dev=0, st_ino=0), (1, 2))
+    finally:
+        os.close(root_fd)
+
+@pytest.mark.parametrize('kind', ['missing', 'regular', 'changed'])
+def test_walk_root_rejection_reports_incomplete(tmp_path, monkeypatch, kind):
+    root = tmp_path / 'source'
+    if kind == 'regular':
+        root.write_bytes(b'file')
+    elif kind == 'changed':
+        root.mkdir()
+        real_open = hr.os.open
+        def swap_root(path, *args, **kwargs):
+            if path == str(root):
+                root.rename(tmp_path / 'original')
+                root.mkdir()
+            return real_open(path, *args, **kwargs)
+        monkeypatch.setattr(hr.os, 'open', swap_root)
+    results, stats = _drain_walk(root, 1)
+    assert results == []
+    assert stats['dir_errors'] == 1
+
+
+def test_windows_pin_root_owns_descriptor_on_validation_failure(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    root = tmp_path / 'root'
+    root.mkdir()
+    fd = os.open(root, os.O_RDONLY)
+    api = SimpleNamespace(open_root=lambda path: fd)
+    monkeypatch.setattr(hr, '_WindowsDirectoryAPI', lambda: api)
+    monkeypatch.setattr(hr, 'os', SimpleNamespace(name='nt', fstat=os.fstat, close=os.close))
+    ticket = hr._DirectoryTicket(str(root), (-1, -1), None)
+    with pytest.raises(OSError):
+        with hr._pin_walk_root(ticket):
+            pytest.fail('changed identity accepted')
+    with pytest.raises(OSError):
+        os.fstat(fd)
+    with pytest.raises(OSError, match='no usable file identity'):
+        hr._identity_stat(None, SimpleNamespace(st_dev=0, st_ino=0), -1)
+
+
+def test_zero_identity_fallback_stays_relative_during_swap(tmp_path, monkeypatch):
+    original = tmp_path / 'original'
+    original.mkdir()
+    target = original / 'f.bin'
+    target.write_bytes(b'inside')
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'f.bin').write_bytes(b'outside')
+    with os.scandir(original) as entries:
+        entry = next(entries)
+        st = entry.stat()
+    fd = os.open(original, os.O_RDONLY)
+    original.rename(tmp_path / 'saved')
+    original.symlink_to(outside, target_is_directory=True)
+    try:
+        got = hr._identity_stat(entry, _ZeroedStat(st), fd)
+        assert (got.st_dev, got.st_ino) == (st.st_dev, st.st_ino)
+    finally:
+        os.close(fd)

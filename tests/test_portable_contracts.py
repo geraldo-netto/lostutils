@@ -275,3 +275,113 @@ def test_hardlink_fallback_when_no_follow_keyword_is_unsupported(isolated, monke
     module._link_regular_no_follow(source, target)
     assert target.read_bytes() == source.read_bytes()
     assert os.path.samefile(source, target)
+
+@pytest.mark.skipif(os.name != 'nt', reason='native Windows directory handles')
+@pytest.mark.parametrize('attack', ['leaf', 'ancestor', 'during_scan'])
+def test_windows_hash_walk_rejects_directory_swaps(isolated, monkeypatch, attack):
+    """Exercise the actual NtCreateFile ABI and handle enumeration in native CI."""
+    from contextlib import contextmanager
+    work, _ = isolated
+    module = _load_script(work, 'hash-recursive-ai5.py')
+    root = work / 'tree'
+    leaf = root / 'parent' / 'leaf'
+    leaf.mkdir(parents=True)
+    (leaf / 'inside.txt').write_bytes(b'inside')
+    original = module._open_directory_ticket
+    changed = []
+
+    def swap():
+        victim = leaf.parent if attack == 'ancestor' else leaf
+        saved = victim.with_name(victim.name + '-saved')
+        victim.rename(saved)
+        victim.mkdir()
+        replacement = victim / 'leaf' if attack == 'ancestor' else victim
+        replacement.mkdir(exist_ok=True)
+        (replacement / 'outside.txt').write_bytes(b'outside')
+        changed.append((victim, saved))
+
+    @contextmanager
+    def guarded(ticket, guard):
+        if ticket.path != str(leaf) or changed:
+            with original(ticket, guard) as fd:
+                yield fd
+            return
+        if attack == 'during_scan':
+            with original(ticket, guard) as fd:
+                swap()
+                yield fd
+        else:
+            swap()
+            with original(ticket, guard) as fd:
+                yield fd
+
+    monkeypatch.setattr(module, '_open_directory_ticket', guarded)
+    walk = module.iter_threaded_walk(str(root), 1)
+    results = list(walk)
+    assert changed
+    assert all(Path(path).name != 'outside.txt' for path, *_ in results)
+    if attack == 'during_scan':
+        assert [Path(path).name for path, *_ in results] == ['inside.txt']
+    else:
+        assert walk.stats['dir_errors'] == 1
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='native Windows junction guard')
+def test_windows_hash_walk_skips_junction(isolated):
+    work, _ = isolated
+    module = _load_script(work, 'hash-recursive-ai5.py')
+    root, outside = work / 'tree', work / 'outside'
+    root.mkdir()
+    outside.mkdir()
+    (root / 'inside.txt').write_bytes(b'inside')
+    (outside / 'outside.txt').write_bytes(b'outside')
+    result = subprocess.run(['cmd.exe', '/c', 'mklink', '/J', str(root / 'junction'),
+                             str(outside)], capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    try:
+        walk = module.iter_threaded_walk(str(root), 2)
+        assert [Path(path).name for path, *_ in walk] == ['inside.txt']
+        assert walk.stats['dir_errors'] == 0
+    finally:
+        os.rmdir(root / 'junction')
+
+@pytest.mark.skipif(os.name != 'nt', reason='native Windows descriptor lifetime')
+def test_windows_hash_walk_handle_bound_and_cancel(isolated, monkeypatch):
+    import threading
+    work, _ = isolated
+    module = _load_script(work, 'hash-recursive-ai5.py')
+    root = work / 'tree'
+    for width in range(12):
+        leaf = root / str(width) / 'a' / 'b' / 'c' / 'd'
+        leaf.mkdir(parents=True)
+        (leaf / 'data').write_bytes(b'x')
+    own, close = module._WindowsDirectoryAPI._own, module.os.close
+    held, peak = set(), [0]
+    lock = threading.Lock()
+
+    def tracked_own(api, handle):
+        with lock:
+            fd = own(api, handle)
+            held.add(fd)
+            peak[0] = max(peak[0], len(held))
+            return fd
+
+    def tracked_close(fd):
+        with lock:
+            held.discard(fd)
+            close(fd)
+
+    monkeypatch.setattr(module._WindowsDirectoryAPI, '_own', tracked_own)
+    monkeypatch.setattr(module.os, 'close', tracked_close)
+    walk = module.iter_threaded_walk(str(root), 3)
+    assert len(list(walk)) == 12
+    assert walk.stats['dir_errors'] == 0
+    assert peak[0] <= 1 + 2 * 3
+    assert not held
+    cancelled = threading.Event()
+    walk = module.iter_threaded_walk(str(root), 3, cancel_event=cancelled)
+    iterator = iter(walk)
+    next(iterator)
+    cancelled.set()
+    iterator.close()
+    assert not held
