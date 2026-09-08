@@ -779,6 +779,18 @@ def test_expand_inputs_and_discovery_helpers(tmp_path, monkeypatch):
     assert bookmark_tidy._mac_browser_patterns(tmp_path)
 
 
+def test_explicit_unsupported_file_is_retained_for_content_sniff(tmp_path, caplog):
+    path = tmp_path / "Bookmarks.bak"
+    path.write_text("plain", encoding="utf-8")
+
+    caplog.set_level(logging.WARNING, logger="bookmark-tidy")
+    paths = bookmark_tidy.expand_input_paths([str(path)], recursive=True)
+
+    assert paths == [path.resolve()]
+    assert bookmark_tidy.read_all_bookmarks(paths) == []
+    assert "unsupported bookmark file" in caplog.text
+
+
 def test_normalize_url_option_edges():
     options = bookmark_tidy.NormalizeOptions(
         strip_fragment=False,

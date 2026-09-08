@@ -730,7 +730,7 @@ def expand_input_paths(inputs: Sequence[str], recursive: bool) -> list[Path]:
 
 def _expand_one_input(path: Path, recursive: bool) -> list[Path]:
     if path.is_file():
-        return [path] if _supported_input_file(path) else []
+        return [path]
     iterator = path.rglob("*") if recursive else path.glob("*")
     supported = [
         candidate
