@@ -836,7 +836,9 @@ def test_explicit_unsupported_file_is_retained_for_content_sniff(tmp_path, caplo
     paths = bookmark_tidy.expand_input_paths([str(path)], recursive=True)
 
     assert paths == [path.resolve()]
-    assert bookmark_tidy.read_all_bookmarks(paths) == []
+    result = bookmark_tidy.read_all_bookmarks(paths)
+    assert result.bookmarks == []
+    assert result.failed_paths == (path.resolve(),)
     assert "unsupported bookmark file" in caplog.text
 
 
@@ -1513,7 +1515,9 @@ def test_load_immutable_file_and_read_all_bookmarks(tmp_path, caplog):
     caplog.set_level(logging.WARNING, logger="bookmark-tidy")
     assert bookmark_tidy.load_immutable_file(str(immutable)) == ["Work", "Personal"]
     assert bookmark_tidy.load_immutable_file(None) == []
-    assert len(bookmark_tidy.read_all_bookmarks([html, unsupported])) == 2
+    result = bookmark_tidy.read_all_bookmarks([html, unsupported])
+    assert len(result.bookmarks) == 2
+    assert result.failed_paths == (unsupported.resolve(),)
     assert "unsupported bookmark file" in caplog.text
 
 
@@ -1541,8 +1545,8 @@ def test_bom_prefixed_bookmark_files_are_still_recognised(tmp_path):
                 {"type": "url", "name": "Example", "url": "https://example.com/"}]}}}),
         encoding="utf-8-sig")
 
-    assert len(bookmark_tidy.read_all_bookmarks([html])) == 2
-    assert len(bookmark_tidy.read_all_bookmarks([json_path])) == 1
+    assert len(bookmark_tidy.read_all_bookmarks([html]).bookmarks) == 2
+    assert len(bookmark_tidy.read_all_bookmarks([json_path]).bookmarks) == 1
 
 
 def test_load_immutable_file_missing_path_is_user_error(tmp_path):
@@ -1563,7 +1567,9 @@ def test_read_all_bookmarks_skips_unexpected_parser_error(monkeypatch, tmp_path,
     monkeypatch.setattr(bookmark_tidy, "read_bookmark_file", fake_read)
     caplog.set_level(logging.WARNING, logger="bookmark-tidy")
 
-    assert bookmark_tidy.read_all_bookmarks([bad, good]) == expected
+    result = bookmark_tidy.read_all_bookmarks([bad, good])
+    assert result.bookmarks == expected
+    assert result.failed_paths == (bad,)
     assert "could not read bookmark file" in caplog.text
     assert "database is locked" in caplog.text
 
@@ -1652,7 +1658,11 @@ def test_run_returns_nonzero_after_categorization_abort(tmp_path, monkeypatch):
     bookmarks = [_sample_bookmark(f"https://example.test/{index}") for index in range(4)]
 
     monkeypatch.setattr(bookmark_tidy, "_input_paths_from_args", lambda _args: [tmp_path / "input.html"])
-    monkeypatch.setattr(bookmark_tidy, "read_all_bookmarks", lambda _paths: bookmarks)
+    monkeypatch.setattr(
+        bookmark_tidy,
+        "read_all_bookmarks",
+        lambda _paths: bookmark_tidy.BookmarkReadResult(bookmarks, ()),
+    )
 
     class AlwaysFailingCategorizer:
         def __call__(self, _batch):
@@ -1669,6 +1679,25 @@ def test_run_returns_nonzero_after_categorization_abort(tmp_path, monkeypatch):
 
     assert bookmark_tidy._run(args) == 1
     assert len(json.loads(output.read_text(encoding="utf-8"))["roots"]["bookmark_bar"]["children"]) == 1
+
+
+def test_run_returns_nonzero_for_partial_input_failure(tmp_path, caplog):
+    good = tmp_path / "bookmarks.html"
+    bad = tmp_path / "broken.json"
+    output = tmp_path / "out.json"
+    good.write_text(_netscape_html(), encoding="utf-8")
+    bad.write_text("{", encoding="utf-8")
+    args = bookmark_tidy.parse_args(
+        [
+            str(good), str(bad), "--immutable-root", "Work",
+            "--immutable-root", "Other Bookmarks", "-o", str(output),
+        ]
+    )
+    caplog.set_level(logging.WARNING, logger="bookmark-tidy")
+
+    assert bookmark_tidy._run(args) == 1
+    assert output.exists()
+    assert "Bookmark import incomplete: 1 input file(s) failed" in caplog.text
 
 
 def test_run_rejects_existing_output_before_categorization(tmp_path, monkeypatch):
@@ -1702,7 +1731,11 @@ def test_run_rejects_missing_model_before_categorization(tmp_path, monkeypatch):
     )
     bookmarks = [_sample_bookmark()]
     monkeypatch.setattr(bookmark_tidy, "_input_paths_from_args", lambda _args: [tmp_path / "input.html"])
-    monkeypatch.setattr(bookmark_tidy, "read_all_bookmarks", lambda _paths: bookmarks)
+    monkeypatch.setattr(
+        bookmark_tidy,
+        "read_all_bookmarks",
+        lambda _paths: bookmark_tidy.BookmarkReadResult(bookmarks, ()),
+    )
     monkeypatch.setattr(bookmark_tidy, "tidy_bookmarks", lambda *_args: pytest.fail("categorization started"))
 
     with pytest.raises(bookmark_tidy.UserError, match="model file not found"):
@@ -1720,11 +1753,10 @@ def test_run_uses_tidy_path_for_all_immutable_bookmarks(tmp_path, monkeypatch):
     monkeypatch.setattr(
         bookmark_tidy,
         "read_all_bookmarks",
-        lambda _paths: [
-            bookmark_tidy.Bookmark(
-                "https://example.test", "Example", ("Work",)
-            )
-        ],
+        lambda _paths: bookmark_tidy.BookmarkReadResult(
+            [bookmark_tidy.Bookmark("https://example.test", "Example", ("Work",))],
+            (),
+        ),
     )
 
     assert bookmark_tidy._run(args) == 0
@@ -1744,9 +1776,10 @@ def test_run_skips_model_load_when_every_bookmark_is_immutable(tmp_path, monkeyp
     )
     monkeypatch.setattr(
         bookmark_tidy, "read_all_bookmarks",
-        lambda _paths: [
-            bookmark_tidy.Bookmark("https://example.test", "Example", ("Work",))
-        ],
+        lambda _paths: bookmark_tidy.BookmarkReadResult(
+            [bookmark_tidy.Bookmark("https://example.test", "Example", ("Work",))],
+            (),
+        ),
     )
     built = []
     monkeypatch.setattr(

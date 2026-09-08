@@ -110,6 +110,12 @@ class Bookmark:
 
 
 @dataclass(frozen=True)
+class BookmarkReadResult:
+    bookmarks: list[Bookmark]
+    failed_paths: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
 class NormalizeOptions:
     strip_fragment: bool = True
     collapse_http_https: bool = True
@@ -1715,20 +1721,23 @@ def load_immutable_file(path: str | None) -> list[str]:
     ]
 
 
-def read_all_bookmarks(paths: Sequence[Path]) -> list[Bookmark]:
+def read_all_bookmarks(paths: Sequence[Path]) -> BookmarkReadResult:
     bookmarks: list[Bookmark] = []
+    failed_paths: list[Path] = []
     for path in paths:
         try:
             found = read_bookmark_file(path)
         except UserError as exc:
             LOGGER.warning("%s", exc)
+            failed_paths.append(path)
             continue
         except Exception as exc:
             LOGGER.warning("could not read bookmark file %s: %s", path, exc)
+            failed_paths.append(path)
             continue
         LOGGER.info("Read %d bookmarks from %s", len(found), path)
         bookmarks.extend(found)
-    return bookmarks
+    return BookmarkReadResult(bookmarks, tuple(failed_paths))
 
 
 def _positive_int(text: str) -> int:
@@ -1948,7 +1957,15 @@ def _run(args: argparse.Namespace) -> int:
     paths = _input_paths_from_args(args)
     if not paths:
         raise UserError("no bookmark inputs found")
-    bookmarks = read_all_bookmarks(paths)
+    read_result = read_all_bookmarks(paths)
+    bookmarks = read_result.bookmarks
+    input_failures = bool(read_result.failed_paths)
+    if input_failures:
+        LOGGER.warning(
+            "Bookmark import incomplete: %d input file(s) failed; retained %d bookmark(s).",
+            len(read_result.failed_paths),
+            len(bookmarks),
+        )
     if not bookmarks:
         raise UserError("no bookmarks found in supported input files")
     immutable = list(args.immutable_root) + load_immutable_file(args.immutable_file)
@@ -1978,7 +1995,7 @@ def _run(args: argparse.Namespace) -> int:
         LOGGER.warning("Merged/removed %d duplicate bookmark(s).", duplicate_count)
     write_output(organized, output, args.output_format, args.force)
     LOGGER.warning("Wrote %d bookmarks to %s", len(organized), output)
-    return 1 if categorization_aborted else 0
+    return 1 if categorization_aborted or input_failures else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
