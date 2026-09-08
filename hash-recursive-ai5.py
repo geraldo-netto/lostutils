@@ -106,6 +106,14 @@ _REP_PROBE_LIMIT = 8
 _VANISHED_ERRNOS = frozenset({errno.ENOENT, errno.ESTALE})
 
 
+class _HashCancelled(Exception):
+    """Stop one cooperative hash without reporting a file I/O failure.
+
+    hr-watch-70: this private control flow lets a batch discard only the
+    interrupted item while preserving completed results.
+    """
+
+
 def _require_blake3():
     """Return the blake3 module or raise an actionable dependency error."""
     if _BLAKE3_IMPORT_ERROR is not None:
@@ -569,7 +577,8 @@ def _tick_shrank(config) -> None:
             config.hash_skipped_shrank += 1
 
 
-def _read_window_into(h, f, length: int, strict: bool) -> bool:
+def _read_window_into(h, f, length: int, strict: bool,
+                      cancel_event=None) -> bool:
     """Read up to `length` bytes from `f` and feed them to hasher `h`
     (hr-rel-09).
 
@@ -582,9 +591,16 @@ def _read_window_into(h, f, length: int, strict: bool) -> bool:
     natural end of the window."""
     remaining = length
     while remaining > 0:
+        if _cancelled(cancel_event):
+            raise _HashCancelled
         # hr-mem-01: bound the per-read allocation to READ_CHUNK so a wide
         # CAP window doesn't pin CAP bytes per concurrent hash.
-        chunk = f.read(min(remaining, READ_CHUNK))
+        try:
+            chunk = f.read(min(remaining, READ_CHUNK))
+        except OSError as exc:
+            if _cancelled(cancel_event):
+                raise _HashCancelled from exc
+            raise
         if not chunk:
             return not strict
         h.update(chunk)
@@ -612,7 +628,8 @@ class FileWindow(NamedTuple):
     strict: bool = False
 
 
-def _hash_file_windows(path, windows, config=None, expected=None):
+def _hash_file_windows(path, windows, config=None, expected=None,
+                        cancel_event=None):
     """BLAKE3 of one or more (offset, length, whence) windows of a file
     (hr-dup-01). Returns the hex digest or None on any OSError. Shared
     scaffold for hash_head and hash_tail_and_samples.
@@ -660,7 +677,8 @@ def _hash_file_windows(path, windows, config=None, expected=None):
                for w in windows]
     try:
         with _open_hash_file(path) as file_obj:
-            digest = _digest_file_windows(file_obj, windows, config, expected)
+            digest = _digest_file_windows(
+                file_obj, windows, config, expected, cancel_event)
         if digest is None:
             _record_hash_failure(config, expected, real=False)
         return digest
@@ -715,7 +733,8 @@ def _require_hash_identity(stat_result, expected) -> None:
         )
 
 
-def _digest_file_windows(file_obj, windows, config, expected=None):
+def _digest_file_windows(file_obj, windows, config, expected=None,
+                         cancel_event=None):
     initial = os.fstat(file_obj.fileno())
     pinned_identity = expected if expected is not None else _stat_identity(initial)
     _require_hash_identity(initial, pinned_identity)
@@ -725,9 +744,11 @@ def _digest_file_windows(file_obj, windows, config, expected=None):
     for window in windows:
         file_obj.seek(window.offset, window.whence)
         if not _read_window_into(
-                hasher, file_obj, window.length, window.strict):
+                hasher, file_obj, window.length, window.strict, cancel_event):
             complete = False
             break
+    if _cancelled(cancel_event):
+        raise _HashCancelled
     final = os.fstat(file_obj.fileno())
     _require_hash_identity(final, pinned_identity)
     if (final.st_mtime_ns, final.st_ctime_ns) != timestamps:
@@ -745,7 +766,7 @@ def _handle_hash_error(path, exc: OSError, config) -> None:
         _log_hash_error(path, exc, config)
 
 
-def hash_head(path, config=None, expected=None):
+def hash_head(path, config=None, expected=None, cancel_event=None):
     """Stage 1: BLAKE3 of the first block-size bytes (or whole file if
     smaller).
 
@@ -755,11 +776,8 @@ def hash_head(path, config=None, expected=None):
     depends on process-global state."""
     cap = config.block_size if config is not None else CAP
     return _hash_file_windows(
-        path,
-        [FileWindow(0, cap, os.SEEK_SET)],
-        config,
-        expected,
-    )
+        path, [FileWindow(0, cap, os.SEEK_SET)], config, expected,
+        cancel_event)
 
 
 class SamplingStrategy:
@@ -830,7 +848,8 @@ class ThirdsStrategy(SamplingStrategy):
 _DEFAULT_SAMPLING: SamplingStrategy = ThirdsStrategy()
 
 
-def hash_tail_and_samples(path, size, strategy=None, config=None, expected=None):
+def hash_tail_and_samples(path, size, strategy=None, config=None, expected=None,
+                          cancel_event=None):
     """Stage 2 (only when size > CAP): BLAKE3 of the last CAP bytes, a
     center CAP block at the file midpoint, plus two SAMPLE-byte windows
     around size/3 and 2*size/3 (hr-rel-05). Catches files that share a
@@ -848,17 +867,15 @@ def hash_tail_and_samples(path, size, strategy=None, config=None, expected=None)
         sampler = ThirdsStrategy(config.block_size, config.sample_size)
     else:
         sampler = _DEFAULT_SAMPLING
-    return _hash_file_windows(path, sampler.windows(size), config, expected)
+    return _hash_file_windows(
+        path, sampler.windows(size), config, expected, cancel_event)
 
 
-def hash_full(path, size, config=None, expected=None):
+def hash_full(path, size, config=None, expected=None, cancel_event=None):
     """Final confirmation: BLAKE3 every byte of a sampled candidate."""
     return _hash_file_windows(
-        path,
-        [FileWindow(0, size, os.SEEK_SET, strict=True)],
-        config,
-        expected,
-    )
+        path, [FileWindow(0, size, os.SEEK_SET, strict=True)], config,
+        expected, cancel_event)
 
 
 def _readable_rep(paths):
@@ -888,49 +905,54 @@ def _walked_identity(key, size) -> tuple[int, int, int]:
     return key[0], key[1], size
 
 
-def _make_head_candidate_batch(rep, config):
+def _run_cancelable_batch(items, item_fn, cancel_event):
+    """Apply one hash operation per item until cooperative cancellation."""
+    result = []
+    for item in items:
+        if _cancelled(cancel_event):
+            break
+        try:
+            result.append(item_fn(item))
+        except _HashCancelled:
+            break
+    return result
+
+
+def _make_head_candidate_batch(rep, config, cancel_event=None):
     """Build a stage-1 batch closure keyed by inode, not path (hr-scal-07)."""
-    def _head_batch(items):
-        return [
-            (key, hash_head(rep[key], config, _walked_identity(key, size)))
-            for size, key in items
-        ]
-    return _head_batch
+    def _hash_one(item):
+        size, key = item
+        digest = hash_head(
+            rep[key], config, _walked_identity(key, size), cancel_event)
+        return key, digest
+    return lambda items: _run_cancelable_batch(items, _hash_one, cancel_event)
 
 
-def _make_tail_stage2_batch(config):
+def _make_tail_stage2_batch(config, cancel_event=None):
     """Build a stage-2 batch closure without projecting a second item list."""
-    def _tail_batch(items):
-        return [
-            (
-                item,
-                hash_tail_and_samples(
-                    item[1],
-                    item[0],
-                    config=config,
-                    expected=_walked_identity(item[3], item[0]),
-                ),
-            )
-            for item in items
-        ]
-    return _tail_batch
+    def _hash_one(item):
+        digest = hash_tail_and_samples(
+            item[1],
+            item[0],
+            config=config,
+            expected=_walked_identity(item[3], item[0]),
+            cancel_event=cancel_event,
+        )
+        return item, digest
+    return lambda items: _run_cancelable_batch(items, _hash_one, cancel_event)
 
 
-def _make_full_stage3_batch(config):
-    def _full_batch(items):
-        return [
-            (
-                item,
-                hash_full(
-                    item[0],
-                    item[1],
-                    config,
-                    expected=_walked_identity(item[3], item[1]),
-                ),
-            )
-            for item in items
-        ]
-    return _full_batch
+def _make_full_stage3_batch(config, cancel_event=None):
+    def _hash_one(item):
+        digest = hash_full(
+            item[0],
+            item[1],
+            config,
+            expected=_walked_identity(item[3], item[1]),
+            cancel_event=cancel_event,
+        )
+        return item, digest
+    return lambda items: _run_cancelable_batch(items, _hash_one, cancel_event)
 
 
 def _iter_batches(items, batch_size):
@@ -1398,7 +1420,10 @@ def _retry_alias(key, tried, aliases, hash_alias, cancel_event=None):
             return None
         if alias == tried:
             continue
-        digest = hash_alias(alias)
+        try:
+            digest = hash_alias(alias)
+        except _HashCancelled:
+            return None
         if digest is not None:
             return digest
     return None
@@ -1408,7 +1433,12 @@ def _retry_head_alias(key, tried, size, aliases, config, cancel_event=None):
     """Stage-1 head retry (hr-rel-02)."""
     return _retry_alias(
         key, tried, aliases,
-        lambda alias: hash_head(alias, config, _walked_identity(key, size)),
+        lambda alias: hash_head(
+            alias,
+            config,
+            _walked_identity(key, size),
+            cancel_event,
+        ),
         cancel_event)
 
 
@@ -1421,6 +1451,7 @@ def _retry_tail_alias(key, tried, size, aliases, config, cancel_event=None):
             size,
             config=config,
             expected=_walked_identity(key, size),
+            cancel_event=cancel_event,
         ),
         cancel_event)
 
@@ -1439,6 +1470,7 @@ def _retry_full_alias(key, tried, size, aliases, config, cancel_event=None):
             size,
             config,
             expected=_walked_identity(key, size),
+            cancel_event=cancel_event,
         ),
         cancel_event)
 
@@ -1472,7 +1504,7 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
     if on_progress is not None:
         run_kwargs["on_progress"] = on_progress
     head_by_key, errors = _run_stage(
-        candidates, _make_head_candidate_batch(rep, config), stage1_bytes,
+        candidates, _make_head_candidate_batch(rep, config, cancel_event), stage1_bytes,
         jobs, **run_kwargs)
     by_head, recovered = _bucket_stage1_heads(
         candidates, head_by_key, rep, aliases, config, on_hashed, cancel_event)
@@ -1538,7 +1570,7 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     if on_progress is not None:
         run_kwargs["on_progress"] = on_progress
     tail_by_item, errors = _run_stage(
-        stage2_items, _make_tail_stage2_batch(config), stage2_bytes, jobs,
+        stage2_items, _make_tail_stage2_batch(config, cancel_event), stage2_bytes, jobs,
         **run_kwargs)
     regrouped: dict = {}
     recovered = 0
@@ -1598,7 +1630,7 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
         run_kwargs["on_progress"] = on_progress
     full_by_item, errors = _run_stage(
         items,
-        _make_full_stage3_batch(config),
+        _make_full_stage3_batch(config, cancel_event),
         _capped_byte_total(item[1] for item in items),
         jobs,
         **run_kwargs,

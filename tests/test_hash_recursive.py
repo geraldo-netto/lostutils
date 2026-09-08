@@ -734,8 +734,9 @@ def test_hash_file_windows_rejects_size_mutation_during_read(
     expected = hr._stat_identity(path.stat())
     real_read = hr._read_window_into
 
-    def read_then_grow(hasher, file_obj, length, strict):
-        complete = real_read(hasher, file_obj, length, strict)
+    def read_then_grow(hasher, file_obj, length, strict, cancel_event=None):
+        complete = real_read(
+            hasher, file_obj, length, strict, cancel_event)
         with path.open("ab") as changed:
             changed.write(b"!")
         return complete
@@ -842,7 +843,7 @@ def test_hash_tail_and_samples_clamps_windows(monkeypatch):
     _hash_file_windows must satisfy offset + SAMPLE <= size."""
     captured = {}
 
-    def fake_hash(path, windows, config=None, expected=None):
+    def fake_hash(path, windows, config=None, expected=None, cancel_event=None):
         captured["windows"] = windows
         return "deadbeef"
 
@@ -860,7 +861,7 @@ def test_hash_tail_and_samples_tiny_size_does_not_overflow(monkeypatch):
     # window may read past EOF.
     captured = {}
 
-    def fake_hash(path, windows, config=None, expected=None):
+    def fake_hash(path, windows, config=None, expected=None, cancel_event=None):
         captured["windows"] = windows
         return None
 
@@ -880,15 +881,17 @@ def test_hash_stage_batches_forward_walked_identity(monkeypatch):
     expected = (7, 11, size)
     seen = []
 
-    def fake_head(got_path, config, got_expected=None):
+    def fake_head(got_path, config, got_expected=None, cancel_event=None):
         seen.append(("head", got_path, got_expected))
         return "HEAD"
 
-    def fake_tail(got_path, got_size, strategy=None, config=None, expected=None):
+    def fake_tail(got_path, got_size, strategy=None, config=None,
+                  expected=None, cancel_event=None):
         seen.append(("tail", got_path, expected))
         return "TAIL"
 
-    def fake_full(got_path, got_size, config=None, expected=None):
+    def fake_full(got_path, got_size, config=None, expected=None,
+                  cancel_event=None):
         seen.append(("full", got_path, expected))
         return "FULL"
 
@@ -1450,6 +1453,133 @@ def test_read_window_into_assembles_short_reads():
     expected = blake3.blake3()
     expected.update(payload)
     assert h.hexdigest() == expected.hexdigest()
+
+
+def test_read_window_into_stops_between_chunks_on_cancel():
+    import blake3
+
+    cancel = threading.Event()
+
+    class CancellingFile:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self, _size):
+            self.reads += 1
+            cancel.set()
+            return b"chunk"
+
+    with pytest.raises(hr._HashCancelled):
+        hr._read_window_into(
+            blake3.blake3(), CancellingFile(), 12, strict=True,
+            cancel_event=cancel)
+
+    class InterruptedFile:
+        def read(self, _size):
+            interrupted.set()
+            raise OSError("interrupted")
+
+    interrupted = threading.Event()
+    with pytest.raises(hr._HashCancelled):
+        hr._read_window_into(
+            blake3.blake3(), InterruptedFile(), 1, strict=True,
+            cancel_event=interrupted)
+
+
+def test_hash_head_propagates_cooperative_cancel(tmp_path):
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"x" * 32)
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(hr._HashCancelled):
+        hr.hash_head(str(data), cancel_event=cancel)
+
+
+def test_hash_batch_stops_after_item_cancel(monkeypatch):
+    cancel = threading.Event()
+    calls = []
+    first = (1, 1)
+    second = (1, 2)
+
+    def fake_hash(path, _config, _expected, cancel_event=None):
+        calls.append(path)
+        cancel_event.set()
+        return "digest"
+
+    monkeypatch.setattr(hr, "hash_head", fake_hash)
+    batch = hr._make_head_candidate_batch(
+        {first: "/a", second: "/b"}, None, cancel)
+    result = batch([(1, first), (1, second)])
+    assert result == [(first, "digest")]
+    assert calls == ["/a"]
+
+
+def test_stage1_cancelled_items_are_not_hash_errors(monkeypatch):
+    cancel = threading.Event()
+    first, second = (1, 1), (1, 2)
+
+    def fake_hash(path, _config, _expected, cancel_event=None):
+        cancel_event.set()
+        return "head"
+
+    monkeypatch.setattr(hr, "hash_head", fake_hash)
+    _groups, info = hr._stage1_hash(
+        [(10, first), (10, second)],
+        {first: "/a", second: "/b"},
+        jobs=1,
+        config=None,
+        cancel_event=cancel,
+    )
+    assert info["stage1"] == 1
+    assert info["stage1_errors"] == 0
+    assert info["stage1_real_errors"] == 0
+
+
+def test_stage2_cancelled_items_are_not_hash_errors(monkeypatch):
+    cancel = threading.Event()
+    first, second = (1, 1), (1, 2)
+    items = [(10, "/a", "head", first), (10, "/b", "head", second)]
+
+    def fake_hash(path, size, config=None, expected=None, cancel_event=None):
+        cancel_event.set()
+        return "tail"
+
+    monkeypatch.setattr(hr, "hash_tail_and_samples", fake_hash)
+    _groups, info = hr._stage2_hash(
+        items, jobs=1, config=None, cancel_event=cancel)
+    assert info["stage2"] == 1
+    assert info["stage2_errors"] == 0
+    assert info["stage2_real_errors"] == 0
+
+
+def test_stage3_cancelled_items_are_not_hash_errors(monkeypatch):
+    cancel = threading.Event()
+    first, second = (1, 1), (1, 2)
+    regrouped = {("head", "tail"): [first, second]}
+    rep = {first: "/a", second: "/b"}
+    sizes = {first: 10, second: 10}
+
+    def fake_hash(path, size, config=None, expected=None, cancel_event=None):
+        cancel_event.set()
+        return "full"
+
+    monkeypatch.setattr(hr, "hash_full", fake_hash)
+    _groups, info = hr._stage3_hash(
+        regrouped, rep, sizes, jobs=1, config=None, cancel_event=cancel)
+    assert info["stage3"] == 1
+    assert info["stage3_errors"] == 0
+    assert info["stage3_real_errors"] == 0
+
+
+def test_cancelled_hash_is_not_reported_as_read_error(tmp_path):
+    data = tmp_path / "data.bin"
+    data.write_bytes(b"x" * 32)
+    stat_result = data.stat()
+    key = (stat_result.st_dev, stat_result.st_ino)
+    cancel = threading.Event()
+    cancel.set()
+    batch = hr._make_head_candidate_batch({key: str(data)}, None, cancel)
+    assert batch([(data.stat().st_size, key)]) == []
 
 
 def test_hash_file_windows_multi_window_digest_stable(tmp_path):
@@ -3367,7 +3497,7 @@ def test_retry_head_alias_skips_tried_and_returns_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_hash_head(path, config, expected=None):
+    def fake_hash_head(path, config, expected=None, cancel_event=None):
         calls.append(path)
         return None if path == "/dead" else "GOODHEAD"
 
@@ -3379,7 +3509,10 @@ def test_retry_head_alias_skips_tried_and_returns_sibling(monkeypatch):
 
 def test_retry_head_alias_returns_none_when_no_sibling_readable(monkeypatch):
     aliases = {("d", 0): ["/dead", "/alsodead"]}
-    monkeypatch.setattr(hr, "hash_head", lambda p, c, expected=None: None)
+    monkeypatch.setattr(
+        hr, "hash_head",
+        lambda p, c, expected=None, cancel_event=None: None,
+    )
     assert hr._retry_head_alias(
         ("d", 0), "/dead", 1234, aliases, None) is None
 
@@ -3466,7 +3599,7 @@ def test_retry_head_alias_property(n_aliases, live_choice):
     readable = siblings[live_choice % len(siblings)] if live_choice % 3 else None
     probed = []
 
-    def fake(path, config, expected=None):
+    def fake(path, config, expected=None, cancel_event=None):
         probed.append(path)
         return "HD" if path == readable else None
 
@@ -3483,7 +3616,7 @@ def test_retry_tail_alias_skips_tried_and_returns_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_tail(path, size, config=None, expected=None):
+    def fake_tail(path, size, config=None, expected=None, cancel_event=None):
         calls.append(path)
         return None if path == "/dead" else "GOODTAIL"
 
@@ -3498,7 +3631,7 @@ def test_retry_tail_alias_returns_none_when_no_sibling_readable(monkeypatch):
     monkeypatch.setattr(
         hr,
         "hash_tail_and_samples",
-        lambda p, s, config=None, expected=None: None,
+        lambda p, s, config=None, expected=None, cancel_event=None: None,
     )
     assert hr._retry_tail_alias(("d", 0), "/dead", 1, aliases, None) is None
 
@@ -3581,7 +3714,7 @@ def test_retry_full_alias_uses_the_next_readable_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_full(path, size, config=None, expected=None):
+    def fake_full(path, size, config=None, expected=None, cancel_event=None):
         calls.append(path)
         return None if path == "/dead" else "GOODFULL"
 
@@ -3594,7 +3727,7 @@ def test_retry_full_alias_returns_none_when_no_sibling_readable(monkeypatch):
     monkeypatch.setattr(
         hr,
         "hash_full",
-        lambda p, s, config=None, expected=None: None,
+        lambda p, s, config=None, expected=None, cancel_event=None: None,
     )
     aliases = {("d", 0): ["/dead", "/alsodead"]}
     assert hr._retry_full_alias(("d", 0), "/dead", 1, aliases, None) is None
@@ -3855,8 +3988,9 @@ def test_hash_rejects_same_size_write_during_read(
     config = hr.RunConfig(block_size=2, sample_size=1)
     real_read = hr._read_window_into
 
-    def mutate_after_read(hasher, file_obj, length, strict):
-        complete = real_read(hasher, file_obj, length, strict)
+    def mutate_after_read(hasher, file_obj, length, strict, cancel_event=None):
+        complete = real_read(
+            hasher, file_obj, length, strict, cancel_event)
         path.write_bytes(b"modified")
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
         return complete
@@ -3905,8 +4039,9 @@ def test_pipeline_never_confirms_duplicate_changed_after_hash_read(tmp_path, mon
     records = [_walk_record(candidate), _walk_record(stable)]
     real_read = hr._read_window_into
 
-    def mutate_candidate(hasher, file_obj, length, strict):
-        complete = real_read(hasher, file_obj, length, strict)
+    def mutate_candidate(hasher, file_obj, length, strict, cancel_event=None):
+        complete = real_read(
+            hasher, file_obj, length, strict, cancel_event)
         if os.fstat(file_obj.fileno()).st_ino == before.st_ino:
             candidate.write_bytes(b"modified")
             os.utime(candidate, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
