@@ -1855,11 +1855,7 @@ def _input_paths_from_args(args: argparse.Namespace) -> list[Path]:
 def _categorizer_from_args(args: argparse.Namespace, bookmarks: Sequence[Bookmark]) -> CategoryProvider | None:
     if not bookmarks:
         return None
-    if args.model is None:
-        raise UserError("missing --model for LLM categorization")
-    model_path = args.model.expanduser()
-    if not model_path.is_file():
-        raise UserError(f"model file not found: {model_path}")
+    model_path = _model_path_from_args(args)
     return LlamaCategorizer(
         model_path=model_path,
         auto_install=args.auto_install_llama,
@@ -1868,6 +1864,37 @@ def _categorizer_from_args(args: argparse.Namespace, bookmarks: Sequence[Bookmar
         max_tokens=args.llm_max_tokens,
         inference_timeout=args.llm_inference_timeout,
     )
+
+
+def _model_path_from_args(args: argparse.Namespace) -> Path:
+    if args.model is None:
+        raise UserError("missing --model for LLM categorization")
+    model_path = args.model.expanduser()
+    if not model_path.is_file():
+        raise UserError(f"model file not found: {model_path}")
+    return model_path
+
+
+def _preflight_model(
+    args: argparse.Namespace,
+    bookmarks: Sequence[Bookmark],
+    immutable: Iterable[str],
+    options: NormalizeOptions,
+) -> None:
+    if args.model is None:
+        return
+    _, mutable = deduplicate_bookmarks(bookmarks, _immutable_names(immutable), options)
+    if mutable:
+        _model_path_from_args(args)
+
+
+def _preflight_output(output: Path, force: bool) -> None:
+    if os.path.lexists(output):
+        if output.is_dir():
+            raise UserError(f"output path is a directory: {output}")
+        if not force:
+            raise UserError(f"output exists, pass --force to overwrite: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
 
 
 class _LazyCategorizer:
@@ -1916,6 +1943,8 @@ class _LazyCategorizer:
 
 
 def _run(args: argparse.Namespace) -> int:
+    output = Path(args.output).expanduser() if args.output else default_output_path(args.output_format)
+    _preflight_output(output, args.force)
     paths = _input_paths_from_args(args)
     if not paths:
         raise UserError("no bookmark inputs found")
@@ -1924,6 +1953,7 @@ def _run(args: argparse.Namespace) -> int:
         raise UserError("no bookmarks found in supported input files")
     immutable = list(args.immutable_root) + load_immutable_file(args.immutable_file)
     options = _normalization_from_args(args)
+    _preflight_model(args, bookmarks, immutable, options)
     categorizer = (
         _LazyCategorizer(lambda: _categorizer_from_args(args, bookmarks))
         if args.model is not None
@@ -1946,7 +1976,6 @@ def _run(args: argparse.Namespace) -> int:
     duplicate_count = len(bookmarks) - len(organized)
     if duplicate_count:
         LOGGER.warning("Merged/removed %d duplicate bookmark(s).", duplicate_count)
-    output = Path(args.output).expanduser() if args.output else default_output_path(args.output_format)
     write_output(organized, output, args.output_format, args.force)
     LOGGER.warning("Wrote %d bookmarks to %s", len(organized), output)
     return 1 if categorization_aborted else 0

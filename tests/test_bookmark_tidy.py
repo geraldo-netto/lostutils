@@ -1643,8 +1643,10 @@ def test_main_logs_duplicate_summary(tmp_path, monkeypatch, caplog):
 
 def test_run_returns_nonzero_after_categorization_abort(tmp_path, monkeypatch):
     output = tmp_path / "out.json"
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"gguf")
     args = bookmark_tidy.parse_args(
-        ["input.html", "--model", str(tmp_path / "model.gguf"),
+        ["input.html", "--model", str(model),
          "--llm-batch-size", "1", "-o", str(output)]
     )
     bookmarks = [_sample_bookmark(f"https://example.test/{index}") for index in range(4)]
@@ -1667,6 +1669,44 @@ def test_run_returns_nonzero_after_categorization_abort(tmp_path, monkeypatch):
 
     assert bookmark_tidy._run(args) == 1
     assert len(json.loads(output.read_text(encoding="utf-8"))["roots"]["bookmark_bar"]["children"]) == 1
+
+
+def test_run_rejects_existing_output_before_categorization(tmp_path, monkeypatch):
+    output = tmp_path / "out.json"
+    output.write_text("existing", encoding="utf-8")
+    args = bookmark_tidy.parse_args(
+        ["input.html", "--model", str(tmp_path / "missing.gguf"), "-o", str(output)]
+    )
+    monkeypatch.setattr(bookmark_tidy, "read_all_bookmarks", lambda _paths: pytest.fail("read started"))
+
+    with pytest.raises(bookmark_tidy.UserError, match="output exists"):
+        bookmark_tidy._run(args)
+
+
+def test_run_rejects_output_directory_before_categorization(tmp_path, monkeypatch):
+    output = tmp_path / "out.json"
+    output.mkdir()
+    args = bookmark_tidy.parse_args(
+        ["input.html", "--model", str(tmp_path / "missing.gguf"), "--force", "-o", str(output)]
+    )
+    monkeypatch.setattr(bookmark_tidy, "_input_paths_from_args", lambda _args: pytest.fail("read started"))
+
+    with pytest.raises(bookmark_tidy.UserError, match="output path is a directory"):
+        bookmark_tidy._run(args)
+
+
+def test_run_rejects_missing_model_before_categorization(tmp_path, monkeypatch):
+    output = tmp_path / "out.json"
+    args = bookmark_tidy.parse_args(
+        ["input.html", "--model", str(tmp_path / "missing.gguf"), "-o", str(output)]
+    )
+    bookmarks = [_sample_bookmark()]
+    monkeypatch.setattr(bookmark_tidy, "_input_paths_from_args", lambda _args: [tmp_path / "input.html"])
+    monkeypatch.setattr(bookmark_tidy, "read_all_bookmarks", lambda _paths: bookmarks)
+    monkeypatch.setattr(bookmark_tidy, "tidy_bookmarks", lambda *_args: pytest.fail("categorization started"))
+
+    with pytest.raises(bookmark_tidy.UserError, match="model file not found"):
+        bookmark_tidy._run(args)
 
 
 def test_run_uses_tidy_path_for_all_immutable_bookmarks(tmp_path, monkeypatch):
@@ -1695,10 +1735,8 @@ def test_run_uses_tidy_path_for_all_immutable_bookmarks(tmp_path, monkeypatch):
 def test_run_skips_model_load_when_every_bookmark_is_immutable(tmp_path, monkeypatch):
     """bt-perf-50: an all-immutable run must not pay a full GGUF load."""
     output = tmp_path / "out.json"
-    model = tmp_path / "model.gguf"
-    model.write_bytes(b"gguf")
     args = bookmark_tidy.parse_args(
-        ["input.html", "--immutable-root", "Work", "--model", str(model),
+        ["input.html", "--immutable-root", "Work", "--model", str(tmp_path / "missing.gguf"),
          "-o", str(output)]
     )
     monkeypatch.setattr(
