@@ -5964,6 +5964,13 @@ class MappingEditor(_FormDialog):
             messagebox.showerror(
                 "Error", "Command flag is required.", parent=self.dlg)
             return
+        try:
+            _split_command_template(flag)
+        except ValueError as exc:
+            messagebox.showerror(
+                "Invalid flag", f"The command flag cannot be parsed:\n\n{exc}",
+                parent=self.dlg)
+            return
         host.mappings[p] = flag
         host.save()
         host.refresh()

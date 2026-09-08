@@ -2715,6 +2715,18 @@ def test_mapping_editor_requires_fields(app, monkeypatch):
     assert [prompt["parent"] for prompt in prompts] == [prefix_dlg, flag_dlg]
 
 
+def test_mapping_editor_rejects_invalid_flag_quoting(app, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(messagebox, "showerror", lambda *args, **kwargs: prompts.append((args, kwargs)))
+
+    dialog = _drive_mapping_editor(app, None, "z:", '-o "')
+
+    assert "z:" not in app.config["token_mappings"]
+    assert dialog.winfo_exists()
+    assert prompts[0][0][0] == "Invalid flag"
+    assert prompts[0][1]["parent"] is dialog
+
+
 def test_mapping_button_handlers(app):
     app._on_new_mapping()                       # opens the editor
     d = find_toplevel(app, "mapping")
