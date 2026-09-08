@@ -5293,11 +5293,20 @@ def test_stream_deadline_closes_inherited_output_pipe(
     assert closed == [Proc.stdout]
 
 
-def test_main_reports_state_lock_error(monkeypatch, capsys):
+@pytest.mark.parametrize("dialog_fails", [False, True])
+def test_main_reports_state_lock_error(monkeypatch, capsys, dialog_fails):
+    prompts = []
+
     class Root:
         def destroy(self):
             raise tk.TclError("already destroyed")
 
+    def showerror(title, message, **kwargs):
+        prompts.append((title, message, kwargs))
+        if dialog_fails:
+            raise tk.TclError("display closed")
+
+    monkeypatch.setattr(link_queue.messagebox, "showerror", showerror)
     monkeypatch.setattr(link_queue.tk, "Tk", Root)
     monkeypatch.setattr(
         link_queue,
@@ -5310,6 +5319,8 @@ def test_main_reports_state_lock_error(monkeypatch, capsys):
 
     assert exc.value.code == 1
     assert "locked" in capsys.readouterr().err
+    assert prompts[0][:2] == ("Queue unavailable", "locked")
+    assert isinstance(prompts[0][2]["parent"], Root)
 
 
 class _TkVarTouched(BaseException):

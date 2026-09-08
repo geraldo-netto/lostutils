@@ -6012,6 +6012,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _report_state_lock_error(root, error: StateFileLockError) -> None:
+    print(f"error: {error}", file=sys.stderr)
+    try:
+        messagebox.showerror("Queue unavailable", str(error), parent=root)
+    except tk.TclError:
+        pass
+    try:
+        root.destroy()
+    except tk.TclError:
+        pass
+
+
 def main(argv: "list[str] | None" = None) -> None:
     build_parser().parse_args(sys.argv[1:] if argv is None else argv)
     root = tk.Tk()
@@ -6029,11 +6041,7 @@ def main(argv: "list[str] | None" = None) -> None:
     try:
         LinkQueueApp(root)
     except StateFileLockError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        try:
-            root.destroy()
-        except tk.TclError:
-            pass
+        _report_state_lock_error(root, exc)
         raise SystemExit(1) from exc
     root.mainloop()
 
