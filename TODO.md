@@ -6,7 +6,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| bt-rel-71 | open | low | low | bookmark-tidy.py:1647 — [reliability / correctness] `load_immutable_file` wraps only `OSError`; a non-UTF-8 `--immutable-file` raises `UnicodeDecodeError`, which `main`'s except clause does not catch, so the CLI dies with a traceback instead of an `error:` line (reproduced with `Work\xff`). Catch `UnicodeDecodeError` and raise `UserError`, or reuse `_read_utf8_text`. |
 | bt-prod-70 | open | low | low | bookmark-tidy.py:758-766 — [product engineering] Auto-discovery globs only `~/.mozilla/firefox` and `~/.config/{google-chrome,chromium,microsoft-edge}`; snap Firefox (`~/snap/firefox/common/.mozilla/firefox`) and Flatpak browsers (`~/.var/app/<id>/`) on stock Ubuntu are missed, and Windows lacks `Chromium\User Data`, so the documented no-argument mode reports `no bookmark inputs found`. Add snap/flatpak/Chromium pattern roots. |
 
 ### `dedupl_numpy.py`

@@ -1554,6 +1554,14 @@ def test_load_immutable_file_missing_path_is_user_error(tmp_path):
         bookmark_tidy.load_immutable_file(str(tmp_path / "missing.txt"))
 
 
+def test_load_immutable_file_invalid_utf8_is_user_error(tmp_path):
+    path = tmp_path / "immutable.txt"
+    path.write_bytes(b"Work\xff")
+
+    with pytest.raises(bookmark_tidy.UserError, match="could not read immutable file"):
+        bookmark_tidy.load_immutable_file(str(path))
+
+
 def test_read_all_bookmarks_skips_unexpected_parser_error(monkeypatch, tmp_path, caplog):
     bad = tmp_path / "places.sqlite"
     good = tmp_path / "bookmarks.html"

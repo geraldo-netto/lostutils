@@ -1711,8 +1711,8 @@ def load_immutable_file(path: str | None) -> list[str]:
         return []
     immutable_path = Path(path).expanduser()
     try:
-        text = immutable_path.read_text(encoding="utf-8")
-    except OSError as exc:
+        text = _read_utf8_text(immutable_path)
+    except (OSError, UserError) as exc:
         raise UserError(f"could not read immutable file {immutable_path}: {exc}") from exc
     return [
         line.strip()
