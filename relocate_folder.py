@@ -1865,23 +1865,8 @@ def _warn_fsync_failures(root: Path, failures: "list[str]") -> None:
     )
 
 @contextmanager
-def _backup_target(target: Path) -> Iterator[Path]:
-    """Move `target` aside to a sibling `<name>.relocate-backup`, yield the
-    backup path, restore-or-clean on exit (rf-cx-02).
-
-    Exit semantics:
-      * normal completion -> shutil.rmtree(backup); failure to remove the
-        backup is warned but not raised (rf-rel-03).
-      * exception inside the `with` -> rename(backup, target) to restore;
-        failure to restore is logged with explicit `mv` recovery
-        instructions (rf-rel-05). The original exception is then re-raised.
-
-    rf-sec-03: the backup's (st_dev, st_ino) is captured right after the
-    rename-aside. On a world-writable parent an attacker could swap a
-    symlink/different inode in at the backup name during the `with` body;
-    restoring that onto `target` would silently install attacker-controlled
-    content. Both the restore path and the success rmtree path re-lstat the
-    backup and refuse to act when the identity no longer matches."""
+def _backup_target(target: Path, expected: tuple[int, int]) -> Iterator[Path]:
+    """Quarantine the pinned source; restore on error and remove only that inode."""
     backup = target.with_name(target.name + BACKUP_SUFFIX)
     try:
         _rename_noreplace(target, backup)
@@ -1889,45 +1874,89 @@ def _backup_target(target: Path) -> Iterator[Path]:
         raise FileExistsError(
             f"stale backup exists, refusing to overwrite: {backup}"
         ) from exc
-    backup_st = os.lstat(backup)
-    backup_id = (backup_st.st_dev, backup_st.st_ino)
+    _validate_source_backup(backup, target, expected)
     try:
         _fsync_directory(target.parent)
         yield backup
     except BaseException:
-        # rf-robust-03: BaseException (not just Exception) so a KeyboardInterrupt
-        # /SystemExit between the rename-aside and the symlink restores the
-        # source instead of leaving it missing with only <name>.relocate-backup.
-        # Abrupt death (SIGKILL/power-loss) still falls to --recover.
-        if not _backup_identity_ok(backup, backup_id):
-            _log().error(
-                "atomic_swap failed AND the backup at %s was substituted "
-                "(inode/device changed since it was moved aside); refusing to "
-                "restore it onto %s. Inspect both paths manually.",
-                backup, target,
-            )
-            raise
-        try:
-            _rename_noreplace(backup, target)
-            _fsync_directory(target.parent)
-        except OSError as restore_exc:
-            _log().exception(
-                "atomic_swap failed AND rollback failed: %s is gone and the "
-                "backup at %s could not be moved back (%s). Run "
-                "`mv %s %s` manually before re-running.",
-                target, backup, restore_exc, backup, target,
-            )
+        _restore_backup(backup, target, expected)
         raise
-    if not _backup_identity_ok(backup, backup_id):
-        _log().warning(
-            "backup at %s was substituted since it was moved aside "
-            "(inode/device changed); leaving it in place instead of removing "
-            "it — inspect it manually", backup,
-        )
-        return
-    _swallow_or_warn(f"remove backup {backup}", shutil.rmtree, backup)
+    _remove_source_backup(backup, expected)
     if not _path_taken(backup):
         _fsync_directory(target.parent)
+
+
+def _restore_backup(backup: Path, target: Path, expected: tuple[int, int]) -> None:
+    if not _backup_identity_ok(backup, expected):
+        _log().error(
+            "backup at %s was substituted; refusing to restore it onto %s. "
+            "Inspect both paths manually.", backup, target,
+        )
+        return
+    try:
+        _rename_noreplace(backup, target)
+    except (OSError, RuntimeError) as exc:
+        _log().error(
+            "rollback failed: backup preserved at %s; restore to %s failed: %s. "
+            "Inspect both paths before using mv to restore it manually.",
+            backup, target, exc,
+        )
+        return
+    _swallow_or_warn(f"sync restored source {target}", _fsync_directory, target.parent)
+
+
+def _validate_source_backup(
+    backup: Path, target: Path, expected: tuple[int, int],
+) -> None:
+    try:
+        actual = os.lstat(backup)
+    except OSError:
+        _log().error("cannot read backup identity; preserving %s for inspection", backup)
+        raise
+    actual_id = (actual.st_dev, actual.st_ino)
+    if actual_id != expected:
+        # This directory was never copied. Put it back without replacing any
+        # newer source occupant, and never enter the symlink/delete lifecycle.
+        _restore_backup(backup, target, actual_id)
+        raise RuntimeError(
+            f"source changed before swap: {target}; replacement preserved at "
+            f"the source or backup {backup}; inspect both paths"
+        )
+
+
+def _remove_source_backup(backup: Path, expected: tuple[int, int]) -> None:
+    if not _backup_identity_ok(backup, expected):
+        _log().warning("backup at %s was substituted; leaving it in place", backup)
+        return
+    private = Path(tempfile.mkdtemp(prefix=".relocate-cleanup-", dir=backup.parent))
+    held = private / "backup"
+    descriptor = os.open(private, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(descriptor)
+        if opened.st_uid != os.geteuid() or stat.S_IMODE(opened.st_mode) != 0o700:
+            raise RuntimeError(f"backup cleanup directory was substituted: {private}")
+        # Checking inside a private parent closes the public backup-name race
+        # between the identity check and recursive deletion.
+        _rename_noreplace(backup, held)
+        _dispose_source_backup(held, backup, expected, descriptor)
+    finally:
+        os.close(descriptor)
+        _swallow_or_warn(f"remove backup cleanup staging {private}", private.rmdir)
+
+
+def _dispose_source_backup(
+    held: Path, backup: Path, expected: tuple[int, int], directory_fd: int,
+) -> None:
+    actual = os.stat(held.name, dir_fd=directory_fd, follow_symlinks=False)
+    actual_id = (actual.st_dev, actual.st_ino)
+    if actual_id != expected:
+        _log().warning("backup at %s was substituted; preserving replacement", backup)
+        _restore_backup(held, backup, actual_id)
+        return
+    _swallow_or_warn(
+        f"remove backup {held}", shutil.rmtree, held.name, dir_fd=directory_fd)
+    if _path_taken(held):
+        _restore_backup(held, backup, expected)
 
 
 def _backup_identity_ok(backup: Path, expected: tuple[int, int]) -> bool:
@@ -1940,18 +1969,17 @@ def _backup_identity_ok(backup: Path, expected: tuple[int, int]) -> bool:
     return (st.st_dev, st.st_ino) == expected
 
 
-def atomic_swap(source: Path, target: Path) -> None:
+def atomic_swap(source: Path, target: Path, *, source_fd: int) -> None:
     """Replace `source` (a real dir) with a symlink to `target` (rf-arch-01).
 
     NOT atomic across process death, despite the name. The name is retained
-    only for backward compatibility with existing callers and tests; treat it
-    as `swap_with_backup`.
+    as a description of the symlink publication, not of the entire operation.
 
     The sequence is:
 
       1. no-replace rename to `source<BACKUP_SUFFIX>` — move the real dir aside
       2. `os.symlink(target, source)`                — only THIS step is atomic
-      3. `shutil.rmtree(backup)`                      — delete the moved-aside dir
+      3. privately quarantine and delete the identity-checked backup
 
     A SIGKILL / power-loss between steps 1 and 2 leaves `source` renamed to
     `<name>.relocate-backup` with no symlink in place — see rf-rel-01 for the
@@ -1962,14 +1990,15 @@ def atomic_swap(source: Path, target: Path) -> None:
     Delegates the rename-aside / restore-or-clean lifecycle to
     `_backup_target`.
 
-    rf-sec-02: the source's uid/gid are captured BEFORE `_backup_target` moves
-    the real dir aside (afterwards `source` no longer exists to stat), so the
+    Source identity and uid/gid come from the caller's still-open descriptor,
+    captured before the target fsync and checked after quarantine. The
     replacement symlink can be lchown'd to the original owner. When run as root
     migrating a user-owned dir this keeps the symlink owned by the user instead
     of root."""
+    src_st = os.fstat(source_fd)
+    expected = (src_st.st_dev, src_st.st_ino)
     _fsync_tree(target)
-    src_st = os.lstat(source)
-    with _backup_target(source):
+    with _backup_target(source, expected):
         _create_symlink(source, target, owner=(src_st.st_uid, src_st.st_gid))
         _fsync_directory(source.parent)
 
@@ -2366,7 +2395,7 @@ def _execute_migration(plan: Plan,
             _copy_and_verify(
                 plan, on_state=advance, source_fd=src_fd, source_id=src_id)
             advance(MigrationState.VERIFIED)
-            _swap_or_explain(plan)
+            _swap_or_explain(plan, source_fd=src_fd)
             advance(MigrationState.SWAPPED)
             return f"ok: {plan.source} -> {plan.target}"
         except BaseException:
@@ -2380,7 +2409,7 @@ def _execute_migration(plan: Plan,
         os.close(src_fd)
 
 
-def _swap_or_explain(plan: Plan) -> None:
+def _swap_or_explain(plan: Plan, *, source_fd: int) -> None:
     """Run the swap; on failure say that the target is a COMPLETE copy (rf-rob-50).
 
     Everything up to here succeeded, so `_copy_and_verify`'s cleanup no longer
@@ -2389,17 +2418,14 @@ def _swap_or_explain(plan: Plan) -> None:
     with "may be a stale partial target" — the opposite of the truth. Name both
     ways out instead."""
     try:
-        atomic_swap(plan.source, plan.target)
+        atomic_swap(plan.source, plan.target, source_fd=source_fd)
     except BaseException:
         _log().error(
             "swap failed AFTER the copy was verified: %s holds a COMPLETE, "
-            "verified copy and %s is untouched. Either remove %s and re-run to "
-            "copy again, or finish by hand: "
-            "`mv %s %s%s && ln -s %s %s && rm -rf %s%s`.",
-            plan.target, plan.source, plan.target,
-            plan.source, plan.source, BACKUP_SUFFIX,
+            "verified copy. Preserve it while inspecting the source %s and "
+            "backup %s before recovery; either path may contain newer data.",
             plan.target, plan.source,
-            plan.source, BACKUP_SUFFIX,
+            plan.source.with_name(plan.source.name + BACKUP_SUFFIX),
         )
         raise
 

@@ -294,14 +294,14 @@ class BackupTargetFuzz(unittest.TestCase):
             (t / "marker").write_text("orig")
             if fail:
                 try:
-                    with rf._backup_target(t):
+                    with rf._backup_target(t, (t.stat().st_dev, t.stat().st_ino)):
                         raise RuntimeError("boom")
                 except RuntimeError:
                     pass
                 self.assertTrue(t.is_dir())
                 self.assertEqual((t / "marker").read_text(), "orig")
             else:
-                with rf._backup_target(t):
+                with rf._backup_target(t, (t.stat().st_dev, t.stat().st_ino)):
                     t.mkdir()
                     (t / body_name).write_text("new")
                 self.assertTrue((t / body_name).exists())

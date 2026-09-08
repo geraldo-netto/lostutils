@@ -26,6 +26,14 @@ def _pinned_source(source):
         os.close(descriptor)
 
 
+@contextmanager
+def _pinned_backup(source):
+    with _pinned_source(source) as descriptor:
+        entry = os.fstat(descriptor)
+        with rf._backup_target(source, (entry.st_dev, entry.st_ino)) as backup:
+            yield backup
+
+
 def _pinned_call(function, source, *args, **kwargs):
     """Keep the runtime source descriptor alive across each tested operation."""
     path = source.source if isinstance(source, rf.Plan) else source
@@ -163,7 +171,7 @@ def test_atomic_swap_backup_rmtree_failure_warns(caplog):
         (target / "f").write_text("x")
         with mock.patch.object(rf.shutil, "rmtree",
                                side_effect=OSError("cannot remove")):
-            rf.atomic_swap(source, target)        # must NOT raise
+            _pinned_call(rf.atomic_swap, source, target)        # must NOT raise
         assert source.is_symlink()
         assert Path(os.readlink(source)) == target
         assert any("could not remove backup" in r.message for r in caplog.records)
@@ -178,7 +186,7 @@ def test_atomic_swap_rolls_back_on_symlink_failure():
         target = root / "copy"
         with mock.patch.object(rf.os, "symlink", side_effect=OSError("nope")):
             with pytest.raises(OSError):
-                rf.atomic_swap(source, target)
+                _pinned_call(rf.atomic_swap, source, target)
         # rolled back: source restored as a real directory
         assert source.is_dir()
         assert not source.is_symlink()
@@ -704,7 +712,7 @@ def test_atomic_swap_restore_failure_logs_recovery(tmp_path, monkeypatch, caplog
                            side_effect=OSError("symlink failed")), \
          mock.patch.object(rf, "_rename_noreplace", side_effect=flaky_rename):
         with pytest.raises(OSError, match="symlink failed"):
-            rf.atomic_swap(source, target)
+            _pinned_call(rf.atomic_swap, source, target)
     # Recovery line in the error log must mention the backup path and the
     # `mv backup source` hint.
     assert any("rollback failed" in r.message and "mv" in r.message
@@ -861,7 +869,7 @@ def test_atomic_swap_lchowns_symlink_to_source_owner(tmp_path, monkeypatch):
         lambda path, uid, gid, *, follow_symlinks=True:
             calls.append((Path(path), uid, gid, follow_symlinks)),
     )
-    rf.atomic_swap(source, target)
+    _pinned_call(rf.atomic_swap, source, target)
     assert source.is_symlink()
     assert (source, src_st.st_uid, src_st.st_gid, False) in calls
 
@@ -874,7 +882,7 @@ def test_atomic_swap_real_lchown_as_root(tmp_path):
     os.chown(source, 1, 1, follow_symlinks=False)
     target = tmp_path / "dest" / "src"
     target.parent.mkdir(parents=True)
-    rf.atomic_swap(source, target)
+    _pinned_call(rf.atomic_swap, source, target)
     st = os.lstat(source)
     assert (st.st_uid, st.st_gid) == (1, 1)
 
@@ -1400,7 +1408,7 @@ def test_copy_tree_populates_mode_cache(tmp_path):
 def test_backup_target_rmtrees_on_success(tmp_path):
     t = tmp_path / "target"; t.mkdir()
     (t / "f").write_text("x")
-    with rf._backup_target(t) as backup:
+    with _pinned_backup(t) as backup:
         assert backup.is_dir()
         assert not t.exists()
         t.mkdir()                     # body re-creates a replacement
@@ -1414,7 +1422,7 @@ def test_backup_target_restores_on_exception(tmp_path):
     (t / "f").write_text("x")
 
     def fail_in_backup_window():
-        with rf._backup_target(t):
+        with _pinned_backup(t):
             raise RuntimeError("body failure")
 
     with pytest.raises(RuntimeError):
@@ -1427,7 +1435,7 @@ def test_backup_target_refuses_stale_backup(tmp_path):
     t = tmp_path / "target"; t.mkdir()
     stale = tmp_path / ("target" + rf.BACKUP_SUFFIX); stale.mkdir()
     with pytest.raises(FileExistsError, match="stale backup"):
-        with rf._backup_target(t):
+        with _pinned_backup(t):
             pass
 
 
@@ -1445,7 +1453,7 @@ def test_backup_target_refuses_backup_raced_in_at_publication(
     monkeypatch.setattr(rf, "_rename_noreplace", race)
 
     with pytest.raises(FileExistsError, match="stale backup"):
-        with rf._backup_target(target):
+        with _pinned_backup(target):
             pass
 
     assert target.is_dir()
@@ -1461,82 +1469,44 @@ def test_backup_identity_ok_matches_and_mismatches(tmp_path):
     assert rf._backup_identity_ok(tmp_path / "gone", (0, 0)) is False
 
 
-def _spoof_changing_lstat(monkeypatch, backup_name):
-    # First lstat (identity capture) returns ino=1; later lstats return ino=2,
-    # simulating an inode substitution at the backup name (FS inode reuse makes
-    # a real rmtree+rename unreliable to test directly).
-    real_lstat = rf.os.lstat
-    state = {"n": 0}
-
-    class _ST:
-        def __init__(self, dev, ino): self.st_dev, self.st_ino = dev, ino
-
-    def fake(p):
-        if str(p).endswith(backup_name) and rf.os.path.exists(p):
-            # only spoof once the backup actually exists (post rename-aside),
-            # so the pre-rename _path_taken check sees the real (absent) state.
-            state["n"] += 1
-            return _ST(7, 1 if state["n"] == 1 else 2)
-        return real_lstat(p)
-
-    monkeypatch.setattr(rf.os, "lstat", fake)
-
-
-def test_backup_target_refuses_restore_on_substituted_backup(tmp_path, monkeypatch, caplog):
-    # rf-sec-03: if the backup inode is swapped during the with-body, the
-    # restore path refuses to rename the impostor onto target.
-    t = tmp_path / "target"; t.mkdir()
-    (t / "f").write_text("real")
-    rename_calls = {"n": 0}
-    real_rename = rf._rename_noreplace
-
-    def counting_rename(a, b):
-        rename_calls["n"] += 1
-        return real_rename(a, b)
-
-    monkeypatch.setattr(rf, "_rename_noreplace", counting_rename)
-    _spoof_changing_lstat(monkeypatch, t.name + rf.BACKUP_SUFFIX)
-    import logging
-
-    def fail_in_backup_window():
-        with rf._backup_target(t):
+def test_backup_target_refuses_restore_on_substituted_backup(tmp_path, caplog):
+    source = tmp_path / "target"
+    source.mkdir()
+    (source / "original").write_text("preserved")
+    parked = tmp_path / "original"
+    backup = source.with_name(source.name + rf.BACKUP_SUFFIX)
+    with pytest.raises(RuntimeError, match="trigger rollback"):
+        with _pinned_backup(source):
+            backup.rename(parked)
+            backup.mkdir()
+            (backup / "replacement").write_text("preserved")
             raise RuntimeError("trigger rollback")
-
-    with caplog.at_level(logging.ERROR, logger="relocate"):
-        with pytest.raises(RuntimeError, match="trigger rollback"):
-            fail_in_backup_window()
-    # only the rename-aside happened; no restore rename onto target.
-    assert rename_calls["n"] == 1
-    assert any("was substituted" in r.message for r in caplog.records)
+    assert not source.exists()
+    assert (parked / "original").read_text() == "preserved"
+    assert (backup / "replacement").read_text() == "preserved"
+    assert "was substituted" in caplog.text
 
 
-def test_backup_target_leaves_substituted_backup_on_success(tmp_path, monkeypatch, caplog):
-    # rf-sec-03: on the success path, a substituted backup is left in place
-    # (not rmtree'd) with a warning.
-    t = tmp_path / "target"; t.mkdir()
-    (t / "f").write_text("real")
-    rmtree_calls = {"n": 0}
-    real_rmtree = rf.shutil.rmtree
-
-    def counting_rmtree(p, *a, **k):
-        rmtree_calls["n"] += 1
-        return real_rmtree(p, *a, **k)
-
-    monkeypatch.setattr(rf.shutil, "rmtree", counting_rmtree)
-    _spoof_changing_lstat(monkeypatch, t.name + rf.BACKUP_SUFFIX)
-    import logging
-    with caplog.at_level(logging.WARNING, logger="relocate"):
-        with rf._backup_target(t):
-            t.mkdir()                       # body re-creates the replacement
-    assert rmtree_calls["n"] == 0           # substituted backup not removed
-    assert any("was substituted" in r.message for r in caplog.records)
+def test_backup_target_leaves_substituted_backup_on_success(tmp_path, caplog):
+    source = tmp_path / "target"
+    source.mkdir()
+    (source / "original").write_text("preserved")
+    parked = tmp_path / "original"
+    with _pinned_backup(source) as backup:
+        backup.rename(parked)
+        backup.mkdir()
+        (backup / "replacement").write_text("preserved")
+        source.mkdir()
+    assert (parked / "original").read_text() == "preserved"
+    assert (backup / "replacement").read_text() == "preserved"
+    assert "was substituted" in caplog.text
 
 
 def test_backup_target_warns_on_rmtree_failure(tmp_path, monkeypatch, caplog):
     t = tmp_path / "target"; t.mkdir()
     (t / "f").write_text("x")
     monkeypatch.setattr(rf.shutil, "rmtree", _raise_os)
-    with rf._backup_target(t):
+    with _pinned_backup(t):
         t.mkdir()
         (t / "g").write_text("y")
     assert any("could not remove backup" in r.message for r in caplog.records)
@@ -3359,7 +3329,7 @@ def test_atomic_swap_still_performs_swap(tmp_path):
     (source / "f.txt").write_text("data")
     target = tmp_path / "tgt"
     target.mkdir()
-    rf.atomic_swap(source, target)
+    _pinned_call(rf.atomic_swap, source, target)
     assert source.is_symlink()
     assert os.readlink(source) == str(target)
     assert not rf._path_taken(source.with_name(source.name + rf.BACKUP_SUFFIX))
@@ -3378,7 +3348,7 @@ def test_atomic_swap_fsyncs_target_before_source_parent(tmp_path, monkeypatch):
         rf, "_fsync_directory", lambda path: calls.append(("dir", path))
     )
 
-    rf.atomic_swap(source, target)
+    _pinned_call(rf.atomic_swap, source, target)
 
     assert calls[0] == ("tree", target)
     assert calls.count(("dir", source.parent)) >= 3
@@ -4273,7 +4243,7 @@ def test_backup_target_restores_source_on_keyboardinterrupt(tmp_path):
     backup = target.with_name(target.name + rf.BACKUP_SUFFIX)
 
     def interrupt_backup_window():
-        with rf._backup_target(target) as candidate:
+        with _pinned_backup(target) as candidate:
             assert candidate == backup
             assert backup.exists()
             raise KeyboardInterrupt
@@ -4832,13 +4802,14 @@ def test_post_verify_swap_failure_names_the_target_as_complete(
         tmp_path, monkeypatch, caplog):
     """rf-rob-50: the operator must learn the target is a finished copy."""
     plan = rf.Plan(source=tmp_path / "src", target=tmp_path / "dst")
+    plan.source.mkdir()
     monkeypatch.setattr(
         rf, "atomic_swap",
-        lambda _s, _t: (_ for _ in ()).throw(OSError("swap exploded")))
+        lambda _s, _t, **_kwargs: (_ for _ in ()).throw(OSError("swap exploded")))
     caplog.set_level(logging.ERROR)
 
     with pytest.raises(OSError, match="swap exploded"):
-        rf._swap_or_explain(plan)
+        _pinned_call(rf._swap_or_explain, plan)
 
     assert "COMPLETE, verified copy" in caplog.text
     assert str(plan.target) in caplog.text
@@ -4846,10 +4817,11 @@ def test_post_verify_swap_failure_names_the_target_as_complete(
 
 def test_swap_or_explain_is_quiet_on_success(tmp_path, monkeypatch, caplog):
     plan = rf.Plan(source=tmp_path / "src", target=tmp_path / "dst")
-    monkeypatch.setattr(rf, "atomic_swap", lambda _s, _t: None)
+    plan.source.mkdir()
+    monkeypatch.setattr(rf, "atomic_swap", lambda _s, _t, **_kwargs: None)
     caplog.set_level(logging.ERROR)
 
-    rf._swap_or_explain(plan)
+    _pinned_call(rf._swap_or_explain, plan)
 
     assert caplog.text == ""
 
