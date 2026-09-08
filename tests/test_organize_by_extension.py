@@ -7,6 +7,7 @@ import time
 import errno
 import unittest
 import logging
+import multiprocessing as mp
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -386,7 +387,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
         calls: list[Path] = []
         lock = threading.Lock()
 
-        def fake_move(path: Path, destination: Path) -> Path:
+        def fake_move(path: Path, destination: Path, **_kwargs) -> Path:
             with lock:
                 n = len(calls)
                 calls.append(path)
@@ -3259,11 +3260,13 @@ class SourceCollisionResolution(unittest.TestCase):
             futures = {fut: src}
             stats = _oze._RunStats()
             calls = []
+            clock = [0.0]
 
             def fake_wait(futures_arg, timeout, return_when):
                 self.assertEqual(timeout, 0.01)
                 self.assertIs(return_when, _oze.FIRST_COMPLETED)
                 calls.append(len(calls))
+                clock[0] += _oze.MOVE_STALL_WARN_SECONDS
                 if len(calls) == 1:
                     return set(), set(futures_arg)
                 return {fut}, set()
@@ -3273,6 +3276,7 @@ class SourceCollisionResolution(unittest.TestCase):
                     _oze._drain_futures(
                         futures, stats, preview=False, head_cache={},
                         wait_timeout=0.01,
+                        now_fn=lambda: clock[0],
                     )
 
             self.assertIn("move stage stalled", "\n".join(cm.output))
@@ -3292,7 +3296,7 @@ class SourceCollisionResolution(unittest.TestCase):
         stats = _oze._RunStats()
         head_cache = {}
         with patch.object(_oze, "wait", side_effect=never_done):
-            with self.assertRaisesRegex(RuntimeError, "move stage aborted"):
+            with pytest.raises(RuntimeError, match="move stage aborted"):
                 _oze._drain_futures(
                     futures,
                     stats,
@@ -3303,7 +3307,37 @@ class SourceCollisionResolution(unittest.TestCase):
                     now_fn=lambda: now[0],
                 )
 
-        self.assertTrue(fut.cancelled())
+        assert fut.cancelled()
+
+    def test_drain_futures_resets_watchdog_on_byte_progress(self):
+        from concurrent.futures import Future
+
+        src = Path("/slow/source.bin")
+        fut: Future = Future()
+        tracker = _oze._MoveProgress()
+        now = [0.0]
+        calls = [0]
+
+        def wait_with_progress(futures_arg, timeout, return_when):
+            calls[0] += 1
+            now[0] += 0.6
+            if calls[0] == 1:
+                tracker.add(1)
+            return set(), set(futures_arg)
+
+        with patch.object(_oze, "wait", side_effect=wait_with_progress):
+            with pytest.raises(RuntimeError, match="move stage aborted"):
+                _oze._drain_futures(
+                    {fut: src},
+                    _oze._RunStats(),
+                    preview=False,
+                    head_cache={},
+                    wait_timeout=0.01,
+                    max_stall_seconds=1.0,
+                    now_fn=lambda: now[0],
+                    progress_registry={src: tracker},
+                )
+        assert calls[0] > 2
 
     def test_run_moves_cancels_pending_futures_on_unexpected_error(self):
         shutdown_calls = []
@@ -3816,6 +3850,535 @@ def test_threads_positive_accepted():
     parser = oze.build_parser()
     ns = parser.parse_args(["/tmp", "--threads", "8"])
     assert ns.threads == 8
+
+
+def test_move_stall_seconds_parser_contract():
+    parser = oze.build_parser()
+    assert parser.parse_args(["/tmp"]).move_stall_seconds == 300.0
+    assert parser.parse_args(
+        ["/tmp", "--move-stall-seconds", "2.5"]
+    ).move_stall_seconds == 2.5
+    help_text = " ".join(parser.format_help().split())
+    assert "--move-stall-seconds" in help_text
+    assert "default:" in help_text and "300" in help_text
+    assert "Cross-device copies are isolated" in help_text
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "oops"])
+def test_move_stall_seconds_parser_rejects_nonpositive_or_nonfinite(value):
+    with pytest.raises(SystemExit):
+        oze.build_parser().parse_args(["/tmp", "--move-stall-seconds", value])
+
+
+def test_move_stall_seconds_api_rejects_nonfinite_values(tmp_path):
+    with pytest.raises(ValueError, match="finite positive"):
+        oze.organize(tmp_path, move_stall_seconds=float("nan"))
+
+
+def test_cross_device_supervisor_bounds_blocked_child(monkeypatch, tmp_path):
+    if "fork" not in mp.get_all_start_methods():
+        pytest.skip("fork is unavailable on this platform")
+
+    def blocked_copy(_source, _target, _callback=None):
+        while True:
+            time.sleep(0.05)
+
+    monkeypatch.setattr(oze, "_move_cross_device", blocked_copy)
+    real_get_context = mp.get_context
+    monkeypatch.setattr(
+        oze.mp, "get_context", lambda _name: real_get_context("fork"))
+    supervisor = oze._CrossDeviceSupervisor()
+    progress = oze._MoveProgress()
+    timer = threading.Timer(0.2, progress.abort.set)
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(oze.MoveTimeoutError, match="child pid"):
+            supervisor.move(tmp_path / "source", tmp_path / "target", progress)
+    finally:
+        timer.cancel()
+        supervisor.close()
+    assert time.monotonic() - started < 2.5
+
+
+def test_cross_device_move_reports_cumulative_bytes(monkeypatch, tmp_path):
+    source = tmp_path / "source.bin"
+    destination = tmp_path / "bucket"
+    payload = b"payload" * 1024
+    source.write_bytes(payload)
+    destination.mkdir()
+
+    def force_copy(_source, _target):
+        raise OSError(errno.EXDEV, "different device")
+
+    progress = oze._MoveProgress()
+    monkeypatch.setattr(oze.os, "link", force_copy)
+    try:
+        landed = oze.move_file(source, destination, progress=progress)
+    finally:
+        oze._close_cross_device_supervisors(progress.supervisor_registry)
+    assert landed == destination / source.name
+    assert landed.read_bytes() == payload
+    assert not source.exists()
+    assert progress.bytes_copied == len(payload)
+
+
+@pytest.mark.filterwarnings("ignore:This process .*multi-threaded.*:DeprecationWarning")
+def test_run_moves_aborts_blocked_child_through_move_file(monkeypatch, tmp_path):
+    if "fork" not in mp.get_all_start_methods():
+        pytest.skip("fork is unavailable on this platform")
+
+    source = tmp_path / "source.txt"
+    source.write_text("payload")
+    bucket = tmp_path / "txt" / "t00000"
+
+    def blocked_copy(_source, _target, _callback=None):
+        while True:
+            time.sleep(0.05)
+
+    def force_copy(_source, _target):
+        raise OSError(errno.EXDEV, "different device")
+
+    real_get_context = mp.get_context
+    monkeypatch.setattr(oze.mp, "get_context", lambda _name: real_get_context("fork"))
+    monkeypatch.setattr(oze, "_move_cross_device", blocked_copy)
+    monkeypatch.setattr(oze, "_link_exclusive", force_copy)
+    plan = iter([(source, bucket)])
+    progress_registry = {}
+    started = time.monotonic()
+    with pytest.raises(oze.MoveStallError):
+        oze._run_moves(
+            plan,
+            worker=oze.make_worker(False, progress_registry),
+            num_threads=1,
+            preview=False,
+            total_files=1,
+            head_cache={},
+            manager=oze.BucketManager(root=tmp_path),
+            progress_registry=progress_registry,
+            max_stall_seconds=0.2,
+        )
+    assert time.monotonic() - started < 3.0
+
+
+@pytest.mark.parametrize("unsupported_links", [False, True])
+def test_cross_device_recovery_comparison_reports_progress(tmp_path, monkeypatch, unsupported_links):
+    source, target = tmp_path / "source", tmp_path / "target"
+    payload = b"x" * (oze._CONTENT_CMP_CHUNK + 17)
+    source.write_bytes(payload)
+    target.write_bytes(payload)
+    progress = []
+    if unsupported_links:
+        def no_links(*_args, **_kwargs):
+            raise OSError(errno.EPERM, "hardlinks unavailable")
+        monkeypatch.setattr(oze, "_link_with_transient_retry", no_links)
+
+    oze._move_cross_device(source, target, progress.append)
+
+    assert sum(progress) == 2 * len(payload), "copy and recovery comparison must both report bytes"
+    assert target.read_bytes() == payload
+    assert not source.exists()
+
+
+def test_cross_device_job_emits_terminal_messages(monkeypatch, tmp_path):
+    class Connection:
+        def __init__(self):
+            self.messages = []
+
+        def send(self, message):
+            self.messages.append(message)
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    outcomes = [
+        (None, "done"),
+        (OSError("broken"), "error"),
+        (ValueError("bad"), "error"),
+        (KeyboardInterrupt(), "unknown"),
+        (oze.PartialMoveError(source, target, OSError("left")), "partial"),
+    ]
+    for outcome, expected in outcomes:
+        connection = Connection()
+
+        def run(_source, _target, _report, outcome=outcome):
+            if outcome is not None:
+                raise outcome
+            _report(4)
+
+        monkeypatch.setattr(oze, "_move_cross_device", run)
+        oze._run_cross_device_job(connection, source, target)
+        assert connection.messages[-1][0] == expected
+
+
+def test_cross_device_child_stops_on_stop_message(monkeypatch):
+    class Connection:
+        def __init__(self):
+            self.jobs = [("source", "target"), None]
+
+        def recv(self):
+            return self.jobs.pop(0)
+
+    jobs = []
+    monkeypatch.setattr(
+        oze, "_run_cross_device_job", lambda _connection, source, target: jobs.append(
+            (source, target)))
+    oze._cross_device_child(Connection())
+    assert jobs == [(Path("source"), Path("target"))]
+
+
+def test_cross_device_child_returns_when_pipe_closes():
+    class ClosedConnection:
+        def recv(self):
+            raise EOFError
+
+    oze._cross_device_child(ClosedConnection())
+
+
+def test_cross_device_result_send_ignores_closed_pipe():
+    class ClosedConnection:
+        def send(self, _message):
+            raise BrokenPipeError
+
+    oze._send_cross_device_result(ClosedConnection(), ("done", "target"))
+
+
+def test_cross_device_supervisor_decodes_terminal_messages(tmp_path):
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    assert supervisor._finish_message(source, target, ("done", str(target))) == target
+    with pytest.raises(oze.PartialMoveError):
+        supervisor._finish_message(
+            source, target, ("partial", str(target), "left behind"))
+    with pytest.raises(RuntimeError, match="OSError"):
+        supervisor._finish_message(source, target, ("error", "OSError", "broken"))
+    with pytest.raises(oze.MoveTimeoutError, match="usable result"):
+        supervisor._finish_message(source, target, ("unknown", "Boom", "bad"))
+
+
+def test_cross_device_supervisor_reports_send_failure(monkeypatch, tmp_path):
+    class ClosedConnection:
+        def send(self, _message):
+            raise BrokenPipeError
+
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    supervisor._parent = ClosedConnection()
+    stopped = []
+    monkeypatch.setattr(supervisor, "_stop", lambda: stopped.append(True))
+    with pytest.raises(oze.MoveTimeoutError, match="lost child"):
+        supervisor.move(tmp_path / "source", tmp_path / "target", oze._MoveProgress())
+    assert stopped == [True]
+
+
+def test_cross_device_supervisor_handles_immediate_and_dead_results(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    monkeypatch.setattr(supervisor, "_poll_result", lambda *_args: target)
+    assert supervisor._wait_for_result(source, target, oze._MoveProgress()) == target
+
+    class DeadProcess:
+        pid = 42
+
+        def is_alive(self):
+            return False
+
+    supervisor._process = DeadProcess()
+    supervisor._parent = SimpleNamespace(poll=lambda _timeout: False)
+    monkeypatch.setattr(supervisor, "_poll_result", lambda *_args: None)
+    with pytest.raises(oze.MoveTimeoutError, match="without a result"):
+        supervisor._wait_for_result(source, target, oze._MoveProgress())
+
+
+def test_cross_device_start_failure_closes_both_pipe_ends(monkeypatch):
+    from types import SimpleNamespace
+
+    parent, child = mp.get_context("spawn").Pipe()
+
+    def failed_start():
+        raise OSError("cannot spawn")
+
+    context = SimpleNamespace(
+        Pipe=lambda: (parent, child),
+        Process=lambda **_kwargs: SimpleNamespace(start=failed_start),
+    )
+    monkeypatch.setattr(oze.mp, "get_context", lambda _name: context)
+    with pytest.raises(OSError, match="cannot spawn"):
+        oze._CrossDeviceSupervisor()
+    assert parent.closed and child.closed
+
+
+def test_dead_cross_device_child_preserves_buffered_completion(tmp_path):
+    from types import SimpleNamespace
+
+    target = tmp_path / "target"
+    messages = [("progress", 1), ("progress", 1), ("done", str(target))]
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    supervisor._parent = SimpleNamespace(
+        poll=lambda _timeout: bool(messages), recv=lambda: messages.pop(0))
+    supervisor._process = SimpleNamespace(is_alive=lambda: False)
+    progress = oze._MoveProgress()
+    assert supervisor._wait_for_result(tmp_path / "source", target, progress) == target
+    assert progress.bytes_copied == 2
+    assert not messages
+
+
+def test_cross_device_buffer_drain_bounds_continuous_progress(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    elapsed = [0.0]
+
+    def tick():
+        elapsed[0] += 0.02
+        assert elapsed[0] < 1.0, "drain did not stop"
+        return elapsed[0]
+
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    supervisor._parent = SimpleNamespace(
+        poll=lambda _timeout: True, recv=lambda: ("progress", 1))
+    progress = oze._MoveProgress()
+    monkeypatch.setattr(oze, "time", SimpleNamespace(monotonic=tick))
+    assert supervisor._drain_buffered_result(
+        tmp_path / "source", tmp_path / "target", progress) is None
+    assert 0 < progress.bytes_copied < 10
+
+
+def test_cross_device_supervisor_drains_buffered_terminal_after_progress(tmp_path):
+    class Connection:
+        def __init__(self):
+            self.messages = [("progress", 1), ("done", str(tmp_path / "target"))]
+
+        def poll(self, _timeout):
+            return bool(self.messages)
+
+        def recv(self):
+            return self.messages.pop(0)
+
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    supervisor._parent = Connection()
+    progress = oze._MoveProgress()
+    progress.abort.set()
+    target = tmp_path / "target"
+    assert supervisor._wait_for_result(tmp_path / "source", target, progress) == target
+    assert progress.bytes_copied == 1
+    assert supervisor._parent.messages == []
+
+
+def test_cross_device_supervisor_drains_terminal_after_terminate(tmp_path):
+    class Connection:
+        def __init__(self):
+            self.messages = []
+
+        def poll(self, _timeout):
+            return bool(self.messages)
+
+        def recv(self):
+            return self.messages.pop(0)
+
+        def close(self):
+            return None
+
+    class Process:
+        pid = 44
+
+        def __init__(self, connection):
+            self.connection = connection
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.connection.messages.append(("done", str(tmp_path / "target")))
+            self.alive = False
+
+        def join(self, _timeout):
+            return None
+
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    connection = Connection()
+    supervisor._parent = connection
+    supervisor._process = Process(connection)
+    supervisor._closed = False
+    assert supervisor._finish_stalled_child(
+        tmp_path / "source", tmp_path / "target", oze._MoveProgress()
+    ) == tmp_path / "target"
+    assert connection.messages == []
+
+
+def test_cross_device_supervisor_stop_kill_and_close_paths(caplog):
+    class StuckProcess:
+        pid = 43
+
+        def __init__(self):
+            self.queries = 0
+
+        def is_alive(self):
+            self.queries += 1
+            return True
+
+        def terminate(self):
+            return None
+
+        def join(self, _timeout):
+            return None
+
+        def kill(self):
+            return None
+
+    class Connection:
+        def poll(self, _timeout):
+            return False
+
+        def close(self):
+            return None
+
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    supervisor._closed = False
+    supervisor._process = StuckProcess()
+    supervisor._parent = Connection()
+    with caplog.at_level(logging.ERROR):
+        supervisor._stop()
+    assert "cancellation is unconfirmed" in caplog.text
+
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    supervisor._closed = False
+    supervisor._process = StuckProcess()
+    supervisor._parent = Connection()
+    with pytest.raises(oze.MoveTimeoutError, match="cancellation unconfirmed"):
+        supervisor._finish_stalled_child(
+            Path("source"), Path("target"), oze._MoveProgress())
+
+    class ClosingProcess:
+        def __init__(self):
+            self.queries = 0
+
+        def is_alive(self):
+            self.queries += 1
+            return self.queries == 1
+
+    class BrokenConnection:
+        def send(self, _message):
+            raise BrokenPipeError
+
+        def close(self):
+            return None
+
+    supervisor = object.__new__(oze._CrossDeviceSupervisor)
+    supervisor._closed = False
+    supervisor._process = ClosingProcess()
+    supervisor._parent = BrokenConnection()
+    supervisor.close()
+    assert supervisor._closed
+
+
+def test_cross_device_supervisor_replaces_dead_thread_local(monkeypatch):
+    class DeadProcess:
+        def is_alive(self):
+            return False
+
+    class DeadSupervisor:
+        def __init__(self):
+            self._process = DeadProcess()
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FreshSupervisor:
+        def __init__(self):
+            self._process = DeadProcess()
+
+        def close(self):
+            return None
+
+    dead = DeadSupervisor()
+    monkeypatch.setattr(oze, "_CrossDeviceSupervisor", FreshSupervisor)
+    oze._CROSS_DEVICE_LOCAL.supervisor = dead
+    owner = set()
+    oze._CROSS_DEVICE_LOCAL.supervisor_owner = None
+    fresh = oze._cross_device_supervisor(owner)
+    try:
+        assert dead.closed
+        assert fresh is oze._CROSS_DEVICE_LOCAL.supervisor
+    finally:
+        oze._close_cross_device_supervisors(owner)
+        del oze._CROSS_DEVICE_LOCAL.supervisor
+        del oze._CROSS_DEVICE_LOCAL.supervisor_owner
+
+
+def test_run_moves_drains_success_and_timed_out_results(tmp_path):
+    completed = tmp_path / "completed.txt"
+    stalled = tmp_path / "stalled.txt"
+    bucket = tmp_path / "txt" / "t00000"
+
+    def worker(source, destination):
+        if source == stalled:
+            return source, destination / source.name, oze.MoveTimeoutError("stalled")
+        return source, destination / source.name, None
+
+    stats = oze._run_moves(
+        iter([(completed, bucket), (stalled, bucket)]),
+        worker=worker,
+        num_threads=2,
+        preview=False,
+        total_files=2,
+        head_cache={},
+        manager=oze.BucketManager(root=tmp_path),
+    )
+    assert stats.processed == 1
+    assert stats.skipped == 1
+    assert stats.timed_out == 1
+
+
+def test_move_stage_reports_timed_out_unfinished_moves(monkeypatch, tmp_path):
+    expected = oze._RunStats(planned=1, skipped=1, timed_out=1)
+    monkeypatch.setattr(oze, "plan_moves", lambda *_args, **_kwargs: iter(()))
+    monkeypatch.setattr(oze, "_run_moves", lambda *_args, **_kwargs: expected)
+    monkeypatch.setattr(oze, "_log_run_stats", lambda *_args: None)
+    with patch.object(oze.logger, "warning") as warning:
+        result = oze._run_move_stage(
+            tmp_path,
+            iter(()),
+            oze.SniffContext(),
+            preview=False,
+            verbose=False,
+            num_threads=1,
+            bucket_size=500,
+            move_stall_seconds=1.0,
+            bucket_manager=None,
+            head_cache={},
+        )
+    assert result is expected
+    assert "Timed out 1 unfinished move(s)." in warning.call_args.args[0]
+
+
+def test_interrupted_move_stage_drains_completed_successes(tmp_path):
+    from concurrent.futures import Future
+
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "txt" / "t00000" / source.name
+    future: Future = Future()
+    future.set_result((source, destination, None))
+    futures = {future: source}
+
+    class Executor:
+        def shutdown(self, **_kwargs):
+            return None
+
+    stats = oze._RunStats()
+    oze._finish_interrupted_moves(
+        Executor(),
+        futures,
+        {},
+        stats,
+        preview=False,
+        head_cache={},
+        manager=oze.BucketManager(root=tmp_path),
+    )
+    assert stats.processed == 1
+    assert futures == {}
 
 
 # --- oze-test-05: bucket_name boundaries ----------------------------------
@@ -5147,7 +5710,7 @@ def test_main_exits_nonzero_when_a_file_is_skipped(tmp_path, monkeypatch, caplog
         raise OSError("device busy")
 
     monkeypatch.setattr(
-        organize_by_extension, "make_worker", lambda _preview: refuse)
+        organize_by_extension, "make_worker", lambda _preview, *_args: refuse)
     caplog.set_level(logging.WARNING)
 
     with pytest.raises(SystemExit) as exc:

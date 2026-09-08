@@ -19,6 +19,8 @@ import argparse
 import ctypes
 import errno
 import logging
+import math
+import multiprocessing as mp
 import os
 import secrets
 import sqlite3
@@ -27,10 +29,10 @@ import re
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from bisect import insort
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from functools import partial
 from itertools import pairwise
 from pathlib import Path
@@ -66,6 +68,8 @@ HEADER_SNIFF_BYTES = 32
 SCAN_STALL_WARN_SECONDS = 60.0
 MOVE_STALL_WARN_SECONDS = 60.0
 MOVE_MAX_STALL_SECONDS = 300.0
+MOVE_PROGRESS_POLL_SECONDS = 0.1
+MOVE_TERMINATION_GRACE_SECONDS = 1.0
 # oze-cli-50: the run reached the end but did not place every planned file.
 # Distinct from 1 (the run could not complete) and from argparse's 2.
 EXIT_INCOMPLETE = 3
@@ -1516,7 +1520,11 @@ def _require_regular_source(path: Path) -> None:
         raise ValueError(f"refusing to move non-regular source: {path}")
 
 
-def move_file(path: Path, destination: Path) -> Path:
+def move_file(
+    path: Path,
+    destination: Path,
+    progress: _MoveProgress | None = None,
+) -> Path:
     """Move a file into the destination directory without overwriting an existing target.
 
     Same-filesystem moves use an atomic hardlink+unlink: `os.link` fails with
@@ -1554,7 +1562,11 @@ def move_file(path: Path, destination: Path) -> Path:
     except OSError as exc:
         if exc.errno != errno.EXDEV and not _link_unsupported(exc):
             raise
-        _move_cross_device(path, target)
+        if progress is None:
+            _move_cross_device(path, target)
+        else:
+            _cross_device_supervisor(progress.supervisor_registry).move(
+                path, target, progress)
     else:
         _unlink_with_rollback(path, target, source_identity)
     return target
@@ -1929,8 +1941,10 @@ def _same_file_content(
     source_stream: BinaryIO,
     source_stat: os.stat_result,
     target: Path,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> bool:
     """True when a pinned source and no-follow target are byte-identical."""
+    report_progress = progress_callback or (lambda _count: None)
     try:
         with _open_pinned_regular(target) as (target_stream, target_stat):
             if source_stat.st_size != target_stat.st_size:
@@ -1939,6 +1953,7 @@ def _same_file_content(
             while True:
                 source_chunk = source_stream.read(_CONTENT_CMP_CHUNK)
                 target_chunk = target_stream.read(_CONTENT_CMP_CHUNK)
+                report_progress(len(source_chunk))
                 if source_chunk != target_chunk:
                     return False
                 if not source_chunk:
@@ -2017,7 +2032,8 @@ def _copy_cross_device_target(
         os.chmod(tmp, _stat.S_IMODE(source_stat.st_mode))
         os.utime(tmp, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         _fsync_file(tmp)
-        _publish_cross_device_copy(source_stream, source_stat, tmp, target)
+        _publish_cross_device_copy(
+            source_stream, source_stat, tmp, target, progress_callback)
         _fsync_directory(target.parent)
         try:
             os.unlink(tmp)
@@ -2040,20 +2056,21 @@ def _publish_cross_device_copy(
     source_stat: os.stat_result,
     tmp: Path,
     target: Path,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> None:
     """Publish a completed staging file without replacing a target."""
     try:
         _link_with_transient_retry(tmp, target)
         return
     except FileExistsError:
-        if _same_file_content(source_stream, source_stat, target):
+        if _same_file_content(source_stream, source_stat, target, progress_callback):
             return
         raise
     except OSError as exc:
         if exc.errno != errno.EXDEV and not _link_unsupported(exc):
             raise
         return _publish_without_hardlink(
-            source_stream, source_stat, tmp, target, exc)
+            source_stream, source_stat, tmp, target, exc, progress_callback)
 
 
 def _publish_without_hardlink(
@@ -2062,12 +2079,13 @@ def _publish_without_hardlink(
     tmp: Path,
     target: Path,
     link_error: OSError,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> None:
     if os.name == "nt":  # pragma: no cover - Windows-only rename semantics
         try:
             os.rename(tmp, target)
         except FileExistsError:
-            if _same_file_content(source_stream, source_stat, target):
+            if _same_file_content(source_stream, source_stat, target, progress_callback):
                 return
             raise FileExistsError(
                 f"Target file already exists: {target}") from link_error
@@ -2075,7 +2093,7 @@ def _publish_without_hardlink(
     try:
         _rename_noreplace(tmp, target)
     except FileExistsError:
-        if _same_file_content(source_stream, source_stat, target):
+        if _same_file_content(source_stream, source_stat, target, progress_callback):
             return
         raise FileExistsError(
             f"Target file already exists: {target}") from link_error
@@ -2327,7 +2345,271 @@ MoveResult = tuple[Path, Path, Exception | None]
 WorkerFn = Callable[[Path, Path], MoveResult]
 
 
-def make_worker(preview: bool) -> WorkerFn:
+class MoveTimeoutError(RuntimeError):
+    """A move controller stopped a stalled child before terminal status."""
+
+
+@dataclass
+class _MoveProgress:
+    bytes_copied: int = 0
+    last_update: float = field(default_factory=time.monotonic)
+    abort: threading.Event = field(default_factory=threading.Event)
+    supervisor_registry: set = field(default_factory=set)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def add(self, count: int) -> None:
+        with self._lock:
+            self.bytes_copied += count
+            self.last_update = time.monotonic()
+
+    def snapshot(self) -> tuple[int, float]:
+        with self._lock:
+            return self.bytes_copied, self.last_update
+
+
+def _send_cross_device_result(connection, message: tuple) -> None:
+    try:
+        connection.send(message)
+    except (BrokenPipeError, EOFError, OSError):
+        return
+
+
+def _run_cross_device_job(connection, source: Path, target: Path) -> None:
+    def report(count: int) -> None:
+        _send_cross_device_result(connection, ("progress", count))
+
+    try:
+        _move_cross_device(source, target, report)
+    except PartialMoveError as exc:
+        _send_cross_device_result(
+            connection, ("partial", str(exc.destination), str(exc)))
+    except (OSError, RuntimeError, ValueError) as exc:
+        _send_cross_device_result(
+            connection, ("error", type(exc).__name__, str(exc)))
+    except BaseException as exc:
+        _send_cross_device_result(
+            connection, ("unknown", type(exc).__name__, str(exc)))
+    else:
+        _send_cross_device_result(connection, ("done", str(target)))
+
+
+def _cross_device_child(connection) -> None:
+    """Run cross-device copy jobs for one persistent supervisor process."""
+    while True:
+        try:
+            job = connection.recv()
+        except (EOFError, OSError):
+            return
+        if job is None:
+            return
+        source, target = (Path(value) for value in job)
+        _run_cross_device_job(connection, source, target)
+
+
+class _CrossDeviceSupervisor:
+    def __init__(self) -> None:
+        self._context = mp.get_context("spawn")
+        self._parent, child = self._context.Pipe()
+        self._process = self._context.Process(
+            target=_cross_device_child, args=(child,), daemon=True)
+        try:
+            self._process.start()
+        except BaseException:
+            self._parent.close()
+            raise
+        finally:
+            child.close()
+        self._closed = False
+
+    def move(
+        self, source: Path, target: Path, progress: _MoveProgress,
+    ) -> Path:
+        try:
+            self._parent.send((str(source), str(target)))
+        except (BrokenPipeError, EOFError, OSError) as exc:
+            self._stop()
+            raise MoveTimeoutError(
+                f"move controller lost child for {source}: {exc}") from exc
+        return self._wait_for_result(source, target, progress)
+
+    def _wait_for_result(
+        self, source: Path, target: Path, progress: _MoveProgress,
+    ) -> Path:
+        while True:
+            result = self._poll_result(source, target, progress, 0)
+            if result is not None:
+                return result
+            if progress.abort.is_set():
+                return self._handle_abort(source, target, progress)
+            result = self._poll_result(
+                source, target, progress, MOVE_PROGRESS_POLL_SECONDS)
+            if result is not None:
+                return result
+            if not self._process.is_alive():
+                return self._finish_dead_child(source, target, progress)
+
+    def _finish_dead_child(
+        self, source: Path, target: Path, progress: _MoveProgress,
+    ) -> Path:
+        result = self._drain_buffered_result(source, target, progress)
+        if result is not None:
+            return result
+        raise MoveTimeoutError(f"move child exited without a result for {source}")
+
+    def _finish_stalled_child(
+        self, source: Path, target: Path, progress: _MoveProgress,
+    ) -> Path:
+        pid = self._process.pid
+        reaped = self._stop(close=False)
+        try:
+            result = self._drain_buffered_result(source, target, progress)
+        finally:
+            self._parent.close()
+            self._closed = True
+        if result is not None:
+            return result
+        status = "stopped" if reaped else "cancellation unconfirmed"
+        raise MoveTimeoutError(
+            f"timed out cross-device move {source}; child pid {pid} {status}")
+
+    def _handle_abort(
+        self, source: Path, target: Path, progress: _MoveProgress,
+    ) -> Path:
+        result = self._drain_buffered_result(source, target, progress)
+        if result is not None:
+            return result
+        return self._finish_stalled_child(source, target, progress)
+
+    def _drain_buffered_result(
+        self, source: Path, target: Path, progress: _MoveProgress,
+    ) -> Path | None:
+        result = None
+        deadline = time.monotonic() + MOVE_PROGRESS_POLL_SECONDS
+        try:
+            while time.monotonic() < deadline and self._parent.poll(0):
+                result = self._poll_result(source, target, progress, 0)
+                if result is not None:
+                    return result
+        except (EOFError, OSError):
+            return result
+        return result
+
+    def _poll_result(
+        self,
+        source: Path,
+        target: Path,
+        progress: _MoveProgress,
+        timeout: float,
+    ) -> Path | None:
+        if not self._parent.poll(timeout):
+            return None
+        message = self._parent.recv()
+        if message[0] == "progress":
+            progress.add(message[1])
+            return None
+        return self._finish_message(source, target, message)
+
+    def _finish_message(
+        self, source: Path, target: Path, message: tuple,
+    ) -> Path:
+        if message[0] == "done":
+            return Path(message[1])
+        if message[0] == "partial":
+            raise PartialMoveError(source, Path(message[1]), OSError(message[2]))
+        if message[0] == "error":
+            raise RuntimeError(f"{message[1]}: {message[2]}")
+        raise MoveTimeoutError(
+            f"move child returned no usable result for {source}: {message}")
+
+    def _stop(self, close: bool = True) -> bool:
+        if self._closed:
+            return True
+        reaped = True
+        if self._process.is_alive():
+            self._process.terminate()
+            self._process.join(MOVE_TERMINATION_GRACE_SECONDS)
+            if self._process.is_alive() and hasattr(self._process, "kill"):
+                self._process.kill()
+                self._process.join(MOVE_TERMINATION_GRACE_SECONDS)
+            if self._process.is_alive():
+                logger.error(
+                    "could not reap stalled move child pid %s; cancellation "
+                    "is unconfirmed", self._process.pid)
+                reaped = False
+        if close:
+            self._parent.close()
+            self._closed = True
+        return reaped
+
+    def close(self) -> None:
+        if self._process.is_alive():
+            try:
+                self._parent.send(None)
+                self._process.join(MOVE_TERMINATION_GRACE_SECONDS)
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+        self._stop()
+
+
+_CROSS_DEVICE_LOCAL = threading.local()
+_CROSS_DEVICE_SUPERVISORS_LOCK = threading.Lock()
+
+
+def _cross_device_supervisor(
+    owner: set[_CrossDeviceSupervisor],
+) -> _CrossDeviceSupervisor:
+    supervisor = getattr(_CROSS_DEVICE_LOCAL, "supervisor", None)
+    current_owner = getattr(_CROSS_DEVICE_LOCAL, "supervisor_owner", None)
+    if (supervisor is None or not supervisor._process.is_alive()
+            or current_owner is not owner):
+        if supervisor is not None:
+            supervisor.close()
+            if current_owner is not None:
+                current_owner.discard(supervisor)
+        supervisor = _CrossDeviceSupervisor()
+        _CROSS_DEVICE_LOCAL.supervisor = supervisor
+        _CROSS_DEVICE_LOCAL.supervisor_owner = owner
+        with _CROSS_DEVICE_SUPERVISORS_LOCK:
+            owner.add(supervisor)
+    return supervisor
+
+
+def _close_cross_device_supervisors(
+    owner: set[_CrossDeviceSupervisor],
+) -> None:
+    with _CROSS_DEVICE_SUPERVISORS_LOCK:
+        supervisors = tuple(owner)
+        owner.clear()
+    for supervisor in supervisors:
+        supervisor.close()
+
+
+def _move_worker(
+    preview: bool,
+    progress_registry: dict[Path, _MoveProgress] | None,
+    source: Path,
+    bucket_dir: Path,
+) -> MoveResult:
+    dest = bucket_dir / source.name
+    if preview:
+        return source, dest, None
+    try:
+        tracker = progress_registry.get(source) if progress_registry else None
+        if tracker is None:
+            actual = move_file(source, bucket_dir)
+        else:
+            actual = move_file(source, bucket_dir, progress=tracker)
+        return source, actual, None
+    except PartialMoveError as exc:
+        return source, exc.destination, exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        return source, dest, exc
+
+
+def make_worker(
+    preview: bool,
+    progress_registry: dict[Path, _MoveProgress] | None = None,
+) -> WorkerFn:
     """Return the per-move worker (oze-arch-01).
 
     Closing over ``preview`` lets the worker body stay pure: the planner picks
@@ -2340,21 +2622,7 @@ def make_worker(preview: bool) -> WorkerFn:
     (out-of-range bucket index) are equally per-file, not run-fatal. A
     BaseException (KeyboardInterrupt, SystemExit) is never swallowed.
     """
-    def _move_worker(source: Path, bucket_dir: Path) -> MoveResult:
-        dest = bucket_dir / source.name
-        if preview:
-            return source, dest, None
-        try:
-            # oze-obs-01: log where the file actually landed. move_file may
-            # rename the source aside to `<name>.collision<n>`, so the precomputed
-            # `dest` can diverge from reality — use its return value.
-            actual = move_file(source, bucket_dir)
-            return source, actual, None
-        except PartialMoveError as exc:
-            return source, exc.destination, exc
-        except (OSError, RuntimeError, ValueError) as exc:
-            return source, dest, exc
-    return _move_worker
+    return partial(_move_worker, preview, progress_registry)
 
 
 def plan_moves(
@@ -2625,6 +2893,7 @@ class _RunStats:
     skipped: int = 0
     partial: int = 0
     planned: int = 0
+    timed_out: int = 0
 
 
 def _drain_futures(
@@ -2636,6 +2905,7 @@ def _drain_futures(
     wait_timeout: float = MOVE_STALL_WARN_SECONDS,
     max_stall_seconds: float = MOVE_MAX_STALL_SECONDS,
     now_fn: Callable[[], float] | None = None,
+    progress_registry: dict[Path, _MoveProgress] | None = None,
 ) -> None:
     """Block until at least one future completes, then log results and prune
     the head_cache for finished sources (oze-conc-03 / oze-scal-05).
@@ -2646,10 +2916,15 @@ def _drain_futures(
     caller that substitutes one.
     """
     done = _wait_for_move_futures(
-        futures, wait_timeout, max_stall_seconds, now_fn or time.monotonic)
+        futures, wait_timeout, max_stall_seconds, now_fn or time.monotonic,
+        progress_registry,
+    )
     for future in done:
+        source = futures[future]
         _drain_move_future(
             future, futures, stats, preview, head_cache, manager)
+        if progress_registry is not None:
+            progress_registry.pop(source, None)
 
 
 def _wait_for_move_futures(
@@ -2657,27 +2932,72 @@ def _wait_for_move_futures(
     wait_timeout: float,
     max_stall_seconds: float,
     now_fn: Callable[[], float],
+    progress_registry: dict[Path, _MoveProgress] | None = None,
 ) -> set[Future]:
     stalled_since = now_fn()
+    last_bytes = {
+        source: tracker.snapshot()[0]
+        for source, tracker in (progress_registry or {}).items()
+    }
+    last_warning: float | None = None
     while True:
         done, _ = wait(
-            futures, timeout=wait_timeout, return_when=FIRST_COMPLETED)
+            futures,
+            timeout=min(wait_timeout, MOVE_PROGRESS_POLL_SECONDS),
+            return_when=FIRST_COMPLETED,
+        )
         if done:
             return done
-        elapsed = now_fn() - stalled_since
+        current = now_fn()
+        stalled_since = _update_stall_clock(
+            futures, progress_registry, last_bytes, current, stalled_since)
+        elapsed = current - stalled_since
         if elapsed >= max_stall_seconds:
-            for future in futures:
-                future.cancel()
+            _abort_stalled_moves(futures, progress_registry)
             raise MoveStallError(
                 "move stage aborted after "
-                f"{elapsed:.0f}s with no completed worker "
+                f"{elapsed:.0f}s without byte progress or a completed worker "
                 f"({len(futures)} in flight)"
             )
-        logger.warning(
-            "move stage stalled: no completed worker for %.0fs "
-            "(%d in flight)",
-            elapsed, len(futures),
-        )
+        if (elapsed >= MOVE_STALL_WARN_SECONDS
+                and (last_warning is None
+                     or current - last_warning >= MOVE_STALL_WARN_SECONDS)):
+            logger.warning(
+                "move stage stalled: no byte progress or completed worker for %.0fs "
+                "(%d in flight)",
+                elapsed, len(futures),
+            )
+            last_warning = current
+
+
+def _update_stall_clock(
+    futures: dict[Future, Path],
+    progress_registry: dict[Path, _MoveProgress] | None,
+    last_bytes: dict[Path, int],
+    current: float,
+    stalled_since: float,
+) -> float:
+    for source in futures.values():
+        tracker = (progress_registry or {}).get(source)
+        if tracker is None:
+            continue
+        copied, _ = tracker.snapshot()
+        if copied > last_bytes.get(source, 0):
+            last_bytes[source] = copied
+            stalled_since = current
+    return stalled_since
+
+
+def _abort_stalled_moves(
+    futures: dict[Future, Path],
+    progress_registry: dict[Path, _MoveProgress] | None,
+) -> None:
+    for source in futures.values():
+        tracker = (progress_registry or {}).get(source)
+        if tracker is not None:
+            tracker.abort.set()
+    for future in futures:
+        future.cancel()
 
 
 def _drain_move_future(
@@ -2696,21 +3016,36 @@ def _drain_move_future(
         logger.warning("Skipped %s: unexpected worker error: %s", source, exc)
         stats.skipped += 1
         return
-    if error:
-        if isinstance(error, PartialMoveError):
-            logger.error("Partial move %s: %s", source, error)
-            stats.partial += 1
-            return
-        logger.warning(f"Skipped {source}: {error}")
-        if manager is not None:
-            manager.release(source, destination.parent)
-        stats.skipped += 1
+    if error is not None:
+        _record_move_error(source, destination, error, stats, manager)
         return
     if manager is not None and not preview:
         manager.confirm(source, destination.parent)
     action = "Preview:" if preview else "Moved"
     logger.info(f"{action} {source} -> {destination}")
     stats.processed += 1
+
+
+def _record_move_error(
+    source: Path,
+    destination: Path,
+    error: Exception,
+    stats: _RunStats,
+    manager: BucketManager | None,
+) -> None:
+    if isinstance(error, MoveTimeoutError):
+        logger.error("Timed out move %s: %s", source, error)
+        stats.skipped += 1
+        stats.timed_out += 1
+        return
+    if isinstance(error, PartialMoveError):
+        logger.error("Partial move %s: %s", source, error)
+        stats.partial += 1
+        return
+    logger.warning("Skipped %s: %s", source, error)
+    if manager is not None:
+        manager.release(source, destination.parent)
+    stats.skipped += 1
 
 
 def _maybe_log_progress(
@@ -2735,6 +3070,23 @@ def _maybe_log_progress(
         progress["last"] = done_so_far
 
 
+def _drain_finished_move_futures(
+    futures: dict[Future, Path],
+    stats: _RunStats,
+    preview: bool,
+    head_cache: dict[Path, HeadBytes],
+    manager: BucketManager,
+    progress_registry: dict[Path, _MoveProgress],
+) -> None:
+    for future in list(futures):
+        if not future.done():
+            continue
+        source = futures[future]
+        _drain_move_future(
+            future, futures, stats, preview, head_cache, manager)
+        progress_registry.pop(source, None)
+
+
 def _run_moves(
     plan: Iterator[tuple[Path, Path]],
     worker: WorkerFn,
@@ -2744,6 +3096,8 @@ def _run_moves(
     head_cache: dict[Path, HeadBytes],
     manager: BucketManager,
     stats: _RunStats | None = None,
+    progress_registry: dict[Path, _MoveProgress] | None = None,
+    max_stall_seconds: float = MOVE_MAX_STALL_SECONDS,
 ) -> _RunStats:
     """Execute stage (oze-cmplx-01): own the thread pool, the bounded-backlog
     submission loop, drain, and progress logging. Returns the run tally.
@@ -2755,16 +3109,25 @@ def _run_moves(
     """
     if stats is None:
         stats = _RunStats()
+    if progress_registry is None:
+        progress_registry = {}
     max_outstanding = max(1, num_threads * SUBMIT_BACKLOG_MULT)
     executor = ThreadPoolExecutor(max_workers=num_threads)
     futures: dict[Future, Path] = {}
+    supervisor_registry: set[_CrossDeviceSupervisor] = set()
     progress = {"last": 0}
     try:
         for source, bucket_dir in plan:
             stats.planned += 1
             while len(futures) >= max_outstanding:
-                _drain_futures(futures, stats, preview, head_cache, manager)
+                _drain_futures(
+                    futures, stats, preview, head_cache, manager,
+                    max_stall_seconds=max_stall_seconds,
+                    progress_registry=progress_registry,
+                )
                 _maybe_log_progress(stats, total_files, progress)
+            progress_registry[source] = _MoveProgress(
+                supervisor_registry=supervisor_registry)
             futures[executor.submit(worker, source, bucket_dir)] = source
             _maybe_log_progress(stats, total_files, progress)
         # oze-obs-01: also evaluate PROGRESS_EVERY while draining the tail, so
@@ -2772,18 +3135,68 @@ def _run_moves(
         # is exhausted still emits progress instead of going silent until the
         # summary.
         while futures:
-            _drain_futures(futures, stats, preview, head_cache, manager)
+            _drain_futures(
+                futures, stats, preview, head_cache, manager,
+                max_stall_seconds=max_stall_seconds,
+                progress_registry=progress_registry,
+            )
             _maybe_log_progress(stats, total_files, progress)
+    except MoveStallError:
+        _finish_aborted_moves(
+            executor, futures, stats, preview, head_cache, manager,
+            progress_registry)
+        raise
     except KeyboardInterrupt:
-        executor.shutdown(wait=True, cancel_futures=True)
-        logger.info(f"\nInterrupted. Processed {stats.processed} file(s), "
-                    f"skipped {stats.skipped} file(s), partial {stats.partial}.")
+        _finish_interrupted_moves(
+            executor, futures, progress_registry, stats, preview, head_cache,
+            manager)
         raise SystemExit(1) from None
     finally:
         # Running filesystem calls cannot be cancelled safely. Wait for them so
         # no mutation continues after this function reports failure or returns.
         executor.shutdown(wait=True, cancel_futures=True)
+        _close_cross_device_supervisors(supervisor_registry)
     return stats
+
+
+def _finish_aborted_moves(
+    executor: ThreadPoolExecutor,
+    futures: dict[Future, Path],
+    stats: _RunStats,
+    preview: bool,
+    head_cache: dict[Path, HeadBytes],
+    manager: BucketManager,
+    progress_registry: dict[Path, _MoveProgress],
+) -> None:
+    for tracker in progress_registry.values():
+        tracker.abort.set()
+    executor.shutdown(wait=True, cancel_futures=True)
+    _drain_finished_move_futures(
+        futures, stats, preview, head_cache, manager, progress_registry)
+    logger.error(
+        "move stage aborted: processed %d, skipped %d, timed out %d",
+        stats.processed, stats.skipped, stats.timed_out,
+    )
+
+
+def _finish_interrupted_moves(
+    executor: ThreadPoolExecutor,
+    futures: dict[Future, Path],
+    progress_registry: dict[Path, _MoveProgress],
+    stats: _RunStats,
+    preview: bool,
+    head_cache: dict[Path, HeadBytes],
+    manager: BucketManager,
+) -> None:
+    for tracker in progress_registry.values():
+        tracker.abort.set()
+    executor.shutdown(wait=True, cancel_futures=True)
+    _drain_finished_move_futures(
+        futures, stats, preview, head_cache, manager, progress_registry)
+    logger.info(
+        "\nInterrupted. Processed %d file(s), skipped %d file(s), partial %d.",
+        stats.processed, stats.skipped, stats.partial,
+    )
 
 
 def _log_run_stats(head_cache: dict[Path, HeadBytes], manager: BucketManager) -> None:
@@ -2813,7 +3226,7 @@ def _clamp_num_threads(num_threads: int) -> int:
 
 def _run_move_stage(root: Path, files: Iterable[Path], ctx: SniffContext, *,
                     preview: bool, verbose: bool, num_threads: int,
-                    bucket_size: int,
+                    bucket_size: int, move_stall_seconds: float,
                     bucket_manager: BucketManager | None,
                     head_cache: dict[Path, HeadBytes]) -> _RunStats:
     """Plan then execute the moves for the scanned `files` (oze-arch pipeline
@@ -2826,21 +3239,26 @@ def _run_move_stage(root: Path, files: Iterable[Path], ctx: SniffContext, *,
         if bucket_manager is not None
         else BucketManager(root=root, bucket_size=bucket_size)
     )
+    progress_registry: dict[Path, _MoveProgress] = {}
     plan = plan_moves(root, files, manager, ctx=ctx, preview=preview)
     stats = _run_moves(
         plan,
-        worker=make_worker(preview),
+        worker=make_worker(preview, progress_registry),
         num_threads=num_threads,
         preview=preview,
         total_files=None,
         head_cache=head_cache,
         manager=manager,
         stats=ctx.stats,
+        progress_registry=progress_registry,
+        max_stall_seconds=move_stall_seconds,
     )
     summary = (
         f"Finished. Processed {stats.processed} file(s), "
         f"skipped {stats.skipped} file(s), partial {stats.partial}."
     )
+    if stats.timed_out:
+        summary += f" Timed out {stats.timed_out} unfinished move(s)."
     if stats.skipped or stats.partial:
         # oze-cli-50: the run is about to exit non-zero, so the tally that
         # explains why has to be visible without --verbose.
@@ -2879,6 +3297,7 @@ def organize(
     bucket_manager: BucketManager | None = None,
     head_cache: dict[Path, HeadBytes] | None = None,
     prune_empty: bool = False,
+    move_stall_seconds: float = MOVE_MAX_STALL_SECONDS,
 ) -> _RunStats:
     """Organize files under the root path into extension-based buckets.
 
@@ -2905,6 +3324,13 @@ def organize(
         raise ValueError(
             f"bucket_size must be a positive integer, got {bucket_size!r}"
         )
+    if (not isinstance(move_stall_seconds, (int, float))
+            or isinstance(move_stall_seconds, bool)
+            or not math.isfinite(move_stall_seconds)
+            or move_stall_seconds <= 0):
+        raise ValueError(
+            "move_stall_seconds must be a finite positive number"
+        )
     root = resolve_root(root)
     if verbose:
         logger.info(f"Organizing files in: {root}")
@@ -2926,6 +3352,7 @@ def organize(
         root, files, ctx,
         preview=preview, verbose=verbose, num_threads=num_threads,
         bucket_size=bucket_size,
+        move_stall_seconds=float(move_stall_seconds),
         bucket_manager=bucket_manager, head_cache=head_cache,
     )
 
@@ -2992,6 +3419,17 @@ def _positive_int(value: str) -> int:
     return n
 
 
+def _positive_finite_float(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got {value!r}")
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError(
+            f"must be a finite positive number, got {value!r}")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Return the argument parser used by the script."""
     parser = argparse.ArgumentParser(
@@ -3037,6 +3475,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=BUCKET_SIZE,
         help=f'Max files per bucket directory (positive int, default: {BUCKET_SIZE}).',
+    )
+    parser.add_argument(
+        '--move-stall-seconds',
+        type=_positive_finite_float,
+        default=MOVE_MAX_STALL_SECONDS,
+        help=(
+            'Abort a move stage after this many seconds without byte progress '
+            f'or completed moves (finite positive number, default: {MOVE_MAX_STALL_SECONDS:g}). '
+            'Cross-device copies are isolated in child processes; native '
+            'same-filesystem operations remain subject to OS I/O behavior.'
+        ),
     )
     parser.add_argument(
         '--no-sniff',
@@ -3162,6 +3611,7 @@ def main() -> None:
             extra_zip_family=_parse_extra_zip_family(args.extra_zip_family),
             bucket_size=args.bucket_size,
             prune_empty=args.prune_empty,
+            move_stall_seconds=args.move_stall_seconds,
         )
     except (PlanSpoolError, MoveStallError) as exc:
         # oze-dep-50: a full / read-only TMPDIR is an environment problem, not
