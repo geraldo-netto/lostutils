@@ -29,7 +29,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from hypothesis import HealthCheck, assume, given, settings, strategies as st
+from hypothesis import HealthCheck, assume, example, given, settings, strategies as st
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -72,9 +72,12 @@ class PathTakenFuzz(unittest.TestCase):
 
     @settings(parent=FUZZ)
     @given(SAFE_NAME, st.sampled_from(["file", "dir", "link", "broken"]))
+    @example(name="target", kind="link")
     def test_existing_kinds_all_taken(self, name: str, kind: str) -> None:
         with TemporaryDirectory() as d:
-            p = Path(d) / name
+            candidates = Path(d) / "candidates"
+            candidates.mkdir()
+            p = candidates / name
             if kind == "file":
                 p.write_text("x")
             elif kind == "dir":
