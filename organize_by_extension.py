@@ -23,6 +23,7 @@ import secrets
 import sqlite3
 import stat as _stat
 import re
+import tempfile
 import threading
 import time
 from bisect import insort
@@ -1374,30 +1375,77 @@ def _reserve_target(target: Path) -> None:
     os.close(fd)
 
 
-def _unlink_with_rollback(source: Path, target: Path) -> None:
-    """Remove ``source`` after a successful hardlink; roll back the new link
-    if the source unlink fails (oze-cx-04).
-
-    Flattens the previous three-deep ``try`` nest in :func:`move_file`. The
-    invariant is "the file ends up in exactly one place" — either the hardlink
-    survives and the source is gone (success), or both are removed and the
-    caller sees the original OSError (rollback succeeded), or a RuntimeError
-    surfaces with both errnos so manual cleanup is unmistakable
-    (oze-rel-02 / oze-rel-04).
-    """
+def _rollback_link(target: Path, source_exc: OSError) -> NoReturn:
     try:
-        os.unlink(source)
-        return
-    except OSError as src_exc:
-        try:
-            os.unlink(target)
-        except OSError as tgt_exc:
-            raise RuntimeError(
-                f"double-copy: hardlinked {target} but failed to remove "
-                f"both the source ({src_exc}) and the new link ({tgt_exc}); "
-                f"manual cleanup required"
-            ) from src_exc
-        raise
+        os.unlink(target)
+    except OSError as target_exc:
+        raise RuntimeError(
+            f"double-copy: hardlinked {target} but failed to remove "
+            f"both the source ({source_exc}) and the new link ({target_exc}); "
+            f"manual cleanup required"
+        ) from source_exc
+    raise source_exc
+
+
+def _restore_quarantined_source(quarantine: Path, source: Path) -> bool:
+    try:
+        os.link(quarantine, source, follow_symlinks=False)
+    except (FileExistsError, TypeError, NotImplementedError, OSError) as exc:
+        logger.warning(
+            "could not restore raced source %s from private quarantine %s: %s; "
+            "preserving both values",
+            source, quarantine, exc,
+        )
+        return False
+    try:
+        os.unlink(quarantine)
+    except OSError as exc:
+        logger.warning(
+            "could not remove private quarantine entry %s after restoring %s: %s; "
+            "preserving both values",
+            quarantine, source, exc,
+        )
+        return False
+    return True
+
+
+def _remove_quarantine_dir(quarantine_dir: Path) -> None:
+    try:
+        quarantine_dir.rmdir()
+    except OSError as exc:
+        logger.warning(
+            "could not remove private quarantine directory %s: %s",
+            quarantine_dir, exc,
+        )
+
+
+def _unlink_with_rollback(
+    source: Path, target: Path, expected: os.stat_result,
+) -> None:
+    """Remove a verified source after linking; preserve raced replacements."""
+    try:
+        quarantine_dir = Path(tempfile.mkdtemp(
+            prefix=".lostutils-remove-", dir=source.parent))
+    except OSError as exc:
+        _rollback_link(target, exc)
+    quarantine = quarantine_dir / "source"
+    try:
+        os.rename(source, quarantine)
+    except OSError as exc:
+        _remove_quarantine_dir(quarantine_dir)
+        _rollback_link(target, exc)
+    try:
+        current = os.lstat(quarantine)
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise OSError(errno.EBUSY, "source replaced during move", source)
+        os.unlink(quarantine)
+    except OSError as exc:
+        restored = _restore_quarantined_source(quarantine, source)
+        if restored:
+            _remove_quarantine_dir(quarantine_dir)
+        _rollback_link(target, exc)
+    else:
+        _remove_quarantine_dir(quarantine_dir)
 
 
 def _require_regular_source(path: Path) -> None:
@@ -1442,6 +1490,7 @@ def move_file(path: Path, destination: Path) -> Path:
     """
     _require_regular_source(path)
     path = _resolve_source_collision(path, destination)
+    source_identity = os.lstat(path)
     ensure_directory(destination)
     target = destination / path.name
     try:
@@ -1451,7 +1500,7 @@ def move_file(path: Path, destination: Path) -> Path:
             raise
         _move_cross_device(path, target)
     else:
-        _unlink_with_rollback(path, target)
+        _unlink_with_rollback(path, target, source_identity)
     return target
 
 

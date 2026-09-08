@@ -744,9 +744,11 @@ class ReliabilityFixesTests(unittest.TestCase):
             dest = root / "bucket"
             target = dest / "a.txt"
             real_unlink = os.unlink
+            calls = {"count": 0}
 
             def fake_unlink(p):
-                if Path(p) == src:
+                calls["count"] += 1
+                if calls["count"] == 1:
                     raise OSError("cannot remove source")
                 return real_unlink(p)
 
@@ -1774,7 +1776,7 @@ class UnlinkRollbackTests(unittest.TestCase):
 
             with patch("organize_by_extension.os.unlink", side_effect=fake_unlink):
                 with self.assertRaises(PermissionError):
-                    _unlink_with_rollback(src, tgt)
+                    _unlink_with_rollback(src, tgt, os.lstat(src))
             # Both original src and rolled-back tgt: src remains (we couldn't remove it),
             # tgt was rolled back.
             self.assertTrue(src.exists())
@@ -4239,6 +4241,128 @@ def test_move_file_rejects_source_swapped_to_symlink_during_link(tmp_path, monke
 
     assert src.is_symlink()
     assert not (dest / "file.bin").exists()
+
+
+def test_move_file_preserves_regular_replacement_during_link(
+        tmp_path, monkeypatch):
+    """oze-conc-80: a replacement source survives the hardlink rollback."""
+    src = tmp_path / "file.bin"
+    src.write_bytes(b"original")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(b"replacement")
+    dest = tmp_path / "bucket"
+    dest.mkdir()
+    real_link = oze.os.link
+    changed = False
+
+    def linked_then_replaced(source, target, *args, **kwargs):
+        nonlocal changed
+        result = real_link(source, target, *args, **kwargs)
+        if not changed:
+            replacement.replace(src)
+            changed = True
+        return result
+
+    monkeypatch.setattr(oze.os, "link", linked_then_replaced)
+
+    with pytest.raises(OSError, match="source replaced during move"):
+        oze.move_file(src, dest)
+
+    assert src.read_bytes() == b"replacement"
+    assert not (dest / "file.bin").exists()
+
+
+def test_move_file_preserves_symlink_replacement_during_link(
+        tmp_path, monkeypatch):
+    src = tmp_path / "file.bin"
+    src.write_bytes(b"original")
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"replacement")
+    dest = tmp_path / "bucket"
+    dest.mkdir()
+    real_link = oze.os.link
+    changed = False
+
+    def linked_then_symlink(source, target, *args, **kwargs):
+        nonlocal changed
+        result = real_link(source, target, *args, **kwargs)
+        if not changed:
+            src.unlink()
+            src.symlink_to(outside)
+            changed = True
+        return result
+
+    monkeypatch.setattr(oze.os, "link", linked_then_symlink)
+
+    with pytest.raises(OSError, match="source replaced during move"):
+        oze.move_file(src, dest)
+
+    assert src.is_symlink()
+    assert src.resolve() == outside
+    assert not (dest / "file.bin").exists()
+
+
+def test_quarantine_restore_keeps_new_source_when_path_reused(tmp_path, caplog):
+    quarantine = tmp_path / ".file.bin.random.remove"
+    source = tmp_path / "file.bin"
+    quarantine.write_bytes(b"original")
+    source.write_bytes(b"replacement")
+
+    with caplog.at_level("WARNING"):
+        oze._restore_quarantined_source(quarantine, source)
+
+    assert source.read_bytes() == b"replacement"
+    assert quarantine.read_bytes() == b"original"
+    assert "preserving both values" in caplog.text
+
+
+def test_quarantine_restore_failure_preserves_both_values(tmp_path, monkeypatch):
+    quarantine = tmp_path / "private" / "source"
+    quarantine.parent.mkdir()
+    source = tmp_path / "file.bin"
+    quarantine.write_bytes(b"original")
+    source.write_bytes(b"replacement")
+
+    def fail_link(*_args, **_kwargs):
+        raise OSError("denied")
+
+    monkeypatch.setattr(oze.os, "link", fail_link)
+
+    assert not oze._restore_quarantined_source(quarantine, source)
+    assert source.read_bytes() == b"replacement"
+    assert quarantine.read_bytes() == b"original"
+
+
+def test_quarantine_restore_without_nofollow_preserves_both_values(
+        tmp_path, monkeypatch):
+    quarantine = tmp_path / "private" / "source"
+    quarantine.parent.mkdir()
+    source = tmp_path / "file.bin"
+    quarantine.write_bytes(b"original")
+    source.write_bytes(b"replacement")
+    calls = []
+
+    def unsupported_link(*_args, **_kwargs):
+        calls.append(True)
+        raise NotImplementedError
+
+    monkeypatch.setattr(oze.os, "link", unsupported_link)
+
+    assert not oze._restore_quarantined_source(quarantine, source)
+    assert calls == [True]
+    assert source.read_bytes() == b"replacement"
+    assert quarantine.read_bytes() == b"original"
+
+
+def test_private_quarantine_cleanup_failure_is_logged(tmp_path, monkeypatch, caplog):
+    def fail_rmdir(_path):
+        raise OSError("busy")
+
+    monkeypatch.setattr(Path, "rmdir", fail_rmdir)
+    with caplog.at_level("WARNING"):
+        oze._remove_quarantine_dir(tmp_path)
+
+    assert "could not remove private quarantine directory" in caplog.text
 
 
 def test_move_worker_reports_actual_dest_from_move_file(tmp_path, monkeypatch):
