@@ -2297,6 +2297,7 @@ def test_hash_open_flags_tolerate_missing_posix_flags(tmp_path, monkeypatch):
     f.write_bytes(b"abc")
     monkeypatch.delattr(hr.os, "O_NOFOLLOW", raising=False)
     monkeypatch.delattr(hr.os, "O_CLOEXEC", raising=False)
+    monkeypatch.delattr(hr.os, "O_NONBLOCK", raising=False)
     assert hr.hash_head(str(f)) is not None
 
 
@@ -3885,6 +3886,7 @@ def test_hash_rejects_change_timestamp_even_when_modification_time_is_unchanged(
         calls += 1
         return SimpleNamespace(
             st_dev=result.st_dev, st_ino=result.st_ino, st_size=result.st_size,
+            st_mode=result.st_mode,
             st_mtime_ns=result.st_mtime_ns,
             st_ctime_ns=result.st_ctime_ns + (1 if calls > 1 else 0),
         )
@@ -3954,3 +3956,34 @@ def test_main_recovered_alias_cannot_hide_independent_read_failure(
     if not quiet:
         assert "hash_errors=1 " in captured.err
         assert "hash_skipped=1 " in captured.err
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="requires POSIX FIFOs")
+@pytest.mark.parametrize("use_walked_identity", [False, True])
+def test_hash_rejects_fifo_replacement_without_blocking(tmp_path, use_walked_identity):
+    import subprocess
+    import sys
+
+    code = '''
+import importlib.util
+import os
+import sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("hash_recursive_ai5", sys.argv[1])
+hr = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hr)
+path = Path(sys.argv[2])
+path.write_bytes(b"original")
+walked = path.stat()
+expected = (walked.st_dev, walked.st_ino, walked.st_size) if sys.argv[3] == "True" else None
+path.unlink()
+os.mkfifo(path)
+assert hr.hash_head(str(path), hr.RunConfig(), expected) is None
+'''
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(_PATH), str(tmp_path / "candidate"),
+         str(use_walked_identity)],
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "no longer a regular file" in result.stderr

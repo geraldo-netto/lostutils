@@ -127,6 +127,7 @@ def _hash_open_flags() -> int:
         os.O_RDONLY
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
     )
 
 
@@ -704,6 +705,8 @@ def _stat_identity(stat_result) -> tuple[int, int, int]:
 
 
 def _require_hash_identity(stat_result, expected) -> None:
+    if not stat.S_ISREG(stat_result.st_mode):
+        raise OSError(errno.EBUSY, "hash input is no longer a regular file")
     actual = _stat_identity(stat_result)
     if actual != expected:
         raise OSError(
