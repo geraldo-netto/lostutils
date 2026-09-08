@@ -1180,7 +1180,8 @@ def _copy_tree_pinned(
     if check_space or progress_cb is not None:
         apparent, allocated = _pinned_size_totals(source_fd)
     if check_space:
-        _check_disk_space(source_label, destination, total_bytes=allocated)
+        # Stream copying materializes sparse holes; retain allocation headroom too.
+        _check_disk_space(source_label, destination, total_bytes=max(apparent, allocated))
     watchdog = _OperationStallWatchdog("copytree")
     try:
         staged = owner.create()

@@ -4087,8 +4087,7 @@ def test_execute_unwinds_created_dest_dirs_on_failure(tmp_path, monkeypatch):
 
 
 def test_pinned_size_totals_sparse_alloc_under_apparent(tmp_path):
-    """rf-perf-06: a sparse file's allocated total is below its apparent size,
-    so the disk-space precheck doesn't over-count it."""
+    """Sparse source allocation differs from the bytes its stream copy writes."""
     f = tmp_path / "sparse.bin"
     with open(f, "wb") as fh:
         fh.truncate(10 * 1024 * 1024)  # 10 MiB hole, ~0 blocks allocated
@@ -4097,19 +4096,29 @@ def test_pinned_size_totals_sparse_alloc_under_apparent(tmp_path):
     assert allocated < apparent  # holes not counted at full logical size
 
 
-def test_check_disk_space_uses_allocated_not_apparent(tmp_path, monkeypatch):
-    """rf-perf-06: a mostly-sparse tree that fits in actual blocks must not be
-    refused on apparent size alone."""
+def test_copy_tree_refuses_sparse_expansion_before_population(tmp_path, monkeypatch):
     src = tmp_path / "src"; src.mkdir()
     with open(src / "sparse.bin", "wb") as fh:
-        fh.truncate(1 << 40)  # 1 TiB apparent, ~0 allocated
+        fh.truncate(1024 * 1024)
 
     class _Usage:
-        free = 64 * 1024 * 1024  # 64 MiB free — far below 1 TiB apparent
+        free = 64 * 1024
+
+    if (src / "sparse.bin").stat().st_blocks * 512 >= _Usage.free:
+        pytest.skip("test filesystem does not create a sufficiently sparse file")
+
+    def unexpected_copy(*_args, **_kwargs):
+        pytest.fail("insufficient logical copy space must be detected before population")
 
     monkeypatch.setattr(rf.shutil, "disk_usage", lambda _p: _Usage())
-    # Apparent-size accounting would raise; allocated accounting passes.
-    rf._check_disk_space(src, tmp_path / "dst", total_bytes=_pinned_totals(src)[1])
+    monkeypatch.setattr(rf, "_populate_pinned_copy", unexpected_copy)
+
+    with pytest.raises(RuntimeError, match="insufficient space"):
+        _pinned_call(rf.copy_tree, src, tmp_path / "dst")
+
+    assert (src / "sparse.bin").stat().st_size == 1024 * 1024
+    assert not (tmp_path / "dst").exists()
+    assert not list(tmp_path.glob(".relocate-copy-*"))
 
 
 def test_copy_tree_cleans_partial_target_on_keyboardinterrupt(tmp_path, monkeypatch):
