@@ -59,14 +59,14 @@ import tempfile
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 import contextvars
 import ctypes
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterable, Iterator, Sequence
+from typing import BinaryIO, Callable, Generator, Iterable, Iterator, Sequence
 
 LOG = logging.getLogger("relocate")
 
@@ -1393,11 +1393,15 @@ def _run_streamed(
     latency instead."""
     inflight: set = set()
     abort = False
-    for task in tasks:
-        if abort:
-            break
+    iterator = iter(tasks)
+    while not abort:
         if len(inflight) >= max_inflight:
             inflight, abort = _consume_completed(inflight, on_done)
+            continue
+        try:
+            task = next(iterator)
+        except StopIteration:
+            break
         inflight.add(submit(task))
     # rf-conc-02: drains (and thus joins) every still-inflight future —
     # including running ones — so callers that delete shared state after
@@ -1516,6 +1520,27 @@ def _verify_pinned_symlink(
         )
 
 
+@dataclass
+class _PinnedFileVerification:
+    """One-shot hash task owning a duplicate of the walker's directory fd."""
+
+    directory_fd: int
+    name: str
+    source_stat: os.stat_result
+    verify: Callable[[str], None]
+
+    def __call__(self) -> None:
+        try:
+            self.verify(_digest_pinned_file(self.directory_fd, self.name, self.source_stat))
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        descriptor, self.directory_fd = self.directory_fd, -1
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _pinned_kind_verify_task(
     source_path: Path,
     target: Path,
@@ -1525,11 +1550,13 @@ def _pinned_kind_verify_task(
     source_stat: os.stat_result,
     checksum: bool,
 ) -> Callable[[], None] | None:
-    # Capture source data before the walker advances and closes directory_fd.
+    # A checksum worker must retain its own directory fd after the walk advances.
     mode = source_stat.st_mode
     if stat.S_ISREG(mode):
-        digest = _digest_pinned_file(directory_fd, name, source_stat) if checksum else None
-        return partial(_verify_pinned_file, source_path, target, rel, source_stat, digest)
+        verify = partial(_verify_pinned_file, source_path, target, rel, source_stat)
+        if checksum:
+            return _PinnedFileVerification(os.dup(directory_fd), name, source_stat, verify)
+        return partial(verify, None)
     if stat.S_ISDIR(mode):
         return partial(_verify_pinned_directory, source_path, target, rel)
     if stat.S_ISLNK(mode):
@@ -1546,7 +1573,8 @@ def _iter_pinned_verify_tasks(
     destination: Path,
     checksum: bool,
     verify_ownership: bool,
-) -> Iterator[Callable[[], None]]:
+) -> Generator[Callable[[], None], None, None]:
+    """Yield one-shot tasks; checksum tasks own fds until run or pool cancellation."""
     for rel, directory_fd, name, source_stat in _walk_pinned_entries(source_fd):
         source_path = source_label / rel
         target = destination / rel
@@ -1588,7 +1616,7 @@ def verify_copy(src: Path, dst: Path, checksum: bool = False,
     _verify_target_xattrs(dst, _read_xattrs(source_fd))
     tasks = _iter_pinned_verify_tasks(
         source_fd, src, dst, checksum, verify_ownership)
-    with _OperationStallWatchdog("verify_copy") as watchdog:
+    with closing(tasks), _OperationStallWatchdog("verify_copy") as watchdog:
         if not checksum:
             # cheap stat-only / readlink ops: sequential is fast and keeps the
             # error path deterministic for tests.
@@ -1792,7 +1820,7 @@ def _run_verify_pool(
         # only drops queued work, the in-flight hashes are not left detached
         # past this function. The previous wait=False leaked those threads on
         # the abort path.
-        ex.shutdown(wait=True, cancel_futures=bool(first_error))
+        ex.shutdown(wait=True, cancel_futures=True)
     if first_error:
         if dropped[0]:
             _log().warning(
@@ -1808,7 +1836,16 @@ def _submit_in_context(ex: ThreadPoolExecutor, task: Callable[[], None]
     (rf-test-01) so worker threads inherit the active `_hash` / `_log`
     contextvars instead of the empty default context."""
     ctx = contextvars.copy_context()
-    return ex.submit(ctx.run, task)
+    try:
+        future = ex.submit(ctx.run, task)
+    except BaseException:
+        if isinstance(task, _PinnedFileVerification):
+            task.close()
+        raise
+    if isinstance(task, _PinnedFileVerification):
+        # A cancelled queued task never enters __call__ and must release its fd.
+        future.add_done_callback(lambda _future: task.close())
+    return future
 
 
 def _verify_ownership(

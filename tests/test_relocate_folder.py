@@ -4982,7 +4982,8 @@ def test_cleanup_preserves_replacement_that_wins_before_quarantine(
 
 @pytest.mark.parametrize("checksum", [False, True])
 @pytest.mark.parametrize("ownership", [False, True])
-def test_pinned_verify_tasks_outlive_source_descriptors(tmp_path, checksum, ownership):
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_pinned_verify_tasks_outlive_source_descriptors(tmp_path, checksum, ownership, corrupt):
     source, target = tmp_path / "source", tmp_path / "target"
     _make_tree(source)
     _copy_identical(source, target)
@@ -4995,17 +4996,20 @@ def test_pinned_verify_tasks_outlive_source_descriptors(tmp_path, checksum, owne
         os.close(source_fd)
 
     assert len(tasks) == 4 * (2 if ownership else 1) + 3  # Symlink xattrs are unsupported.
-    for task in tasks:
-        task()
-
-    (target / "sub" / "file.txt").write_text("HELLO WORLD")
-    if checksum:
-        with pytest.raises(RuntimeError, match="hash mismatch"):
+    if corrupt:
+        (target / "sub" / "file.txt").write_text("HELLO WORLD")
+    try:
+        if checksum and corrupt:
+            with pytest.raises(RuntimeError, match="hash mismatch"):
+                for task in tasks:
+                    task()
+        else:
             for task in tasks:
                 task()
-    else:
+    finally:
         for task in tasks:
-            task()
+            if isinstance(task, rf._PinnedFileVerification):
+                task.close()
 
 
 @pytest.mark.parametrize("operation", [rf.copy_tree, rf.verify_copy])
