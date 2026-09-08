@@ -5,7 +5,9 @@ import importlib.util
 import json
 import logging
 import multiprocessing
+import os
 import sqlite3
+import stat
 import sys
 import types
 from pathlib import Path
@@ -1333,6 +1335,30 @@ def test_atomic_write_fsyncs_parent_directory(tmp_path, monkeypatch):
     assert calls[-3][0:2] == ("open", tmp_path)
     assert calls[-2] == ("fsync", opened_dir_fd)
     assert calls[-1] == ("close", opened_dir_fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="file mode and umask semantics differ on Windows")
+def test_atomic_write_uses_umask_for_new_output(tmp_path):
+    output = tmp_path / "out.txt"
+    original_umask = os.umask(0o027)
+    try:
+        bookmark_tidy._atomic_write_text(output, "data")
+    finally:
+        os.umask(original_umask)
+
+    assert stat.S_IMODE(output.stat().st_mode) == 0o640
+
+
+def test_atomic_write_preserves_existing_output_mode(tmp_path):
+    output = tmp_path / "out.txt"
+    output.write_text("old", encoding="utf-8")
+    output.chmod(0o664)
+    expected_mode = stat.S_IMODE(output.stat().st_mode)
+
+    bookmark_tidy._atomic_write_text(output, "new")
+
+    assert output.read_text(encoding="utf-8") == "new"
+    assert stat.S_IMODE(output.stat().st_mode) == expected_mode
 
 
 def test_fsync_parent_dir_ignores_unsupported_directory_fsync(tmp_path, monkeypatch):

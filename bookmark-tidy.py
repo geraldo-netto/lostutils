@@ -7,6 +7,7 @@ import logging
 import multiprocessing
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1631,12 +1632,18 @@ def write_output(bookmarks: Sequence[Bookmark], output: Path, output_format: str
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    tmp_path = Path(tmp_name)
+    try:
+        target_mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        target_mode = None
+    tmp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
+            if target_mode is not None:
+                os.chmod(tmp_path, target_mode)
             os.fsync(handle.fileno())
         os.replace(tmp_path, path)
         _fsync_parent_dir(path)
