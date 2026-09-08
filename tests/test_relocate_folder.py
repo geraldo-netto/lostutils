@@ -1204,7 +1204,7 @@ def test_pinned_verify_tasks_reuse_regular_file_stat(tmp_path, monkeypatch):
                                        verify_ownership=False))
     # fwalk checks the directory before traversal; symlink reads recheck identity.
     assert counts == {".": 1, "f.txt": 1, "d": 2, "l": 2}
-    assert len(tasks) == 3
+    assert len(tasks) == 5  # Three kind checks plus regular-file/directory xattrs.
 
 
 def test_pinned_verify_tasks_fail_immediately_on_source_stat_error(tmp_path, monkeypatch):
@@ -4982,7 +4982,7 @@ def test_pinned_verify_tasks_outlive_source_descriptors(tmp_path, checksum, owne
     finally:
         os.close(source_fd)
 
-    assert len(tasks) == 4 * (2 if ownership else 1)
+    assert len(tasks) == 4 * (2 if ownership else 1) + 3  # Symlink xattrs are unsupported.
     for task in tasks:
         task()
 

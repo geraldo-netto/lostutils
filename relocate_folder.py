@@ -61,6 +61,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 import contextvars
+import ctypes
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import partial
@@ -941,6 +942,130 @@ def _apply_pinned_metadata(
         )
 
 
+class _DarwinXattrs:
+    """macOS exposes fd xattrs in libc but not Python's Linux-only os API."""
+
+    def __init__(self) -> None:
+        self.library = ctypes.CDLL(None, use_errno=True)
+
+    def _function(self, name, argument_types, result_type):
+        function = getattr(self.library, name)
+        function.argtypes = argument_types
+        function.restype = result_type
+        return function
+
+    def _read(self, function, prefix, suffix) -> bytes:
+        size = _checked_xattr_call(function, *prefix, None, 0, *suffix)
+        if size == 0:
+            return b""
+        buffer = ctypes.create_string_buffer(size)
+        count = _checked_xattr_call(function, *prefix, buffer, size, *suffix)
+        return buffer.raw[:count]
+
+    def listxattr(self, descriptor: int) -> list[str]:
+        function = self._function("flistxattr", [
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int,
+        ], ctypes.c_ssize_t)
+        packed = self._read(function, (descriptor,), (0,))
+        return [os.fsdecode(name) for name in packed.split(b"\0") if name]
+
+    def getxattr(self, descriptor: int, name: str) -> bytes:
+        function = self._function("fgetxattr", [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.c_uint32, ctypes.c_int,
+        ], ctypes.c_ssize_t)
+        return self._read(function, (descriptor, os.fsencode(name)), (0, 0))
+
+    def setxattr(self, descriptor: int, name: str, value: bytes) -> None:
+        function = self._function("fsetxattr", [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.c_uint32, ctypes.c_int,
+        ], ctypes.c_int)
+        _checked_xattr_call(function, descriptor, os.fsencode(name), value, len(value), 0, 0)
+
+    def removexattr(self, descriptor: int, name: str) -> None:
+        function = self._function("fremovexattr", [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+        ], ctypes.c_int)
+        _checked_xattr_call(function, descriptor, os.fsencode(name), 0)
+
+
+def _checked_xattr_call(function, *args) -> int:
+    result = function(*args)
+    if result < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return result
+
+
+def _xattr_backend():
+    if sys.platform == "darwin":
+        return _DarwinXattrs()
+    required = ("listxattr", "getxattr", "setxattr", "removexattr")
+    if not all(hasattr(os, name) for name in required):
+        raise RuntimeError("descriptor xattr APIs unavailable; source metadata cannot be preserved")
+    return os
+
+
+def _read_xattrs(descriptor: int) -> dict[str, bytes]:
+    backend = _xattr_backend()
+    try:
+        names = backend.listxattr(descriptor)
+    except OSError as exc:
+        if exc.errno in {errno.ENOTSUP, errno.EOPNOTSUPP}:
+            return {}
+        raise
+    return {name: backend.getxattr(descriptor, name) for name in names}
+
+
+def _sync_xattrs(descriptor: int, expected: dict[str, bytes]) -> None:
+    backend = _xattr_backend()
+    actual = _read_xattrs(descriptor)
+    for name in actual.keys() - expected.keys():
+        backend.removexattr(descriptor, name)
+    for name, value in expected.items():
+        if actual.get(name) != value:
+            backend.setxattr(descriptor, name, value)
+    if _read_xattrs(descriptor) != expected:
+        raise RuntimeError("xattr mismatch after copying metadata; refusing to remove source")
+
+
+@contextmanager
+def _open_pinned_directory(
+    directory_fd: int, name: str, expected: os.stat_result,
+) -> Iterator[int]:
+    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+    try:
+        if _pinned_stat_snapshot(os.fstat(descriptor)) != _pinned_stat_snapshot(expected):
+            raise RuntimeError(f"source directory changed while opening metadata: {name}")
+        yield descriptor
+        if _pinned_stat_snapshot(os.fstat(descriptor)) != _pinned_stat_snapshot(expected):
+            raise RuntimeError(f"source directory changed while reading metadata: {name}")
+    finally:
+        os.close(descriptor)
+
+
+def _entry_xattrs(directory_fd: int, name: str, expected: os.stat_result) -> dict[str, bytes]:
+    if stat.S_ISREG(expected.st_mode):
+        with _open_pinned_file(directory_fd, name, expected) as stream:
+            return _read_xattrs(stream.fileno())
+    with _open_pinned_directory(directory_fd, name, expected) as descriptor:
+        return _read_xattrs(descriptor)
+
+
+def _apply_directory_metadata(
+    target: Path, entry_stat: os.stat_result, attributes: dict[str, bytes],
+    warning_limiter: _ChownWarningLimiter,
+) -> None:
+    descriptor = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _apply_pinned_metadata(target, entry_stat, warning_limiter)
+        # ACL xattrs can update mode bits; apply them after chmod/chown.
+        _sync_xattrs(descriptor, attributes)
+    finally:
+        os.close(descriptor)
+
+
 def _copy_pinned_regular(
     directory_fd: int,
     name: str,
@@ -949,9 +1074,12 @@ def _copy_pinned_regular(
     warning_limiter: "_ChownWarningLimiter",
 ) -> None:
     with _open_pinned_file(directory_fd, name, source_stat) as source_stream:
+        attributes = _read_xattrs(source_stream.fileno())
         with open(destination, "xb") as target_stream:
             shutil.copyfileobj(source_stream, target_stream)
-    _apply_pinned_metadata(destination, source_stat, warning_limiter)
+            target_stream.flush()
+            _apply_pinned_metadata(destination, source_stat, warning_limiter)
+            _sync_xattrs(target_stream.fileno(), attributes)
 
 
 def _pinned_size_totals(source_fd: int) -> tuple[int, int]:
@@ -982,7 +1110,7 @@ def _copy_pinned_entry(
     source_label: Path,
     destination: Path,
     entry: PinnedEntry,
-    directories: list[tuple[Path, os.stat_result]],
+    directories: list[tuple[Path, os.stat_result, dict[str, bytes]]],
     skipped: list[Path],
     mode_cache: dict[Path, int],
     warning_limiter: "_ChownWarningLimiter",
@@ -992,7 +1120,7 @@ def _copy_pinned_entry(
     mode = entry_stat.st_mode
     if stat.S_ISDIR(mode):
         target.mkdir(mode=0o700)
-        directories.append((target, entry_stat))
+        directories.append((target, entry_stat, _entry_xattrs(directory_fd, name, entry_stat)))
     elif stat.S_ISREG(mode):
         _copy_pinned_regular(
             directory_fd, name, entry_stat, target, warning_limiter)
@@ -1050,7 +1178,7 @@ def _populate_pinned_copy(
 ) -> list[Path]:
     skipped: list[Path] = []
     warning_limiter = _ChownWarningLimiter()
-    directories = [(destination, os.fstat(source_fd))]
+    directories = [(destination, os.fstat(source_fd), _read_xattrs(source_fd))]
     copied = 0
     for entry in _walk_pinned_entries(source_fd):
         copied_size = _copy_pinned_entry(
@@ -1062,8 +1190,8 @@ def _populate_pinned_copy(
             if progress_cb is not None:
                 progress_cb(copied, apparent)
         watchdog.touch("copytree")
-    for target, entry_stat in reversed(directories):
-        _apply_pinned_metadata(target, entry_stat, warning_limiter)
+    for target, entry_stat, attributes in reversed(directories):
+        _apply_directory_metadata(target, entry_stat, attributes, warning_limiter)
     warning_limiter.summarize()
     return skipped
 
@@ -1391,9 +1519,23 @@ def _iter_pinned_verify_tasks(
         if task is None:
             continue
         yield task
+        if not stat.S_ISLNK(source_stat.st_mode):
+            yield partial(
+                _verify_target_xattrs, target,
+                _entry_xattrs(directory_fd, name, source_stat),
+            )
         if verify_ownership:
             yield partial(
                 _verify_ownership, source_path, target, rel, source_stat)
+
+
+def _verify_target_xattrs(target: Path, expected: dict[str, bytes]) -> None:
+    descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if _read_xattrs(descriptor) != expected:
+            raise RuntimeError(f"xattr mismatch in copy: {target}")
+    finally:
+        os.close(descriptor)
 
 
 def verify_copy(src: Path, dst: Path, checksum: bool = False,
@@ -1404,8 +1546,10 @@ def verify_copy(src: Path, dst: Path, checksum: bool = False,
     ``src`` labels diagnostics only. The caller keeps ``source_fd`` open until
     verification finishes. Checksum tasks stream through a bounded worker pool;
     size-only checks run sequentially. Optional ownership checks compare mode,
-    uid and gid for every copied entry.
+    uid and gid for every copied entry. Extended attributes on regular files
+    and directories are always compared; symlink xattrs are not copied.
     """
+    _verify_target_xattrs(dst, _read_xattrs(source_fd))
     tasks = _iter_pinned_verify_tasks(
         source_fd, src, dst, checksum, verify_ownership)
     with _OperationStallWatchdog("verify_copy") as watchdog:
