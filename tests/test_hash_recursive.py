@@ -3987,3 +3987,66 @@ assert hr.hash_head(str(path), hr.RunConfig(), expected) is None
     )
     assert result.returncode == 0, result.stderr
     assert "no longer a regular file" in result.stderr
+
+
+@pytest.mark.parametrize("failure_phase", ["write", "flush"])
+def test_closed_stdout_pipe_exits_without_traceback(tmp_path, failure_phase):
+    import subprocess
+    import sys
+
+    code = '''
+import importlib.util
+import sys
+spec = importlib.util.spec_from_file_location("hash_recursive_ai5", sys.argv[1])
+hr = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(hr)
+def run():
+    sys.stdout.write("x" * (100000 if sys.argv[2] == "write" else 1))
+    return 0
+hr._run = run
+raise SystemExit(hr.main())
+'''
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(_PATH), failure_phase],
+            stdout=write_fd, stderr=subprocess.PIPE, text=True, timeout=5,
+        )
+    finally:
+        os.close(write_fd)
+    assert result.returncode == 1
+    assert result.stderr == ""
+
+
+def test_broken_pipe_still_finalizes_requested_dump(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a").write_bytes(b"duplicate")
+    (source / "b").write_bytes(b"duplicate")
+    dump = tmp_path / "hashes.txt"
+    finalized = []
+    silence = []
+    finalize = hr._finalize_hash_dump
+
+    def tracked_finalize(*args):
+        finalize(*args)
+        finalized.append(True)
+
+    def broken(_value):
+        raise BrokenPipeError()
+
+    monkeypatch.setattr(hr.sys, "argv", ["hr", str(source), "--hashes-file", str(dump)])
+    monkeypatch.setattr(hr.sys.stdout, "write", broken)
+    monkeypatch.setattr(hr, "_silence_stdout_after_broken_pipe", lambda: silence.append(True))
+    monkeypatch.setattr(hr, "_finalize_hash_dump", tracked_finalize)
+    assert hr.main() == 1
+    assert finalized == [True]
+    assert silence == [True]
+    assert str(source / "a") in dump.read_text()
+    assert str(source / "b") in dump.read_text()
+
+
+def test_broken_pipe_silencing_tolerates_stream_without_descriptor(monkeypatch):
+    monkeypatch.setattr(hr.sys, "stdout", io.StringIO())
+    hr._silence_stdout_after_broken_pipe()

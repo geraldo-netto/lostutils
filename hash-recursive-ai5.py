@@ -2444,7 +2444,25 @@ def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet):
     return on_hashed, on_composite, _StageProgress(stall_monitor, quiet)
 
 
+def _silence_stdout_after_broken_pipe() -> None:
+    try:
+        with open(os.devnull, "wb") as sink:
+            os.dup2(sink.fileno(), sys.stdout.fileno())
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 def main():
+    try:
+        exit_code = _run()
+        sys.stdout.flush()
+        return exit_code
+    except BrokenPipeError:
+        _silence_stdout_after_broken_pipe()
+        return 1
+
+
+def _run():
     _configure_stdio_encoding()
     args = _build_arg_parser().parse_args()
     try:
