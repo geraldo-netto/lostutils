@@ -2,7 +2,9 @@
 
 import logging
 import os
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -204,3 +206,111 @@ def test_pinned_special_preflight_allows_regular_files_directories_and_symlinks(
     assert cache == {}
     assert (root / "regular.txt").read_bytes() == b"ordinary"
     assert (root / "link").is_symlink()
+
+
+def test_pinned_copy_rejects_fifo_substitution_without_blocking(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_bytes(b"original data")
+    code = textwrap.dedent("""\
+        import os
+        import sys
+        from pathlib import Path
+        import relocate_folder as rf
+
+        root = Path(sys.argv[1])
+        source = root / "source"
+        target = root / "target"
+        original_walk = rf._walk_pinned_entries
+        original_open = os.open
+        opened_files = []
+
+        def race_walk(descriptor):
+            for entry in original_walk(descriptor):
+                if entry[0].name == "payload":
+                    (source / "payload").rename(root / "original")
+                    os.mkfifo(source / "payload")
+                yield entry
+
+        def track_open(name, flags, *args, **kwargs):
+            descriptor = original_open(name, flags, *args, **kwargs)
+            if name == "payload":
+                opened_files.append(descriptor)
+            return descriptor
+
+        rf._walk_pinned_entries = race_walk
+        rf.os.open = track_open
+        descriptor, identity = rf._source_identity_fd(source)
+        try:
+            try:
+                rf.copy_tree(source, target, source_fd=descriptor, check_space=False)
+            except RuntimeError as exc:
+                assert "source entry changed while opening" in str(exc)
+            else:
+                raise AssertionError("FIFO was accepted as source data")
+            assert not target.exists()
+            assert os.fstat(descriptor).st_ino == identity[1]
+        finally:
+            os.close(descriptor)
+        assert len(opened_files) == 1
+        try:
+            os.fstat(opened_files[0])
+        except OSError:
+            pass
+        else:
+            raise AssertionError("substituted file descriptor leaked")
+        print("rejected safely")
+    """)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)], cwd=Path(rf.__file__).parent,
+        capture_output=True, text=True, timeout=3,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "rejected safely"
+    assert (tmp_path / "original").read_bytes() == b"original data"
+    assert not (tmp_path / "target").exists()
+
+
+def test_pinned_regular_file_open_becomes_blocking_after_validation(pinned_directory, monkeypatch):
+    root, directory_fd = pinned_directory
+    payload = root / "payload"
+    payload.write_bytes(b"original")
+    observed_flags = []
+    real_open = os.open
+
+    def track_open(name, flags, *args, **kwargs):
+        observed_flags.append(flags)
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(rf.os, "open", track_open)
+    with rf._open_pinned_file(directory_fd, payload.name, payload.stat()) as stream:
+        assert os.get_blocking(stream.fileno())
+        assert stream.read() == b"original"
+
+    assert len(observed_flags) == 1
+    assert observed_flags[0] & os.O_NONBLOCK
+
+
+def test_pinned_open_closes_descriptor_when_blocking_mode_cannot_be_restored(
+        pinned_directory, monkeypatch):
+    root, directory_fd = pinned_directory
+    payload = root / "payload"
+    payload.write_bytes(b"original")
+    attempted = []
+
+    def denied(descriptor, blocking):
+        assert blocking is True
+        attempted.append(descriptor)
+        raise OSError("cannot restore blocking mode")
+
+    monkeypatch.setattr(rf.os, "set_blocking", denied)
+    with pytest.raises(OSError, match="cannot restore blocking mode"):
+        with rf._open_pinned_file(directory_fd, payload.name, payload.stat()):
+            pytest.fail("file content must not be read before the mode is restored")
+
+    assert len(attempted) == 1
+    with pytest.raises(OSError):
+        os.fstat(attempted[0])
+    assert payload.read_bytes() == b"original"

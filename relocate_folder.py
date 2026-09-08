@@ -885,13 +885,15 @@ def _open_pinned_file(
     name: str,
     expected: os.stat_result,
 ) -> Iterator[BinaryIO]:
-    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_BINARY", 0)
+    # A FIFO substituted after stat must not block before its type is checked.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_BINARY", 0)
     fd = os.open(name, flags, dir_fd=directory_fd)
     try:
         opened = os.fstat(fd)
         if (not stat.S_ISREG(opened.st_mode)
                 or _pinned_stat_snapshot(opened) != _pinned_stat_snapshot(expected)):
             raise RuntimeError(f"source entry changed while opening: {name}")
+        os.set_blocking(fd, True)
         with os.fdopen(fd, "rb") as stream:
             fd = -1
             yield stream
