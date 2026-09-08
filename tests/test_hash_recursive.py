@@ -2513,10 +2513,43 @@ def test_main_hashes_file_open_failure_warns(tmp_path, monkeypatch, capsys):
     bad = tmp_path / "nonexistent-dir" / "hashes.txt"   # parent missing
     monkeypatch.setattr(
         hr.sys, "argv", ["hr", "--hashes-file", str(bad), str(tmp_path)])
-    hr.main()                                  # must not raise
-    err = capsys.readouterr().err
-    assert "cannot write" in err
+    assert hr.main() == 1                      # dump failure is incomplete
+    captured = capsys.readouterr()
+    assert "cannot write" in captured.err
+    assert "a.bin" in captured.out
     assert not bad.exists()
+
+
+def test_main_dump_write_failure_keeps_stdout_and_returns_incomplete(
+        tmp_path, monkeypatch, capsys):
+    (tmp_path / "a.bin").write_bytes(b"same")
+    (tmp_path / "b.bin").write_bytes(b"same")
+    dump = tmp_path / "hashes.txt"
+    real_open = open
+
+    class _WriteFail:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def write(self, _value):
+            raise OSError("dump write failed")
+
+        def close(self):
+            self._handle.close()
+
+        def __getattr__(self, name):
+            return getattr(self._handle, name)
+
+    def fake_open_dump(path):
+        return _WriteFail(real_open(path, "w+", encoding="utf-8"))
+
+    monkeypatch.setattr(hr, "_open_hash_dump", fake_open_dump)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", "--hashes-file", str(dump), str(tmp_path)])
+    assert hr.main() == 1
+    captured = capsys.readouterr()
+    assert "a.bin" in captured.out and "b.bin" in captured.out
+    assert "dump write failed" in captured.err
 
 
 def test_setup_hash_dump_returns_skip_ino_and_sets_writer(tmp_path, capsys):
@@ -2524,18 +2557,20 @@ def test_setup_hash_dump_returns_skip_ino_and_sets_writer(tmp_path, capsys):
     # in hashes_state and returns the dump's inode identity for the walk.
     dump = tmp_path / "hashes.txt"
     state: dict = {"writer": None}
-    skip_ino = hr._setup_hash_dump(str(dump), state)
+    config = hr.RunConfig()
+    skip_ino = hr._setup_hash_dump(str(dump), state, config)
     try:
         st_ = os.stat(dump)
         assert skip_ino == (st_.st_dev, st_.st_ino)
         assert state["writer"] is not None
     finally:
         state["writer"].close()
-    assert hr._setup_hash_dump(None, {"writer": None}) is None
+    assert hr._setup_hash_dump(None, {"writer": None}, config) is None
     bad = tmp_path / "missing-dir" / "hashes.txt"
     state_bad: dict = {"writer": None}
-    assert hr._setup_hash_dump(str(bad), state_bad) is None
+    assert hr._setup_hash_dump(str(bad), state_bad, config) is None
     assert state_bad["writer"] is None
+    assert config.dump_errors == 1
     assert "cannot write" in capsys.readouterr().err
 
 
@@ -2569,7 +2604,7 @@ writer.close()
         assert child.stdout.readline().strip() == "locked"
         before = dump.read_bytes()
         state = {"writer": None}
-        assert hr._setup_hash_dump(str(dump), state) is None
+        assert hr._setup_hash_dump(str(dump), state, hr.RunConfig()) is None
         assert state["writer"] is None
         assert dump.read_bytes() == before
     finally:
@@ -2579,7 +2614,7 @@ writer.close()
     assert child.returncode == 0, child.stderr.read() if child.stderr else ""
 
     state = {"writer": None}
-    assert hr._setup_hash_dump(str(dump), state) is not None
+    assert hr._setup_hash_dump(str(dump), state, hr.RunConfig()) is not None
     writer = state["writer"]
     writer.write_head((2, 2), "bb" * 32, [str(marker)])
     writer.close()
@@ -2670,11 +2705,13 @@ def test_open_hash_dump_closes_owned_descriptor_on_setup_failures(
 
     monkeypatch.setattr(hr.os, "fstat", fail_fstat)
     state = {"writer": None}
-    assert hr._setup_hash_dump(str(dump), state) is None
+    config = hr.RunConfig()
+    assert hr._setup_hash_dump(str(dump), state, config) is None
     assert state["writer"] is None
+    assert config.dump_errors == 1
     monkeypatch.setattr(hr.os, "fstat", real_fstat)
     state = {"writer": None}
-    assert hr._setup_hash_dump(str(dump), state) is not None
+    assert hr._setup_hash_dump(str(dump), state, config) is not None
     state["writer"].close()
 
 
@@ -4400,13 +4437,62 @@ def test_disable_hash_dump_clears_writer_when_close_fails(monkeypatch):
             raise OSError("close failed")
 
     state = {"writer": Writer()}
+    config = hr.RunConfig()
     logged = []
     monkeypatch.setattr(hr, "_log_line", lambda message, quiet: logged.append((message, quiet)))
 
-    hr._disable_hash_dump(state, "hashes.txt", OSError("write failed"))
+    hr._disable_hash_dump(
+        state, "hashes.txt", OSError("write failed"), config)
 
     assert state["writer"] is None
+    assert config.dump_errors == 2
     assert "write failed" in logged[0][0]
+
+
+@pytest.mark.parametrize("phase", ["compact", "close"])
+def test_dump_finalization_restores_sigint_after_keyboard_interrupt(
+        monkeypatch, phase):
+    class Writer:
+        closed = 0
+
+        def compact_invalid_aliases(self, _config):
+            if phase == "compact":
+                raise KeyboardInterrupt
+
+        def close(self):
+            self.closed += 1
+            if phase == "close":
+                raise KeyboardInterrupt
+
+    writer = Writer()
+    state = {"writer": writer}
+    restored = []
+    monkeypatch.setattr(
+        hr.signal, "signal",
+        lambda signum, handler: restored.append((signum, handler)),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        hr._finalize_hash_dump(state, "hashes.txt", "previous", hr.RunConfig())
+    assert state["writer"] is None
+    assert writer.closed == 1
+    assert restored == [(hr.signal.SIGINT, "previous")]
+
+
+def test_dump_finalization_failures_set_incomplete_status(monkeypatch):
+    class Writer:
+        def compact_invalid_aliases(self, _config):
+            raise OSError("compact failed")
+
+        def close(self):
+            raise OSError("close failed")
+
+    config = hr.RunConfig()
+    state = {"writer": Writer()}
+    monkeypatch.setattr(hr.signal, "signal", lambda *_args: None)
+    hr._finalize_hash_dump(state, "hashes.txt", "previous", config)
+    assert state["writer"] is None
+    assert config.dump_errors == 2
+    assert hr._run_exit_code(threading.Event(), {}, {}, config) == 1
 
 
 def test_composite_dump_failure_disables_writer(monkeypatch):
@@ -4422,15 +4508,17 @@ def test_composite_dump_failure_disables_writer(monkeypatch):
     writer = Writer()
     state = {"writer": writer}
     monitor = mock.Mock()
+    config = hr.RunConfig()
     monkeypatch.setattr(hr, "_log_line", lambda *_args: None)
     _on_hashed, on_composite, _on_progress = hr._build_dump_callbacks(
-        state, "hashes.txt", monitor, False, hr.RunConfig()
+        state, "hashes.txt", monitor, False, config
     )
 
     on_composite(("dev", 1), "digest")
 
     assert state["writer"] is None
     assert writer.closed
+    assert config.dump_errors == 1
 
 
 # --- hr-plat-06: DirEntry.stat reports dev/ino as zero on Windows -----------

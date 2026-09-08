@@ -173,6 +173,7 @@ class RunConfig:
         # subtracted from final per-inode failure counts.
         "hash_skipped_vanished",
         "hash_skipped_shrank",
+        "dump_errors",
         # Failed (device, inode, size) attempts in the current stage. True
         # means at least one real failure; entries are consumed after retries.
         "_hash_failures",
@@ -206,6 +207,7 @@ class RunConfig:
         self.hash_error_suppressed = 0
         self.hash_skipped_vanished = 0
         self.hash_skipped_shrank = 0
+        self.dump_errors = 0
         self._hash_failures: dict[tuple[int, int, int], bool] = {}
         self._alias_identity_reported: set[tuple[tuple, str]] = set()
         self._counter_lock = threading.Lock()
@@ -224,6 +226,13 @@ class RunConfig:
         (hr-dec-05); tracks ``block_size`` exactly as the module-level
         HEAD_TAIL_THRESHOLD tracks CAP (hr-rel-03)."""
         return self.block_size
+
+
+def _record_dump_failure(config) -> None:
+    if config is None:
+        return
+    with config._counter_lock:
+        config.dump_errors += 1
 
 
 class RootError(Exception):
@@ -2672,6 +2681,7 @@ def _run_exit_code(cancel_event, walk_stats, info, config) -> int:
         + walk_stats.get("entry_errors", 0)
         + walk_stats.get("worker_failures", 0)
         + _real_hash_error_count(info, config)
+        + config.dump_errors
     )
     return 1 if failures else 0
 
@@ -2679,7 +2689,8 @@ def _run_exit_code(cancel_event, walk_stats, info, config) -> int:
 def _emit_incomplete_run_error(exit_code) -> None:
     if exit_code == 1:
         _log_line(
-            "ERROR: run incomplete because walk, worker, or hash failures occurred.",
+            "ERROR: run incomplete because walk, worker, hash, or dump failures "
+            "occurred.",
             False,
         )
 
@@ -2712,6 +2723,7 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
         f"walk_errors={f(walk_stats['dir_errors'])}+"
         f"{f(walk_stats['entry_errors'])} "
         f"hash_errors={f(real_hash_errors)} "
+        f"dump_errors={f(config.dump_errors)} "
         f"hash_skipped={f(config.hash_skipped_vanished)} "
         f"hash_shrank={f(config.hash_skipped_shrank)} "
         f"walk_s={walk_seconds:.2f} hash_s={hash_seconds:.2f}"
@@ -2727,28 +2739,31 @@ def _finalize_hash_dump(hashes_state, hashes_file, previous_sigint, config) -> N
     Ctrl-C KeyboardInterrupt), so current-run aliases are compacted, the fd
     is always released (hr-rob-01), and the previous signal handler is always
     restored (hr-rel-20)."""
-    if hashes_state["writer"] is not None:
-        writer = hashes_state["writer"]
-        try:
-            writer.compact_invalid_aliases(config)
-        except OSError as exc:
-            _log_line(f"WARNING: finalizing {hashes_file} failed: {exc}", False)
-        finally:
+    writer = hashes_state["writer"]
+    hashes_state["writer"] = None
+    try:
+        if writer is not None:
             try:
-                writer.close()
+                writer.compact_invalid_aliases(config)
             except OSError as exc:
-                _log_line(f"WARNING: closing {hashes_file} failed: {exc}", False)
+                _record_dump_failure(config)
+                _log_line(f"WARNING: finalizing {hashes_file} failed: {exc}", False)
             finally:
-                hashes_state["writer"] = None
-    # `signal.getsignal` returns None when the previous handler was installed
-    # from C; `signal.signal` rejects None, so fall back to SIG_DFL.
-    signal.signal(
-        signal.SIGINT,
-        previous_sigint if previous_sigint is not None else signal.SIG_DFL,
-    )
+                try:
+                    writer.close()
+                except OSError as exc:
+                    _record_dump_failure(config)
+                    _log_line(f"WARNING: closing {hashes_file} failed: {exc}", False)
+    finally:
+        # `signal.getsignal` returns None when the previous handler was installed
+        # from C; `signal.signal` rejects None, so fall back to SIG_DFL.
+        signal.signal(
+            signal.SIGINT,
+            previous_sigint if previous_sigint is not None else signal.SIG_DFL,
+        )
 
 
-def _setup_hash_dump(hashes_file, hashes_state):
+def _setup_hash_dump(hashes_file, hashes_state, config):
     """Open the hashes dump and stash its writer in ``hashes_state``
     (hr-cx-06 extraction from :func:`main`).
 
@@ -2766,27 +2781,31 @@ def _setup_hash_dump(hashes_file, hashes_state):
         dump_stat = os.fstat(writer.fileno())
         return (dump_stat.st_dev, dump_stat.st_ino)
     except OSError as exc:
+        _record_dump_failure(config)
         if writer is not None:
             hashes_state["writer"] = None
             try:
                 writer.close()
-            except OSError:
-                pass
+            except OSError as close_exc:
+                _record_dump_failure(config)
+                _log_line(f"WARNING: closing {hashes_file} failed: {close_exc}", False)
         _log_line(f"WARNING: cannot write {hashes_file}: {exc}", False)
         return None
 
 
-def _disable_hash_dump(hashes_state, hashes_file, exc) -> None:
+def _disable_hash_dump(hashes_state, hashes_file, exc, config) -> None:
     """Stop dumping after a write failure: warn once, close the writer and
     clear it from ``hashes_state`` so later dump callbacks become no-ops."""
     writer = hashes_state["writer"]
     hashes_state["writer"] = None
+    _record_dump_failure(config)
     _log_line(f"WARNING: writing {hashes_file} failed: {exc}", False)
     if writer is not None:
         try:
             writer.close()
-        except OSError:
-            pass
+        except OSError as close_exc:
+            _record_dump_failure(config)
+            _log_line(f"WARNING: closing {hashes_file} failed: {close_exc}", False)
 
 
 def _dump_hashed_file(
@@ -2809,17 +2828,17 @@ def _dump_hashed_file(
         aliases[key] = paths
         writer.write_head(key, head, paths)
     except OSError as exc:
-        _disable_hash_dump(hashes_state, hashes_file, exc)
+        _disable_hash_dump(hashes_state, hashes_file, exc, config)
 
 
-def _dump_composite_hash(hashes_state, hashes_file, key, composite) -> None:
+def _dump_composite_hash(hashes_state, hashes_file, config, key, composite) -> None:
     writer = hashes_state["writer"]
     if writer is None:
         return
     try:
         writer.patch_composite(key, composite)
     except OSError as exc:
-        _disable_hash_dump(hashes_state, hashes_file, exc)
+        _disable_hash_dump(hashes_state, hashes_file, exc, config)
 
 
 class _StageProgress:
@@ -2855,7 +2874,7 @@ def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet,
     :func:`_finalize_hash_dump` observe the same writer slot as main."""
     on_hashed = partial(
         _dump_hashed_file, hashes_state, hashes_file, stall_monitor, config)
-    on_composite = partial(_dump_composite_hash, hashes_state, hashes_file)
+    on_composite = partial(_dump_composite_hash, hashes_state, hashes_file, config)
     return on_hashed, on_composite, _StageProgress(stall_monitor, quiet)
 
 
@@ -2935,7 +2954,7 @@ def _run():
         # hr-rob-02: each stage-1 head line is written immediately, then the
         # fixed-width digest field is patched if stage 3 upgrades it to the
         # confirmed full-file digest.
-        skip_ino = _setup_hash_dump(args.hashes_file, hashes_state)
+        skip_ino = _setup_hash_dump(args.hashes_file, hashes_state, config)
         # hr-obs-02 + hr-scal-05: stream the walk so we never materialise
         # the full `files` list. `on_walk_done` snaps the walk/hash
         # boundary so the per-stage durations remain meaningful.
