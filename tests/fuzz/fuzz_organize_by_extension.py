@@ -331,7 +331,8 @@ class FindReusableBucketFuzz(unittest.TestCase):
             if fill >= BUCKET_SIZE:
                 state_cache[bucket_path] = oze._BUCKET_FULL
             else:
-                state_cache[bucket_path] = {f"existing_{i}" for i in range(fill)}
+                names = {f"existing_{i}" for i in range(fill)}
+                state_cache[bucket_path] = oze._BucketState(names, set(names))
         choice = _find_reusable_bucket(
             ext_dir, prefix, filename, state_cache, list(seen)
         )

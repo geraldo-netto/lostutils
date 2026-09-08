@@ -29,7 +29,7 @@ from organize_by_extension import ( # Added for new tests
     is_bucketed_file,
     list_files,
     move_file,
-    bucket_file_names, choose_bucket, BUCKET_SIZE,
+    choose_bucket, BUCKET_SIZE,
     _BUCKET_FULL, _walk_scandir, _find_reusable_bucket,
 )
 from organize_by_extension import (  # noqa: E402 — refactor surface (cx-02/arch/decl/perf/rel)
@@ -38,6 +38,7 @@ from organize_by_extension import (  # noqa: E402 — refactor surface (cx-02/ar
     Bucket,
     BucketChoice,
     BucketManager,
+    _BucketState,
     CONTAINER_FAMILIES,
     ContainerFamily,
     SniffContext,
@@ -49,6 +50,7 @@ from organize_by_extension import (  # noqa: E402 — refactor surface (cx-02/ar
     _reserve_target,
     _safe_scandir,
     _scan_bucket_indices,
+    _read_bucket_contents,
     _unlink_with_rollback,
     _warn_if_symlink_escapes_root,
     detect_type_by_header,
@@ -57,6 +59,11 @@ from organize_by_extension import (  # noqa: E402 — refactor surface (cx-02/ar
     read_head_bytes,
     resolve_real_extension,
 )
+
+
+def _state(names=()):
+    regular = set(names)
+    return _BucketState(set(regular), regular)
 
 
 class OrganizeByExtensionTest(unittest.TestCase):
@@ -529,24 +536,67 @@ class OrganizeByExtensionTest(unittest.TestCase):
             self.assertEqual(
                 _scan_bucket_indices(root / "missing").get("a", []), [])
 
-    def test_bucket_file_names(self):
-        """Returns only file names; missing bucket -> empty set; subdirs excluded."""
+    def test_bucket_state_tracks_regular_and_occupied_names(self):
+        """Missing buckets are empty; blockers occupy names without capacity."""
         with TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
-            self.assertEqual(bucket_file_names(root / "nope"), set())
+            missing = _read_bucket_contents(root / "nope", False)
+            self.assertEqual(missing.occupied, set())
+            self.assertEqual(missing.regular, set())
             bucket = root / "b00000"
             bucket.mkdir()
             (bucket / "x.txt").write_text("x")
             (bucket / "y.txt").write_text("y")
             (bucket / "sub").mkdir()
-            self.assertEqual(bucket_file_names(bucket), {"x.txt", "y.txt"})
+            state = _read_bucket_contents(bucket, False)
+            self.assertEqual(state.regular, {"x.txt", "y.txt"})
+            self.assertEqual(state.occupied, {"x.txt", "y.txt", "sub"})
+
+    def test_bucket_occupancy_separates_nonregular_names_from_capacity(self):
+        """oze-rel-80: blockers consume names, while only files consume slots."""
+        with TemporaryDirectory() as temp_dir_name:
+            ext_dir = Path(temp_dir_name)
+            bucket = ext_dir / bucket_name("a", 0)
+            bucket.mkdir()
+            (bucket / "x.txt").mkdir()
+            state_cache = {}
+
+            chosen, _ = choose_bucket(
+                ext_dir, "a", "x.txt", state_cache, [0], bucket_size=1)
+            self.assertEqual(chosen, ext_dir / bucket_name("a", 1))
+
+            chosen, _ = choose_bucket(
+                ext_dir, "a", "y.txt", state_cache, [0, 1], bucket_size=1)
+            self.assertEqual(chosen, bucket)
+
+    def test_organize_avoids_dangling_name_blocker(self):
+        """oze-rel-80: a dangling destination link advances to the next bucket."""
+        with TemporaryDirectory() as temp_dir_name:
+            root = Path(temp_dir_name)
+            existing = root / "txt" / bucket_name("x", 0)
+            existing.mkdir(parents=True)
+            (existing / "x.txt").symlink_to("missing.txt")
+            source = root / "x.txt"
+            source.write_text("payload", encoding="utf-8")
+
+            stats = organize(root, sniff=False, num_threads=1)
+
+            self.assertEqual(stats.processed, 1)
+            self.assertTrue((existing / "x.txt").is_symlink())
+            self.assertEqual(
+                (root / "txt" / bucket_name("x", 1) / "x.txt").read_text(
+                    encoding="utf-8"),
+                "payload",
+            )
 
     def test_choose_bucket_fills_gap_when_earlier_bucket_full(self):
         """A full bucket 0 with a gap before index 2 routes the file into gap bucket 1."""
         with TemporaryDirectory() as temp_dir_name:
             ext_dir = Path(temp_dir_name)
             full = ext_dir / bucket_name("a", 0)
-            state_cache = {full: {f"f{i}.txt" for i in range(BUCKET_SIZE)}}
+            state_cache = {
+                full: _state(f"f{i}.txt" for i in range(BUCKET_SIZE)),
+            }
             chosen, _ = choose_bucket(ext_dir, "a", "new.txt", state_cache,
                                       [0, 2])
             self.assertEqual(chosen, ext_dir / bucket_name("a", 1))
@@ -664,7 +714,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
             state_cache: dict = {}
             chosen, _ = choose_bucket(ext_dir, "a", "new.txt", state_cache, [0])
             self.assertEqual(chosen, bucket0)
-            self.assertEqual(state_cache[bucket0], {"old.txt"})
+            self.assertEqual(state_cache[bucket0].regular, {"old.txt"})
 
 
 class ReliabilityFixesTests(unittest.TestCase):
@@ -856,11 +906,12 @@ class PerfScanTests(unittest.TestCase):
             self.assertEqual(
                 _scan_bucket_indices(Path(d) / "nope").get("a", []), [])
 
-    def test_bucket_file_names_unreadable_returns_empty(self):
+    def test_bucket_state_unreadable_returns_empty(self):
         with TemporaryDirectory() as d:
             with patch("organize_by_extension.os.scandir",
                        side_effect=PermissionError("no")):
-                self.assertEqual(bucket_file_names(Path(d)), set())
+                state = _read_bucket_contents(Path(d), False)
+                self.assertEqual(state.occupied, set())
 
     def test_find_reusable_bucket_collapses_to_sentinel(self):
         # oze-scal-02: a pre-populated full bucket gets collapsed to
@@ -869,7 +920,9 @@ class PerfScanTests(unittest.TestCase):
         with TemporaryDirectory() as d:
             ext_dir = Path(d)
             full_set = {f"f{i}.txt" for i in range(BUCKET_SIZE)}
-            state_cache = {ext_dir / bucket_name("a", 0): full_set}
+            state_cache = {
+                ext_dir / bucket_name("a", 0): _state(full_set),
+            }
             chosen, nxt, cursor = _find_reusable_bucket(
                 ext_dir, "a", "new.txt", state_cache, [0, 2])
             self.assertIsNone(chosen)        # gap at 1 -> caller allocates
@@ -889,7 +942,7 @@ class PerfScanTests(unittest.TestCase):
             chosen, nxt, cursor = _find_reusable_bucket(
                 ext_dir, "a", "x.txt", state_cache, [0, 1])
             # Index 0 is sentinel -> next_expected becomes 1; index 1 doesn't
-            # exist on disk so bucket_file_names returns {} -> available.
+            # exist on disk so the missing state is available.
             self.assertEqual(chosen, ext_dir / bucket_name("a", 1))
             self.assertEqual(nxt, 1)
             self.assertEqual(cursor, 1)
@@ -979,9 +1032,8 @@ class PerfScanTests(unittest.TestCase):
             self.assertEqual(_scan_bucket_indices(ext).get("a", []), [0, 7])
 
     def test_organize_state_cache_bounded_on_overflow(self):
-        # oze-scal-02 end-to-end: across a BUCKET_SIZE+5-file run, no Set entry
-        # in state_cache should still be a real set at end-of-run; the full
-        # ones collapse to the _BUCKET_FULL sentinel.
+        # oze-scal-02 end-to-end: across a BUCKET_SIZE+5-file run, full states
+        # collapse to the _BUCKET_FULL sentinel.
         with TemporaryDirectory() as d:
             root = Path(d)
             for i in range(BUCKET_SIZE + 5):
@@ -1044,7 +1096,7 @@ class BucketManagerTests(unittest.TestCase):
             self.assertEqual(bucket.prefix, "a")
             self.assertEqual(bucket.index, 0)
             self.assertIn("a.txt", bucket.members)
-            self.assertIn("a.txt", mgr.state_cache[bucket.path])
+            self.assertIn("a.txt", mgr.state_cache[bucket.path].occupied)
 
     def test_choose_collapses_full_bucket(self):
         with TemporaryDirectory() as d:
@@ -1054,7 +1106,8 @@ class BucketManagerTests(unittest.TestCase):
             # tips the bucket over and collapses to the sentinel.
             ext_dir = root / "txt"
             bucket_path = ext_dir / "a00000"
-            mgr.state_cache[bucket_path] = {f"f{i}.txt" for i in range(BUCKET_SIZE - 1)}
+            mgr.state_cache[bucket_path] = _state(
+                f"f{i}.txt" for i in range(BUCKET_SIZE - 1))
             mgr.indices_cache[(ext_dir, "a")] = [0]
             src = root / "azzz.txt"
             src.write_bytes(b"x")
@@ -1071,7 +1124,7 @@ class BucketManagerTests(unittest.TestCase):
             second = ext_dir / "a00001"
             mgr = BucketManager(root=root)
             mgr.state_cache[first] = _BUCKET_FULL
-            mgr.state_cache[second] = set()
+            mgr.state_cache[second] = _state()
             mgr.indices_cache[(ext_dir, "a")] = [0, 1]
             src = root / "aa.txt"
             src.write_bytes(b"x")
@@ -1088,8 +1141,8 @@ class BucketManagerTests(unittest.TestCase):
             first = ext_dir / "a00000"
             second = ext_dir / "a00001"
             mgr = BucketManager(root=root)
-            mgr.state_cache[first] = {"aa.txt"}
-            mgr.state_cache[second] = set()
+            mgr.state_cache[first] = _state({"aa.txt"})
+            mgr.state_cache[second] = _state()
             mgr.indices_cache[(ext_dir, "a")] = [0, 1]
             src = root / "aa.txt"
             src.write_bytes(b"x")
@@ -1109,7 +1162,7 @@ class BucketManagerTests(unittest.TestCase):
 
             mgr.release(src, bucket.path)
 
-            self.assertNotIn("a.txt", mgr.state_cache[bucket.path])
+            self.assertNotIn("a.txt", mgr.state_cache[bucket.path].occupied)
 
     def test_release_handles_unknown_and_empty_bucket_reservations(self):
         with TemporaryDirectory() as d:
@@ -1120,11 +1173,11 @@ class BucketManagerTests(unittest.TestCase):
 
             manager.release(source, bucket)
 
-            manager.state_cache[bucket] = set()
+            manager.state_cache[bucket] = _state()
             manager._reserved_names[bucket] = {source.name}
             manager.release(source, bucket)
 
-            self.assertEqual(manager.state_cache[bucket], set())
+            self.assertEqual(manager.state_cache[bucket].occupied, set())
             self.assertNotIn(bucket, manager._reserved_names)
 
     def test_release_rescans_full_bucket_before_releasing(self):
@@ -1140,7 +1193,7 @@ class BucketManagerTests(unittest.TestCase):
 
             mgr.release(src, bucket_path)
 
-            self.assertEqual(mgr.state_cache[bucket_path], {"old.txt"})
+            self.assertEqual(mgr.state_cache[bucket_path].regular, {"old.txt"})
 
     def test_release_preserves_inflight_reservations_after_full_rescan(self):
         with TemporaryDirectory() as d:
@@ -1150,7 +1203,8 @@ class BucketManagerTests(unittest.TestCase):
             bucket_path.mkdir(parents=True)
             (bucket_path / "old.txt").write_bytes(b"x")
             mgr = BucketManager(root=root)
-            mgr.state_cache[bucket_path] = {f"f{i}.txt" for i in range(BUCKET_SIZE - 2)}
+            mgr.state_cache[bucket_path] = _state(
+                f"f{i}.txt" for i in range(BUCKET_SIZE - 2))
             mgr.indices_cache[(ext_dir, "a")] = [0]
             pending = root / "aa.txt"
             failed = root / "ab.txt"
@@ -1163,8 +1217,8 @@ class BucketManagerTests(unittest.TestCase):
 
             mgr.release(failed, bucket.path)
 
-            self.assertIn("aa.txt", mgr.state_cache[bucket.path])
-            self.assertNotIn("ab.txt", mgr.state_cache[bucket.path])
+            self.assertIn("aa.txt", mgr.state_cache[bucket.path].occupied)
+            self.assertNotIn("ab.txt", mgr.state_cache[bucket.path].occupied)
 
     def test_release_keeps_reserved_name_blocking_later_same_name(self):
         with TemporaryDirectory() as d:
@@ -1173,7 +1227,8 @@ class BucketManagerTests(unittest.TestCase):
             bucket_path = ext_dir / "a00000"
             bucket_path.mkdir(parents=True)
             mgr = BucketManager(root=root)
-            mgr.state_cache[bucket_path] = {f"f{i}.txt" for i in range(BUCKET_SIZE - 2)}
+            mgr.state_cache[bucket_path] = _state(
+                f"f{i}.txt" for i in range(BUCKET_SIZE - 2))
             mgr.indices_cache[(ext_dir, "a")] = [0]
             pending = root / "dir1" / "aa.txt"
             failed = root / "ab.txt"
@@ -1206,8 +1261,8 @@ class PlanMovesBucketExhaustionTests(unittest.TestCase):
             # allocation for the 'd' prefix needs index 4 -> ValueError.
             with patch("organize_by_extension.BUCKET_INDEX_MAX", 3):
                 for i in range(4):
-                    mgr.state_cache[ext_dir / f"d{i:05d}"] = {
-                        f"x{j}.txt" for j in range(500)}
+                    mgr.state_cache[ext_dir / f"d{i:05d}"] = _state(
+                        f"x{j}.txt" for j in range(500))
                 mgr.indices_cache[(ext_dir, "d")] = [0, 1, 2, 3]
                 with self.assertLogs("organize_by_extension", level="WARNING") as cm:
                     plan = list(plan_moves(
@@ -2385,7 +2440,7 @@ class BucketManagerChooseDefensiveBranches(unittest.TestCase):
             ext_dir = tmp / "ext"; ext_dir.mkdir()
             manager = _oze.BucketManager(root=tmp)
             bogus_path = ext_dir / "not-a-bucket-name"
-            manager.state_cache[bogus_path] = set()
+            manager.state_cache[bogus_path] = _state()
             with patch.object(_oze, "choose_bucket",
                               lambda *a, **k: (bogus_path, 0)):
                 src = tmp / "thing.txt"; src.write_text("x")
@@ -3160,7 +3215,7 @@ class SourceCollisionResolution(unittest.TestCase):
                     futures, stats, preview=False, head_cache=head_cache,
                     manager=mgr,
                 )
-            self.assertNotIn(src.name, mgr.state_cache[bucket.path])
+            self.assertNotIn(src.name, mgr.state_cache[bucket.path].occupied)
 
     def test_drain_futures_logs_stalled_move_worker(self):
         from concurrent.futures import Future
@@ -4801,7 +4856,7 @@ def test_confirm_keeps_a_saturated_bucket_rebuildable(tmp_path):
     names = manager._restore_mutable_bucket_names(bucket)
 
     assert manager._reserved_names[bucket] == {"inflight.txt"}
-    assert names == {"landed.txt", "inflight.txt"}   # nothing lost
+    assert names.occupied == {"landed.txt", "inflight.txt"}   # nothing lost
 
 
 def test_preview_keeps_reservations(tmp_path):
@@ -4856,13 +4911,15 @@ def test_case_probe_falls_back_to_the_host_default_when_unwritable(tmp_path):
         tmp_path / "missing") is (os.name == "nt")
 
 
-def test_bucket_file_names_folds_when_asked(tmp_path):
+def test_bucket_state_folds_occupied_names(tmp_path):
     bucket = tmp_path / "txt" / "f00000"
     bucket.mkdir(parents=True)
     (bucket / "ReadMe.TXT").write_text("x", encoding="utf-8")
 
-    assert bucket_file_names(bucket) == {"ReadMe.TXT"}
-    assert bucket_file_names(bucket, True) == {"readme.txt"}
+    state = _read_bucket_contents(bucket, False)
+    folded = _read_bucket_contents(bucket, True)
+    assert state.regular == {"ReadMe.TXT"}
+    assert folded.regular == {"readme.txt"}
 
 
 def test_choose_bucket_treats_case_variants_as_taken_when_folding(tmp_path):
@@ -4907,7 +4964,7 @@ def test_release_and_confirm_use_the_same_folded_key(tmp_path):
 
     manager.release(source, bucket)
     assert bucket not in manager._reserved_names
-    assert manager.state_cache[bucket] == set()
+    assert manager.state_cache[bucket].occupied == set()
 
 
 def test_is_bucketed_file_accepts_a_case_variant_directory_when_folding(

@@ -967,11 +967,36 @@ def _name_key(name: str, folds: bool) -> str:
     return name.lower() if folds else name
 
 
-def bucket_file_names(bucket_path: Path, folds: bool = False) -> Set[str]:
-    """Return the set of file names currently present in a bucket."""
+@dataclass
+class _BucketState:
+    """Track occupied names independently from regular-file capacity."""
+
+    occupied: set[str] = field(default_factory=set)
+    regular: set[str] = field(default_factory=set)
+
+    @property
+    def regular_count(self) -> int:
+        return len(self.regular)
+
+    def reserve(self, name: str) -> None:
+        self.occupied.add(name)
+        self.regular.add(name)
+
+    def release(self, name: str) -> None:
+        self.occupied.discard(name)
+        self.regular.discard(name)
+
+
+def _read_bucket_contents(bucket_path: Path, folds: bool) -> _BucketState:
+    occupied: set[str] = set()
+    regular: set[str] = set()
     with _safe_scandir(bucket_path) as entries:
-        return {_name_key(entry.name, folds) for entry in entries
-                if entry.is_file(follow_symlinks=False)}
+        for entry in entries:
+            name = _name_key(entry.name, folds)
+            occupied.add(name)
+            if entry.is_file(follow_symlinks=False):
+                regular.add(name)
+    return _BucketState(occupied, regular)
 
 
 class BucketChoice(NamedTuple):
@@ -993,7 +1018,7 @@ def _find_reusable_bucket(
     ext_dir: Path,
     prefix: str,
     filename: str,
-    state_cache: dict[Path, Set[str] | frozenset[str]],
+    state_cache: dict[Path, _BucketState | frozenset[str]],
     indices: list[int],
     first_non_full_index: int = 0,
     bucket_size: int = BUCKET_SIZE,
@@ -1036,7 +1061,7 @@ def _reusable_bucket_at_index(
     ext_dir: Path,
     prefix: str,
     filename: str,
-    state_cache: dict[Path, Set[str] | frozenset[str]],
+    state_cache: dict[Path, _BucketState | frozenset[str]],
     index: int,
     bucket_size: int,
     folds: bool = False,
@@ -1046,12 +1071,14 @@ def _reusable_bucket_at_index(
     if names is _BUCKET_FULL:
         return None, True
     if names is None:
-        names = bucket_file_names(bucket_path, folds)
+        names = _read_bucket_contents(bucket_path, folds)
         state_cache[bucket_path] = names
-    if len(names) >= bucket_size:
+    if not isinstance(names, _BucketState):
+        raise RuntimeError(f"invalid bucket state for {bucket_path}")
+    if names.regular_count >= bucket_size:
         state_cache[bucket_path] = _BUCKET_FULL
         return None, True
-    taken = _name_key(filename, folds) in names
+    taken = _name_key(filename, folds) in names.occupied
     return (bucket_path if not taken else None), False
 
 
@@ -1059,14 +1086,14 @@ def _allocate_new_bucket(
     ext_dir: Path,
     prefix: str,
     index: int,
-    state_cache: dict[Path, Set[str] | frozenset[str]],
+    state_cache: dict[Path, _BucketState | frozenset[str]],
     indices: list[int],
 ) -> Path:
     """Create the bucket-path entry for `index` (oze-cx-01): seed an empty
     state_cache entry and record the index. The directory itself is created
     later by ensure_directory on the actual move."""
     new_path = ext_dir / bucket_name(prefix, index)
-    state_cache[new_path] = set()
+    state_cache[new_path] = _BucketState()
     insort(indices, index)
     return new_path
 
@@ -1075,7 +1102,7 @@ def choose_bucket(
     ext_dir: Path,
     prefix: str,
     filename: str,
-    state_cache: dict[Path, Set[str] | frozenset[str]],
+    state_cache: dict[Path, _BucketState | frozenset[str]],
     indices: list[int],
     first_non_full_index: int = 0,
     bucket_size: int = BUCKET_SIZE,
@@ -1128,7 +1155,8 @@ class Bucket:
 class BucketManager:
     """Bundles the bookkeeping for bucket selection (oze-arch-02).
 
-    Encapsulates ``state_cache`` (per-bucket filename sets and the
+    Encapsulates ``state_cache`` (per-bucket occupied names and regular-file
+    sets, plus the
     ``_BUCKET_FULL`` sentinel) and ``indices_cache`` (per (ext, prefix) list
     of seen bucket indices). The plan stage talks to ``choose`` only; the
     internal dicts stay private so "selected but never created" drift between
@@ -1141,7 +1169,7 @@ class BucketManager:
 
     root: Path
     bucket_size: int = BUCKET_SIZE
-    state_cache: dict[Path, Set[str] | frozenset[str]] = field(default_factory=dict)
+    state_cache: dict[Path, _BucketState | frozenset[str]] = field(default_factory=dict)
     # Indices cache is keyed by *directory* (oze-perf-05): one scandir per
     # ext_dir populates every prefix at once, so the 26-times-per-extension
     # re-scan is gone.
@@ -1211,7 +1239,7 @@ class BucketManager:
             self.bucket_size, self.folds_case)
         self._first_non_full[cursor_key] = new_cursor
         names = self.state_cache[bucket_path]
-        if not isinstance(names, set):  # _BUCKET_FULL frozenset sentinel (oze-cx-05)
+        if not isinstance(names, _BucketState):
             raise RuntimeError(
                 f"choose_bucket returned full bucket {bucket_path}"
             )
@@ -1220,7 +1248,7 @@ class BucketManager:
         else:
             self.stats["bucket_reused"] += 1
         key = _name_key(source.name, self.folds_case)
-        names.add(key)
+        names.reserve(key)
         self._reserved_names.setdefault(bucket_path, set()).add(key)
         match = BUCKET_NAME_PATTERN.match(bucket_path.name)
         if match is None:
@@ -1231,7 +1259,7 @@ class BucketManager:
             path=bucket_path,
             prefix=match.group(1),
             index=int(match.group(2)),
-            members=names,
+            members=names.regular,
             capacity=self.bucket_size,
         )
         if bucket.is_full():
@@ -1254,9 +1282,9 @@ class BucketManager:
         """Retire a reservation whose file is now on disk (oze-mem-01).
 
         ``_reserved_names`` exists for one purpose: letting
-        :meth:`_restore_mutable_bucket_names` rebuild a saturated bucket's name
-        set without losing files that were planned but not yet written. A
-        landed move is found by ``bucket_file_names``, so keeping its
+        :meth:`_restore_mutable_bucket_names` rebuild a saturated bucket's
+        state without losing files that were planned but not yet written. A
+        landed move is found by rescanning the bucket, so keeping its
         reservation only pins one string per moved file for the rest of the
         run. Callers must not call this for a preview move — nothing was
         written, so the reservation is still the only record of it.
@@ -1273,16 +1301,17 @@ class BucketManager:
             names = self._restore_mutable_bucket_names(bucket_dir)
         if (bucket_dir / source.name).exists():
             return
-        if not isinstance(names, set):
+        if not isinstance(names, _BucketState):
             return
-        names.discard(_name_key(source.name, self.folds_case))
+        names.release(_name_key(source.name, self.folds_case))
         self._mark_bucket_non_full(bucket_dir)
         self._release_reserved_name(
             bucket_dir, _name_key(source.name, self.folds_case))
 
-    def _restore_mutable_bucket_names(self, bucket_dir: Path) -> Set[str]:
-        names = bucket_file_names(bucket_dir, self.folds_case)
-        names.update(self._reserved_names.get(bucket_dir, set()))
+    def _restore_mutable_bucket_names(self, bucket_dir: Path) -> _BucketState:
+        names = _read_bucket_contents(bucket_dir, self.folds_case)
+        for name in self._reserved_names.get(bucket_dir, set()):
+            names.reserve(name)
         self.state_cache[bucket_dir] = names
         return names
 
