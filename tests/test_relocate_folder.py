@@ -1123,15 +1123,17 @@ def test_check_cross_device_raises_when_strict(tmp_path):
         rf._check_cross_device(plan)
 
 
-def test_check_cross_device_silent_on_stat_failure(tmp_path, monkeypatch, caplog):
+def test_check_cross_device_silent_on_stat_failure(tmp_path, caplog):
     src = tmp_path / "src"; src.mkdir()
     plan = rf.Plan(source=src, target=tmp_path / "dst" / "src")
+    probed = []
 
-    def boom(self, **kw):
+    def boom(path):
+        probed.append(path)
         raise OSError("denied")
 
-    monkeypatch.setattr(rf.Path, "stat", boom)
-    rf._check_cross_device(plan)
+    rf._check_cross_device(plan, stat_fn=boom)
+    assert probed == [src]
     assert not any("same filesystem" in r.message for r in caplog.records)
 
 
