@@ -89,7 +89,7 @@ def with_logger(log: logging.Logger) -> Iterator[logging.Logger]:
         _log_ctx.reset(token)
 
 
-# rf-test-01: contextvar-backed hash injection. `_verify_content` calls
+# rf-test-01: contextvar-backed destination hash injection. `_verify_pinned_file` calls
 # `_hash()` (the active hash function) rather than `_sha256` directly so a
 # test can substitute a hash that blocks a worker mid-stream and exercise the
 # verify-pool race/leak paths (e.g. proving rmtree waits for a still-running
@@ -851,47 +851,6 @@ def _copy_target_owner(path: Path) -> Iterator[_CopyTargetOwner]:
         owner.close()
 
 
-def _copytree_copy_function(
-    progress_cb: "Callable[[int, int], None] | None",
-    total: int,
-    watchdog: _OperationStallWatchdog,
-) -> Callable[..., Path]:
-    done = [0]
-
-    def tracking_copy2(s, d, *, follow_symlinks=True):
-        result = shutil.copy2(s, d, follow_symlinks=follow_symlinks)
-        watchdog.touch("copytree")
-        if progress_cb is not None:
-            _record_copy_progress(d, follow_symlinks, done, total, progress_cb)
-        return result
-
-    return tracking_copy2
-
-
-def _record_copy_progress(
-    dst: Path,
-    follow_symlinks: bool,
-    done: list[int],
-    total: int,
-    progress_cb: Callable[[int, int], None],
-) -> None:
-    try:
-        # rf-rel-05 / rf-robust-04: account the bytes actually written
-        # at the DESTINATION. Statting the source would let a concurrent
-        # writer changing `s` between copytree's read and here skew
-        # `done` past (or below) the total; the freshly-written `d` is
-        # stable. follow_symlinks=False copies the link itself, so the
-        # dst is a symlink — lstat it; otherwise it's the regular file.
-        stat_fn = os.stat if follow_symlinks else os.lstat
-        done[0] += stat_fn(dst).st_size
-    except OSError:
-        pass
-    try:
-        progress_cb(done[0], total)
-    except Exception:   # pragma: no cover - cb is user code
-        pass
-
-
 PinnedEntry = tuple[Path, int, str, os.stat_result]
 
 
@@ -1110,125 +1069,29 @@ def _populate_pinned_copy(
 
 
 def copy_tree(src: Path, dst: Path, *,
+              source_fd: int,
               mode_cache: dict[Path, int] | None = None,
-              jobs: int | None = None,
-              progress_cb: "Callable[[int, int], None] | None" = None,
+              progress_cb: Callable[[int, int], None] | None = None,
               check_space: bool = True,
-              source_fd: int | None = None,
               _target_owner: _CopyTargetOwner | None = None,
               ) -> list[Path]:
-    """Copy src -> dst recursively, skipping non-regular files. Returns
-    skipped paths.
+    """Copy through an open source directory descriptor, skipping special files.
 
-    ``source_fd`` selects the descriptor-anchored implementation used by the
-    migration runtime; ``src`` then remains only the user-facing path label.
-
-    When `mode_cache` is supplied, the `lstat().st_mode` looked up by the
-    ignore-callback is cached into it so the post-copy classification in
-    `_group_specials_by_kind` skips a second `lstat` per skipped entry
-    (rf-perf-03). Backward compatible: callers that don't care omit it.
-
-    `progress_cb(bytes_done, bytes_total)` (rf-obs-01) is invoked after
-    each completed file copy when supplied. Total bytes are computed up
-    front via `_src_size_totals`. The cb is wrapped in a copy_function
-    shim around `shutil.copy2` so per-file accounting needs no walk of
-    its own.
-
-    rf-perf-02: `check_space=False` skips the pre-copy disk-space walk
-    (`_src_size_totals` + `_check_disk_space`). On a multi-TB tree that
-    full lstat walk is itself expensive and merely duplicates the walk
-    `shutil.copytree` does anyway; an ENOSPC mid-copy still triggers the
-    same cleanup. The walk is also skipped entirely when neither the
-    precheck nor a `progress_cb` needs the byte total."""
+    The caller owns ``source_fd`` and keeps it open until this call returns.
+    ``src`` labels diagnostics and skipped entries; it is never reopened.
+    ``mode_cache`` records skipped entry modes for reporting. Optional progress
+    receives completed and total apparent file bytes; disabling both progress
+    and the space precheck avoids the preliminary size walk.
+    """
     ownership = (
         _copy_target_owner(dst) if _target_owner is None else nullcontext(_target_owner)
     )
     with ownership as owner:
-        return _copy_tree_owned(
-            src, dst, mode_cache=mode_cache, jobs=jobs, progress_cb=progress_cb,
-            check_space=check_space, source_fd=source_fd, owner=owner,
-        )
-
-
-def _copy_tree_owned(
-    src: Path, dst: Path, *, mode_cache: dict[Path, int] | None,
-    jobs: int | None, progress_cb: Callable[[int, int], None] | None,
-    check_space: bool, source_fd: int | None, owner: _CopyTargetOwner,
-) -> list[Path]:
-    cache = mode_cache if mode_cache is not None else {}
-    if source_fd is not None:
         return _copy_tree_pinned(
-            src, source_fd, dst, mode_cache=cache,
+            src, source_fd, dst,
+            mode_cache=mode_cache if mode_cache is not None else {},
             progress_cb=progress_cb, check_space=check_space, owner=owner,
         )
-    if _path_taken(dst):
-        raise FileExistsError(
-            f"target already exists: {dst}; if a previous run was killed "
-            "during copy, this may be a stale partial target. Inspect and "
-            "remove it manually before re-running."
-        )
-    # rf-rel-14 / rf-perf-02: compute total bytes ONCE and share between the
-    # precheck and (when present) the progress callback. The walk runs only
-    # when something needs the total: the disk-space precheck (unless
-    # disabled) or a progress callback. Otherwise it's skipped outright.
-    apparent_total = 0
-    alloc_total = 0
-    if check_space or progress_cb is not None:
-        apparent_total, alloc_total = _src_size_totals(src)
-    if check_space:
-        # rf-perf-06: size the precheck by allocated bytes, not apparent size.
-        _check_disk_space(src, dst, total_bytes=alloc_total)
-    skipped: list[Path] = []
-    watchdog = _OperationStallWatchdog("copytree")
-    copy_function = _copytree_copy_function(progress_cb, apparent_total, watchdog)
-    try:
-        with watchdog:
-            _copy_tree_unpublished(
-                src, dst, owner, copy_function=copy_function,
-                skipped=skipped, mode_cache=cache, jobs=jobs,
-            )
-    except BaseException:
-        # rf-robust-02: catch BaseException (not just Exception) so a
-        # KeyboardInterrupt mid-copy also cleans the half-written `dst` instead
-        # of leaving a partial target that blocks the O_EXCL/_path_taken retry.
-        # rf-rel-11: log cleanup failures so an operator knows when a
-        # half-written `dst` survived a failed copy (read-only mount,
-        # permission-denied target). The original exception is still
-        # raised — the warning is informational.
-        owner.cleanup("failed copy")
-        raise
-    return skipped
-
-
-@contextmanager
-def _copy_staging_envelope(parent: Path) -> Iterator[Path]:
-    private = Path(tempfile.mkdtemp(prefix=".relocate-copy-", dir=parent))
-    try:
-        yield private
-    except BaseException:
-        _rmtree_logging(private, "failed copy")
-        raise
-    else:
-        _swallow_or_warn(f"remove empty copy staging {private}", private.rmdir)
-
-
-def _copy_tree_unpublished(
-    src: Path, dst: Path, owner: _CopyTargetOwner, *,
-    copy_function: Callable[..., Path], skipped: list[Path], mode_cache: dict[Path, int],
-    jobs: int | None,
-) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    # Keep the populated tree inside a private envelope even when source
-    # metadata gives its eventual owner access to the completed copy.
-    with _copy_staging_envelope(dst.parent) as private:
-        staged = private / "target"
-        shutil.copytree(
-            src, staged, symlinks=True, copy_function=copy_function,
-            ignore=_make_ignore_specials(skipped, mode_cache),
-        )
-        _replicate_ownership(src, staged, jobs=jobs)
-        owner.pin(staged)
-        _rename_noreplace(staged, dst)
 
 
 # Headroom factor: filesystems need a little slack for metadata, journals, and
@@ -1252,24 +1115,13 @@ def _disk_space_headroom() -> float:
     return max(1.0, value)
 
 
-def _check_disk_space(src: Path, dst: Path, *, total_bytes: int | None = None) -> None:
-    """Pre-flight check that the destination filesystem has room for `src`
-    (rf-rel-07). An ENOSPC mid-copy already triggers a cleanup, but the
-    user-visible failure is then "copy errored, source still present"; a
-    precheck fails immediately and cheaply.
+def _check_disk_space(src: Path, dst: Path, *, total_bytes: int) -> None:
+    """Check destination headroom using the caller's pinned source size walk.
 
-    Uses `_src_size_totals` (a one-pass lstat walk) and `shutil.disk_usage` on
-    the nearest existing ancestor of `dst`. Raises `RuntimeError` when free
-    space is below `_DISK_SPACE_HEADROOM * needed`.
-
-    rf-rel-14: the check is BEST-EFFORT. The tree can grow between this
-    call and `shutil.copytree`'s own walk; an ENOSPC mid-stream is still
-    possible. Callers that already computed the allocated total (e.g.
-    `copy_tree`) pass `total_bytes=` to skip the second walk.
-
-    rf-perf-06: ``total_bytes`` is the ALLOCATED size (``st_blocks * 512``),
-    not the apparent ``st_size``, so sparse files aren't over-counted."""
-    needed = total_bytes if total_bytes is not None else _src_size_totals(src)[1]
+    This is best effort: the source can grow after the precheck, and a copy
+    that runs out of space must still clean up its owned target.
+    """
+    needed = total_bytes
     probe = dst
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -1284,52 +1136,6 @@ def _check_disk_space(src: Path, dst: Path, *, total_bytes: int | None = None) -
             f"need ~{required} bytes (incl. headroom for ~{needed} of payload), "
             f"have {free} free"
         )
-
-
-def _src_size_totals(src: Path) -> tuple[int, int]:
-    """One walk returning ``(apparent_bytes, allocated_bytes)`` for regular
-    files under ``src`` (rf-perf-06). ``apparent`` (``st_size``) drives the
-    progress bar; ``allocated`` (``st_blocks * 512``) drives the disk-space
-    precheck, so a sparse file whose holes the copy preserves isn't counted at
-    its full logical size and falsely refused for "insufficient space".
-    Non-regular files are zero-cost in the copy; symlinks are not followed."""
-    apparent = 0
-    allocated = 0
-    for path, _dir_names, names in os.walk(src, followlinks=False):
-        base = Path(path)
-        for name in names:
-            try:
-                st = (base / name).lstat()
-            except OSError:
-                continue
-            if stat.S_ISREG(st.st_mode):
-                apparent += st.st_size
-                allocated += st.st_blocks * 512
-    return apparent, allocated
-
-
-def _make_ignore_specials(skipped: list[Path], mode_cache: dict[Path, int]):
-    """Build a shutil.copytree ignore callback that filters non-regular files.
-
-    Captures the lstat mode of each skipped entry into `mode_cache` so the
-    later kind-summary pass can avoid a second syscall per path
-    (rf-perf-03)."""
-    def _ignore(directory: str, names: list[str]) -> list[str]:
-        out: list[str] = []
-        for name in names:
-            full = Path(directory) / name
-            try:
-                mode = os.lstat(full).st_mode
-            except OSError:
-                continue
-            if _is_special_file(mode):
-                skipped.append(full)
-                mode_cache[full] = mode
-                out.append(name)
-        return out
-    return _ignore
-
-
 
 
 def _is_special_file(mode: int) -> bool:
@@ -1358,7 +1164,7 @@ def _default_worker_count() -> int:
 
     Mirrors `ThreadPoolExecutor`'s own default heuristic but is exposed as
     a module-level helper so callers (the CLI `--jobs` knob, tests) can
-    override via `Plan.jobs` and so the verify + ownership pools share
+    override via `Plan.jobs` and so verification uses
     one source of truth (rf-arch-06 unified the loop; this unifies the
     sizing)."""
     return min(32, (os.cpu_count() or 1) + 4)
@@ -1397,11 +1203,11 @@ def _run_streamed(
     on_done: Callable[["Future"], bool],
 ) -> None:
     """Drive `tasks` through `submit(task)` with a bounded inflight set
-    (rf-arch-06). Shared by `_replicate_ownership` and `_run_verify_pool`.
+    (rf-arch-06). Used by `_run_verify_pool`.
 
     `on_done(fut)` is invoked for every completed Future and returns True
-    to short-circuit the submission loop (the verify pool aborts on first
-    error; the ownership pool never aborts). Streaming preserves the
+    to short-circuit the submission loop on the first verify error.
+    Streaming preserves the
     millions-of-entries-without-OOM property (rf-scal-03).
 
     In-flight futures on abort (rf-conc-02)
@@ -1451,71 +1257,6 @@ def _consume_completed(
     return pending, abort
 
 
-def _replicate_ownership(src: Path, dst: Path, *, jobs: int | None = None) -> None:
-    """Replicate src's uid/gid onto every counterpart in dst, in parallel
-    (rf-conc-01) — one chown per file/dir is fast individually but a sequential
-    pass dominates the migration of large trees.
-
-    Pairs are streamed lazily from `_pair_walk` (rf-scal-03): on a tree with
-    millions of entries we never materialise the full `(src, dst)` list, only
-    `_inflight_cap(workers)` pairs at a time. Unexpected exceptions are
-    collected and logged instead of being swallowed by the executor's iterator
-    (rf-conc-02); known `PermissionError` / `FileNotFoundError` paths inside
-    `_chown_pair` continue to log-and-skip per-entry.
-
-    rf-conc-05: the producer (`_pair_walk` / `os.walk`) can raise mid-stream
-    when src disappears. The bare iterator previously let that propagate
-    through `_run_streamed`, which aborted the executor context and left the
-    operator with no visibility into how much partial ownership was applied.
-    We wrap the producer so the walk error is logged with the count of pairs
-    processed so far, and inflight tasks still drain cleanly."""
-    errors: list[BaseException] = []
-    processed = [0]
-    walk_error: list[OSError] = []
-    warning_limiter = _ChownWarningLimiter()
-
-    def on_done(fut: "Future") -> bool:
-        _collect_chown_error(fut, errors)
-        processed[0] += 1
-        return False  # ownership never short-circuits
-
-    def counted_pairs():
-        try:
-            yield from _pair_walk(src, dst)
-        except OSError as exc:
-            # rf-conc-05: surface the walk error rather than letting it abort
-            # the executor context with inflight chowns in unknown state.
-            walk_error.append(exc)
-            return
-
-    workers = _resolved_jobs(jobs)
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        _run_streamed(
-            partial(ex.submit, _chown_pair, warning_limiter=warning_limiter),
-            counted_pairs(),
-            _inflight_cap(workers),
-            on_done,
-        )
-    warning_limiter.summarize()
-    if walk_error:
-        _log().warning(
-            "ownership replication: walk failed after %d pair(s): %s",
-            processed[0], walk_error[0],
-        )
-    if errors:
-        _log().warning("ownership replication: %d worker(s) raised unexpectedly "
-                       "(first: %s)", len(errors), errors[0])
-
-
-def _collect_chown_error(fut, errors: list[BaseException]) -> None:
-    """Drain one ownership future, recording unexpected exceptions for the
-    end-of-walk summary (rf-conc-02). Expected failures are already logged
-    inside `_chown_pair`; this only catches the surprises."""
-    exc = fut.exception()
-    if exc is not None:
-        errors.append(exc)
-
-
 class _ChownWarningLimiter:
     def __init__(self, limit: int | None = None) -> None:
         self.limit = _CHOWN_WARNING_LIMIT if limit is None else limit
@@ -1543,58 +1284,6 @@ class _ChownWarningLimiter:
                 "ownership replication: suppressed %d additional chown warning(s)",
                 self.suppressed,
             )
-
-
-def _warn_chown_failure(
-    dst_path: Path,
-    exc: BaseException,
-    warning_limiter: "_ChownWarningLimiter | None",
-    *,
-    invalid: bool = False,
-) -> None:
-    if warning_limiter is not None:
-        warning_limiter.warn(dst_path, exc, invalid=invalid)
-    elif invalid:
-        _log().warning("could not chown %s (invalid path): %s", dst_path, exc)
-    else:
-        _log().warning("could not chown %s: %s", dst_path, exc)
-
-
-def _chown_pair(
-    pair: tuple[Path, Path],
-    warning_limiter: "_ChownWarningLimiter | None" = None,
-) -> None:
-    """Replicate one (src, dst) pair's uid/gid. We do NOT pre-check existence:
-    the dst can vanish between the check and the chown (rf-conc-03), and the
-    common skip-during-copy case (sockets, FIFOs) shows up as
-    `FileNotFoundError` from `os.lstat` or `os.chown` anyway.
-
-    rf-rel-13: `ValueError` from a NUL byte in a path (`os.chown` /
-    `os.lstat` raise it bare instead of `OSError`) is caught here and
-    treated as a per-entry skip. Without this clause the error would
-    escape `_chown_pair`, bubble through `_collect_chown_error`, and
-    surface only as "N workers raised unexpectedly (first: ValueError)"
-    in the end-of-walk summary — with no attribution to the bad path."""
-    src_path, dst_path = pair
-    try:
-        st = os.lstat(src_path)
-        os.chown(dst_path, st.st_uid, st.st_gid, follow_symlinks=False)
-    except FileNotFoundError:
-        return  # dst skipped during copy (socket / FIFO / device) or vanished
-    except OSError as exc:
-        _warn_chown_failure(dst_path, exc, warning_limiter)
-    except ValueError as exc:
-        # rf-rel-13: NUL byte in src/dst path. Attributed here so the
-        # operator sees which entry caused it.
-        _warn_chown_failure(dst_path, exc, warning_limiter, invalid=True)
-
-
-def _pair_walk(src: Path, dst: Path) -> Iterable[tuple[Path, Path]]:
-    yield src, dst
-    for root, dirs, files in os.walk(src):
-        rel = Path(root).relative_to(src)
-        for name in (*dirs, *files):
-            yield Path(root) / name, dst / rel / name
 
 
 def _digest_pinned_file(
@@ -1709,43 +1398,16 @@ def _iter_pinned_verify_tasks(
 
 def verify_copy(src: Path, dst: Path, checksum: bool = False,
                 verify_ownership: bool = False,
-                *, jobs: int | None = None,
-                source_fd: int | None = None) -> None:
-    """Verify dst is a faithful copy of src in a SINGLE walk over src,
-    comparing each entry against its counterpart on the fly — no full
-    in-memory inventories and one tree traversal instead of two (rf-perf-01 /
-    rf-scal-01). Files (and dirs/symlinks) are created in dst only from src, so
-    a one-sided src walk catches every missing/changed entry; extra dst-only
-    entries can't arise because copy_tree refuses a pre-existing target.
+                *, source_fd: int, jobs: int | None = None) -> None:
+    """Verify contents and inventory through the caller's open source descriptor.
 
-    When `verify_ownership` is True, every counterpart's mode/uid/gid is
-    compared against src (rf-rel-04).
-
-    When `checksum` is True the per-file SHA-256 work is fanned out across
-    the configured `jobs` worker count (rf-perf-02). Verification used to
-    dominate wall time on content-heavy migrations because the existing
-    ownership-replication pool was unused once we left `copy_tree`.
-
-    Task contract (rf-scal-04)
-    --------------------------
-    Tasks reach `_run_verify_pool` as an `Iterator[Callable[[], None]]`
-    drained lazily by `_run_streamed`'s inflight cap. This is deliberate:
-    a `Sequence`-based API would force materialising the full
-    `[task per file]` list on every migration, and on TB-scale trees
-    that list itself would be hundreds of MB of `partial` objects
-    before the first hash even starts. The streaming shape keeps RSS
-    bounded by the inflight cap regardless of tree size, at the cost
-    of giving up the ability to report a stable `len(tasks)` upfront.
-
-    ``source_fd`` anchors every source stat/read/inventory operation to the
-    already-open directory descriptor used by :func:`execute`.
+    ``src`` labels diagnostics only. The caller keeps ``source_fd`` open until
+    verification finishes. Checksum tasks stream through a bounded worker pool;
+    size-only checks run sequentially. Optional ownership checks compare mode,
+    uid and gid for every copied entry.
     """
-    tasks = (
-        _iter_pinned_verify_tasks(
-            source_fd, src, dst, checksum, verify_ownership)
-        if source_fd is not None
-        else _iter_verify_tasks(src, dst, checksum, verify_ownership)
-    )
+    tasks = _iter_pinned_verify_tasks(
+        source_fd, src, dst, checksum, verify_ownership)
     with _OperationStallWatchdog("verify_copy") as watchdog:
         if not checksum:
             # cheap stat-only / readlink ops: sequential is fast and keeps the
@@ -1770,13 +1432,11 @@ def _inventory_kind(mode: int) -> int:
 
 
 def _load_inventory(
-    database: sqlite3.Connection, table: str, root: Path, *, source: bool
+    database: sqlite3.Connection, table: str, root: Path
 ) -> None:
     for path in _walk_entries(root):
         mode = os.lstat(path).st_mode
         kind = _inventory_kind(mode)
-        if source and kind == 4:
-            continue
         database.execute(
             f"INSERT INTO {table} VALUES (?, ?)",
             (os.fsencode(path.relative_to(root)), kind),
@@ -1857,7 +1517,7 @@ def _assert_complete_inventory_match(
     src: Path,
     dst: Path,
     *,
-    source_fd: int | None = None,
+    source_fd: int,
 ) -> None:
     """Entry-for-entry comparison of the two trees immediately before the swap.
 
@@ -1866,11 +1526,8 @@ def _assert_complete_inventory_match(
     with _inventory_db() as database:
         database.execute("CREATE TABLE source_entries (path BLOB, kind INTEGER)")
         database.execute("CREATE TABLE target_entries (path BLOB, kind INTEGER)")
-        if source_fd is None:
-            _load_inventory(database, "source_entries", src, source=True)
-        else:
-            _load_pinned_inventory(database, source_fd)
-        _load_inventory(database, "target_entries", dst, source=False)
+        _load_pinned_inventory(database, source_fd)
+        _load_inventory(database, "target_entries", dst)
         missing = database.execute(_INVENTORY_MISSING_SQL).fetchone()
         extra = database.execute(_INVENTORY_EXTRA_SQL).fetchone()
     _raise_on_inventory_divergence(missing, extra)
@@ -1890,62 +1547,6 @@ def _raise_on_inventory_divergence(missing, extra) -> None:
         f"source/destination inventory mismatch immediately before swap "
         f"({detail})"
     )
-
-
-def _kind_verify_task(full: Path, counterpart: Path, rel: Path,
-                      st: os.stat_result, checksum: bool) -> Callable[[], None] | None:
-    """Return the copy-kind verify task for `st` (symlink/regular/dir), or None
-    for a special file (socket/FIFO/device) that copy_tree did not copy and so
-    has no dst counterpart to check."""
-    mode = st.st_mode
-    if stat.S_ISLNK(mode):
-        return partial(_verify_symlink, full, counterpart, rel)
-    if stat.S_ISREG(mode):
-        return partial(_verify_file, full, counterpart, rel, checksum, src_size=st.st_size)
-    if stat.S_ISDIR(mode):
-        return partial(_verify_dir, full, counterpart, rel)
-    return None
-
-
-def _iter_verify_tasks(src: Path, dst: Path, checksum: bool,
-                       verify_ownership: bool) -> Iterator[Callable[[], None]]:
-    """Yield zero-arg callables, one per check, for parallel execution.
-
-    Symlink/dir checks are cheap but ride along in the same iterator so the
-    walk happens only once. Ownership is appended after the kind-specific
-    check, and `_verify_ownership` also gates missing destinations itself so
-    the parallel checksum path cannot downgrade that case to a generic stat
-    failure.
-
-    rf-perf-01: each entry is lstat'd ONCE here and classified from
-    `st_mode` (S_ISLNK/S_ISREG/S_ISDIR) instead of the previous
-    `is_symlink()` + `is_file()` + `is_dir()` trio, which issued up to three
-    stat syscalls per entry on large trees. The known src `st_size` is passed
-    into the file check so `_verify_size` skips re-lstat'ing the source."""
-    for full in _walk_entries(src):
-        rel = full.relative_to(src)
-        counterpart = dst / rel
-        try:
-            st = os.lstat(full)
-        except OSError as exc:
-            # rf-rel-01: a src entry that became unreadable mid-run must NOT be
-            # silently skipped — the copy would be accepted and the source then
-            # deleted. Yield a task that raises so verify_copy fails loudly.
-            # rf-obs-01: also log a breadcrumb so the operator sees WHY an entry
-            # couldn't be classified, not just the eventual verify failure.
-            _log().warning("verify: cannot stat source entry %s: %s", full, exc)
-            yield partial(_verify_unreadable_src, full, rel, exc)
-            continue
-        kind_task = _kind_verify_task(full, counterpart, rel, st, checksum)
-        if kind_task is None:
-            continue
-        yield kind_task
-        # rf-rel-02: only verify ownership for entries copy_tree actually copied
-        # (symlink/regular/dir). A skipped special file (socket/FIFO/device) has
-        # no dst counterpart, so its ownership check would lstat a missing path
-        # and fail the whole --verify-ownership migration.
-        if verify_ownership:
-            yield partial(_verify_ownership, full, counterpart, rel, st)
 
 
 def _run_verify_pool(
@@ -2030,33 +1631,6 @@ def _submit_in_context(ex: ThreadPoolExecutor, task: Callable[[], None]
     return ex.submit(ctx.run, task)
 
 
-def _verify_unreadable_src(src_path: Path, rel: Path, exc: OSError) -> None:
-    """Fail verification for a src entry that couldn't be lstat'd (rf-rel-01).
-
-    Classification needs the src mode; when lstat fails we can't say whether the
-    copy is faithful, so verification must not pass. Raising here (rather than
-    skipping the entry) keeps the source from being deleted on a copy we never
-    confirmed."""
-    raise RuntimeError(
-        f"could not stat source entry during verify: {rel} "
-        f"(src={src_path}): {exc}"
-    ) from exc
-
-
-def _verify_dir(src_dir: Path, dst_dir: Path, rel: Path) -> None:
-    # rf-n1-30: one dst lstat classified via st_mode replaces the previous
-    # is_dir() + is_symlink() pair (S_ISDIR on lstat is false for symlinks,
-    # so a symlink-to-dir dst still fails).
-    try:
-        dst_mode = dst_dir.lstat().st_mode
-    except OSError:
-        dst_mode = 0
-    if src_dir.is_symlink() or not stat.S_ISDIR(dst_mode):
-        # rf-obs-02: include absolute src path so log lines are actionable
-        # without having to mentally join `rel` to the migration root.
-        raise RuntimeError(f"missing directory in copy: {rel} (src={src_dir})")
-
-
 def _verify_ownership(
     src_path: Path,
     dst_path: Path,
@@ -2101,79 +1675,6 @@ def _walk_entries(root: Path) -> Iterable[Path]:
         base = Path(path)
         for n in (*dir_names, *names):
             yield base / n
-
-
-def _verify_symlink(src_link: Path, dst_link: Path, rel: Path) -> None:
-    if not dst_link.is_symlink():
-        raise RuntimeError(f"missing symlink in copy: {rel} (src={src_link})")
-    # rf-n1-30: read each side once and reuse in the error message.
-    src_target = os.readlink(src_link)
-    dst_target = os.readlink(dst_link)
-    if src_target != dst_target:
-        raise RuntimeError(
-            f"symlink target mismatch for {rel} (src={src_link}): "
-            f"{src_target!r} != {dst_target!r}")
-
-
-def _verify_file(src_file: Path, dst_file: Path, rel: Path, checksum: bool,
-                 *, src_size: int | None = None) -> None:
-    """Compose size and (optionally) content verification (rf-cx-01).
-
-    Split out so each branch is independently testable and so the parallel
-    pool can swap the heavy checksum step in/out without touching the
-    cheap kind check.
-
-    rf-perf-01: `src_size` may be supplied by the caller (it already lstat'd
-    `src_file` to classify it) so `_verify_size` doesn't re-stat the source.
-    Direct callers that omit it fall back to a fresh lstat.
-
-    rf-n1-30: dst is lstat'd ONCE and classified from `st_mode` (S_ISREG on
-    lstat is false for symlinks), then its size is passed through to
-    `_verify_size` — replacing the previous is_symlink() + is_file() +
-    re-lstat trio (3 stat round-trips per file on large trees)."""
-    try:
-        dst_st = dst_file.lstat()
-    except OSError:
-        raise RuntimeError(
-            f"missing file in copy: {rel} (src={src_file})") from None
-    if not stat.S_ISREG(dst_st.st_mode):
-        raise RuntimeError(f"missing file in copy: {rel} (src={src_file})")
-    _verify_size(src_file, dst_file, rel,
-                 src_size=src_size, dst_size=dst_st.st_size)
-    if checksum:
-        _verify_content(src_file, dst_file, rel)
-
-
-def _verify_size(src_file: Path, dst_file: Path, rel: Path,
-                 *, src_size: int | None = None,
-                 dst_size: int | None = None) -> None:
-    if src_size is None:
-        src_size = src_file.lstat().st_size
-    if dst_size is None:
-        dst_size = dst_file.lstat().st_size
-    if src_size != dst_size:
-        raise RuntimeError(
-            f"size mismatch for {rel} (src={src_file}): {src_size} != {dst_size}"
-        )
-
-
-def _verify_content(src_file: Path, dst_file: Path, rel: Path) -> None:
-    """Hash both sides and compare.
-
-    Invariant (rf-rel-16): the caller MUST have run :func:`_verify_size`
-    first. If a writer truncates `src_file` AFTER the size match but
-    BEFORE / DURING this content hash, the hash succeeds on the shorter
-    byte stream and `_sha256` re-stats the file after closing to detect
-    post-hoc truncation — a mismatch between the hashed length and the
-    final size is reported as a typed error so the operator can rerun.
-
-    rf-test-01: the hash function is taken from `_hash()` (a contextvar,
-    defaulting to `_sha256`) so tests can inject a blocking/instrumented hash
-    to drive the verify-pool race paths.
-    """
-    hash_fn = _hash()
-    if hash_fn(src_file) != hash_fn(dst_file):
-        raise RuntimeError(f"hash mismatch for {rel} (src={src_file})")
 
 
 class _HashTruncatedError(RuntimeError):
@@ -3056,34 +2557,11 @@ def _device_mount_point(path: Path) -> "str | None":
         return None
 
 
-def _refuse_specials_before_copy(src: Path,
-                                 mode_cache: dict[Path, int]) -> None:
-    """rf-perf-31: under --strict any special file means the migration is
-    refused, so discovering one AFTER `shutil.copytree` wastes a full
-    copy + rmtree on large trees. Pre-walk with lstat (same
-    classification as `_make_ignore_specials`) and refuse first, via
-    `_report_skipped` so the strict message contract is unchanged.
-    Modes are cached for the kind summary (rf-perf-03)."""
-    specials: list[Path] = []
-    for path, _dir_names, names in os.walk(src, followlinks=False):
-        base = Path(path)
-        for name in names:
-            full = base / name
-            try:
-                mode = os.lstat(full).st_mode
-            except OSError:
-                continue
-            if _is_special_file(mode):
-                mode_cache[full] = mode
-                specials.append(full)
-    _report_skipped(specials, strict=True, mode_cache=mode_cache)
-
-
 def _copy_and_verify(
     plan: Plan,
     on_state: Callable[[MigrationState], None] | None = None,
     *,
-    source_fd: int | None = None,
+    source_fd: int,
     source_id: tuple[int, int] | None = None,
 ) -> None:
     with _copy_target_owner(plan.target) as owner:
@@ -3095,18 +2573,15 @@ def _copy_and_verify_owned(
     plan: Plan,
     owner: _CopyTargetOwner,
     on_state: Callable[[MigrationState], None] | None,
-    source_fd: int | None,
+    source_fd: int,
     source_id: tuple[int, int] | None,
 ) -> None:
     mode_cache: dict[Path, int] = {}
     if plan.strict:
-        if source_fd is None:
-            _refuse_specials_before_copy(plan.source, mode_cache)
-        else:
-            _refuse_pinned_specials(source_fd, plan.source, mode_cache)
+        _refuse_pinned_specials(source_fd, plan.source, mode_cache)
     try:
         skipped = copy_tree(plan.source, plan.target, mode_cache=mode_cache,
-                            jobs=plan.jobs, check_space=plan.check_space,
+                            check_space=plan.check_space,
                             progress_cb=(_copy_progress_callback()
                                          if plan.progress else None),
                             source_fd=source_fd, _target_owner=owner)
@@ -3265,7 +2740,7 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="rf-sec-03: refuse to proceed when source and dest "
                         "share a filesystem (default: warn and continue)")
     p.add_argument("--jobs", "-j", type=_positive_jobs, default=None,
-                   help="rf-scal-02: pool width for ownership + verify "
+                   help="rf-scal-02: pool width for checksum verification "
                         "(default: min(32, cpu_count+4))")
     p.add_argument("--no-space-check", action="store_true",
                    help="rf-perf-02: skip the pre-copy disk-space walk (saves "

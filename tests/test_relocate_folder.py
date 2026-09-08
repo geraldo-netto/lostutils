@@ -2,6 +2,7 @@
 plus the functions they touch (verify_copy/_inventory/_classify, atomic_swap,
 parse_args, execute)."""
 import logging
+from contextlib import contextmanager
 import os
 import sys
 from pathlib import Path
@@ -16,6 +17,38 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import relocate_folder as rf
 
 
+@contextmanager
+def _pinned_source(source):
+    descriptor, _identity = rf._source_identity_fd(source)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def _pinned_call(function, source, *args, **kwargs):
+    """Keep the runtime source descriptor alive across each tested operation."""
+    path = source.source if isinstance(source, rf.Plan) else source
+    with _pinned_source(path) as descriptor:
+        return function(source, *args, source_fd=descriptor, **kwargs)
+
+
+def _pinned_totals(source):
+    with _pinned_source(source) as descriptor:
+        return rf._pinned_size_totals(descriptor)
+
+
+def _pinned_verify_tasks(source, destination, checksum, verify_ownership):
+    with _pinned_source(source) as descriptor:
+        yield from rf._iter_pinned_verify_tasks(
+            descriptor, source, destination, checksum, verify_ownership)
+
+
+def _pinned_special_preflight(source, cache):
+    with _pinned_source(source) as descriptor:
+        return rf._refuse_pinned_specials(descriptor, source, cache)
+
+
 def _raise_os(*a, **k):
     raise OSError("injected")
 
@@ -28,7 +61,7 @@ def _make_tree(root: Path) -> None:
 
 
 def _copy_identical(src: Path, dst: Path) -> None:
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
 
 
 # --- rf-rel-01: checksum default + content verification ---------------------
@@ -48,9 +81,9 @@ def test_verify_detects_same_size_content_mismatch():
         _copy_identical(src, dst)
         # corrupt dst content WITHOUT changing size
         (dst / "sub" / "file.txt").write_text("HELLO WORLD")  # same length
-        rf.verify_copy(src, dst, checksum=False)              # size-only: passes
+        _pinned_call(rf.verify_copy, src, dst, checksum=False)              # size-only: passes
         with pytest.raises(RuntimeError, match="hash mismatch"):
-            rf.verify_copy(src, dst, checksum=True)           # content: caught
+            _pinned_call(rf.verify_copy, src, dst, checksum=True)           # content: caught
 
 
 def test_verify_happy_path_files_links_dirs():
@@ -59,7 +92,7 @@ def test_verify_happy_path_files_links_dirs():
         src, dst = root / "s", root / "t"
         _make_tree(src)
         _copy_identical(src, dst)
-        rf.verify_copy(src, dst, checksum=True)   # no exception
+        _pinned_call(rf.verify_copy, src, dst, checksum=True)   # no exception
 
 
 def test_fsync_directory_ignores_unsupported_error_but_raises_io_failure(
@@ -91,7 +124,7 @@ def test_verify_detects_missing_empty_dir():
         _copy_identical(src, dst)
         (dst / "empty").rmdir()                   # drop an empty dir from copy
         with pytest.raises(RuntimeError, match="missing directory"):
-            rf.verify_copy(src, dst, checksum=False)
+            _pinned_call(rf.verify_copy, src, dst, checksum=False)
 
 
 def test_verify_detects_symlink_mismatch():
@@ -103,7 +136,7 @@ def test_verify_detects_symlink_mismatch():
         (dst / "link").unlink()
         (dst / "link").symlink_to("elsewhere")    # wrong target
         with pytest.raises(RuntimeError, match="symlink target mismatch"):
-            rf.verify_copy(src, dst, checksum=False)
+            _pinned_call(rf.verify_copy, src, dst, checksum=False)
 
 
 def test_verify_detects_missing_file():
@@ -114,7 +147,7 @@ def test_verify_detects_missing_file():
         _copy_identical(src, dst)
         (dst / "sub" / "file.txt").unlink()
         with pytest.raises(RuntimeError, match="missing file"):
-            rf.verify_copy(src, dst, checksum=False)
+            _pinned_call(rf.verify_copy, src, dst, checksum=False)
 
 
 # --- rf-rel-03: backup-removal failure warns, doesn't fail -------------------
@@ -158,7 +191,7 @@ def test_copy_and_verify_no_verify_warns(caplog):
         src = root / "s"
         _make_tree(src)
         plan = rf.Plan(source=src, target=root / "t", verify=False)
-        rf._copy_and_verify(plan)
+        _pinned_call(rf._copy_and_verify, plan)
         assert (root / "t" / "sub" / "file.txt").exists()    # copied
         assert any("verification disabled" in r.message for r in caplog.records)
 
@@ -170,7 +203,7 @@ def test_verify_copy_size_only_branch_uses_no_pool(tmp_path, monkeypatch):
     # is specific to the checksum branch (no worker thread exists here).
     src = tmp_path / "src"; _make_tree(src)
     dst = tmp_path / "dst"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     pool_used = {"n": 0}
     real_pool = rf.ThreadPoolExecutor
 
@@ -179,7 +212,7 @@ def test_verify_copy_size_only_branch_uses_no_pool(tmp_path, monkeypatch):
         return real_pool(*a, **k)
 
     monkeypatch.setattr(rf, "ThreadPoolExecutor", counting_pool)
-    rf.verify_copy(src, dst, checksum=False)
+    _pinned_call(rf.verify_copy, src, dst, checksum=False)
     assert pool_used["n"] == 0   # size-only verify ran sequentially
 
 
@@ -194,7 +227,7 @@ def test_copy_and_verify_cleans_up_on_verify_failure(caplog):
         with caplog.at_level(logging.WARNING, logger="relocate"):
             with mock.patch.object(rf, "verify_copy", side_effect=RuntimeError("boom")):
                 with pytest.raises(RuntimeError):
-                    rf._copy_and_verify(plan)
+                    _pinned_call(rf._copy_and_verify, plan)
         assert not target.exists()                            # rolled back
         # rf-rel-06: the destruction of the partial target is logged.
         assert any("after verification failed" in r.message
@@ -295,45 +328,44 @@ def test_copy_tree_skips_specials_and_rejects_existing_target(tmp_path):
     (src / "ok.txt").write_text("hi")
     fifo = src / "f.fifo"; os.mkfifo(fifo)
     dst = tmp_path / "t"
-    skipped = rf.copy_tree(src, dst)
+    skipped = _pinned_call(rf.copy_tree, src, dst)
     assert (dst / "ok.txt").exists()
     assert not (dst / "f.fifo").exists()
     assert fifo in skipped
     # second call into an existing target -> FileExistsError
     with pytest.raises(FileExistsError, match="stale partial target"):
-        rf.copy_tree(src, dst)
+        _pinned_call(rf.copy_tree, src, dst)
 
 
-def test_copy_tree_rolls_back_on_copytree_failure(tmp_path, monkeypatch):
+def test_copy_tree_rolls_back_on_population_failure(tmp_path, monkeypatch):
     src = tmp_path / "s"; src.mkdir()
     (src / "x.txt").write_text("hi")
     dst = tmp_path / "t"
-    monkeypatch.setattr(rf.shutil, "copytree",
+    monkeypatch.setattr(rf, "_populate_pinned_copy",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     with pytest.raises(RuntimeError):
-        rf.copy_tree(src, dst)
+        _pinned_call(rf.copy_tree, src, dst)
     assert not dst.exists()                  # rolled back
 
 
-def test_replicate_ownership_logs_on_chown_failure(tmp_path, monkeypatch, caplog):
+def test_pinned_copy_ownership_logs_on_chown_failure(tmp_path, monkeypatch, caplog):
     src = tmp_path / "s"; src.mkdir()
     (src / "a.txt").write_text("x")
     dst = tmp_path / "t"
     monkeypatch.setattr(rf.os, "chown", _raise_os)
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     assert any("could not chown" in r.message for r in caplog.records)
 
 
-def test_replicate_ownership_caps_chown_failure_logs(tmp_path, monkeypatch, caplog):
+def test_pinned_copy_ownership_caps_chown_failure_logs(tmp_path, monkeypatch, caplog):
     src = tmp_path / "s"; src.mkdir()
     for i in range(4):
         (src / f"f{i}.txt").write_text("x")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
     caplog.clear()
     monkeypatch.setattr(rf, "_CHOWN_WARNING_LIMIT", 2)
     monkeypatch.setattr(rf.os, "chown", _raise_os)
-    rf._replicate_ownership(src, dst, jobs=1)
+    _pinned_call(rf.copy_tree, src, dst)
     chown_warnings = [r.message for r in caplog.records
                       if r.message.startswith("could not chown")]
     assert len(chown_warnings) == 2
@@ -341,9 +373,8 @@ def test_replicate_ownership_caps_chown_failure_logs(tmp_path, monkeypatch, capl
                for r in caplog.records)
 
 
-def test_replicate_ownership_parallel(tmp_path, monkeypatch):
-    # rf-conc-01: every (src,dst) pair under _pair_walk should reach _chown_pair
-    # exactly once, even with several worker threads.
+def test_pinned_copy_applies_ownership_to_every_entry(tmp_path, monkeypatch):
+    # Ownership applies once to each copied file, directory, and source root.
     src = tmp_path / "s"; src.mkdir()
     for i in range(20):
         (src / f"f{i}.txt").write_text(str(i))
@@ -351,7 +382,6 @@ def test_replicate_ownership_parallel(tmp_path, monkeypatch):
     for i in range(20):
         (src / "sub" / f"g{i}.txt").write_text(str(i))
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)            # also calls _replicate_ownership
     import threading
     seen, lock = [], threading.Lock()
     real_chown = rf.os.chown
@@ -362,7 +392,7 @@ def test_replicate_ownership_parallel(tmp_path, monkeypatch):
         return real_chown(p, uid, gid, follow_symlinks=follow_symlinks)
 
     monkeypatch.setattr(rf.os, "chown", tracking_chown)
-    rf._replicate_ownership(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     # every src/* (incl. nested) was visited
     src_count = sum(1 for _ in src.rglob("*")) + 1   # +1 for src itself
     assert len(seen) == src_count
@@ -501,91 +531,11 @@ def test_execute_warns_on_stranded_backup_when_already_migrated(tmp_path, caplog
 
 # --- rf-scal-03: stream pairs, don't materialise the full list ---------------
 
-def test_replicate_ownership_streams_lazily(tmp_path, monkeypatch):
-    src = tmp_path / "s"; src.mkdir()
-    for i in range(40):
-        (src / f"f{i}.txt").write_text(str(i))
-    dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-
-    # Spy on _pair_walk to assert it's iterated, not list()'d.
-    real_pair_walk = rf._pair_walk
-    spy = {"started": 0}
-
-    def spy_pair_walk(s, d):
-        for p in real_pair_walk(s, d):
-            spy["started"] += 1
-            yield p
-
-    monkeypatch.setattr(rf, "_pair_walk", spy_pair_walk)
-    # Tight bound to force the wait-then-submit branch to be exercised.
-    monkeypatch.setattr(rf, "_inflight_cap", lambda _workers: 4)
-    rf._replicate_ownership(src, dst)
-    assert spy["started"] == 41   # 40 files + src dir itself
-
 
 # --- rf-conc-02: collect unexpected exceptions from the executor -------------
 
-def test_replicate_ownership_collects_unexpected_exception(tmp_path, monkeypatch, caplog):
-    src = tmp_path / "s"; src.mkdir()
-    (src / "a.txt").write_text("x")
-    dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-
-    def raising_chown_pair(pair):
-        raise RuntimeError("unexpected")
-
-    monkeypatch.setattr(rf, "_chown_pair", raising_chown_pair)
-    rf._replicate_ownership(src, dst)
-    # Walks `dst`'s pairs (src + a.txt = 2 pairs); both raise; one summary log.
-    msgs = [r.message for r in caplog.records]
-    assert any("ownership replication" in m and "raised unexpectedly" in m
-               for m in msgs)
-
-
-def test_collect_chown_error_records_exception():
-    from concurrent.futures import Future
-    fut: Future = Future()
-    fut.set_exception(ValueError("boom"))
-    errs: list = []
-    rf._collect_chown_error(fut, errs)
-    assert len(errs) == 1
-    assert isinstance(errs[0], ValueError)
-
-
-def test_collect_chown_error_ignores_success():
-    from concurrent.futures import Future
-    fut: Future = Future()
-    fut.set_result(None)
-    errs: list = []
-    rf._collect_chown_error(fut, errs)
-    assert errs == []
-
 
 # --- rf-conc-03: drop the pre-check; handle FileNotFoundError directly -------
-
-def test_chown_pair_swallows_filenotfound_on_dst(tmp_path, monkeypatch, caplog):
-    # The dst path may vanish between copy and chown (or never existed for a
-    # skipped FIFO). rf-conc-03: handle FileNotFoundError, do not pre-check.
-    src = tmp_path / "s"; src.write_text("x")
-    dst_missing = tmp_path / "vanished"   # never created
-    rf._chown_pair((src, dst_missing))    # must NOT raise / log
-    assert not any("could not chown" in r.message for r in caplog.records)
-
-
-def test_chown_pair_swallows_filenotfound_on_src(tmp_path, caplog):
-    # Symmetric: if the src vanished, lstat() raises FNF — same skip.
-    rf._chown_pair((tmp_path / "missing-src", tmp_path / "irrelevant"))
-    assert not any("could not chown" in r.message for r in caplog.records)
-
-
-def test_chown_pair_logs_on_permission_error(tmp_path, monkeypatch, caplog):
-    src = tmp_path / "s"; src.write_text("x")
-    dst = tmp_path / "t"; dst.write_text("x")
-    monkeypatch.setattr(rf.os, "chown",
-                        lambda *a, **k: (_ for _ in ()).throw(PermissionError("EPERM")))
-    rf._chown_pair((src, dst))
-    assert any("could not chown" in r.message for r in caplog.records)
 
 
 # --- rf-rel-07: disk-space precheck -----------------------------------------
@@ -594,7 +544,7 @@ def test_check_disk_space_passes_when_room(tmp_path):
     # Real fs with plenty of room: no exception.
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.txt").write_text("x" * 1024)
-    rf._check_disk_space(tmp_path / "src", tmp_path / "dst")
+    rf._check_disk_space(tmp_path / "src", tmp_path / "dst", total_bytes=1024)
 
 
 def test_check_disk_space_raises_when_insufficient(tmp_path, monkeypatch):
@@ -606,7 +556,7 @@ def test_check_disk_space_raises_when_insufficient(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rf.shutil, "disk_usage", lambda p: _DU(free=64))
     with pytest.raises(RuntimeError, match="insufficient space"):
-        rf._check_disk_space(tmp_path / "src", tmp_path / "dst")
+        rf._check_disk_space(tmp_path / "src", tmp_path / "dst", total_bytes=1024)
 
 
 def test_check_disk_space_lets_unsupported_proceed(tmp_path, monkeypatch):
@@ -615,33 +565,28 @@ def test_check_disk_space_lets_unsupported_proceed(tmp_path, monkeypatch):
     (tmp_path / "src" / "a.txt").write_text("x" * 16)
     monkeypatch.setattr(rf.shutil, "disk_usage",
                         lambda p: (_ for _ in ()).throw(OSError("ENOTSUP")))
-    rf._check_disk_space(tmp_path / "src", tmp_path / "dst")  # no raise
+    rf._check_disk_space(tmp_path / "src", tmp_path / "dst", total_bytes=1024)  # no raise
 
 
-def test_src_size_totals_sums_regular_only(tmp_path):
+def test_pinned_size_totals_sums_regular_only(tmp_path):
     src = tmp_path / "src"; src.mkdir()
     (src / "a.bin").write_bytes(b"hello")              # 5
     (src / "b.bin").write_bytes(b"world!")             # 6
     fifo = src / "fifo"; os.mkfifo(fifo)               # 0
     (src / "sub").mkdir()
     (src / "sub" / "c.bin").write_bytes(b"x" * 1000)
-    total = rf._src_size_totals(src)[0]
+    total = _pinned_totals(src)[0]
     assert total == 5 + 6 + 1000
 
 
-def test_src_size_totals_skips_lstat_errors(tmp_path, monkeypatch):
-    src = tmp_path / "src"; src.mkdir()
-    (src / "a.bin").write_bytes(b"hello")
-
-    real_lstat = Path.lstat
-
-    def flaky_lstat(self):
-        if self.name == "a.bin":
-            raise OSError("racy")
-        return real_lstat(self)
-
-    monkeypatch.setattr(Path, "lstat", flaky_lstat)
-    assert rf._src_size_totals(src)[0] == 0
+def test_pinned_size_totals_propagates_source_stat_failure(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_bytes(b"original")
+    with _pinned_source(source) as descriptor:
+        monkeypatch.setattr(rf.os, "stat", _raise_os)
+        with pytest.raises(OSError, match="injected"):
+            rf._pinned_size_totals(descriptor)
 
 
 # --- rf-rel-04: verify_ownership flag --------------------------------------
@@ -649,7 +594,7 @@ def test_src_size_totals_skips_lstat_errors(tmp_path, monkeypatch):
 class _FakeStat:
     """Stat-like result that preserves real attributes and lets a test
     override `st_uid` / `st_gid` / `st_mode` without breaking the rest of
-    `_verify_file`."""
+    `_verify_pinned_file`."""
     def __init__(self, real, **over):
         self._real = real
         self._over = over
@@ -664,7 +609,7 @@ def test_verify_copy_ownership_mismatch_raises(tmp_path, monkeypatch):
     src = tmp_path / "s"; src.mkdir()
     (src / "a.txt").write_text("hi")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
 
     real_lstat = Path.lstat
 
@@ -676,14 +621,14 @@ def test_verify_copy_ownership_mismatch_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "lstat", fake_lstat)
     with pytest.raises(RuntimeError, match="ownership mismatch"):
-        rf.verify_copy(src, dst, checksum=False, verify_ownership=True)
+        _pinned_call(rf.verify_copy, src, dst, checksum=False, verify_ownership=True)
 
 
 def test_verify_copy_ownership_mode_mismatch_raises(tmp_path, monkeypatch):
     src = tmp_path / "s"; src.mkdir()
     (src / "a.txt").write_text("hi")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
 
     real_lstat = Path.lstat
 
@@ -695,7 +640,7 @@ def test_verify_copy_ownership_mode_mismatch_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "lstat", fake_lstat)
     with pytest.raises(RuntimeError, match="mode mismatch"):
-        rf.verify_copy(src, dst, checksum=False, verify_ownership=True)
+        _pinned_call(rf.verify_copy, src, dst, checksum=False, verify_ownership=True)
 
 
 def test_verify_copy_ownership_off_by_default(tmp_path, monkeypatch):
@@ -703,7 +648,7 @@ def test_verify_copy_ownership_off_by_default(tmp_path, monkeypatch):
     src = tmp_path / "s"; src.mkdir()
     (src / "a.txt").write_text("hi")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     # Deliberately monkeypatch _verify_ownership to fail if called.
     called = {"n": 0}
 
@@ -712,7 +657,7 @@ def test_verify_copy_ownership_off_by_default(tmp_path, monkeypatch):
         raise AssertionError("should not be called")
 
     monkeypatch.setattr(rf, "_verify_ownership", trap)
-    rf.verify_copy(src, dst, checksum=False, verify_ownership=False)
+    _pinned_call(rf.verify_copy, src, dst, checksum=False, verify_ownership=False)
     assert called["n"] == 0
 
 
@@ -773,22 +718,22 @@ def test_find_open_file_holders_doc_mentions_snapshot_limitation():
 
 
 def test_copy_tree_skips_space_check_when_disabled(tmp_path, monkeypatch):
-    # rf-perf-02: check_space=False skips both _src_size_totals and
+    # rf-perf-02: check_space=False skips both _pinned_size_totals and
     # _check_disk_space (no walk for the precheck).
     src = tmp_path / "src"; src.mkdir()
     (src / "a.bin").write_bytes(b"x" * 4096)
     called = {"space": 0, "total": 0}
     monkeypatch.setattr(rf, "_check_disk_space",
                         lambda *a, **k: called.__setitem__("space", called["space"] + 1))
-    real_totals = rf._src_size_totals
+    real_totals = rf._pinned_size_totals
     monkeypatch.setattr(
         rf,
-        "_src_size_totals",
+        "_pinned_size_totals",
         lambda s: (
             called.__setitem__("total", called["total"] + 1), real_totals(s)
         )[1],
     )
-    rf.copy_tree(src, tmp_path / "dst", check_space=False)
+    _pinned_call(rf.copy_tree, src, tmp_path / "dst", check_space=False)
     assert called["space"] == 0
     assert called["total"] == 0          # no precheck walk
     assert (tmp_path / "dst" / "a.bin").exists()
@@ -804,7 +749,7 @@ def test_copy_tree_no_space_check_ignores_low_space(tmp_path, monkeypatch):
         free = 1
 
     monkeypatch.setattr(rf.shutil, "disk_usage", lambda p: _DU())
-    rf.copy_tree(src, tmp_path / "dst", check_space=False)   # no raise
+    _pinned_call(rf.copy_tree, src, tmp_path / "dst", check_space=False)   # no raise
     assert (tmp_path / "dst" / "a.bin").exists()
 
 
@@ -814,7 +759,7 @@ def test_copy_tree_space_check_still_needs_total_for_progress(tmp_path, monkeypa
     src = tmp_path / "src"; src.mkdir()
     (src / "a.bin").write_bytes(b"x" * 100)
     calls = []
-    rf.copy_tree(src, tmp_path / "dst", check_space=False,
+    _pinned_call(rf.copy_tree, src, tmp_path / "dst", check_space=False,
                  progress_cb=lambda d, t: calls.append((d, t)))
     assert calls
     assert calls[-1][1] == 100   # total still reflects real bytes
@@ -852,7 +797,7 @@ def test_copy_tree_disk_space_precheck_blocks(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rf.shutil, "disk_usage", lambda p: _DU(free=10))
     with pytest.raises(RuntimeError, match="insufficient space"):
-        rf.copy_tree(src, tmp_path / "dst")
+        _pinned_call(rf.copy_tree, src, tmp_path / "dst")
     assert not (tmp_path / "dst").exists()    # nothing copied
 
 
@@ -1208,65 +1153,58 @@ def test_check_cross_device_silent_when_different_dev(tmp_path, monkeypatch, cap
     assert not any("same filesystem" in r.message for r in caplog.records)
 
 
-# --- rf-cx-01: split _verify_size / _verify_content -------------------------
+# --- pinned size and content verification -------------------------------
 
 def test_verify_size_pass_and_fail(tmp_path):
     a = tmp_path / "a"; a.write_text("abc")
     b = tmp_path / "b"; b.write_text("abc")
-    rf._verify_size(a, b, Path("a"))
+    rf._verify_pinned_file(a, b, Path("a"), a.stat(), None)
     c = tmp_path / "c"; c.write_text("longer")
     with pytest.raises(RuntimeError, match="size mismatch"):
-        rf._verify_size(a, c, Path("a"))
+        rf._verify_pinned_file(a, c, Path("a"), a.stat(), None)
 
 
 def test_verify_size_uses_passed_src_size_without_lstatting_src(tmp_path, monkeypatch):
-    # rf-perf-01: when src_size is provided, _verify_size must NOT lstat src.
+    # The pinned source stat must be sufficient without reopening its path.
     a = tmp_path / "a"   # deliberately never created
     b = tmp_path / "b"; b.write_text("abc")   # 3 bytes
-    rf._verify_size(a, b, Path("a"), src_size=3)   # no raise, no src lstat
+    rf._verify_pinned_file(a, b, Path("a"), _FakeStat(b.stat(), st_size=3), None)   # no raise, no src lstat
     with pytest.raises(RuntimeError, match="size mismatch"):
-        rf._verify_size(a, b, Path("a"), src_size=99)
+        rf._verify_pinned_file(a, b, Path("a"), _FakeStat(b.stat(), st_size=99), None)
 
 
-def test_iter_verify_tasks_lstats_each_entry_once(tmp_path, monkeypatch):
+def test_pinned_verify_tasks_reuse_regular_file_stat(tmp_path, monkeypatch):
     # rf-perf-01: classification issues exactly one lstat per walked entry.
     src = tmp_path / "s"; src.mkdir()
     (src / "f.txt").write_text("hi")
     (src / "d").mkdir()
     (src / "l").symlink_to("f.txt")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-    counts = {"n": 0}
-    real_lstat = rf.os.lstat
+    _pinned_call(rf.copy_tree, src, dst)
+    counts = {}
+    real_stat = rf.os.stat
 
-    def counting(p):
-        counts["n"] += 1
-        return real_lstat(p)
+    def counting(name, *args, **kwargs):
+        if kwargs.get("dir_fd") is not None and kwargs.get("follow_symlinks") is False:
+            counts[name] = counts.get(name, 0) + 1
+        return real_stat(name, *args, **kwargs)
 
-    monkeypatch.setattr(rf.os, "lstat", counting)
-    tasks = list(rf._iter_verify_tasks(src, dst, checksum=False,
+    monkeypatch.setattr(rf.os, "stat", counting)
+    tasks = list(_pinned_verify_tasks(src, dst, checksum=False,
                                        verify_ownership=False))
-    # 3 entries → one classification lstat each (4th lstat is os.walk
-    # deciding whether to descend the subdir, outside classification). The
-    # old trio of is_symlink/is_file/is_dir would have been far more.
-    assert counts["n"] <= 4
+    # fwalk checks the directory before traversal; symlink reads recheck identity.
+    assert counts == {".": 1, "f.txt": 1, "d": 2, "l": 2}
     assert len(tasks) == 3
 
 
-def test_iter_verify_tasks_lstat_fail_yields_raising_task(tmp_path, monkeypatch):
-    # rf-rel-01: an lstat failure during classification must NOT silently skip
-    # the entry; a task is yielded that raises so verification fails loudly
-    # instead of accepting an unconfirmed copy.
-    src = tmp_path / "s"; src.mkdir()
-    (src / "f.txt").write_text("hi")
-    dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-    monkeypatch.setattr(rf.os, "lstat", _raise_os)
-    tasks = list(rf._iter_verify_tasks(src, dst, checksum=False,
-                                       verify_ownership=False))
-    assert len(tasks) == 1
-    with pytest.raises(RuntimeError, match="could not stat source entry"):
-        tasks[0]()
+def test_pinned_verify_tasks_fail_immediately_on_source_stat_error(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_bytes(b"original")
+    with _pinned_source(source) as descriptor:
+        monkeypatch.setattr(rf.os, "stat", _raise_os)
+        with pytest.raises(OSError, match="injected"):
+            list(rf._iter_pinned_verify_tasks(descriptor, source, tmp_path / "copy", False, False))
 
 
 def test_verify_copy_raises_when_one_src_entry_unreadable(tmp_path, monkeypatch):
@@ -1276,17 +1214,17 @@ def test_verify_copy_raises_when_one_src_entry_unreadable(tmp_path, monkeypatch)
     (src / "good.txt").write_text("ok")
     bad = src / "bad.txt"; bad.write_text("data")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-    real_lstat = rf.os.lstat
+    _pinned_call(rf.copy_tree, src, dst)
+    real_stat = rf.os.stat
 
     def selective(p, *a, **k):
-        if Path(p) == bad:
+        if p == bad.name and k.get("dir_fd") is not None:
             raise PermissionError("became unreadable mid-run")
-        return real_lstat(p, *a, **k)
+        return real_stat(p, *a, **k)
 
-    monkeypatch.setattr(rf.os, "lstat", selective)
-    with pytest.raises(RuntimeError, match="could not stat source entry"):
-        rf.verify_copy(src, dst, checksum=False)
+    monkeypatch.setattr(rf.os, "stat", selective)
+    with pytest.raises(OSError, match="unreadable"):
+        _pinned_call(rf.verify_copy, src, dst, checksum=False)
 
 
 def test_verify_copy_checksum_raises_when_src_entry_unreadable(tmp_path, monkeypatch):
@@ -1297,17 +1235,17 @@ def test_verify_copy_checksum_raises_when_src_entry_unreadable(tmp_path, monkeyp
         (src / f"f{i}.txt").write_text(f"content-{i}")
     bad = src / "f3.txt"
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-    real_lstat = rf.os.lstat
+    _pinned_call(rf.copy_tree, src, dst)
+    real_stat = rf.os.stat
 
     def selective(p, *a, **k):
-        if Path(p) == bad:
+        if p == bad.name and k.get("dir_fd") is not None:
             raise PermissionError("became unreadable mid-run")
-        return real_lstat(p, *a, **k)
+        return real_stat(p, *a, **k)
 
-    monkeypatch.setattr(rf.os, "lstat", selective)
-    with pytest.raises(RuntimeError, match="could not stat source entry"):
-        rf.verify_copy(src, dst, checksum=True)
+    monkeypatch.setattr(rf.os, "stat", selective)
+    with pytest.raises(OSError, match="unreadable"):
+        _pinned_call(rf.verify_copy, src, dst, checksum=True)
 
 
 @settings(max_examples=30, deadline=None)
@@ -1320,37 +1258,37 @@ def test_verify_copy_unreadable_entry_property(tmp_path_factory, idx):
     for n in names:
         n.write_text("payload")
     dst = base / "t"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     bad = names[idx]
-    real_lstat = rf.os.lstat
+    real_stat = rf.os.stat
 
     def selective(p, *a, **k):
-        if Path(p) == bad:
+        if p == bad.name and k.get("dir_fd") is not None:
             raise OSError("unreadable")
-        return real_lstat(p, *a, **k)
+        return real_stat(p, *a, **k)
 
     with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(rf.os, "lstat", selective)
-        with pytest.raises(RuntimeError, match="could not stat source entry"):
-            rf.verify_copy(src, dst, checksum=False)
+        monkeypatch.setattr(rf.os, "stat", selective)
+        with pytest.raises(OSError, match="unreadable"):
+            _pinned_call(rf.verify_copy, src, dst, checksum=False)
 
 
 def test_verify_content_pass_and_fail(tmp_path):
     a = tmp_path / "a"; a.write_text("hello")
     b = tmp_path / "b"; b.write_text("hello")
-    rf._verify_content(a, b, Path("a"))
+    rf._verify_pinned_file(a, b, Path("a"), a.stat(), rf._sha256(a))
     b.write_text("HELLO")
     with pytest.raises(RuntimeError, match="hash mismatch"):
-        rf._verify_content(a, b, Path("a"))
+        rf._verify_pinned_file(a, b, Path("a"), a.stat(), rf._sha256(a))
 
 
 def test_verify_dir_passes_and_raises(tmp_path):
     s = tmp_path / "s"; s.mkdir()
     d = tmp_path / "d"; d.mkdir()
-    rf._verify_dir(s, d, Path("d"))
+    rf._verify_pinned_directory(s, d, Path("d"))
     d.rmdir()
     with pytest.raises(RuntimeError, match="missing directory"):
-        rf._verify_dir(s, d, Path("d"))
+        rf._verify_pinned_directory(s, d, Path("d"))
 
 
 # --- rf-n1-30: single-lstat dst classification -------------------------------
@@ -1360,35 +1298,27 @@ def test_verify_dir_rejects_symlink_dst(tmp_path):
     real = tmp_path / "real"; real.mkdir()
     d = tmp_path / "d"; d.symlink_to(real)
     with pytest.raises(RuntimeError, match="missing directory"):
-        rf._verify_dir(s, d, Path("d"))
+        rf._verify_pinned_directory(s, d, Path("d"))
 
 
 def test_verify_file_missing_dst(tmp_path):
     a = tmp_path / "a"; a.write_text("abc")
     with pytest.raises(RuntimeError, match="missing file in copy"):
-        rf._verify_file(a, tmp_path / "gone", Path("a"), checksum=False)
+        rf._verify_pinned_file(a, tmp_path / "gone", Path("a"), a.stat(), None)
 
 
 def test_verify_file_rejects_symlink_dst(tmp_path):
     a = tmp_path / "a"; a.write_text("abc")
     b = tmp_path / "b"; b.symlink_to(a)
     with pytest.raises(RuntimeError, match="missing file in copy"):
-        rf._verify_file(a, b, Path("a"), checksum=False)
-
-
-def test_verify_size_uses_passed_dst_size_without_lstatting_dst(tmp_path):
-    a = tmp_path / "a"; a.write_text("abc")
-    missing = tmp_path / "gone"
-    rf._verify_size(a, missing, Path("a"), src_size=3, dst_size=3)
-    with pytest.raises(RuntimeError, match="size mismatch"):
-        rf._verify_size(a, missing, Path("a"), src_size=3, dst_size=99)
+        rf._verify_pinned_file(a, b, Path("a"), a.stat(), None)
 
 
 def test_verify_file_size_mismatch_via_passed_stat(tmp_path):
     a = tmp_path / "a"; a.write_text("abc")
     b = tmp_path / "b"; b.write_text("abcdef")
     with pytest.raises(RuntimeError, match="size mismatch"):
-        rf._verify_file(a, b, Path("a"), checksum=False)
+        rf._verify_pinned_file(a, b, Path("a"), a.stat(), None)
 
 
 # --- rf-perf-02: parallel verify pool ---------------------------------------
@@ -1398,21 +1328,21 @@ def test_verify_copy_parallel_detects_corruption(tmp_path):
     for i in range(12):
         (src / f"f{i}.txt").write_text(f"content-{i}" * 50)
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-    rf.verify_copy(src, dst, checksum=True)
+    _pinned_call(rf.copy_tree, src, dst)
+    _pinned_call(rf.verify_copy, src, dst, checksum=True)
     (dst / "f3.txt").write_text("X" * len((src / "f3.txt").read_text()))
     with pytest.raises(RuntimeError, match="hash mismatch"):
-        rf.verify_copy(src, dst, checksum=True)
+        _pinned_call(rf.verify_copy, src, dst, checksum=True)
 
 
 def test_verify_copy_rejects_destination_only_injection(tmp_path):
     src = tmp_path / "src"; _make_tree(src)
     dst = tmp_path / "dst"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     (dst / "injected.txt").write_text("unexpected", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="inventory mismatch"):
-        rf.verify_copy(src, dst, checksum=False)
+        _pinned_call(rf.verify_copy, src, dst, checksum=False)
 
 
 def test_verify_copy_parallel_propagates_size_mismatch(tmp_path):
@@ -1420,21 +1350,10 @@ def test_verify_copy_parallel_propagates_size_mismatch(tmp_path):
     for i in range(5):
         (src / f"f{i}.txt").write_text("abc")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     (dst / "f2.txt").write_text("differentlength")
     with pytest.raises(RuntimeError, match="size mismatch"):
-        rf.verify_copy(src, dst, checksum=True)
-
-
-def test_collect_chown_error_appends_each_exception():
-    # The drainer records every exception; the caller decides first-vs-all.
-    from concurrent.futures import Future
-    f1: Future = Future(); f1.set_exception(ValueError("a"))
-    f2: Future = Future(); f2.set_exception(ValueError("b"))
-    errs: list = []
-    rf._collect_chown_error(f1, errs)
-    rf._collect_chown_error(f2, errs)
-    assert [e.args[0] for e in errs] == ["a", "b"]
+        _pinned_call(rf.verify_copy, src, dst, checksum=True)
 
 
 # --- rf-perf-03: lstat cache reused by _group_specials_by_kind -------------
@@ -1468,7 +1387,7 @@ def test_copy_tree_populates_mode_cache(tmp_path):
     fifo = src / "f.fifo"; os.mkfifo(fifo)
     dst = tmp_path / "t"
     cache: dict = {}
-    rf.copy_tree(src, dst, mode_cache=cache)
+    _pinned_call(rf.copy_tree, src, dst, mode_cache=cache)
     assert fifo in cache
     import stat as _s
     assert _s.S_ISFIFO(cache[fifo])
@@ -1729,7 +1648,7 @@ def test_copy_and_verify_wires_progress_callback(tmp_path, monkeypatch, caplog):
     )
 
     caplog.set_level("INFO", logger="relocate")
-    rf._copy_and_verify(plan)
+    _pinned_call(rf._copy_and_verify, plan)
     captured["progress_cb"](50, 100)
 
     assert callable(captured["progress_cb"])
@@ -1865,18 +1784,18 @@ def test_with_logger_swaps_logger_in_swallow_or_warn():
 
 # --- rf-test-01: injectable hash function via contextvar --------------------
 
-def test_with_hash_fn_swaps_hash_used_by_verify_content(tmp_path):
+def test_with_hash_fn_swaps_destination_hash(tmp_path):
     src = tmp_path / "a"; src.write_text("hello")
     dst = tmp_path / "b"; dst.write_text("hello")
     calls = []
 
     def fake_hash(p):
         calls.append(p)
-        return "constant"          # both sides hash equal -> no mismatch
+        return rf._sha256(p)
 
     with rf.with_hash_fn(fake_hash):
-        rf._verify_content(src, dst, Path("rel"))
-    assert len(calls) == 2          # src + dst hashed via the injected fn
+        rf._verify_pinned_file(src, dst, Path("rel"), src.stat(), rf._sha256(src))
+    assert calls == [dst]
     # outside the context, the default _sha256 is restored.
     assert rf._hash() is rf._sha256
 
@@ -1902,7 +1821,7 @@ def test_injected_hash_detects_mismatch(tmp_path):
 
     with rf.with_hash_fn(per_path_hash):
         with pytest.raises(RuntimeError, match="hash mismatch"):
-            rf._verify_content(src, dst, Path("rel"))
+            rf._verify_pinned_file(src, dst, Path("rel"), src.stat(), rf._sha256(src))
 
 
 def test_injected_blocking_hash_is_joined_before_rmtree(tmp_path, monkeypatch):
@@ -1937,7 +1856,7 @@ def test_injected_blocking_hash_is_joined_before_rmtree(tmp_path, monkeypatch):
     plan = rf.Plan(source=src, target=target, checksum=True, jobs=2)
     with rf.with_hash_fn(blocking_hash):
         with pytest.raises(RuntimeError):
-            rf._copy_and_verify(plan)
+            _pinned_call(rf._copy_and_verify, plan)
     target_deletes = [
         done for names, done in rmtree_seen if names == {"slow.txt", "boom.txt"}
     ]
@@ -1983,9 +1902,9 @@ def test_verify_copy_parallel_drains_bounded_inflight(tmp_path, monkeypatch):
     for i in range(20):
         (src / f"f{i}.bin").write_bytes(b"payload-" + str(i).encode())
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     monkeypatch.setattr(rf, "_inflight_cap", lambda _workers: 2)
-    rf.verify_copy(src, dst, checksum=True)   # exercise the wait+resubmit branch
+    _pinned_call(rf.verify_copy, src, dst, checksum=True)   # exercise the wait+resubmit branch
 
 
 def test_cleanup_staging_handles_nested_dir(tmp_path):
@@ -2021,7 +1940,7 @@ def test_verify_symlink_missing_in_dst(tmp_path):
     src_link = tmp_path / "link"; src_link.symlink_to(tmp_path / "anything")
     missing = tmp_path / "absent"
     with pytest.raises(RuntimeError, match="missing symlink"):
-        rf._verify_symlink(src_link, missing, Path("link"))
+        rf._verify_pinned_symlink(src_link, os.readlink(src_link), missing, Path("link"))
 
 
 def test_already_migrated_with_relative_resolves(tmp_path):
@@ -2094,7 +2013,7 @@ def test_copy_tree_progress_cb_called_per_file(tmp_path):
         (src / f"f{i}.txt").write_bytes(b"x" * (i + 1) * 100)
     dst = tmp_path / "t"
     calls = []
-    rf.copy_tree(src, dst, progress_cb=lambda done, total: calls.append((done, total)))
+    _pinned_call(rf.copy_tree, src, dst, progress_cb=lambda done, total: calls.append((done, total)))
     assert calls
     last = calls[-1]
     # Last cb is done == total.
@@ -2103,16 +2022,16 @@ def test_copy_tree_progress_cb_called_per_file(tmp_path):
 
 def test_copy_tree_progress_done_matches_src_total_with_symlink(tmp_path):
     # rf-rel-05: a tree containing a symlink must still finish with
-    # done == total. _src_size_totals counts regular files only and the
+    # done == total. _pinned_size_totals counts regular files only and the
     # tracking copy_function must account the same bytes (os.stat for the
     # followed target, never the link's own lstat size).
     src = tmp_path / "s"; src.mkdir()
     (src / "real.txt").write_bytes(b"x" * 4096)
     (src / "link").symlink_to("real.txt")
     dst = tmp_path / "t"
-    expected_total = rf._src_size_totals(src)[0]
+    expected_total = _pinned_totals(src)[0]
     calls = []
-    rf.copy_tree(src, dst, progress_cb=lambda d, t: calls.append((d, t)))
+    _pinned_call(rf.copy_tree, src, dst, progress_cb=lambda d, t: calls.append((d, t)))
     last = calls[-1]
     assert last[0] == last[1] == expected_total
 
@@ -2122,19 +2041,19 @@ def test_copy_tree_progress_done_matches_src_total_with_symlink(tmp_path):
                       min_size=1, max_size=6))
 def test_copy_tree_progress_done_equals_total_property(tmp_path_factory, sizes):
     # rf-rel-05: for any set of regular files, the final progress `done`
-    # equals the apparent total derived from _src_size_totals — no drift.
+    # equals the apparent total derived from _pinned_size_totals — no drift.
     src = tmp_path_factory.mktemp("s") / "tree"
     src.mkdir()
     for i, n in enumerate(sizes):
         (src / f"f{i}.bin").write_bytes(b"a" * n)
     dst = src.parent / "dst"
-    expected = rf._src_size_totals(src)[0]
+    expected = _pinned_totals(src)[0]
     calls = []
-    rf.copy_tree(src, dst, progress_cb=lambda d, t: calls.append((d, t)))
+    _pinned_call(rf.copy_tree, src, dst, progress_cb=lambda d, t: calls.append((d, t)))
     assert calls[-1][0] == calls[-1][1] == expected
 
 
-def test_copy_tree_progress_cb_swallows_user_exception(tmp_path):
+def test_copy_tree_progress_cb_failure_cleans_target(tmp_path):
     src = tmp_path / "s"; src.mkdir()
     (src / "f.txt").write_text("x")
     dst = tmp_path / "t"
@@ -2142,14 +2061,14 @@ def test_copy_tree_progress_cb_swallows_user_exception(tmp_path):
     def boom(done, total):
         raise RuntimeError("user cb broke")
 
-    # User cb raising must NOT abort the copy.
-    rf.copy_tree(src, dst, progress_cb=boom)
-    assert (dst / "f.txt").exists()
+    with pytest.raises(RuntimeError, match="user cb broke"):
+        _pinned_call(rf.copy_tree, src, dst, progress_cb=boom)
+    assert not dst.exists()
+    assert (src / "f.txt").read_text() == "x"
 
 
-def test_copy_tree_progress_cb_handles_lstat_failure(tmp_path, monkeypatch):
-    # rf-obs-01: lstat for size accounting may fail post-copy; cb still fires
-    # but `done` doesn't grow for that file.
+def test_pinned_copy_progress_needs_no_path_lstat(tmp_path, monkeypatch):
+    # Progress accounts copied bytes without restatting source path labels.
     src = tmp_path / "s"; src.mkdir()
     (src / "a.txt").write_text("y")
     dst = tmp_path / "t"
@@ -2162,8 +2081,8 @@ def test_copy_tree_progress_cb_handles_lstat_failure(tmp_path, monkeypatch):
         return real_lstat(p)
 
     monkeypatch.setattr(rf.os, "lstat", flaky)
-    rf.copy_tree(src, dst, progress_cb=lambda d, t: calls.append((d, t)))
-    assert calls   # cb still got called even though size accounting failed
+    _pinned_call(rf.copy_tree, src, dst, progress_cb=lambda d, t: calls.append((d, t)))
+    assert calls == [(1, 1)]
 
 
 def test_operation_stall_watchdog_warns_after_idle(caplog):
@@ -2204,7 +2123,7 @@ def test_copy_tree_uses_stall_watchdog(tmp_path, monkeypatch):
     src = tmp_path / "s"
     src.mkdir()
     (src / "a").write_text("x")
-    rf.copy_tree(src, tmp_path / "d", check_space=False)
+    _pinned_call(rf.copy_tree, src, tmp_path / "d", check_space=False)
     assert any(w.operation == "copytree" and "copytree" in w.touches
                for w in created)
 
@@ -2232,9 +2151,9 @@ def test_verify_copy_uses_stall_watchdog(tmp_path, monkeypatch):
     src.mkdir()
     (src / "a").write_text("x")
     dst = tmp_path / "d"
-    rf.copy_tree(src, dst, check_space=False)
+    _pinned_call(rf.copy_tree, src, dst, check_space=False)
     created.clear()
-    rf.verify_copy(src, dst, checksum=False)
+    _pinned_call(rf.verify_copy, src, dst, checksum=False)
     assert any(w.operation == "verify_copy" and "verify_copy" in w.touches
                for w in created)
 
@@ -2413,11 +2332,11 @@ def test_copy_tree_logs_rmtree_cleanup_failures(tmp_path, monkeypatch, caplog):
             callback(os.unlink, str(path) + "/zombie", OSError("EBUSY"))
         # don't actually remove
 
-    monkeypatch.setattr(rf.shutil, "copytree", explode_copy)
+    monkeypatch.setattr(rf, "_populate_pinned_copy", explode_copy)
     monkeypatch.setattr(rf.shutil, "rmtree", fail_rmtree)
     with pytest.raises(RuntimeError, match="copy boom"):
-        rf.copy_tree(src, dst)
-    assert any("cleanup after failed copy" in r.message for r in caplog.records)
+        _pinned_call(rf.copy_tree, src, dst)
+    assert any("cleanup after failed descriptor-pinned copy" in r.message for r in caplog.records)
 
 
 @pytest.mark.parametrize(
@@ -2453,10 +2372,10 @@ def test_copy_tree_truncates_many_cleanup_failures(tmp_path, monkeypatch, caplog
             for i in range(20):
                 callback(os.unlink, f"/fake/{i}", OSError("EBUSY"))
 
-    monkeypatch.setattr(rf.shutil, "copytree", explode_copy)
+    monkeypatch.setattr(rf, "_populate_pinned_copy", explode_copy)
     monkeypatch.setattr(rf.shutil, "rmtree", many_failures)
     with pytest.raises(RuntimeError):
-        rf.copy_tree(src, dst)
+        _pinned_call(rf.copy_tree, src, dst)
     # 10 individual + 1 summary line
     assert any("more removal errors suppressed" in r.message for r in caplog.records)
 
@@ -2607,14 +2526,14 @@ def test_copy_and_verify_advances_state_to_copied(tmp_path):
     src = tmp_path / "src"; _make_tree(src)
     plan = rf.Plan(source=src, target=tmp_path / "dst" / "src")
     captured: list[rf.MigrationState] = []
-    rf._copy_and_verify(plan, on_state=captured.append)
+    _pinned_call(rf._copy_and_verify, plan, on_state=captured.append)
     assert rf.MigrationState.COPIED in captured
 
 
 def test_copy_and_verify_state_not_called_when_no_callback(tmp_path):
     src = tmp_path / "src"; _make_tree(src)
     plan = rf.Plan(source=src, target=tmp_path / "dst" / "src")
-    rf._copy_and_verify(plan)   # on_state defaults to None — must not raise
+    _pinned_call(rf._copy_and_verify, plan)   # on_state defaults to None — must not raise
 
 
 def test_execute_logs_copied_then_verified_then_swapped(tmp_path, caplog):
@@ -2663,17 +2582,8 @@ def test_verify_copy_honours_jobs_kwarg(tmp_path):
     for i in range(6):
         (src / f"f{i}.txt").write_text(f"content-{i}")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst, jobs=2)
-    rf.verify_copy(src, dst, checksum=True, jobs=2)
-
-
-def test_replicate_ownership_honours_jobs_kwarg(tmp_path):
-    src = tmp_path / "s"; src.mkdir()
-    for i in range(5):
-        (src / f"f{i}.txt").write_text(str(i))
-    dst = tmp_path / "t"
-    rf.copy_tree(src, dst, jobs=3)
-    rf._replicate_ownership(src, dst, jobs=3)
+    _pinned_call(rf.copy_tree, src, dst)
+    _pinned_call(rf.verify_copy, src, dst, checksum=True, jobs=2)
 
 
 # --- 100% coverage: edge branches not exercised by other tests --------------
@@ -2733,14 +2643,14 @@ def test_process_open_files_in_under_root(tmp_path, monkeypatch):
     assert inside in out
 
 
-def test_iter_verify_tasks_emits_dir_task(tmp_path):
+def test_pinned_verify_tasks_emits_dir_task(tmp_path):
     src = tmp_path / "s"; src.mkdir()
     (src / "sub").mkdir()
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-    tasks = list(rf._iter_verify_tasks(src, dst, checksum=False, verify_ownership=False))
+    _pinned_call(rf.copy_tree, src, dst)
+    tasks = list(_pinned_verify_tasks(src, dst, checksum=False, verify_ownership=False))
     # Must include at least one task corresponding to a directory check.
-    assert any(t.func is rf._verify_dir for t in tasks)
+    assert any(t.func is rf._verify_pinned_directory for t in tasks)
 
 
 def test_verify_ownership_mode_bits_equal(tmp_path):
@@ -2775,22 +2685,16 @@ def test_check_cross_device_returns_none_when_no_existing_ancestor(tmp_path, mon
     rf._check_cross_device(plan)   # silent return
 
 
-def test_src_size_totals_skip_continues_after_oserror(tmp_path, monkeypatch):
-    src = tmp_path / "s"; src.mkdir()
-    (src / "a").write_text("x")
-    (src / "b").write_text("xx")
-    flaky = {"n": 0}
-    real_lstat = Path.lstat
-
-    def lstat(self):
-        flaky["n"] += 1
-        if self.name == "a":
-            raise OSError("nope")
-        return real_lstat(self)
-
-    monkeypatch.setattr(Path, "lstat", lstat)
-    total = rf._src_size_totals(src)[0]
-    assert total == 2   # only "b" counted; "a" skipped via continue
+def test_pinned_size_totals_stops_after_walk_failure(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "payload").write_bytes(b"original")
+    def fail_walk(*args):
+        yield Path("payload"), -1, "payload", (source / "payload").stat()
+        raise PermissionError("source walk failed")
+    monkeypatch.setattr(rf, "_walk_pinned_entries", fail_walk)
+    with pytest.raises(PermissionError, match="source walk failed"):
+        _pinned_totals(source)
 
 
 def test_report_skipped_truncates_long_lists(tmp_path, caplog):
@@ -2803,25 +2707,21 @@ def test_report_skipped_truncates_long_lists(tmp_path, caplog):
     assert any("and 3 more" in r.message for r in caplog.records)
 
 
-def test_make_ignore_specials_skips_oserror_lstat(monkeypatch, tmp_path):
-    # Force os.lstat to raise for one specific name during copytree.
-    src = tmp_path / "s"; src.mkdir()
-    (src / "good.txt").write_text("x")
-    (src / "vanish.txt").write_text("y")
-    dst = tmp_path / "t"
-    real_lstat = rf.os.lstat
-
-    def flaky(p):
-        if str(p).endswith("vanish.txt"):
-            raise OSError("racy unlink")
-        return real_lstat(p)
-
-    monkeypatch.setattr(rf.os, "lstat", flaky)
-    # copy still proceeds; the failing entry is silently skipped in the ignore.
-    try:
-        rf.copy_tree(src, dst)
-    except Exception:
-        pass
+def test_copy_fails_closed_when_source_entry_stat_fails(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "valuable").write_bytes(b"untouched")
+    target = tmp_path / "copy"
+    real_stat = rf.os.stat
+    def fail_stat(name, *args, **kwargs):
+        if name == "valuable" and kwargs.get("dir_fd") is not None:
+            raise PermissionError("source metadata unavailable")
+        return real_stat(name, *args, **kwargs)
+    monkeypatch.setattr(rf.os, "stat", fail_stat)
+    with pytest.raises(PermissionError, match="source metadata unavailable"):
+        _pinned_call(rf.copy_tree, source, target, check_space=False)
+    assert not target.exists()
+    assert (source / "valuable").read_bytes() == b"untouched"
 
 
 def test_nearest_existing_dir_handles_returns_input_when_dir(tmp_path):
@@ -2830,38 +2730,38 @@ def test_nearest_existing_dir_handles_returns_input_when_dir(tmp_path):
     assert result == tmp_path
 
 
-def test_iter_verify_tasks_with_ownership_appends_extra(tmp_path):
+def test_pinned_verify_tasks_with_ownership_appends_extra(tmp_path):
     src = tmp_path / "s"; src.mkdir()
     (src / "f").write_text("x")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
-    tasks_a = list(rf._iter_verify_tasks(src, dst, checksum=False, verify_ownership=False))
-    tasks_b = list(rf._iter_verify_tasks(src, dst, checksum=False, verify_ownership=True))
+    _pinned_call(rf.copy_tree, src, dst)
+    tasks_a = list(_pinned_verify_tasks(src, dst, checksum=False, verify_ownership=False))
+    tasks_b = list(_pinned_verify_tasks(src, dst, checksum=False, verify_ownership=True))
     assert len(tasks_b) > len(tasks_a)   # ownership adds one task per entry
 
 
-def test_iter_verify_tasks_passes_cached_stat_to_ownership(tmp_path):
+def test_pinned_verify_tasks_passes_cached_stat_to_ownership(tmp_path):
     src = tmp_path / "s"; src.mkdir()
     source_file = src / "f"
     source_file.write_text("x")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
 
-    tasks = list(rf._iter_verify_tasks(src, dst, checksum=False, verify_ownership=True))
+    tasks = list(_pinned_verify_tasks(src, dst, checksum=False, verify_ownership=True))
     ownership = [task for task in tasks if task.func is rf._verify_ownership]
 
     assert len(ownership) == 1
     assert ownership[0].args[3].st_ino == source_file.lstat().st_ino
 
 
-def test_iter_verify_tasks_skips_non_file_dir_symlink(tmp_path):
+def test_pinned_verify_tasks_skips_non_file_dir_symlink(tmp_path):
     # rf-rel-02: a FIFO is a special file copy_tree skips — it has no kind
     # branch AND (now) no ownership task, since there is no dst counterpart to
     # verify. It must produce NO task at all, even with verify_ownership=True.
     src = tmp_path / "s"; src.mkdir()
     fifo = src / "f"; os.mkfifo(fifo)
     dst = tmp_path / "t"; dst.mkdir()
-    tasks = list(rf._iter_verify_tasks(src, dst, checksum=False, verify_ownership=True))
+    tasks = list(_pinned_verify_tasks(src, dst, checksum=False, verify_ownership=True))
     assert tasks == []   # skipped special yields nothing to verify
 
 
@@ -3109,14 +3009,6 @@ def test_validate_source_path_with_long_component_does_not_traceback(tmp_path):
 
 # --- rf-rel-13: _chown_pair catches ValueError from NUL byte --------------
 
-def test_chown_pair_value_error_does_not_propagate(tmp_path, monkeypatch, caplog):
-    # Simulate os.lstat raising ValueError (NUL-in-path edge).
-    def bad_lstat(path, *a, **kw):
-        raise ValueError("embedded null byte")
-    monkeypatch.setattr(rf.os, "lstat", bad_lstat)
-    # Must not raise — handled per-entry with a warning.
-    rf._chown_pair((tmp_path / "src", tmp_path / "dst"))
-
 
 # --- rf-rel-15: stale_pids surfaced in snapshot ---------------------------
 
@@ -3208,16 +3100,6 @@ def test_check_disk_space_accepts_precomputed_total_bytes(tmp_path):
     (src / "a.bin").write_bytes(b"x" * 100)
     # Passing total_bytes=0 means "barely any need" — must not raise.
     rf._check_disk_space(src, tmp_path / "dst", total_bytes=0)
-
-
-def test_check_disk_space_falls_back_to_walk_when_no_total():
-    import shutil
-    # Without total_bytes the function walks src itself — exercised by
-    # existing tests; smoke-check the call shape still works.
-    with TemporaryDirectory() as d:
-        src = Path(d) / "src"; src.mkdir()
-        (src / "a.bin").write_bytes(b"x" * 100)
-        rf._check_disk_space(src, Path(d) / "dst")
 
 
 # ===== rf-rel-17 / rf-sec-04 / rf-arch-09 ================================
@@ -4059,7 +3941,7 @@ def test_copy_and_verify_rmtree_after_pool_joined(tmp_path, monkeypatch):
 
     plan = rf.Plan(source=src, target=target, checksum=True, jobs=2)
     with pytest.raises(RuntimeError):
-        rf._copy_and_verify(plan)
+        _pinned_call(rf._copy_and_verify, plan)
 
     target_deletes = [
         done for names, done in rmtree_calls if names == {"a.txt", "b.txt"}
@@ -4109,10 +3991,10 @@ def test_verify_copy_single_file_error_via_drain(tmp_path):
     src = tmp_path / "s"; src.mkdir()
     (src / "only.txt").write_text("payload")
     dst = tmp_path / "t"
-    rf.copy_tree(src, dst)
+    _pinned_call(rf.copy_tree, src, dst)
     (dst / "only.txt").write_text("PAYLOAD")   # same size, different content
     with pytest.raises(RuntimeError, match="hash mismatch"):
-        rf.verify_copy(src, dst, checksum=True)
+        _pinned_call(rf.verify_copy, src, dst, checksum=True)
 
 
 def test_run_streamed_drain_captures_inflight_only_error():
@@ -4231,13 +4113,13 @@ def test_execute_unwinds_created_dest_dirs_on_failure(tmp_path, monkeypatch):
     assert not (tmp_path / "a").exists(), "created dest dirs not unwound on failure"
 
 
-def test_src_size_totals_sparse_alloc_under_apparent(tmp_path):
+def test_pinned_size_totals_sparse_alloc_under_apparent(tmp_path):
     """rf-perf-06: a sparse file's allocated total is below its apparent size,
     so the disk-space precheck doesn't over-count it."""
     f = tmp_path / "sparse.bin"
     with open(f, "wb") as fh:
         fh.truncate(10 * 1024 * 1024)  # 10 MiB hole, ~0 blocks allocated
-    apparent, allocated = rf._src_size_totals(tmp_path)
+    apparent, allocated = _pinned_totals(tmp_path)
     assert apparent >= 10 * 1024 * 1024
     assert allocated < apparent  # holes not counted at full logical size
 
@@ -4254,7 +4136,7 @@ def test_check_disk_space_uses_allocated_not_apparent(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rf.shutil, "disk_usage", lambda _p: _Usage())
     # Apparent-size accounting would raise; allocated accounting passes.
-    rf._check_disk_space(src, tmp_path / "dst")
+    rf._check_disk_space(src, tmp_path / "dst", total_bytes=_pinned_totals(src)[1])
 
 
 def test_copy_tree_cleans_partial_target_on_keyboardinterrupt(tmp_path, monkeypatch):
@@ -4262,17 +4144,14 @@ def test_copy_tree_cleans_partial_target_on_keyboardinterrupt(tmp_path, monkeypa
     retry isn't blocked by a leftover partial dst."""
     src = tmp_path / "src"; _make_tree(src)
     dst = tmp_path / "dst"
-    from pathlib import Path as _P
 
-    def boom_copytree(s, d, **kw):
-        assert not kw.get("dirs_exist_ok", False)
-        _P(d).mkdir()
-        (_P(d) / "partial").write_text("x")
+    def boom_copytree(source_label, source_fd, destination, *args):
+        (destination / "partial").write_text("x")
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(rf.shutil, "copytree", boom_copytree)
+    monkeypatch.setattr(rf, "_populate_pinned_copy", boom_copytree)
     with pytest.raises(KeyboardInterrupt):
-        rf.copy_tree(src, dst, check_space=False)
+        _pinned_call(rf.copy_tree, src, dst, check_space=False)
     assert not dst.exists(), "partial target not cleaned on KeyboardInterrupt"
 
 
@@ -4281,12 +4160,12 @@ def test_copy_tree_cleans_target_on_ownership_interrupt(tmp_path, monkeypatch):
     dst = tmp_path / "dst"
     monkeypatch.setattr(
         rf,
-        "_replicate_ownership",
+        "_apply_pinned_metadata",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
     )
 
     with pytest.raises(KeyboardInterrupt):
-        rf.copy_tree(src, dst, check_space=False)
+        _pinned_call(rf.copy_tree, src, dst, check_space=False)
 
     assert not dst.exists()
 
@@ -4302,7 +4181,7 @@ def test_copy_and_verify_cleans_target_on_keyboardinterrupt(tmp_path, monkeypatc
 
     monkeypatch.setattr(rf, "verify_copy", boom_verify)
     with pytest.raises(KeyboardInterrupt):
-        rf._copy_and_verify(plan)
+        _pinned_call(rf._copy_and_verify, plan)
     assert not plan.target.exists(), "partial target not cleaned on Ctrl+C in verify"
 
 
@@ -4340,7 +4219,7 @@ def test_strict_refuses_before_any_copy(tmp_path, monkeypatch):
         rf, "copy_tree",
         lambda *a, **k: copy_calls.append(a) or [])
     with pytest.raises(RuntimeError, match="strict mode: refusing"):
-        rf._copy_and_verify(plan)
+        _pinned_call(rf._copy_and_verify, plan)
     assert copy_calls == [], "copy started despite strict pre-walk refusal"
     assert not plan.target.exists(), "dst content created on strict refusal"
 
@@ -4351,7 +4230,7 @@ def test_strict_prewalk_refusal_message_names_kind(tmp_path):
     os.mkfifo(src / "pipe")
     cache: dict = {}
     with pytest.raises(RuntimeError, match=r"1 special file\(s\).*fifo"):
-        rf._refuse_specials_before_copy(src, cache)
+        _pinned_special_preflight(src, cache)
     assert src / "pipe" in cache
 
 
@@ -4360,14 +4239,14 @@ def test_strict_prewalk_noop_on_clean_tree(tmp_path):
     (src / "a.txt").write_text("x")
     (src / "sub").mkdir()
     (src / "sub" / "link").symlink_to(src / "a.txt")
-    rf._refuse_specials_before_copy(src, {})  # no raise
+    _pinned_special_preflight(src, {})  # no raise
 
 
 def test_strict_clean_tree_still_migrates_copy(tmp_path):
     src = tmp_path / "src"; src.mkdir()
     (src / "a.txt").write_text("payload")
     plan = rf.Plan(source=src, target=tmp_path / "dst", strict=True)
-    rf._copy_and_verify(plan)
+    _pinned_call(rf._copy_and_verify, plan)
     assert (plan.target / "a.txt").read_text() == "payload"
 
 
@@ -4379,9 +4258,9 @@ def test_verify_ownership_skips_special_files(tmp_path):
     (src / "real.txt").write_bytes(b"data")
     os.mkfifo(src / "pipe")             # special file copy_tree will skip
     dst = tmp_path / "dst"
-    rf.copy_tree(src, dst, check_space=False)
+    _pinned_call(rf.copy_tree, src, dst, check_space=False)
     # Must not raise on the skipped FIFO that has no dst counterpart.
-    rf.verify_copy(src, dst, False, verify_ownership=True)
+    _pinned_call(rf.verify_copy, src, dst, False, verify_ownership=True)
 
 
 def test_backup_target_restores_source_on_keyboardinterrupt(tmp_path):
@@ -4561,27 +4440,19 @@ def test_positive_jobs_validator():
             rf._positive_jobs(bad)
 
 
-def test_iter_verify_tasks_logs_unstatable_entry(tmp_path, monkeypatch, caplog):
-    """rf-obs-01: a source entry that can't be stat'd logs a breadcrumb (and
-    still yields a raising task)."""
-    import logging as _logging
-    src = tmp_path / "src"; src.mkdir()
-    (src / "f").write_text("x", encoding="utf-8")
-    real_lstat = rf.os.lstat
-
-    def boom_lstat(p, *a, **k):
-        if str(p).endswith("/f"):
-            raise OSError(13, "EACCES")
-        return real_lstat(p, *a, **k)
-
-    monkeypatch.setattr(rf.os, "lstat", boom_lstat)
-    with caplog.at_level(_logging.WARNING):
-        tasks = list(rf._iter_verify_tasks(src, tmp_path / "dst", False, False))
-    assert any("cannot stat source entry" in r.message for r in caplog.records)
-    # the raising task is still yielded
-    with pytest.raises(RuntimeError, match="could not stat source entry"):
-        for t in tasks:
-            t()
+def test_main_reports_unstatable_pinned_entry(tmp_path, monkeypatch, caplog):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "valuable").write_bytes(b"untouched")
+    real_stat = rf.os.stat
+    def fail_stat(name, *args, **kwargs):
+        if name == "valuable" and kwargs.get("dir_fd") is not None:
+            raise PermissionError("source metadata unavailable")
+        return real_stat(name, *args, **kwargs)
+    monkeypatch.setattr(rf.os, "stat", fail_stat)
+    assert rf.main([str(source), str(tmp_path / "destination"), "--force"]) == 1
+    assert "source metadata unavailable" in caplog.text
+    assert (source / "valuable").read_bytes() == b"untouched"
 
 
 def test_copy_and_verify_logs_cleanup_failure(tmp_path, monkeypatch, caplog):
@@ -4601,7 +4472,7 @@ def test_copy_and_verify_logs_cleanup_failure(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(rf.shutil, "rmtree", boom_rmtree)
     with caplog.at_level(_logging.WARNING):
         with pytest.raises(RuntimeError):
-            rf._copy_and_verify(plan)
+            _pinned_call(rf._copy_and_verify, plan)
     assert any("could not remove" in r.message for r in caplog.records)
     assert any("may still exist" in r.message for r in caplog.records)
 
@@ -4686,43 +4557,6 @@ def test_warn_if_not_traversable_ignores_traversal_check_failure(
     )
 
     rf._warn_if_not_traversable(destination, source)
-
-
-def test_record_copy_progress_ignores_callback_failure(tmp_path):
-    target = tmp_path / "copied.bin"
-    target.write_bytes(b"data")
-    done = [0]
-
-    rf._record_copy_progress(
-        target,
-        True,
-        done,
-        4,
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("callback failed")),
-    )
-
-    assert done == [4]
-
-    rf._record_copy_progress(
-        tmp_path / "missing.bin",
-        True,
-        done,
-        4,
-        lambda *_args: None,
-    )
-    assert done == [4]
-
-
-def test_replicate_ownership_surfaces_pair_walk_failure(tmp_path, monkeypatch, caplog):
-    monkeypatch.setattr(
-        rf,
-        "_pair_walk",
-        lambda *_args: (_ for _ in ()).throw(OSError("walk failed")),
-    )
-
-    rf._replicate_ownership(tmp_path / "source", tmp_path / "target", jobs=1)
-
-    assert "walk failed" in caplog.text
 
 
 def test_write_staging_pid_surfaces_marker_failure(caplog):
@@ -4850,7 +4684,7 @@ def test_inventory_match_detects_an_entry_missing_from_the_copy(tmp_path):
     (src / "sub" / "lost.txt").write_text("b", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="missing from the copy.*lost.txt"):
-        rf._assert_complete_inventory_match(src, dst)
+        _pinned_call(rf._assert_complete_inventory_match, src, dst)
 
 
 def test_inventory_match_detects_a_target_only_entry(tmp_path):
@@ -4861,7 +4695,7 @@ def test_inventory_match_detects_a_target_only_entry(tmp_path):
     (dst / "extra.txt").write_text("b", encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="present only in the copy.*extra.txt"):
-        rf._assert_complete_inventory_match(src, dst)
+        _pinned_call(rf._assert_complete_inventory_match, src, dst)
 
 
 def test_inventory_match_detects_a_kind_change(tmp_path):
@@ -4873,7 +4707,7 @@ def test_inventory_match_detects_a_kind_change(tmp_path):
     (dst / "entry").mkdir()
 
     with pytest.raises(RuntimeError, match="inventory mismatch"):
-        rf._assert_complete_inventory_match(src, dst)
+        _pinned_call(rf._assert_complete_inventory_match, src, dst)
 
 
 def test_inventory_match_accepts_a_faithful_copy(tmp_path):
@@ -4886,7 +4720,7 @@ def test_inventory_match_accepts_a_faithful_copy(tmp_path):
     (src / "link").symlink_to("a.txt")
     (dst / "link").symlink_to("a.txt")
 
-    rf._assert_complete_inventory_match(src, dst)   # must not raise
+    _pinned_call(rf._assert_complete_inventory_match, src, dst)   # must not raise
 
 
 def test_inventory_match_ignores_special_files_the_copy_skips(tmp_path):
@@ -4896,7 +4730,7 @@ def test_inventory_match_ignores_special_files_the_copy_skips(tmp_path):
     dst.mkdir()
     os.mkfifo(src / "pipe")
 
-    rf._assert_complete_inventory_match(src, dst)   # must not raise
+    _pinned_call(rf._assert_complete_inventory_match, src, dst)   # must not raise
 
 
 def test_inventory_db_reports_an_unusable_temp_database(monkeypatch):
@@ -5064,10 +4898,10 @@ def test_main_preserves_preexisting_destination_after_copy_refusal(tmp_path):
     assert (target / "valuable.txt").read_text(encoding="utf-8") == "unrelated"
 
 
-@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("entry_point", ["copy", "execute"])
 @pytest.mark.parametrize("empty_replacement", [False, True])
 def test_copy_refuses_target_created_during_publication(
-        tmp_path, monkeypatch, pinned, empty_replacement):
+        tmp_path, monkeypatch, entry_point, empty_replacement):
     source = tmp_path / "source"
     target = tmp_path / "target"
     source.mkdir()
@@ -5087,10 +4921,10 @@ def test_copy_refuses_target_created_during_publication(
 
     monkeypatch.setattr(rf, "_rename_noreplace", race_publication)
     with pytest.raises(FileExistsError):
-        if pinned:
+        if entry_point == "execute":
             rf.execute(rf.Plan(source=source, target=target, force=True, check_space=False))
         else:
-            rf.copy_tree(source, target, check_space=False)
+            _pinned_call(rf.copy_tree, source, target, check_space=False)
 
     assert target.stat().st_ino == replacement_identity[0]
     assert not (target / "payload.txt").exists()
@@ -5160,41 +4994,6 @@ def test_cleanup_preserves_replacement_that_wins_before_quarantine(
         assert (target / "new.txt").read_text(encoding="utf-8") == "new occupant"
 
 
-@pytest.mark.parametrize("replacement", ["symlink", "directory"])
-def test_unpinned_copy_preserves_destination_created_before_population(
-        tmp_path, monkeypatch, replacement):
-    source = tmp_path / "source"
-    target = tmp_path / "target"
-    source.mkdir()
-    (source / "valuable.txt").write_text("copied source", encoding="utf-8")
-    source.chmod(0o750)
-    foreign = tmp_path / "foreign" if replacement == "symlink" else target
-    original_copytree = rf.shutil.copytree
-    identities = []
-
-    def competing_destination(src, dst, **kwargs):
-        if Path(src) == source:
-            if target.exists():
-                target.rename(tmp_path / "replaced-copy")
-            foreign.mkdir()
-            (foreign / "valuable.txt").write_text("unrelated content", encoding="utf-8")
-            foreign.chmod(0o755)
-            if replacement == "symlink":
-                target.symlink_to(foreign, target_is_directory=True)
-            identities.append(target.lstat().st_ino)
-        return original_copytree(src, dst, **kwargs)
-
-    monkeypatch.setattr(rf.shutil, "copytree", competing_destination)
-    with pytest.raises(FileExistsError):
-        rf.copy_tree(source, target, check_space=False)
-
-    assert target.lstat().st_ino == identities[0]
-    assert (foreign / "valuable.txt").read_text(encoding="utf-8") == "unrelated content"
-    assert foreign.stat().st_mode & 0o777 == 0o755
-    assert (source / "valuable.txt").read_text(encoding="utf-8") == "copied source"
-    assert not list(tmp_path.glob(".relocate-copy-*"))
-
-
 @pytest.mark.parametrize("checksum", [False, True])
 @pytest.mark.parametrize("ownership", [False, True])
 def test_pinned_verify_tasks_outlive_source_descriptors(tmp_path, checksum, ownership):
@@ -5221,3 +5020,38 @@ def test_pinned_verify_tasks_outlive_source_descriptors(tmp_path, checksum, owne
     else:
         for task in tasks:
             task()
+
+
+@pytest.mark.parametrize("operation", [rf.copy_tree, rf.verify_copy])
+def test_copy_and_verify_require_a_source_descriptor(tmp_path, operation):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "valuable").write_bytes(b"untouched")
+    target = tmp_path / "target"
+
+    with pytest.raises(TypeError, match="source_fd"):
+        operation(source, target)
+
+    assert not target.exists()
+    assert (source / "valuable").read_bytes() == b"untouched"
+
+
+def test_copy_and_verify_use_descriptor_after_source_path_is_renamed(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "valuable").write_bytes(b"original")
+    target = tmp_path / "target"
+    original = tmp_path / "original"
+
+    with _pinned_source(source) as descriptor:
+        source.rename(original)
+        source.mkdir()
+        (source / "valuable").write_bytes(b"unrelated")
+        monkeypatch.setattr(rf.shutil, "copytree", mock.Mock(side_effect=AssertionError("legacy copy")))
+        rf.copy_tree(source, target, source_fd=descriptor)
+        rf.verify_copy(source, target, source_fd=descriptor, checksum=True)
+        assert os.fstat(descriptor).st_ino == original.stat().st_ino
+
+    assert (target / "valuable").read_bytes() == b"original"
+    assert (original / "valuable").read_bytes() == b"original"
+    assert (source / "valuable").read_bytes() == b"unrelated"

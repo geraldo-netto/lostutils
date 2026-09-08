@@ -227,7 +227,7 @@ class CreateSymlinkFuzz(unittest.TestCase):
             self.assertEqual(leftovers, [])
 
 
-# --- _verify_size / _verify_content compose like _verify_file (rf-cx-01) ---
+# --- Pinned file size and checksum verification -------------------------
 
 class VerifyFileFuzz(unittest.TestCase):
     @settings(parent=FUZZ)
@@ -236,9 +236,8 @@ class VerifyFileFuzz(unittest.TestCase):
         with TemporaryDirectory() as d:
             a = Path(d) / "a"; a.write_bytes(payload)
             b = Path(d) / "b"; b.write_bytes(payload)
-            rf._verify_size(a, b, Path("a"))
-            rf._verify_content(a, b, Path("a"))
-            rf._verify_file(a, b, Path("a"), checksum=True)
+            rf._verify_pinned_file(a, b, Path("a"), a.stat(), None)
+            rf._verify_pinned_file(a, b, Path("a"), a.stat(), rf._sha256(a))
 
     @settings(parent=FUZZ)
     @given(st.binary(min_size=1, max_size=64), st.binary(min_size=1, max_size=64))
@@ -248,7 +247,7 @@ class VerifyFileFuzz(unittest.TestCase):
             a = Path(d) / "a"; a.write_bytes(a_bytes)
             b = Path(d) / "b"; b.write_bytes(b_bytes)
             with self.assertRaises(RuntimeError):
-                rf._verify_size(a, b, Path("a"))
+                rf._verify_pinned_file(a, b, Path("a"), a.stat(), None)
 
     @settings(parent=FUZZ)
     @given(st.binary(min_size=4, max_size=64))
@@ -260,7 +259,7 @@ class VerifyFileFuzz(unittest.TestCase):
             a = Path(d) / "a"; a.write_bytes(payload)
             b = Path(d) / "b"; b.write_bytes(flipped)
             with self.assertRaises(RuntimeError):
-                rf._verify_content(a, b, Path("a"))
+                rf._verify_pinned_file(a, b, Path("a"), a.stat(), rf._sha256(a))
 
 
 # --- verify_copy parallel == sequential answer (rf-perf-02) ----------------
@@ -274,9 +273,13 @@ class VerifyCopyParallelFuzz(unittest.TestCase):
             for i, p in enumerate(payloads):
                 (src / f"f{i}.bin").write_bytes(p)
             dst = Path(d) / "t"
-            rf.copy_tree(src, dst)
-            rf.verify_copy(src, dst, checksum=True)        # parallel path
-            rf.verify_copy(src, dst, checksum=False)       # sequential path
+            descriptor, _identity = rf._source_identity_fd(src)
+            try:
+                rf.copy_tree(src, dst, source_fd=descriptor)
+                rf.verify_copy(src, dst, checksum=True, source_fd=descriptor)
+                rf.verify_copy(src, dst, checksum=False, source_fd=descriptor)
+            finally:
+                os.close(descriptor)
             # Both succeed for an identical copy.
 
 
