@@ -2511,9 +2511,40 @@ def recover(source: Path, *, force: bool = False) -> str:
 
 # --- orchestration ----------------------------------------------------------
 
+def _cleanup_rename_probe(probe: Path, identity: tuple[int, int] | None) -> None:
+    if identity is None:
+        _log().warning("could not identify rename probe; inspect %s", probe)
+        return
+    for candidate in (probe, probe.with_name(probe.name + ".renamed")):
+        if _backup_identity_ok(candidate, identity):
+            # Never recurse: even an interrupted or substituted probe cannot
+            # justify removing files another process placed in the directory.
+            _swallow_or_warn(f"remove rename probe {candidate}", candidate.rmdir)
+
+
+def _probe_source_rename(parent: Path) -> None:
+    """Exercise source-filesystem rename flags without touching source data."""
+    probe: Path | None = None
+    identity: tuple[int, int] | None = None
+    try:
+        probe = Path(tempfile.mkdtemp(prefix=".relocate-probe-", dir=parent))
+        initial = probe.lstat()
+        identity = initial.st_dev, initial.st_ino
+        _rename_noreplace(probe, probe.with_name(probe.name + ".renamed"))
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(
+            f"source filesystem rename preflight failed at {parent} before copying: "
+            f"{exc}. Check parent permissions and atomic no-replace rename support "
+            "on the source filesystem before retrying."
+        ) from exc
+    finally:
+        if probe is not None:
+            _cleanup_rename_probe(probe, identity)
+
+
 def _execute_preamble(plan: Plan,
                       advance: Callable[[MigrationState], None]) -> str | None:
-    """Guard/skip checks that run before any filesystem mutation
+    """Guard/skip checks and private rename preflight before migration
     (rf-cx-30). Returns a terminal status line for the skip / dry-run
     outcomes, or None when the migration should proceed."""
     if already_migrated(plan.source, plan.target):
@@ -2544,6 +2575,7 @@ def _execute_preamble(plan: Plan,
     if plan.dry_run:
         advance(MigrationState.DRY_RUN)
         return f"dry-run: would migrate {plan.source} -> {plan.target}"
+    _probe_source_rename(plan.source.parent)
     return None
 
 
