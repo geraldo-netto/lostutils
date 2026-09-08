@@ -1545,6 +1545,25 @@ def test_status_flash_cleanup_ignores_tcl_teardown(app, monkeypatch):
     scheduled[0]()
 
 
+def test_status_flash_recovers_when_timer_cancellation_fails(app, monkeypatch):
+    callbacks = []
+
+    def failed_cancel(_timer):
+        raise minikeypad.tk.TclError("timer already removed")
+
+    monkeypatch.setattr(app, "after", lambda _delay, callback: callbacks.append(callback) or "timer")
+    monkeypatch.setattr(app, "after_cancel", failed_cancel)
+    app._flash_status("Busy", "black", "white")
+
+    app._flash_status("Write success", "white", "green")
+
+    assert app.dl_status.cget("text") == "Write success"
+    assert len(callbacks) == 2
+    callbacks[-1]()
+    assert app.dl_status.cget("text") == ""
+    assert app._status_clear_after_id is None
+
+
 def test_download_nothing_assigned(app):
     app._io_busy = False
     app.dev = FakeDev(connected=True)
