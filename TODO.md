@@ -76,7 +76,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| mkp-prod-70 | open | low | low | minikeypad.py:2184 — [product engineering] `App()` is constructed outside any handler, so running without a display (SSH, headless CI, `DISPLAY` unset) prints a raw `_tkinter.TclError: couldn't connect to display ""` traceback (reproduced with `DISPLAY= python minikeypad.py --no-auto-install`). Catch `tk.TclError` around `App()`, log a one-line "no display available" hint, and exit non-zero. |
 
 ### `organize_by_extension.py`
 

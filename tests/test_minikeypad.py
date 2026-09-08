@@ -2296,6 +2296,39 @@ def test_main_handles_keyboard_interrupt(monkeypatch):
     minikeypad.main([])          # must not propagate
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="DISPLAY is Linux/X11-specific")
+def test_main_headless_child_reports_actionable_error():
+    env = dict(os.environ)
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    result = subprocess.run(
+        [sys.executable, minikeypad.__file__, "--no-auto-install"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    assert "Tk initialization failed" in result.stderr
+    assert "display" in result.stderr.lower()
+    assert "traceback" not in result.stderr.lower()
+
+
+def test_main_reports_tclerror_detail_without_traceback(monkeypatch, capsys):
+    class FailingApp:
+        def __init__(self):
+            raise minikeypad.tk.TclError("test display detail")
+
+    monkeypatch.setattr(minikeypad, "App", FailingApp)
+
+    assert minikeypad.main(["--no-auto-install"]) == 1
+    error = capsys.readouterr().err
+    assert "Tk initialization failed (test display detail)" in error
+    assert "graphical session" in error
+
+
 # ===========================================================================
 #  logging + signal helpers
 # ===========================================================================

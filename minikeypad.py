@@ -2241,15 +2241,24 @@ def main(argv=None):
     ) and not args.no_auto_install
     if not _USB_OK and auto:
         _ensure_pyusb()
-    app = App()
+    try:
+        app = App()
+    except tk.TclError as exc:
+        print(
+            "minikeypad: Tk initialization failed (%s); run in a graphical "
+            "session or set DISPLAY." % exc,
+            file=sys.stderr,
+        )
+        return 1
     _install_signal_handlers(app)
     try:
         app.mainloop()
     except KeyboardInterrupt:           # Ctrl-C delivered inside an after() tick
         LOG.info("interrupted")
     finally:
-        app.destroy()                   # closes the device -> re-attaches usbhid
+        app.destroy()                   # queues device cleanup for the reaper
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
-    main()
+    raise SystemExit(main())
