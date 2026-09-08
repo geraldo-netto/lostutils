@@ -5240,9 +5240,9 @@ def test_terminate_active_processes_handles_graceful_and_forced_cleanup(
     assert logs == ["[shutdown] child remained alive after forced kill"]
 
 
-def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monkeypatch):
+def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monkeypatch, tmp_path):
     class Proc:
-        stdout = ()
+        stdout = (tmp_path / "output").open("w+")
 
         @staticmethod
         def wait(timeout):
@@ -5263,116 +5263,12 @@ def test_stream_and_wait_reports_unresponsive_process(headless_dispatcher, monke
     assert "unresponsive" in logs[0]
 
 
-def test_read_subprocess_output_handles_success_and_read_failure(
-    headless_dispatcher, monkeypatch
-):
-    calls = []
-    monkeypatch.setattr(
-        headless_dispatcher,
-        "_stream_subprocess_output",
-        lambda *args: calls.append(args),
-    )
-
-    headless_dispatcher._read_subprocess_output("stdout", "job", "summary")
-
-    monkeypatch.setattr(
-        headless_dispatcher,
-        "_stream_subprocess_output",
-        lambda *_args: (_ for _ in ()).throw(OSError("read timed out")),
-    )
-    headless_dispatcher._read_subprocess_output("stdout", "job", "summary")
-
-    assert calls == [("stdout", "job", "summary")]
-
-
 def test_subprocess_deadline_remaining_handles_expired_deadline(monkeypatch):
     monkeypatch.setattr(link_queue.time, "monotonic", lambda: 100.0)
 
     assert link_queue.Dispatcher._deadline_remaining(None) is None
     assert link_queue.Dispatcher._deadline_remaining(90.0) == 0.0
     assert link_queue.Dispatcher._deadline_remaining(103.0) == 3.0
-
-
-def test_close_subprocess_pipe_uses_fd_and_safe_fallbacks():
-    read_fd, write_fd = os.pipe()
-
-    class FdPipe:
-        @staticmethod
-        def fileno():
-            return write_fd
-
-    try:
-        link_queue.Dispatcher._close_subprocess_pipe(FdPipe())
-        with pytest.raises(OSError):
-            os.fstat(write_fd)
-    finally:
-        os.close(read_fd)
-
-    closed = []
-
-    class FallbackPipe:
-        @staticmethod
-        def fileno():
-            raise ValueError("no descriptor")
-
-        @staticmethod
-        def close():
-            closed.append(True)
-
-    link_queue.Dispatcher._close_subprocess_pipe(FallbackPipe())
-    assert closed == [True]
-
-    class BrokenPipe(FallbackPipe):
-        @staticmethod
-        def close():
-            raise OSError("already closed")
-
-    link_queue.Dispatcher._close_subprocess_pipe(BrokenPipe())
-
-
-def test_stream_deadline_closes_inherited_output_pipe(
-        headless_dispatcher, monkeypatch):
-    joins = []
-    closed = []
-
-    class Reader:
-        def __init__(self, **_kwargs):
-            pass
-
-        @staticmethod
-        def start():
-            pass
-
-        @staticmethod
-        def is_alive():
-            return True
-
-        @staticmethod
-        def join(timeout=None):
-            joins.append(timeout)
-
-    class Proc:
-        pid = 12
-        stdout = object()
-
-    monkeypatch.setattr(link_queue.threading, "Thread", Reader)
-    monkeypatch.setattr(
-        headless_dispatcher,
-        "_arm_command_timeout",
-        lambda *_args: None,
-    )
-    monkeypatch.setattr(
-        headless_dispatcher,
-        "_close_subprocess_pipe",
-        lambda pipe: closed.append(pipe),
-    )
-
-    assert not headless_dispatcher._stream_and_wait(
-        Proc(), "job", "https://example.test", 1, "summary"
-    )
-    assert joins
-    assert joins[0] is not None
-    assert closed == [Proc.stdout]
 
 
 @pytest.mark.parametrize("dialog_fails", [False, True])

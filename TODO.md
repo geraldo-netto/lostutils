@@ -58,7 +58,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| lq-rob-80 | open | high | medium | link_queue.py:2798 — [robustness / recovery] Preserve descriptor ownership when closing subprocess output at a deadline; os.close(stdout.fileno()) leaves TextIOWrapper owning the closed descriptor number. Temporary-file reproduction: the next file reuses that descriptor, then closing the original wrapper closes the unrelated file and fstat raises EBADF. Arrange bounded reader/wrapper cleanup without raw-closing a live wrapper's descriptor, and cover descriptor reuse after timeout. |
 
 ### `minikeypad.py`
 

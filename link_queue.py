@@ -26,10 +26,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import codecs
 import contextlib
 import errno
 import hashlib
 import itertools
+import io
 import json
 import os
 import stat
@@ -2773,7 +2775,7 @@ class Dispatcher:
 
     def _stream_and_wait(self, proc: "subprocess.Popen", label: str, url: str,
                          timeout: float, verbosity: str) -> bool:
-        """Stream output in a bounded reader, then wait for process exit.
+        """Read cancellable output in this worker, then wait for process exit.
 
         lq-rel-02: the bounded wait after streaming stops a SIGTERM/SIGKILL-proof
         zombie from hanging the worker; the safety net is 2*timeout+5 to cover
@@ -2786,21 +2788,10 @@ class Dispatcher:
             time.monotonic() + timeout * 2 + 5 if timeout > 0 else None
         )
         timer = self._arm_command_timeout(proc, label, url, timeout)
-        reader = threading.Thread(
-            target=self._read_subprocess_output,
-            args=(proc.stdout, label, verbosity),
-            daemon=True,
-            name=f"output-reader-{getattr(proc, 'pid', 'unknown')}",
-        )
-        reader.start()
         try:
-            reader.join(timeout=self._deadline_remaining(hard_deadline))
-            if reader.is_alive():
-                self._log(
-                    f"[{label} stuck] output pipe remained open after "
-                    f"deadline; closing it  url={url}"
-                )
-                self._close_subprocess_pipe(proc.stdout)
+            if not self._capture_subprocess_output(proc.stdout, label, url, hard_deadline, verbosity):
+                self._kill_process_tree(proc)
+                self._wait_process_tree(proc, time.monotonic() + 1)
                 return False
             try:
                 proc.wait(timeout=self._deadline_remaining(hard_deadline))
@@ -2815,29 +2806,59 @@ class Dispatcher:
                 timer.cancel()
         return True
 
-    def _read_subprocess_output(
-        self, stdout, label: str, verbosity: str
-    ) -> None:
+    def _capture_subprocess_output(self, stdout, label, url, deadline, verbosity) -> bool:
         try:
-            self._stream_subprocess_output(stdout, label, verbosity)
-        except (OSError, ValueError):
-            pass
+            # This worker alone reads and closes the wrapper; no other thread
+            # can close a descriptor while the wrapper still owns its number.
+            with stdout:
+                self._stream_subprocess_output(
+                    self._iter_output_lines(stdout, deadline), label, verbosity)
+        except TimeoutError:
+            self._log(f"[{label} stuck] output pipe remained open after deadline; closing it  url={url}")
+            return False
+        except (OSError, ValueError, AttributeError) as exc:
+            self._log(f"[{label} error] cannot read cancellable command output: {exc}  url={url}")
+            return False
+        return True
+
+    def _iter_output_chunks(self, stdout, deadline):
+        # stdlib nonblocking pipes work on POSIX and Windows (Python 3.12+).
+        # Unsupported hosts fail visibly through _capture_subprocess_output.
+        descriptor = stdout.fileno()
+        os.set_blocking(descriptor, False)
+        while True:
+            if self._deadline_remaining(deadline) == 0:
+                raise TimeoutError("output deadline expired")
+            try:
+                chunk = os.read(descriptor, 65536)
+            except BlockingIOError:
+                time.sleep(0.05)
+                continue
+            if not chunk:
+                return
+            yield chunk
+
+    def _iter_output_lines(self, stdout, deadline):
+        decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")("replace"), translate=True)
+        pieces = []
+        for chunk in self._iter_output_chunks(stdout, deadline):
+            fragments = decoder.decode(chunk).split("\n")
+            if len(fragments) == 1:
+                pieces.append(fragments[0])
+                continue
+            yield "".join(pieces) + fragments[0] + "\n"
+            yield from (line + "\n" for line in fragments[1:-1])
+            pieces = [fragments[-1]]
+        tail = "".join(pieces) + decoder.decode(b"", final=True)
+        if tail:
+            yield tail
 
     @staticmethod
     def _deadline_remaining(deadline: "float | None") -> "float | None":
         if deadline is None:
             return None
         return max(0.0, deadline - time.monotonic())
-
-    @staticmethod
-    def _close_subprocess_pipe(stdout) -> None:
-        try:
-            os.close(stdout.fileno())
-        except (AttributeError, OSError, ValueError):
-            try:
-                stdout.close()
-            except (AttributeError, OSError, ValueError):
-                pass
 
     def _item_display(self, item: QueueItem) -> str:
         """Render a queue item for the Treeview. Does not execute anything."""

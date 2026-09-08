@@ -173,6 +173,8 @@ Protocols can run immediately in background workers or enter a queue consumed wi
 
 In POSIX shell mode, write `{url_quoted}` and `{protocol}` as standalone words without surrounding quotes, for example `curl -- {url_quoted}`. Values are passed as shell arguments. The editor and runner reject bare `{url}`, quoted or embedded placeholders, backticks, and here-documents; use `$(...)` for command substitution. Shell mode is unavailable on Windows.
 
+On Windows, command output capture requires Python 3.12 or newer. Unsupported nonblocking pipes are reported as command failures.
+
 Current config and queue state are YAML files named `link_queue_config.yaml` and `link_queue_state.yaml`, stored only in `$XDG_CONFIG_HOME/link_queue` or `~/.config/link_queue`. Files beside the script are ignored, including when the per-user directory is unavailable. To transfer an existing queue, review its command templates and manually copy its files into the per-user directory before starting. Legacy `link_queue_config.json` is migrated only from that directory.
 
 If configuration loading fails, the GUI reports the error and uses defaults for the session while refusing to overwrite the original file. Repair the configuration and restart before saving settings.
