@@ -9,6 +9,7 @@ import os
 import sqlite3
 import stat
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -1359,6 +1360,75 @@ def test_atomic_write_preserves_existing_output_mode(tmp_path):
 
     assert output.read_text(encoding="utf-8") == "new"
     assert stat.S_IMODE(output.stat().st_mode) == expected_mode
+
+
+def test_atomic_write_without_replacement_cleans_temp_after_racing_creator(tmp_path, monkeypatch):
+    output = tmp_path / "out.txt"
+    ready = threading.Event()
+    proceed = threading.Event()
+    real_link = bookmark_tidy.os.link
+
+    def racing_link(source, destination, *, follow_symlinks):
+        ready.set()
+        assert proceed.wait(timeout=5)
+        return real_link(source, destination, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(bookmark_tidy.os, "link", racing_link)
+
+    def create_competing_output():
+        assert ready.wait(timeout=5)
+        output.write_text("competitor", encoding="utf-8")
+        proceed.set()
+
+    competitor = threading.Thread(target=create_competing_output)
+    competitor.start()
+    with pytest.raises(bookmark_tidy.UserError, match="output exists"):
+        bookmark_tidy._atomic_write_text(output, "ours", replace_existing=False)
+    competitor.join(timeout=5)
+
+    assert not competitor.is_alive()
+    assert output.read_text(encoding="utf-8") == "competitor"
+    assert list(tmp_path.glob(".out.txt.*.tmp")) == []
+
+
+def test_atomic_write_without_replacement_rejects_dangling_symlink(tmp_path):
+    output = tmp_path / "out.txt"
+    target = tmp_path / "missing-target"
+    try:
+        output.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links unavailable")
+
+    with pytest.raises(bookmark_tidy.UserError, match="output exists"):
+        bookmark_tidy._atomic_write_text(output, "ours", replace_existing=False)
+
+    assert output.is_symlink()
+    assert not target.exists()
+    assert list(tmp_path.glob(".out.txt.*.tmp")) == []
+
+
+def test_atomic_write_force_replaces_existing_output(tmp_path):
+    output = tmp_path / "out.txt"
+    output.write_text("old", encoding="utf-8")
+
+    bookmark_tidy._atomic_write_text(output, "new", replace_existing=True)
+
+    assert output.read_text(encoding="utf-8") == "new"
+
+
+def test_atomic_write_without_replacement_reports_hard_link_failure(tmp_path, monkeypatch):
+    output = tmp_path / "out.txt"
+
+    def fail_link(*_args, **_kwargs):
+        raise OSError("hard links unavailable")
+
+    monkeypatch.setattr(bookmark_tidy.os, "link", fail_link)
+
+    with pytest.raises(bookmark_tidy.UserError, match="cannot publish output"):
+        bookmark_tidy._atomic_write_text(output, "ours", replace_existing=False)
+
+    assert not output.exists()
+    assert list(tmp_path.glob(".out.txt.*.tmp")) == []
 
 
 def test_fsync_parent_dir_ignores_unsupported_directory_fsync(tmp_path, monkeypatch):

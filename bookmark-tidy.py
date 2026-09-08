@@ -1619,8 +1619,6 @@ class _IdFactory:
 
 
 def write_output(bookmarks: Sequence[Bookmark], output: Path, output_format: str, force: bool) -> None:
-    if output.exists() and not force:
-        raise UserError(f"output exists, pass --force to overwrite: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
     if output_format == "chrome":
         text = json.dumps(export_chrome_bookmarks(bookmarks), ensure_ascii=False, indent=2)
@@ -1628,10 +1626,10 @@ def write_output(bookmarks: Sequence[Bookmark], output: Path, output_format: str
         text = json.dumps(export_firefox_bookmarks(bookmarks), ensure_ascii=False, indent=2)
     else:
         text = export_netscape_bookmarks(bookmarks)
-    _atomic_write_text(output, text)
+    _atomic_write_text(output, text, replace_existing=force)
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
+def _atomic_write_text(path: Path, text: str, *, replace_existing: bool = True) -> None:
     try:
         target_mode = stat.S_IMODE(path.stat().st_mode)
     except FileNotFoundError:
@@ -1645,11 +1643,27 @@ def _atomic_write_text(path: Path, text: str) -> None:
             if target_mode is not None:
                 os.chmod(tmp_path, target_mode)
             os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
+        if replace_existing:
+            os.replace(tmp_path, path)
+        else:
+            _link_without_replacing(tmp_path, path)
         _fsync_parent_dir(path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink()
+
+
+def _link_without_replacing(source: Path, destination: Path) -> None:
+    try:
+        os.link(source, destination, follow_symlinks=False)
+    except FileExistsError as exc:
+        raise UserError(f"output exists, pass --force to overwrite: {destination}") from exc
+    except OSError as exc:
+        raise UserError(
+            "cannot publish output without replacement on this filesystem: "
+            f"{destination}: {exc}"
+        ) from exc
+    source.unlink()
 
 
 def _fsync_parent_dir(path: Path) -> None:
