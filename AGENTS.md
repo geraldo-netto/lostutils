@@ -32,6 +32,7 @@ This file defines the expected behavior and usage model for AI agents working in
 - Document assumptions, constraints, and design intent in comments or commit notes when they matter.
 - Do not add comments that restate what the code plainly says. Comment only the non-obvious: why a choice was made, a constraint, or a subtle edge case. Delete redundant comments rather than write them.
 - Prefer explicit, maintainable solutions over clever shortcuts.
+- **No backward compatibility requirement.** Project-owned APIs, function signatures, CLI interfaces, and file/data formats may change or be removed. Do not retain compatibility wrappers, aliases, shims, deprecated paths, or deprecation/versioning machinery solely to preserve old behavior. Update maintained callers, tests, and documentation with the change while preserving correctness and data safety. Compatibility-only expectations in existing tests, documentation, or TODO findings do not constrain future changes.
 - Never cap or wrap lines in Markdown (`.md`) files. Let prose run on a single line per
   paragraph; do not hard-wrap to a column width.
 - Propose business/design patterns and DDD only when they improve clarity or structure.
@@ -133,9 +134,7 @@ framework/law in the finding's `notes`.
 - **configuration discoverability** — every runtime knob (env var / config file / CLI
   flag) has a default, a typed accessor, documented coverage, validation where needed, and
   tests for security-sensitive defaults.
-- **API contract & compatibility** — public function signatures, CLI interfaces, and
-  file/data formats are reviewed as compatibility artifacts: stable signatures, the full
-  error surface declared, and breaking changes that are deliberate, named, and versioned.
+- **API contract** — public function signatures, CLI interfaces, and file/data formats accurately describe current behavior and errors. Changes update maintained callers, tests, and documentation together; preserving older contracts or versioning breaking changes is not required.
 - **CLI / option integrity** — command options, help text, and defaults match actual
   behavior across each script's entry point; ignored or misleading flags are findings.
 - **wiring gaps** — shipped functions, modules, or commands that exist and pass tests but
@@ -146,9 +145,7 @@ framework/law in the finding's `notes`.
 - **unused functions/methods** — narrower grep-proven dead or test-only callable symbols
   (no leading `_`, imported by no production code), including `__init__` re-exports no
   caller pulls; each finding records delete / wire / intentionally keep in `notes`.
-- **legacy / deprecation** — back-compat shims whose constituency is grep-proven gone are
-  flagged to remove; still-live shims are recorded as "do not remove" with the live caller
-  so a future pass doesn't re-pick them.
+- **legacy / deprecation** — flag compatibility-only shims and obsolete paths for removal. Migrate maintained callers to the current implementation as part of removal; hypothetical external callers and historical behavior are not reasons to retain legacy code.
 - **plugin extensibility** — advertised extension points stay open through registries and
   documented contracts rather than closed `if`/`switch` dispatch or private-only hooks.
 - **adaptability** — hardcoded assumptions that block change without a code edit: magic
