@@ -607,6 +607,7 @@ class KeyParam:
         # full buffer like the other mutators do (mouse checks kc + 4).
         if not (self._fits(base + off) and self._fits(self.KEY_Char_Num + 1)):
             return False
+        self.data[5:7] = b"\x00\x00"
         self.data[base + off] = val & 0xFF
         self._store_char(self.KeyChar, 0, name)
         self._mul_general_char_set()
@@ -625,8 +626,7 @@ class KeyParam:
         self.data[kc + 1] = b1 & 0xFF
         self.data[kc + 2] = b2 & 0xFF
         self.data[kc + 3] = b3 & 0xFF
-        if b4 is not None:
-            self.data[kc + 4] = b4 & 0xFF
+        self.data[kc + 4] = (b4 or 0) & 0xFF
         self._store_char(self.KeyChar, kc - 5, name)
         return True
 

@@ -235,6 +235,24 @@ def test_multimedia_report_id_two_and_other():
     assert kp2.data[kp2.KEY_Char_Num] == 205   # "other" branch
 
 
+@pytest.mark.parametrize(
+    ("report_id", "next_value", "vol_value"),
+    [(0, 1, 2), (2, 10, 64)],
+)
+def test_multimedia_replacement_clears_the_other_payload_byte(
+        report_id, next_value, vol_value):
+    kp = _select(KeyParam())
+    kp.ReportID = report_id
+    kp.multimedia("Next", (1, 1), (1, 10), (0, 181))
+    assert kp.data[5:7] == bytearray((0, next_value))
+
+    kp.multimedia("Vol +", (0, 2), (0, 64), (0, 233))
+
+    assert kp.data[5:7] == bytearray((vol_value, 0))
+    reports, _flash, _ = _built(kp)
+    assert reports[-1][2:4] == bytearray((vol_value, 0))
+
+
 def test_multimedia_uses_fixed_report_bytes_after_keyboard_pointer_moves():
     kp = _select(KeyParam())
     kp.basic_key(4, "A")
@@ -268,7 +286,18 @@ def test_mouse_masks_all_bytes_to_one_byte():
 def test_mouse_without_b4():
     kp = _select(KeyParam())
     assert kp.mouse("L Click", 1, 0, 0, 0) is True
+    assert kp.data[5:10] == bytearray((1, 0, 0, 0, 0))
     assert kp.data[5] == 1
+
+
+def test_mouse_replacement_clears_stale_modifier_byte():
+    kp = _select(KeyParam())
+    kp.mouse("Ctrl+Wheel↑", 0, 0, 0, 1, 1)
+    kp.mouse("L Click", 1, 0, 0, 0)
+
+    assert kp.data[5:10] == bytearray((1, 0, 0, 0, 0))
+    reports, _flash, _ = _built(kp)
+    assert reports[0][2:7] == bytearray((1, 0, 0, 0, 0))
 
 
 def test_mouse_refuses_out_of_range():
