@@ -3350,10 +3350,13 @@ class LogSink:
         try:
             self._queue.put_nowait(line)
         except queue.Full:
-            with self._drop_lock:
-                if self._drop_count == 0:
-                    self._drop_first_t = time.monotonic()
-                self._drop_count += 1
+            self._record_dropped_lines(1)
+
+    def _record_dropped_lines(self, count: int) -> None:
+        with self._drop_lock:
+            if self._drop_count == 0:
+                self._drop_first_t = time.monotonic()
+            self._drop_count += count
 
     @property
     def is_alive(self) -> bool:
@@ -3436,6 +3439,7 @@ class LogSink:
             if self._fh is None or self._fh_path != path:
                 self._open_locked(path)
             if self._fh is None:
+                self._record_dropped_lines(len(batch))
                 return
             with self._drop_lock:
                 dropped, self._drop_count = self._drop_count, 0
@@ -3451,7 +3455,7 @@ class LogSink:
                 )
                 text = (
                     f"[sink] dropped {dropped} line(s){window} "
-                    f"(log queue full)\n" + text
+                    f"(log unavailable or queue full)\n" + text
                 )
             try:
                 self._fh.write(text)
@@ -3539,8 +3543,8 @@ class LogSink:
             return
         print(
             f"[warn] log file {path!r} cannot be opened ({exc}). Lines "
-            f"will continue to be queued but won't be written until the "
-            f"path becomes accessible.",
+            f"will be dropped and counted until the path becomes accessible; "
+            f"the loss count will be reported when logging recovers.",
             file=sys.stderr,
         )
 

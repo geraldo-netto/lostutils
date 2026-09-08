@@ -6155,3 +6155,29 @@ def test_main_window_close_saves_edits_with_settings_still_open(app):
     app._on_close()
 
     assert link_queue.yaml.safe_load(Path(path).read_text())["protocols"]["custom"]["command"] == "echo {url}"
+
+
+def test_log_sink_counts_batches_lost_before_path_recovers(tmp_path, capsys):
+    path = tmp_path / "missing" / "log.txt"
+    sink = link_queue.LogSink(lambda: str(path))
+    sink.stop()
+    try:
+        sink._flush_batch(["lost1\n", "lost2\n"])
+        sink._flush_batch(["lost3\n"])
+        warning = capsys.readouterr().err
+        assert warning.count("cannot be opened") == 1
+        assert "dropped and counted" in warning
+        assert sink._drop_count == 3
+
+        path.parent.mkdir()
+        sink._flush_batch(["retained\n"])
+
+        contents = path.read_text()
+        assert "[sink] dropped 3 line(s)" in contents
+        assert "log unavailable" in contents
+        assert "retained" in contents
+        assert "lost1" not in contents
+        assert sink._drop_count == 0
+    finally:
+        with sink._lock:
+            sink._close_locked()
