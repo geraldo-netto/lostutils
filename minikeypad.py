@@ -1251,6 +1251,7 @@ class App(tk.Tk):
         self._phys_base = {}        # key_id -> base button label
         self._selected_id = None
         self._destroyed = False
+        self._status_clear_after_id = None
         self._pending = None        # candidate assignment awaiting write ACK
         self._action_buttons = []   # disabled while a write is in flight
         # Only offer the extended scripts when the OS Unicode-entry method is
@@ -1860,13 +1861,26 @@ class App(tk.Tk):
         buf[1] = 0xA1 if flash == "led" else 0xAA
         return buf
 
-    def _flash_status(self, text, fg, bg):
-        self.dl_status.configure(text=text, fg=fg, bg=bg)
-        self.after(
-            STATUS_CLEAR_MS,
-            lambda: self.dl_status.configure(
+    def _clear_flash_status(self):
+        self._status_clear_after_id = None
+        try:
+            self.dl_status.configure(
                 text="", fg="black", bg=self.cget("bg")
-            ),
+            )
+        except tk.TclError:
+            pass
+
+    def _flash_status(self, text, fg, bg):
+        if self._status_clear_after_id is not None:
+            try:
+                self.after_cancel(self._status_clear_after_id)
+            except tk.TclError:
+                pass
+            self._status_clear_after_id = None
+        self.dl_status.configure(text=text, fg=fg, bg=bg)
+        self._status_clear_after_id = self.after(
+            STATUS_CLEAR_MS,
+            self._clear_flash_status,
         )
 
     def _dl_result(self, ok):

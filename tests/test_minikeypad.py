@@ -1513,6 +1513,38 @@ def test_status_flashes_clear_to_the_same_neutral_state(app, monkeypatch, show):
     assert app.dl_status.cget("bg") == app.cget("bg")
 
 
+def test_status_flash_cancels_stale_clear_callback(app, monkeypatch):
+    scheduled = []
+    cancelled = []
+
+    def after(delay, callback):
+        token = "after-%d" % len(scheduled)
+        scheduled.append((token, delay, callback))
+        return token
+
+    monkeypatch.setattr(app, "after", after)
+    monkeypatch.setattr(app, "after_cancel", cancelled.append)
+
+    app._flash_status("Busy", "black", "white")
+    app._flash_status("Write success", "white", "green")
+
+    assert cancelled == [scheduled[0][0]]
+    assert app.dl_status.cget("text") == "Write success"
+    scheduled[-1][2]()
+    assert app.dl_status.cget("text") == ""
+
+
+def test_status_flash_cleanup_ignores_tcl_teardown(app, monkeypatch):
+    scheduled = []
+    monkeypatch.setattr(
+        app, "after", lambda _delay, callback: scheduled.append(callback) or "id"
+    )
+    app._flash_status("Busy", "black", "white")
+    app.destroy()
+
+    scheduled[0]()
+
+
 def test_download_nothing_assigned(app):
     app._io_busy = False
     app.dev = FakeDev(connected=True)
