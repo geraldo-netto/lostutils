@@ -1097,6 +1097,40 @@ def test_llama_categorizer_wraps_model_load_timeout(monkeypatch, tmp_path):
     assert child.closed
 
 
+def test_llama_categorizer_restarts_worker_after_inference_timeout(monkeypatch, tmp_path):
+    first_parent = FakeLlamaConnection([("ready", "")])
+    first_child = FakeLlamaConnection()
+    second_parent = FakeLlamaConnection([("ready", ""), ("ok", "retry")])
+    second_child = FakeLlamaConnection()
+    pipes = iter([(first_parent, first_child), (second_parent, second_child)])
+    starts = []
+
+    class FakeProcess:
+        def start(self):
+            starts.append("start")
+
+        def is_alive(self):
+            return False
+
+    context = types.SimpleNamespace(
+        Pipe=lambda: next(pipes),
+        Process=lambda **_kwargs: FakeProcess(),
+    )
+    monkeypatch.setattr(bookmark_tidy.multiprocessing, "get_context", lambda _name: context)
+    chat = bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", False, 128, 0, 64)
+    first_parent.poll_result = False
+    chat._inference_timeout = 0.01
+
+    with pytest.raises(bookmark_tidy.UserError, match="LLM inference timed out"):
+        chat._complete("prompt")
+
+    assert starts == ["start", "start"]
+    assert first_parent.closed
+    assert chat._complete("retry") == "retry"
+    chat.close()
+    assert second_parent.closed
+
+
 @_forking_worker
 def test_llama_categorizer_inference_timeout(monkeypatch, tmp_path):
     _install_fake_llama(monkeypatch, HangingLlama)
@@ -1105,6 +1139,8 @@ def test_llama_categorizer_inference_timeout(monkeypatch, tmp_path):
 
     with pytest.raises(bookmark_tidy.UserError, match="LLM inference timed out"):
         chat._complete("prompt")
+    assert chat._process.is_alive()
+    chat.close()
     assert not chat._process.is_alive()
 
 
@@ -1130,6 +1166,7 @@ def test_llama_categorizer_wraps_connection_failures(connection, message):
     chat = object.__new__(bookmark_tidy.LlamaCategorizer)
     chat._connection = connection
     chat._process = types.SimpleNamespace(is_alive=lambda: False)
+    chat._inference_timeout = bookmark_tidy.LLAMA_INFERENCE_TIMEOUT_SECONDS
 
     with pytest.raises(bookmark_tidy.UserError, match=message):
         chat._complete("prompt")
@@ -1604,6 +1641,34 @@ def test_main_logs_duplicate_summary(tmp_path, monkeypatch, caplog):
     assert "Merged/removed 1 duplicate bookmark(s)." in caplog.text
 
 
+def test_run_returns_nonzero_after_categorization_abort(tmp_path, monkeypatch):
+    output = tmp_path / "out.json"
+    args = bookmark_tidy.parse_args(
+        ["input.html", "--model", str(tmp_path / "model.gguf"),
+         "--llm-batch-size", "1", "-o", str(output)]
+    )
+    bookmarks = [_sample_bookmark(f"https://example.test/{index}") for index in range(4)]
+
+    monkeypatch.setattr(bookmark_tidy, "_input_paths_from_args", lambda _args: [tmp_path / "input.html"])
+    monkeypatch.setattr(bookmark_tidy, "read_all_bookmarks", lambda _paths: bookmarks)
+
+    class AlwaysFailingCategorizer:
+        def __call__(self, _batch):
+            raise bookmark_tidy.UserError("inference unavailable")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        bookmark_tidy,
+        "_categorizer_from_args",
+        lambda _args, _bookmarks: AlwaysFailingCategorizer(),
+    )
+
+    assert bookmark_tidy._run(args) == 1
+    assert len(json.loads(output.read_text(encoding="utf-8"))["roots"]["bookmark_bar"]["children"]) == 1
+
+
 def test_run_uses_tidy_path_for_all_immutable_bookmarks(tmp_path, monkeypatch):
     output = tmp_path / "out.json"
     args = bookmark_tidy.parse_args(
@@ -1722,6 +1787,7 @@ def test_parse_args_help_documents_llm_tuning_flags(capsys):
     assert "llama.cpp context size" in out
     assert "model layers to offload" in out
     assert "maximum tokens generated" in out
+    assert "llm-inference-timeout" in out
     assert "bookmarks sent to the model per categorization request" in out
     assert "Bookmark export format" in out
     assert "Keep URL fragments" in out
@@ -1756,12 +1822,25 @@ def test_parse_args_gpu_layers_allows_llama_cpp_sentinels(capsys):
 
 def test_parse_args_accepts_positive_llm_values():
     args = bookmark_tidy.parse_args(
-        ["--llm-context", "2048", "--llm-max-tokens", "256", "--llm-batch-size", "10"]
+        [
+            "--llm-context", "2048", "--llm-max-tokens", "256",
+            "--llm-batch-size", "10", "--llm-inference-timeout", "2.5",
+        ]
     )
 
     assert args.llm_context == 2048
     assert args.llm_max_tokens == 256
     assert args.llm_batch_size == 10
+    assert args.llm_inference_timeout == 2.5
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "bad"])
+def test_parse_args_rejects_invalid_inference_timeout(capsys, value):
+    with pytest.raises(SystemExit) as exc:
+        bookmark_tidy.parse_args(["--llm-inference-timeout", value])
+
+    assert exc.value.code == 2
+    assert "must be a positive number" in capsys.readouterr().err
 
 
 def test_categorizer_from_args_rejects_missing_model(tmp_path):

@@ -4,6 +4,7 @@
 import argparse
 import json
 import logging
+import math
 import multiprocessing
 import os
 import sqlite3
@@ -1049,6 +1050,10 @@ def _assign_categories(
     failures = 0
     for batch in _chunks(bookmarks, max(1, batch_size)):
         categories, failures = _categorize_if_available(categorizer, batch, failures)
+        if failures == LLM_CONSECUTIVE_FAILURE_LIMIT:
+            mark_aborted = getattr(categorizer, "mark_aborted", None)
+            if callable(mark_aborted):
+                mark_aborted()
         result.extend(_apply_category_batch(batch, categories, fallback))
     return result
 
@@ -1179,6 +1184,7 @@ class LlamaCategorizer:
         gpu_layers: int,
         max_tokens: int,
         mp_context: Any = None,
+        inference_timeout: float | None = None,
     ) -> None:
         if auto_install:
             _import_llama(True)
@@ -1190,18 +1196,24 @@ class LlamaCategorizer:
             if mp_context is None
             else mp_context
         )
-        parent, child = process_context.Pipe()
+        self._process_context = process_context
+        self._model_path = str(model_path)
+        self._context = context
+        self._gpu_layers = gpu_layers
+        self._max_tokens = max_tokens
+        self._inference_timeout = (
+            LLAMA_INFERENCE_TIMEOUT_SECONDS
+            if inference_timeout is None
+            else inference_timeout
+        )
+        self._start_worker()
+
+    def _start_worker(self) -> None:
+        parent, child = self._process_context.Pipe()
         self._connection = parent
-        self._process = process_context.Process(
+        self._process = self._process_context.Process(
             target=_llama_process_worker,
-            args=(
-                child,
-                str(model_path),
-                False,
-                context,
-                gpu_layers,
-                max_tokens,
-            ),
+            args=(child, self._model_path, False, self._context, self._gpu_layers, self._max_tokens),
             daemon=True,
         )
         try:
@@ -1211,12 +1223,12 @@ class LlamaCategorizer:
             parent.close()
             child.close()
             raise UserError(
-                f"could not start llama.cpp worker for {model_path}: {exc}"
+                f"could not start llama.cpp worker for {self._model_path}: {exc}"
             ) from exc
         if not parent.poll(LLAMA_MODEL_LOAD_TIMEOUT_SECONDS):
             self._abort()
             raise UserError(
-                f"could not load model {model_path}: timed out after "
+                f"could not load model {self._model_path}: timed out after "
                 f"{LLAMA_MODEL_LOAD_TIMEOUT_SECONDS:g}s"
             )
         try:
@@ -1224,12 +1236,12 @@ class LlamaCategorizer:
         except (EOFError, OSError) as exc:
             self._abort()
             raise UserError(
-                f"could not load model {model_path}: worker exited"
+                f"could not load model {self._model_path}: worker exited"
             ) from exc
         if status != "ready":
             self._abort()
             raise UserError(
-                f"could not load model {model_path}: {message}; "
+                f"could not load model {self._model_path}: {message}; "
                 "verify the file is a valid GGUF model compatible with "
                 "llama-cpp-python"
             )
@@ -1243,11 +1255,12 @@ class LlamaCategorizer:
             self._connection.send(("complete", prompt))
         except (EOFError, OSError) as exc:
             raise UserError("LLM inference worker is unavailable") from exc
-        if not self._connection.poll(LLAMA_INFERENCE_TIMEOUT_SECONDS):
+        if not self._connection.poll(self._inference_timeout):
             self._abort()
+            self._start_worker()
             raise UserError(
                 "LLM inference timed out after "
-                f"{LLAMA_INFERENCE_TIMEOUT_SECONDS:g}s"
+                f"{self._inference_timeout:g}s"
             )
         try:
             status, value = self._connection.recv()
@@ -1725,6 +1738,16 @@ def _positive_int(text: str) -> int:
     return value
 
 
+def _positive_float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"must be a positive number, got {text}") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive number, got {text}")
+    return value
+
+
 def _gpu_layers_int(text: str) -> int:
     # llama.cpp semantics: 0 = CPU only, -1 = offload all layers.
     value = int(text)
@@ -1780,6 +1803,13 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                         help="number of llama.cpp model layers to offload to GPU; -1 offloads all (default 0)")
     parser.add_argument("--llm-max-tokens", type=_positive_int, default=DEFAULT_LLM_MAX_TOKENS,
                         help=f"maximum tokens generated for categorization (default {DEFAULT_LLM_MAX_TOKENS})")
+    parser.add_argument(
+        "--llm-inference-timeout",
+        type=_positive_float,
+        default=LLAMA_INFERENCE_TIMEOUT_SECONDS,
+        help=("maximum seconds to wait for each categorization request "
+              f"(default {LLAMA_INFERENCE_TIMEOUT_SECONDS:g})"),
+    )
     # bt-cli-50: this is NOT llama.cpp's n_batch, which the script never sets.
     parser.add_argument("--llm-batch-size", type=_positive_int, default=DEFAULT_LLM_BATCH_SIZE,
                         help=("bookmarks sent to the model per categorization "
@@ -1836,6 +1866,7 @@ def _categorizer_from_args(args: argparse.Namespace, bookmarks: Sequence[Bookmar
         context=args.llm_context,
         gpu_layers=args.llm_gpu_layers,
         max_tokens=args.llm_max_tokens,
+        inference_timeout=args.llm_inference_timeout,
     )
 
 
@@ -1856,6 +1887,7 @@ class _LazyCategorizer:
     def __init__(self, factory: Callable[[], CategoryProvider | None]) -> None:
         self._factory = factory
         self._provider: CategoryProvider | None = None
+        self._aborted = False
 
     def ensure(self) -> CategoryProvider:
         provider = self._provider
@@ -1868,6 +1900,13 @@ class _LazyCategorizer:
 
     def __call__(self, bookmarks: Sequence[Bookmark]) -> Mapping[int, Sequence[str] | str]:
         return self.ensure()(bookmarks)
+
+    @property
+    def aborted(self) -> bool:
+        return self._aborted
+
+    def mark_aborted(self) -> None:
+        self._aborted = True
 
     def close(self) -> None:
         provider, self._provider = self._provider, None
@@ -1903,13 +1942,14 @@ def _run(args: argparse.Namespace) -> int:
         close = getattr(categorizer, "close", None)
         if callable(close):
             close()
+    categorization_aborted = bool(getattr(categorizer, "aborted", False))
     duplicate_count = len(bookmarks) - len(organized)
     if duplicate_count:
         LOGGER.warning("Merged/removed %d duplicate bookmark(s).", duplicate_count)
     output = Path(args.output).expanduser() if args.output else default_output_path(args.output_format)
     write_output(organized, output, args.output_format, args.force)
     LOGGER.warning("Wrote %d bookmarks to %s", len(organized), output)
-    return 0
+    return 1 if categorization_aborted else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
