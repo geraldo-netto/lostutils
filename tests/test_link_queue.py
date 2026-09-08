@@ -6057,3 +6057,22 @@ def test_home_relative_path_handles_windows_drives_and_outside_paths(monkeypatch
     ))
 
     assert link_queue._home_relative_path(path) == expected
+
+
+@pytest.mark.parametrize("invalid_name", [42, True, None, "", "42http", "bad name", "http:", "schème"])
+def test_invalid_protocol_keys_are_skipped_at_gui_startup(
+        tmp_path, request, capsys, invalid_name):
+    config = {
+        "protocols": {
+            invalid_name: {"command": "echo bad"},
+            "Git+SSH": {"command": "echo valid {url}"},
+        }
+    }
+    (tmp_path / "cfg.yaml").write_text(link_queue.yaml.safe_dump(config), encoding="utf-8")
+
+    instance = request.getfixturevalue("app")
+    instance._refresh_protocols_tree()
+
+    assert "git+ssh" in instance.config["protocols"]
+    assert invalid_name not in instance.config["protocols"]
+    assert "invalid protocol name" in capsys.readouterr().err

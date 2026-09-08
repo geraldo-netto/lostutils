@@ -872,6 +872,10 @@ class _PendingQueue:
 # ---------------------------------------------------------------------------
 
 
+def _valid_protocol_name(name) -> bool:
+    return isinstance(name, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9+.-]*", name) is not None
+
+
 class ConfigStore(dict):
     """Owns the configuration and its persistence (arch-03): load (YAML,
     migrating a legacy JSON file), schema-normalize, and save. A dict subclass
@@ -963,8 +967,11 @@ class ConfigStore(dict):
             )
             return
         for name, protocol_config in protocols.items():
+            if not _valid_protocol_name(name):
+                print(f"[warn] config: ignoring invalid protocol name {name!r}", file=sys.stderr)
+                continue
             if isinstance(protocol_config, dict):
-                cfg["protocols"][name] = dict(protocol_config)
+                cfg["protocols"][name.lower()] = dict(protocol_config)
 
     @staticmethod
     def _normalize_protocols(cfg: dict) -> None:
@@ -5877,9 +5884,10 @@ class ProtocolEditor(_FormDialog):
     def _on_save(self) -> None:
         host = self.host
         name = self.proto_var.get().strip().lower()
-        if not name:
+        if not _valid_protocol_name(name):
             messagebox.showerror(
-                "Error", "Protocol name is required.", parent=self.dlg)
+                "Error", "Protocol name must be a URL scheme: a letter followed "
+                "by letters, digits, '+', '.', or '-'.", parent=self.dlg)
             return
         command = self.cmd_text.get("1.0", tk.END).strip()
         shell = bool(self.shell_var.get())
