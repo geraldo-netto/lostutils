@@ -1180,6 +1180,8 @@ class LlamaCategorizer:
         max_tokens: int,
         mp_context: Any = None,
     ) -> None:
+        if auto_install:
+            _import_llama(True)
         # bt-mt-01: `mp_context` is an injection seam — tests that need the
         # child to inherit an in-process fake `llama_cpp` pass a fork context
         # explicitly. Production always takes the LLAMA_START_METHOD default.
@@ -1195,7 +1197,7 @@ class LlamaCategorizer:
             args=(
                 child,
                 str(model_path),
-                auto_install,
+                False,
                 context,
                 gpu_layers,
                 max_tokens,

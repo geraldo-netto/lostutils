@@ -1049,6 +1049,34 @@ def test_llama_categorizer_wraps_worker_start_failure(monkeypatch, tmp_path):
     assert child.closed
 
 
+def test_llama_categorizer_installs_before_starting_worker(monkeypatch, tmp_path):
+    parent = FakeLlamaConnection([("ready", "")])
+    child = FakeLlamaConnection()
+    process = types.SimpleNamespace(
+        start=lambda: events.append("start"),
+        is_alive=lambda: False,
+    )
+    process_kwargs = {}
+    context = types.SimpleNamespace(
+        Pipe=lambda: (parent, child),
+        Process=lambda **kwargs: process_kwargs.update(kwargs) or process,
+    )
+    events = []
+
+    def install(auto_install):
+        events.append(("install", auto_install))
+        return FakeLlamaChat
+
+    monkeypatch.setattr(bookmark_tidy, "_import_llama", install)
+    monkeypatch.setattr(bookmark_tidy.multiprocessing, "get_context", lambda _name: context)
+
+    chat = bookmark_tidy.LlamaCategorizer(tmp_path / "model.gguf", True, 128, 0, 64)
+    chat.close()
+
+    assert events == [("install", True), "start"]
+    assert process_kwargs["args"][2] is False
+
+
 def test_llama_categorizer_wraps_model_load_timeout(monkeypatch, tmp_path):
     parent = FakeLlamaConnection(poll_result=False)
     child = FakeLlamaConnection()
