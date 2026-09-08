@@ -6093,3 +6093,18 @@ def test_deleted_builtin_protocols_stay_deleted_after_save_and_gui_restart(
 
     assert set(instance.config["protocols"]) == ({"custom"} if keep_custom else set())
     instance._refresh_protocols_tree()
+
+
+def test_main_window_close_saves_edits_with_settings_still_open(app):
+    app._open_settings_dialog()
+    app.config["protocols"]["custom"] = {
+        "command": "echo {url}", "mode": "queue", "shell": False,
+    }
+    app._save_config()
+    assert app._settings_dirty
+    path = app.config.config_file
+    assert "custom" not in link_queue.yaml.safe_load(Path(path).read_text())["protocols"]
+
+    app._on_close()
+
+    assert link_queue.yaml.safe_load(Path(path).read_text())["protocols"]["custom"]["command"] == "echo {url}"

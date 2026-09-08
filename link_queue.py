@@ -3947,7 +3947,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         """Persist config to YAML — but if the Settings dialog is open, defer
         the write and just mark dirty, so every spinbox <FocusOut> doesn't
         trigger a redundant write. The dirty flag is flushed by
-        _on_close_settings_dialog; until then the in-memory config is still the
+        _on_close_settings_dialog or app shutdown; until then the in-memory config is still the
         source of truth, so live behaviour (workers reading sleep / cap / etc.)
         is unchanged."""
         if self._settings_dialog_is_open():
@@ -5661,6 +5661,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         # the snapshot still captures every pending/in-flight item (it never
         # clears queue_items), and the authoritative post-join save follows.
         self.stop_event.set()
+        if self._settings_dirty:
+            self._write_config_now()
         with self.dispatcher._immediate_cv:
             self.dispatcher._immediate_cv.notify_all()
         self._safe_save_state_on_shutdown()
