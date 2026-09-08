@@ -2181,8 +2181,8 @@ def _progress_walk(
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Construct the CLI parser (hr-cmplx-02)."""
     ap = argparse.ArgumentParser(
-        description="Duplicate finder (head + tail + center + mid-samples, "
-                    "hardlink-aware, two-stage hash).",
+        description="Hardlink-aware duplicate finder with three-stage hashing "
+                    "(head, sampled, full-file).",
         epilog=("Watchdog limitation: Python cannot safely interrupt a "
                 "thread blocked inside kernel scandir/stat/read on a hung "
                 "filesystem; use OS or mount-level timeouts for NFS, SMB, "
@@ -2196,9 +2196,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
               f"{_max_jobs()})."))
     ap.add_argument(
         "-q", "--quiet", action="store_true",
-        help=("Suppress routine start/progress/done logs, run warnings, and "
-              "the end summary; hash errors, dump output, and filesystem "
-              "stall diagnostics remain visible."))
+        help=("Suppress routine start/progress/done logs, advisory run warnings, "
+              "and the end summary; hash errors, dump output, filesystem "
+              "stall diagnostics, and SIGINT partial-results warnings "
+              "remain visible."))
     ap.add_argument("--alias-cap", type=int, default=DEFAULT_ALIAS_CAP,
                     help=("Max paths printed per inode group "
                           f"(default: {DEFAULT_ALIAS_CAP}, <= 0 = no cap). "
@@ -2233,7 +2234,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
 def _emit_run_warnings(config, cancel_event, quiet) -> None:
     """One-shot end-of-run warnings: alias-cap truncation (hr-scal-04),
     suppressed hash errors (hr-obs-03), and partial results after a SIGINT
-    cancel (hr-conc-05). All are gated on ``not quiet``."""
+    cancel (hr-conc-05). Cancellation warnings remain visible under quiet."""
     if cancel_event.is_set():
         _log_line("WARNING: cancelled by SIGINT; results are partial.", False)
     if quiet:

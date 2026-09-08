@@ -1819,10 +1819,12 @@ def test_help_documents_kernel_io_stall_limitation():
 
 
 def test_quiet_help_documents_suppressed_and_visible_output():
-    help_text = " ".join(hr._build_arg_parser().format_help().split())
+    parser = hr._build_arg_parser()
+    help_text = " ".join(parser.format_help().split())
+    assert "three-stage hashing (head, sampled, full-file)" in parser.description
     assert "routine start/progress/done logs" in help_text
     assert "hash errors, dump output" in help_text
-    assert "stall diagnostics remain visible" in help_text
+    assert "stall diagnostics, and SIGINT partial-results warnings remain visible" in help_text
 
 
 def test_progress_stall_monitor_warns_once_until_progress(monkeypatch):

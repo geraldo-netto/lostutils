@@ -34,9 +34,9 @@ Finds duplicate regular files under a directory and writes one line per file in 
 python3 hash-recursive-ai5.py /path/to/tree
 ```
 
-The output shape is `<digest> <path>`. Paths containing a line break, or the reserved `@lostutils-json:` prefix, use a tagged JSON representation so one filename cannot create forged records; `remove-deduplv3.py` decodes that representation before building commands. The script first groups by file size, then hashes staged windows with BLAKE3: head, tail, center, and mid-file samples for large files. It is hardlink-aware and hashes one inode representative while still emitting aliases. Hash-dump output is disabled by default; enable it with `--hashes-file`.
+The output shape is `<digest> <path>`. Paths containing a line break, or the reserved `@lostutils-json:` prefix, use a tagged JSON representation so one filename cannot create forged records; `remove-deduplv3.py` decodes that representation before building commands. The script first groups by file size, then uses three BLAKE3 stages: head, sampled windows, and full-file verification. It is hardlink-aware and hashes one inode representative while still emitting aliases. Hash-dump output is disabled by default; enable it with `--hashes-file`.
 
-Useful options include `--jobs`, `--quiet`, `--alias-cap`, `--hash-error-verbose-cap`, `--block-size`, and `--sample-size`.
+Useful options include `--jobs`, `--quiet`, `--alias-cap`, `--hash-error-verbose-cap`, `--block-size`, and `--sample-size`. Quiet mode suppresses routine logs, advisory warnings, and the summary; hash errors, dump output, filesystem stall diagnostics, and SIGINT partial-results warnings remain visible.
 
 ### `deduplicate-by-namev3.py`
 
