@@ -143,6 +143,30 @@ def test_basic_modifier_sets_bit_on_current_char():
     assert kp.data[4] == 1                 # Ctrl modifier byte for char 0
 
 
+def test_trailing_basic_modifier_applies_to_last_written_group():
+    kp = _select(KeyParam())
+    kp.basic_key(4, "A")
+    kp.basic_modifier(1, "Ctrl")
+
+    reports, _flash, _ = _built(kp)
+    assert kp.data[4] == 1
+    assert kp.data[6] == 0
+    assert reports[1][4:6] == bytearray((1, 4))
+    assert kp.download_description() == "A Ctrl"
+
+
+def test_download_description_handles_modifier_only_payload():
+    kp = _select(KeyParam())
+    kp.basic_modifier(1, "Ctrl")
+    assert kp.download_description() == "Ctrl"
+
+
+def test_download_description_uses_raw_keyboard_bytes_without_label():
+    kp = _select(KeyParam())
+    kp.basic_key(4, "")
+    assert kp.download_description() == "raw"
+
+
 def test_basic_key_masks_oversized_code():
     kp = _select(KeyParam())
     kp.basic_key(0x1FF, "x")
@@ -187,6 +211,24 @@ def test_fun_combo_applies_each_modifier():
     kp.fun_combo([(1, "Ctrl"), (4, "Alt")])
     assert kp.FunKeyChar[0] == "Ctrl"
     assert kp.FunKeyChar[1] == "Alt"
+
+
+def test_trailing_fun_modifier_applies_to_last_written_group():
+    kp = _select(KeyParam())
+    kp.basic_key(4, "A")
+    kp.fun_modifier(1, "Ctrl")
+
+    reports, _flash, _ = _built(kp)
+    assert kp.data[4] == 1
+    assert kp.data[6] == 0
+    assert reports[1][4:6] == bytearray((1, 4))
+    assert kp.download_description() == "A Ctrl"
+
+
+def test_download_description_falls_back_for_non_keyboard_payload():
+    kp = _select(KeyParam())
+    kp.multimedia("Vol +", (0, 2), (0, 64), (0, 233))
+    assert kp.download_description() == "Vol +"
 
 
 def test_shift_and_packs_shift_bit_and_code():

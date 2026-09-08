@@ -498,6 +498,11 @@ class KeyParam:
         self.KEY_Char_Num += 2
         self.data[self.KeyGroupCharNum] += 1
 
+    def _modifier_index(self):
+        if self.data[self.KeyGroupCharNum]:
+            return self.KEY_Char_Num - 3
+        return self.KEY_Char_Num - 1
+
     def basic_key(self, keycode, label):
         if not self._fits(self.KEY_Char_Num):
             return False
@@ -508,7 +513,7 @@ class KeyParam:
 
     def basic_modifier(self, bit, name):
         """Key_Ctrl/Shift/Alt/Win on the KEY page."""
-        self.data[self.KEY_Char_Num - 1] |= bit
+        self.data[self._modifier_index()] |= bit
         self._store_char(self.FunKeyChar, self.FunKEY_Char_Num, name)
         self.data[self.KeyType_Num] |= 1
         self.FunKEY_Char_Num += 1
@@ -519,7 +524,7 @@ class KeyParam:
         self.FunKEY_Char_Num += 1
 
     def fun_modifier(self, bit, name):
-        self.data[self.KEY_Char_Num - 1] |= bit
+        self.data[self._modifier_index()] |= bit
         self._store_char(self.FunKeyChar, self.FunKEY_Char_Num, name)
         self._fun_general_char_set()
 
@@ -649,6 +654,35 @@ class KeyParam:
             return ""
         parts = [self.FunKeyChar[i] or "" for i in (0, 1, 2, 3)]
         return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def _modifier_text(value):
+        names = ("Ctrl", "Shift", "Alt", "Win",
+                 "R-Ctrl", "R-Shift", "R-Alt", "R-Win")
+        return " ".join(name for bit, name in enumerate(names)
+                        if value & (1 << bit))
+
+    def _keyboard_description(self):
+        groups = min(self.data[self.KeyGroupCharNum], MAX_KBD_GROUPS)
+        parts = []
+        for group in range(1, groups + 1):
+            label = self.KeyChar[2 * (group - 1)] or ""
+            if label:
+                parts.append(label)
+            modifier = self._modifier_text(self.data[2 + 2 * group])
+            if modifier:
+                parts.append(modifier)
+        if not groups:
+            modifier = self._modifier_text(self.data[4])
+            if modifier:
+                parts.append(modifier)
+        return " ".join(parts) or "raw"
+
+    def download_description(self):
+        """Describe only the keyboard modifiers present in sent reports."""
+        if self.data[self.KeyType_Num] & 0xF != 1:
+            return (self.key_text() + " " + self.fun_text()).strip() or "raw"
+        return self._keyboard_description()
 
     # -- download payload assembly (pure; testable without a device) --------
     def _swlayer_buf(self):
@@ -1862,7 +1896,7 @@ class App(tk.Tk):
         if truncated:
             self.log("Macro longer than %d groups; sending first %d."
                      % (MAX_KBD_GROUPS, MAX_KBD_GROUPS))
-        desc = (self.kp.key_text() + " " + self.kp.fun_text()).strip() or "raw"
+        desc = self.kp.download_description()
         self._pending = (self.kp.KEY_Cur_Layer,
                          self.kp.data[KeyParam.KeySet_KeyNum],
                          bytes(self.kp.data), desc)
