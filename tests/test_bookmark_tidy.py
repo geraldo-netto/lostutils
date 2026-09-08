@@ -1634,9 +1634,8 @@ def test_parse_args_logging_and_cli_helpers(tmp_path, monkeypatch, capsys):
     bookmark_tidy._configure_logging(1)
     bookmark_tidy._configure_logging(2)
     assert bookmark_tidy._input_paths_from_args(args) == [html.resolve()]
-    bookmarks = [_sample_bookmark()]
     with pytest.raises(bookmark_tidy.UserError):
-        bookmark_tidy._categorizer_from_args(args, bookmarks)
+        bookmark_tidy._categorizer_from_args(args)
 
     class FakeCategorizer:
         def __init__(self, **kwargs):
@@ -1708,7 +1707,7 @@ def test_run_returns_nonzero_after_categorization_abort(tmp_path, monkeypatch):
     monkeypatch.setattr(
         bookmark_tidy,
         "_categorizer_from_args",
-        lambda _args, _bookmarks: AlwaysFailingCategorizer(),
+        lambda _args: AlwaysFailingCategorizer(),
     )
 
     assert bookmark_tidy._run(args) == 1
@@ -1950,10 +1949,9 @@ def test_parse_args_rejects_invalid_inference_timeout(capsys, value):
 
 def test_categorizer_from_args_rejects_missing_model(tmp_path):
     args = bookmark_tidy.parse_args(["--model", str(tmp_path / "missing.gguf")])
-    bookmarks = [_sample_bookmark()]
 
     with pytest.raises(bookmark_tidy.UserError, match="model file not found"):
-        bookmark_tidy._categorizer_from_args(args, bookmarks)
+        bookmark_tidy._categorizer_from_args(args)
 
 
 def test_run_without_inputs_reports_error(monkeypatch):

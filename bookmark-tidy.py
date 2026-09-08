@@ -1868,9 +1868,7 @@ def _input_paths_from_args(args: argparse.Namespace) -> list[Path]:
     return _unique_paths(paths)
 
 
-def _categorizer_from_args(args: argparse.Namespace, bookmarks: Sequence[Bookmark]) -> CategoryProvider | None:
-    if not bookmarks:
-        return None
+def _categorizer_from_args(args: argparse.Namespace) -> CategoryProvider:
     model_path = _model_path_from_args(args)
     return LlamaCategorizer(
         model_path=model_path,
@@ -1979,7 +1977,7 @@ def _run(args: argparse.Namespace) -> int:
     options = _normalization_from_args(args)
     _preflight_model(args, bookmarks, immutable, options)
     categorizer = (
-        _LazyCategorizer(lambda: _categorizer_from_args(args, bookmarks))
+        _LazyCategorizer(lambda: _categorizer_from_args(args))
         if args.model is not None
         else None
     )
