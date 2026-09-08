@@ -2597,6 +2597,87 @@ def test_connection_monitor_timeout_allows_fresh_generation():
     assert len(states) == 1
 
 
+def test_slow_version_probe_completes_before_watchdog(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(minikeypad.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(minikeypad.time, "sleep", lambda _seconds: None)
+    scheduled = []
+    device = minikeypad.KeypadDevice(log=lambda _message: None)
+
+    class SlowEndpoint:
+        def __init__(self):
+            self.timeouts = []
+
+        def write(self, _data, timeout):
+            self.timeouts.append(timeout)
+            clock[0] += 0.52
+            return 0
+
+    endpoint = SlowEndpoint()
+    posted = []
+
+    def connect():
+        clock[0] += 0.75
+        device.dev = object()
+        device.ep_out = endpoint
+        return True
+
+    device.connect = connect
+
+    def version_probe(probed_device, _token):
+        for rid in minikeypad.VERSION_PROBE_IDS:
+            probed_device.write_device(rid, bytearray(8))
+
+    monitor = minikeypad.ConnectionMonitor(
+        lambda: device,
+        lambda _message: None,
+        lambda delay, callback: scheduled.append((delay, callback)),
+        posted.append,
+        lambda: None,
+        version_probe,
+    )
+    start = clock[0]
+    monitor._start_probe_worker(monitor.try_connect, "Connect")
+    worker = monitor.probe_thread
+    worker.join(1)
+
+    assert not worker.is_alive()
+    posted.pop()()
+    assert endpoint.timeouts == [minikeypad.WRITE_TIMEOUT_MS] * 9
+    assert (clock[0] - start) * 1000 < scheduled[0][0]
+    assert monitor.unresponsive is False
+
+
+def test_probe_timeout_distinguishes_completed_and_stalled_workers():
+    scheduled = []
+    callbacks = []
+    states = []
+    monitor = minikeypad.ConnectionMonitor(
+        lambda: types.SimpleNamespace(connected=False),
+        lambda _message: None,
+        lambda delay, callback: scheduled.append((delay, callback)),
+        callbacks.append,
+        lambda: states.append(True),
+        lambda: None,
+    )
+
+    monitor._start_probe_worker(
+        lambda token: callbacks.append(lambda: monitor.probe_done(True, token)),
+        "Connect",
+    )
+    worker = monitor.probe_thread
+    worker.join(1)
+    callbacks.pop()()
+    assert monitor.unresponsive is False
+    assert scheduled[0][0] == minikeypad.PROBE_TIMEOUT_MS
+    scheduled.pop(0)[1]()
+    assert monitor.unresponsive is False
+
+    monitor._start_probe_worker(lambda _token: None, "Connect")
+    monitor.probe_timeout(monitor.token, "Connect")
+    assert monitor.unresponsive is True
+
+
 def test_trim_log_lines_ignores_invalid_widget_index():
     app = object.__new__(minikeypad.App)
     app.log_box = types.SimpleNamespace(

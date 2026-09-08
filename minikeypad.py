@@ -153,12 +153,21 @@ PID = 0x8890
 HID_INTERFACE = 1          # "mi_01"
 REPORT_LEN = 64            # data bytes following the report ID
 WRITE_TIMEOUT_MS = 500
-PROBE_TIMEOUT_MS = 5000
 MAX_KBD_GROUPS = 5         # firmware accepts groups 0..5 (6 keystrokes)
 WRITE_RETRIES = 2          # extra attempts after the first on a transient USBError
 WRITE_RETRY_BACKOFF_S = 0.05
 UI_DRAIN_INTERVAL_MS = 120
 CONNECTION_POLL_MS = 1000
+VERSION_PROBE_IDS = (3, 0, 2)
+# The watchdog covers every version probe retry and leaves one poll interval
+# for device enumeration and interface claiming before declaring a stall.
+PROBE_TIMEOUT_MS = round(
+    len(VERSION_PROBE_IDS) * (
+        WRITE_TIMEOUT_MS * (WRITE_RETRIES + 1)
+        + WRITE_RETRY_BACKOFF_S * 1000
+        * WRITE_RETRIES * (WRITE_RETRIES + 1) / 2
+    ) + CONNECTION_POLL_MS
+)
 STATUS_CLEAR_MS = 2500
 WINDOW_GEOMETRY = "1440x880"
 WINDOW_MIN_SIZE = (1024, 768)
@@ -1818,7 +1827,7 @@ class App(tk.Tk):
         """Port of KeyBoardVersion_Check (WriteMode==1): probe report IDs 3,0,2."""
         device = self.dev if device is None else device
         zero = bytearray(8)
-        for rid in (3, 0, 2):
+        for rid in VERSION_PROBE_IDS:
             if not App._version_probe_current(self, device, token):
                 return
             if device.write_device(rid, zero):
