@@ -578,7 +578,7 @@ def _tick_shrank(config) -> None:
 
 
 def _read_window_into(h, f, length: int, strict: bool,
-                      cancel_event=None) -> bool:
+                      cancel_event=None, on_chunk=None) -> bool:
     """Read up to `length` bytes from `f` and feed them to hasher `h`
     (hr-rel-09).
 
@@ -604,8 +604,14 @@ def _read_window_into(h, f, length: int, strict: bool,
         if not chunk:
             return not strict
         h.update(chunk)
+        _notify_hash_chunk(on_chunk)
         remaining -= len(chunk)
     return True
+
+
+def _notify_hash_chunk(on_chunk) -> None:
+    if on_chunk is not None:
+        on_chunk()
 
 
 class FileWindow(NamedTuple):
@@ -629,7 +635,7 @@ class FileWindow(NamedTuple):
 
 
 def _hash_file_windows(path, windows, config=None, expected=None,
-                        cancel_event=None):
+                        cancel_event=None, on_chunk=None):
     """BLAKE3 of one or more (offset, length, whence) windows of a file
     (hr-dup-01). Returns the hex digest or None on any OSError. Shared
     scaffold for hash_head and hash_tail_and_samples.
@@ -678,7 +684,7 @@ def _hash_file_windows(path, windows, config=None, expected=None,
     try:
         with _open_hash_file(path) as file_obj:
             digest = _digest_file_windows(
-                file_obj, windows, config, expected, cancel_event)
+                file_obj, windows, config, expected, cancel_event, on_chunk)
         if digest is None:
             _record_hash_failure(config, expected, real=False)
         return digest
@@ -734,7 +740,7 @@ def _require_hash_identity(stat_result, expected) -> None:
 
 
 def _digest_file_windows(file_obj, windows, config, expected=None,
-                         cancel_event=None):
+                         cancel_event=None, on_chunk=None):
     initial = os.fstat(file_obj.fileno())
     pinned_identity = expected if expected is not None else _stat_identity(initial)
     _require_hash_identity(initial, pinned_identity)
@@ -744,7 +750,8 @@ def _digest_file_windows(file_obj, windows, config, expected=None,
     for window in windows:
         file_obj.seek(window.offset, window.whence)
         if not _read_window_into(
-                hasher, file_obj, window.length, window.strict, cancel_event):
+                hasher, file_obj, window.length, window.strict,
+                cancel_event, on_chunk):
             complete = False
             break
     if _cancelled(cancel_event):
@@ -766,7 +773,8 @@ def _handle_hash_error(path, exc: OSError, config) -> None:
         _log_hash_error(path, exc, config)
 
 
-def hash_head(path, config=None, expected=None, cancel_event=None):
+def hash_head(path, config=None, expected=None, cancel_event=None,
+              on_chunk=None):
     """Stage 1: BLAKE3 of the first block-size bytes (or whole file if
     smaller).
 
@@ -777,7 +785,7 @@ def hash_head(path, config=None, expected=None, cancel_event=None):
     cap = config.block_size if config is not None else CAP
     return _hash_file_windows(
         path, [FileWindow(0, cap, os.SEEK_SET)], config, expected,
-        cancel_event)
+        cancel_event, on_chunk)
 
 
 class SamplingStrategy:
@@ -849,7 +857,7 @@ _DEFAULT_SAMPLING: SamplingStrategy = ThirdsStrategy()
 
 
 def hash_tail_and_samples(path, size, strategy=None, config=None, expected=None,
-                          cancel_event=None):
+                          cancel_event=None, on_chunk=None):
     """Stage 2 (only when size > CAP): BLAKE3 of the last CAP bytes, a
     center CAP block at the file midpoint, plus two SAMPLE-byte windows
     around size/3 and 2*size/3 (hr-rel-05). Catches files that share a
@@ -868,14 +876,15 @@ def hash_tail_and_samples(path, size, strategy=None, config=None, expected=None,
     else:
         sampler = _DEFAULT_SAMPLING
     return _hash_file_windows(
-        path, sampler.windows(size), config, expected, cancel_event)
+        path, sampler.windows(size), config, expected, cancel_event, on_chunk)
 
 
-def hash_full(path, size, config=None, expected=None, cancel_event=None):
+def hash_full(path, size, config=None, expected=None, cancel_event=None,
+              on_chunk=None):
     """Final confirmation: BLAKE3 every byte of a sampled candidate."""
     return _hash_file_windows(
         path, [FileWindow(0, size, os.SEEK_SET, strict=True)], config,
-        expected, cancel_event)
+        expected, cancel_event, on_chunk)
 
 
 def _readable_rep(paths):
@@ -918,17 +927,18 @@ def _run_cancelable_batch(items, item_fn, cancel_event):
     return result
 
 
-def _make_head_candidate_batch(rep, config, cancel_event=None):
+def _make_head_candidate_batch(rep, config, cancel_event=None, on_chunk=None):
     """Build a stage-1 batch closure keyed by inode, not path (hr-scal-07)."""
     def _hash_one(item):
         size, key = item
         digest = hash_head(
-            rep[key], config, _walked_identity(key, size), cancel_event)
+            rep[key], config, _walked_identity(key, size), cancel_event,
+            on_chunk)
         return key, digest
     return lambda items: _run_cancelable_batch(items, _hash_one, cancel_event)
 
 
-def _make_tail_stage2_batch(config, cancel_event=None):
+def _make_tail_stage2_batch(config, cancel_event=None, on_chunk=None):
     """Build a stage-2 batch closure without projecting a second item list."""
     def _hash_one(item):
         digest = hash_tail_and_samples(
@@ -937,12 +947,13 @@ def _make_tail_stage2_batch(config, cancel_event=None):
             config=config,
             expected=_walked_identity(item[3], item[0]),
             cancel_event=cancel_event,
+            on_chunk=on_chunk,
         )
         return item, digest
     return lambda items: _run_cancelable_batch(items, _hash_one, cancel_event)
 
 
-def _make_full_stage3_batch(config, cancel_event=None):
+def _make_full_stage3_batch(config, cancel_event=None, on_chunk=None):
     def _hash_one(item):
         digest = hash_full(
             item[0],
@@ -950,6 +961,7 @@ def _make_full_stage3_batch(config, cancel_event=None):
             config,
             expected=_walked_identity(item[3], item[1]),
             cancel_event=cancel_event,
+            on_chunk=on_chunk,
         )
         return item, digest
     return lambda items: _run_cancelable_batch(items, _hash_one, cancel_event)
@@ -1401,7 +1413,8 @@ def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
     return 1, real_count
 
 
-def _retry_alias(key, tried, aliases, hash_alias, cancel_event=None):
+def _retry_alias(key, tried, aliases, hash_alias, cancel_event=None,
+                 on_chunk=None):
     """Re-hash `key` on its next readable alias after the representative
     produced a None digest (hr-rel-02 / hr-rel-30 / hr-rel-50).
 
@@ -1421,7 +1434,7 @@ def _retry_alias(key, tried, aliases, hash_alias, cancel_event=None):
         if alias == tried:
             continue
         try:
-            digest = hash_alias(alias)
+            digest = hash_alias(alias, on_chunk)
         except _HashCancelled:
             return None
         if digest is not None:
@@ -1429,34 +1442,41 @@ def _retry_alias(key, tried, aliases, hash_alias, cancel_event=None):
     return None
 
 
-def _retry_head_alias(key, tried, size, aliases, config, cancel_event=None):
+def _retry_head_alias(key, tried, size, aliases, config, cancel_event=None,
+                      on_chunk=None):
     """Stage-1 head retry (hr-rel-02)."""
     return _retry_alias(
         key, tried, aliases,
-        lambda alias: hash_head(
+        lambda alias, chunk_callback: hash_head(
             alias,
             config,
             _walked_identity(key, size),
             cancel_event,
+            chunk_callback,
         ),
-        cancel_event)
+        cancel_event,
+        on_chunk)
 
 
-def _retry_tail_alias(key, tried, size, aliases, config, cancel_event=None):
+def _retry_tail_alias(key, tried, size, aliases, config, cancel_event=None,
+                      on_chunk=None):
     """Stage-2 tail/sample retry (hr-rel-30)."""
     return _retry_alias(
         key, tried, aliases,
-        lambda alias: hash_tail_and_samples(
+        lambda alias, chunk_callback: hash_tail_and_samples(
             alias,
             size,
             config=config,
             expected=_walked_identity(key, size),
             cancel_event=cancel_event,
+            on_chunk=chunk_callback,
         ),
-        cancel_event)
+        cancel_event,
+        on_chunk)
 
 
-def _retry_full_alias(key, tried, size, aliases, config, cancel_event=None):
+def _retry_full_alias(key, tried, size, aliases, config, cancel_event=None,
+                      on_chunk=None):
     """Stage-3 full-file retry (hr-rel-50).
 
     Stages 1 and 2 already recovered a vanished representative; without the
@@ -1465,18 +1485,21 @@ def _retry_full_alias(key, tried, size, aliases, config, cancel_event=None):
     group even though a readable hardlink sibling existed."""
     return _retry_alias(
         key, tried, aliases,
-        lambda alias: hash_full(
+        lambda alias, chunk_callback: hash_full(
             alias,
             size,
             config,
             expected=_walked_identity(key, size),
             cancel_event=cancel_event,
+            on_chunk=chunk_callback,
         ),
-        cancel_event)
+        cancel_event,
+        on_chunk)
 
 
 def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
-                 aliases=None, on_hashed=None, on_progress=None):
+                 aliases=None, on_hashed=None, on_progress=None,
+                 on_chunk=None):
     """Run Stage 1 (head hash) and bucket candidates by ``(size, head)``
     (hr-cx-05).
 
@@ -1504,10 +1527,13 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
     if on_progress is not None:
         run_kwargs["on_progress"] = on_progress
     head_by_key, errors = _run_stage(
-        candidates, _make_head_candidate_batch(rep, config, cancel_event), stage1_bytes,
+        candidates,
+        _make_head_candidate_batch(rep, config, cancel_event, on_chunk),
+        stage1_bytes,
         jobs, **run_kwargs)
     by_head, recovered = _bucket_stage1_heads(
-        candidates, head_by_key, rep, aliases, config, on_hashed, cancel_event)
+        candidates, head_by_key, rep, aliases, config, on_hashed, cancel_event,
+        on_chunk)
     return by_head, {
         "stage1": len(head_by_key),
         "stage1_errors": max(0, errors - recovered),
@@ -1518,7 +1544,7 @@ def _stage1_hash(candidates, rep, jobs, config, cancel_event=None,
 
 
 def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashed,
-                         cancel_event=None):
+                         cancel_event=None, on_chunk=None):
     """Bucket hashed candidates by ``(size, head)`` (hr-cmplx-03).
 
     A None head on a multi-alias inode is retried on the next readable sibling
@@ -1534,7 +1560,7 @@ def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashe
         head = head_by_key[key]
         if head is None and aliases is not None and len(aliases.get(key, ())) > 1:
             head = _retry_head_alias(
-                key, rep[key], size, aliases, config, cancel_event)
+                key, rep[key], size, aliases, config, cancel_event, on_chunk)
             recovered += head is not None
         head_by_key[key] = head
         if on_hashed is not None:
@@ -1546,7 +1572,7 @@ def _bucket_stage1_heads(candidates, head_by_key, rep, aliases, config, on_hashe
 
 
 def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
-                 on_progress=None, aliases=None):
+                 on_progress=None, aliases=None, on_chunk=None):
     """Run Stage 2 (tail + center + middle samples) and regroup by
     ``(head, tail)`` (hr-cx-05).
 
@@ -1570,14 +1596,17 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     if on_progress is not None:
         run_kwargs["on_progress"] = on_progress
     tail_by_item, errors = _run_stage(
-        stage2_items, _make_tail_stage2_batch(config, cancel_event), stage2_bytes, jobs,
+        stage2_items,
+        _make_tail_stage2_batch(config, cancel_event, on_chunk),
+        stage2_bytes,
+        jobs,
         **run_kwargs)
     regrouped: dict = {}
     recovered = 0
     for item in stage2_items:
         _size, _path, head, key = item
         tail, was_recovered = _stage2_tail(
-            item, tail_by_item, aliases, config, cancel_event)
+            item, tail_by_item, aliases, config, cancel_event, on_chunk)
         recovered += was_recovered
         if tail is None:
             continue   # failed/unhashed tail — already in stage2_errors
@@ -1591,7 +1620,8 @@ def _stage2_hash(stage2_items, jobs, config, cancel_event=None,
     }
 
 
-def _stage2_tail(item, tail_by_item, aliases, config, cancel_event=None):
+def _stage2_tail(item, tail_by_item, aliases, config, cancel_event=None,
+                 on_chunk=None):
     size, path, _head, key = item
     if item not in tail_by_item:
         # hr-conc-50: absent means `_run_stage` never dispatched this item —
@@ -1604,13 +1634,14 @@ def _stage2_tail(item, tail_by_item, aliases, config, cancel_event=None):
     if tail is not None:
         return tail, False
     if aliases is not None and len(aliases.get(key, ())) > 1:
-        tail = _retry_tail_alias(key, path, size, aliases, config, cancel_event)
+        tail = _retry_tail_alias(
+            key, path, size, aliases, config, cancel_event, on_chunk)
     tail_by_item[item] = tail
     return tail, tail is not None
 
 
 def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
-                 on_progress=None, aliases=None):
+                 on_progress=None, aliases=None, on_chunk=None):
     """Run Stage 3 (full-file hash) and group the confirmed duplicates.
 
     hr-rel-50: a None digest on a multi-alias inode is retried on the next
@@ -1630,7 +1661,7 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
         run_kwargs["on_progress"] = on_progress
     full_by_item, errors = _run_stage(
         items,
-        _make_full_stage3_batch(config, cancel_event),
+        _make_full_stage3_batch(config, cancel_event, on_chunk),
         _capped_byte_total(item[1] for item in items),
         jobs,
         **run_kwargs,
@@ -1639,7 +1670,7 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
     recovered = 0
     for item in items:
         digest, was_recovered = _stage3_digest(
-            item, full_by_item, aliases, config, cancel_event)
+            item, full_by_item, aliases, config, cancel_event, on_chunk)
         recovered += was_recovered
         if digest is not None:
             by_full.setdefault(digest, []).append(item[3])
@@ -1652,7 +1683,8 @@ def _stage3_hash(regrouped, rep, sizes, jobs, config, cancel_event=None,
     }
 
 
-def _stage3_digest(item, full_by_item, aliases, config, cancel_event=None):
+def _stage3_digest(item, full_by_item, aliases, config, cancel_event=None,
+                   on_chunk=None):
     """Resolve one stage-3 item's full digest, retrying a sibling alias when the
     representative failed (hr-rel-50). Returns ``(digest, was_recovered)``.
 
@@ -1665,7 +1697,8 @@ def _stage3_digest(item, full_by_item, aliases, config, cancel_event=None):
     if digest is not None:
         return digest, False
     if aliases is not None and len(aliases.get(key, ())) > 1:
-        digest = _retry_full_alias(key, path, size, aliases, config, cancel_event)
+        digest = _retry_full_alias(
+            key, path, size, aliases, config, cancel_event, on_chunk)
     full_by_item[item] = digest
     return digest, digest is not None
 
@@ -1758,7 +1791,7 @@ def _stage_progress_cb(on_stage_progress, stage):
 def find_duplicate_groups(files, jobs, on_group=None, config=None,
                           on_walk_done=None, cancel_event=None,
                           on_hashed=None, on_stage_progress=None,
-                          on_composite=None):
+                          on_composite=None, on_chunk=None):
     """Run the dedup pipeline on walk results (hr-arch-01).
 
     `files` may be a list OR an iterator (hr-scal-05). When called with
@@ -1849,7 +1882,8 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     by_head, stage1_info = _stage1_hash(
         candidates, rep, jobs, config, cancel_event, aliases=aliases,
         on_hashed=on_hashed,
-        on_progress=_stage_progress_cb(on_stage_progress, "stage1"))
+        on_progress=_stage_progress_cb(on_stage_progress, "stage1"),
+        on_chunk=on_chunk)
     stage2_items = _split_stage1_buckets(
         by_head,
         rep,
@@ -1862,7 +1896,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     regrouped, stage2_info = _stage2_hash(
         stage2_items, jobs, config, cancel_event,
         on_progress=_stage_progress_cb(on_stage_progress, "stage2"),
-        aliases=aliases)
+        aliases=aliases, on_chunk=on_chunk)
     by_full, stage3_info = _stage3_hash(
         regrouped,
         rep,
@@ -1872,6 +1906,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
         cancel_event,
         on_progress=_stage_progress_cb(on_stage_progress, "stage3"),
         aliases=aliases,
+        on_chunk=on_chunk,
     )
     _emit_stage3_groups(by_full, on_composite, _accept_group)
 
@@ -2589,6 +2624,7 @@ def _run():
             on_group=on_group, config=config, on_walk_done=_mark_walk_done,
             cancel_event=cancel_event, on_hashed=on_hashed,
             on_stage_progress=on_stage_progress, on_composite=on_composite,
+            on_chunk=lambda: stall_monitor.touch("hash"),
         )
         if result.overflow:
             dump_overflow.update(result.overflow)

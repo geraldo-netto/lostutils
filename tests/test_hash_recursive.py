@@ -734,9 +734,10 @@ def test_hash_file_windows_rejects_size_mutation_during_read(
     expected = hr._stat_identity(path.stat())
     real_read = hr._read_window_into
 
-    def read_then_grow(hasher, file_obj, length, strict, cancel_event=None):
+    def read_then_grow(hasher, file_obj, length, strict, cancel_event=None,
+                        on_chunk=None):
         complete = real_read(
-            hasher, file_obj, length, strict, cancel_event)
+            hasher, file_obj, length, strict, cancel_event, on_chunk)
         with path.open("ab") as changed:
             changed.write(b"!")
         return complete
@@ -843,7 +844,8 @@ def test_hash_tail_and_samples_clamps_windows(monkeypatch):
     _hash_file_windows must satisfy offset + SAMPLE <= size."""
     captured = {}
 
-    def fake_hash(path, windows, config=None, expected=None, cancel_event=None):
+    def fake_hash(path, windows, config=None, expected=None, cancel_event=None,
+                  on_chunk=None):
         captured["windows"] = windows
         return "deadbeef"
 
@@ -861,7 +863,8 @@ def test_hash_tail_and_samples_tiny_size_does_not_overflow(monkeypatch):
     # window may read past EOF.
     captured = {}
 
-    def fake_hash(path, windows, config=None, expected=None, cancel_event=None):
+    def fake_hash(path, windows, config=None, expected=None, cancel_event=None,
+                  on_chunk=None):
         captured["windows"] = windows
         return None
 
@@ -881,17 +884,18 @@ def test_hash_stage_batches_forward_walked_identity(monkeypatch):
     expected = (7, 11, size)
     seen = []
 
-    def fake_head(got_path, config, got_expected=None, cancel_event=None):
+    def fake_head(got_path, config, got_expected=None, cancel_event=None,
+                  on_chunk=None):
         seen.append(("head", got_path, got_expected))
         return "HEAD"
 
     def fake_tail(got_path, got_size, strategy=None, config=None,
-                  expected=None, cancel_event=None):
+                  expected=None, cancel_event=None, on_chunk=None):
         seen.append(("tail", got_path, expected))
         return "TAIL"
 
     def fake_full(got_path, got_size, config=None, expected=None,
-                  cancel_event=None):
+                  cancel_event=None, on_chunk=None):
         seen.append(("full", got_path, expected))
         return "FULL"
 
@@ -1302,7 +1306,7 @@ def test_main_clamps_huge_jobs_before_pipeline(tmp_path, monkeypatch):
 
     def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
              cancel_event=None, on_hashed=None, on_stage_progress=None,
-             on_composite=None):
+             on_composite=None, on_chunk=None):
         list(files)
         if on_walk_done is not None:
             on_walk_done()
@@ -1447,8 +1451,16 @@ def test_read_window_into_assembles_short_reads():
             return chunk
 
     h = blake3.blake3()
-    ok = hr._read_window_into(h, ShortReadFile(payload), len(payload), strict=True)
+    chunks = []
+    ok = hr._read_window_into(
+        h,
+        ShortReadFile(payload),
+        len(payload),
+        strict=True,
+        on_chunk=lambda: chunks.append(True),
+    )
     assert ok is True
+    assert len(chunks) == 2
 
     expected = blake3.blake3()
     expected.update(payload)
@@ -1495,13 +1507,40 @@ def test_hash_head_propagates_cooperative_cancel(tmp_path):
         hr.hash_head(str(data), cancel_event=cancel)
 
 
+def test_read_chunk_callback_refreshes_stall_monitor(monkeypatch):
+    import blake3
+
+    now = [0.0]
+    warnings = []
+    monkeypatch.setattr(
+        hr, "_log_line", lambda message, quiet: warnings.append(message))
+    monitor = hr._ProgressStallMonitor(
+        warning_after=10.0, now_fn=lambda: now[0])
+    monitor.touch("hash")
+    now[0] = 10.0
+
+    class OneChunkFile:
+        def read(self, _size):
+            return b"x"
+
+    hr._read_window_into(
+        blake3.blake3(),
+        OneChunkFile(),
+        1,
+        strict=True,
+        on_chunk=lambda: monitor.touch("hash"),
+    )
+    monitor._maybe_warn()
+    assert warnings == []
+
+
 def test_hash_batch_stops_after_item_cancel(monkeypatch):
     cancel = threading.Event()
     calls = []
     first = (1, 1)
     second = (1, 2)
 
-    def fake_hash(path, _config, _expected, cancel_event=None):
+    def fake_hash(path, _config, _expected, cancel_event=None, on_chunk=None):
         calls.append(path)
         cancel_event.set()
         return "digest"
@@ -1518,7 +1557,7 @@ def test_stage1_cancelled_items_are_not_hash_errors(monkeypatch):
     cancel = threading.Event()
     first, second = (1, 1), (1, 2)
 
-    def fake_hash(path, _config, _expected, cancel_event=None):
+    def fake_hash(path, _config, _expected, cancel_event=None, on_chunk=None):
         cancel_event.set()
         return "head"
 
@@ -1540,7 +1579,8 @@ def test_stage2_cancelled_items_are_not_hash_errors(monkeypatch):
     first, second = (1, 1), (1, 2)
     items = [(10, "/a", "head", first), (10, "/b", "head", second)]
 
-    def fake_hash(path, size, config=None, expected=None, cancel_event=None):
+    def fake_hash(path, size, config=None, expected=None, cancel_event=None,
+                  on_chunk=None):
         cancel_event.set()
         return "tail"
 
@@ -1559,7 +1599,8 @@ def test_stage3_cancelled_items_are_not_hash_errors(monkeypatch):
     rep = {first: "/a", second: "/b"}
     sizes = {first: 10, second: 10}
 
-    def fake_hash(path, size, config=None, expected=None, cancel_event=None):
+    def fake_hash(path, size, config=None, expected=None, cancel_event=None,
+                  on_chunk=None):
         cancel_event.set()
         return "full"
 
@@ -2233,7 +2274,7 @@ def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
 
     def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
              cancel_event=None, on_hashed=None, on_stage_progress=None,
-             on_composite=None):
+             on_composite=None, on_chunk=None):
         list(files)                             # drain walk so threads finish
         if on_walk_done is not None:
             on_walk_done()
@@ -2258,7 +2299,7 @@ def test_main_hashes_file_written_before_finally(tmp_path, monkeypatch):
 
     def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
              cancel_event=None, on_hashed=None, on_stage_progress=None,
-             on_composite=None):
+             on_composite=None, on_chunk=None):
         list(files)
         if on_walk_done is not None:
             on_walk_done()
@@ -2360,7 +2401,7 @@ def test_main_hashes_closed_when_dump_write_interrupted(tmp_path, monkeypatch):
 
     def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
              cancel_event=None, on_hashed=None, on_stage_progress=None,
-             on_composite=None):
+             on_composite=None, on_chunk=None):
         list(files)
         if on_walk_done is not None:
             on_walk_done()
@@ -3497,7 +3538,8 @@ def test_retry_head_alias_skips_tried_and_returns_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_hash_head(path, config, expected=None, cancel_event=None):
+    def fake_hash_head(path, config, expected=None, cancel_event=None,
+                       on_chunk=None):
         calls.append(path)
         return None if path == "/dead" else "GOODHEAD"
 
@@ -3511,7 +3553,7 @@ def test_retry_head_alias_returns_none_when_no_sibling_readable(monkeypatch):
     aliases = {("d", 0): ["/dead", "/alsodead"]}
     monkeypatch.setattr(
         hr, "hash_head",
-        lambda p, c, expected=None, cancel_event=None: None,
+        lambda p, c, expected=None, cancel_event=None, on_chunk=None: None,
     )
     assert hr._retry_head_alias(
         ("d", 0), "/dead", 1234, aliases, None) is None
@@ -3599,7 +3641,7 @@ def test_retry_head_alias_property(n_aliases, live_choice):
     readable = siblings[live_choice % len(siblings)] if live_choice % 3 else None
     probed = []
 
-    def fake(path, config, expected=None, cancel_event=None):
+    def fake(path, config, expected=None, cancel_event=None, on_chunk=None):
         probed.append(path)
         return "HD" if path == readable else None
 
@@ -3616,7 +3658,8 @@ def test_retry_tail_alias_skips_tried_and_returns_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_tail(path, size, config=None, expected=None, cancel_event=None):
+    def fake_tail(path, size, config=None, expected=None, cancel_event=None,
+                  on_chunk=None):
         calls.append(path)
         return None if path == "/dead" else "GOODTAIL"
 
@@ -3631,7 +3674,8 @@ def test_retry_tail_alias_returns_none_when_no_sibling_readable(monkeypatch):
     monkeypatch.setattr(
         hr,
         "hash_tail_and_samples",
-        lambda p, s, config=None, expected=None, cancel_event=None: None,
+        lambda p, s, config=None, expected=None, cancel_event=None,
+               on_chunk=None: None,
     )
     assert hr._retry_tail_alias(("d", 0), "/dead", 1, aliases, None) is None
 
@@ -3714,7 +3758,8 @@ def test_retry_full_alias_uses_the_next_readable_sibling(monkeypatch):
     aliases = {("d", 0): ["/dead", "/live"]}
     calls = []
 
-    def fake_full(path, size, config=None, expected=None, cancel_event=None):
+    def fake_full(path, size, config=None, expected=None, cancel_event=None,
+                  on_chunk=None):
         calls.append(path)
         return None if path == "/dead" else "GOODFULL"
 
@@ -3727,7 +3772,8 @@ def test_retry_full_alias_returns_none_when_no_sibling_readable(monkeypatch):
     monkeypatch.setattr(
         hr,
         "hash_full",
-        lambda p, s, config=None, expected=None, cancel_event=None: None,
+        lambda p, s, config=None, expected=None, cancel_event=None,
+               on_chunk=None: None,
     )
     aliases = {("d", 0): ["/dead", "/alsodead"]}
     assert hr._retry_full_alias(("d", 0), "/dead", 1, aliases, None) is None
@@ -3988,9 +4034,10 @@ def test_hash_rejects_same_size_write_during_read(
     config = hr.RunConfig(block_size=2, sample_size=1)
     real_read = hr._read_window_into
 
-    def mutate_after_read(hasher, file_obj, length, strict, cancel_event=None):
+    def mutate_after_read(hasher, file_obj, length, strict, cancel_event=None,
+                          on_chunk=None):
         complete = real_read(
-            hasher, file_obj, length, strict, cancel_event)
+            hasher, file_obj, length, strict, cancel_event, on_chunk)
         path.write_bytes(b"modified")
         os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
         return complete
@@ -4039,9 +4086,10 @@ def test_pipeline_never_confirms_duplicate_changed_after_hash_read(tmp_path, mon
     records = [_walk_record(candidate), _walk_record(stable)]
     real_read = hr._read_window_into
 
-    def mutate_candidate(hasher, file_obj, length, strict, cancel_event=None):
+    def mutate_candidate(hasher, file_obj, length, strict, cancel_event=None,
+                         on_chunk=None):
         complete = real_read(
-            hasher, file_obj, length, strict, cancel_event)
+            hasher, file_obj, length, strict, cancel_event, on_chunk)
         if os.fstat(file_obj.fileno()).st_ino == before.st_ino:
             candidate.write_bytes(b"modified")
             os.utime(candidate, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
