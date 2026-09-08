@@ -35,23 +35,16 @@ This file defines the expected behavior and usage model for AI agents working in
 - Never cap or wrap lines in Markdown (`.md`) files. Let prose run on a single line per
   paragraph; do not hard-wrap to a column width.
 - Propose business/design patterns and DDD only when they improve clarity or structure.
-- ALWAYS record review findings in `TODO.md` — never report them only in chat. Any time you
-  scan, review, audit, or "look for issues" (not just major changes), add each finding to the
-  matching category table in `TODO.md` before/while reporting it.
+- ALWAYS record review findings in `TODO.md` — never report them only in chat. Any time you scan, review, audit, or "look for issues" (not just major changes), add each finding to the affected script's table in the "Open" section before/while reporting it. Put blocked/deferred and rejected/wont_fix findings in their shared lifecycle tables.
 - Commit directly on `develop` for this project — no feature branch required.
-- ONE commit per `TODO.md` item — when you implement an item, make exactly one dedicated commit
-  for it (the code change, its tests, and the `TODO.md` edit together). Fully completed: delete the
-  item's row in the same commit. Partial: leave the row and append a note to its `notes` column
-  stating what shipped and why the rest is deferred — never silently leave it unchanged.
+- ONE commit per `TODO.md` item — when you implement an item, make exactly one dedicated commit for it (the code change, its tests, and the `TODO.md` edit together). Fully completed: delete the item's row in the same commit. Partial: leave the row and append a note to its `description` stating what shipped and why the rest is deferred — never silently leave it unchanged.
 - ALWAYS remove completed items from `TODO.md` — once a finding is implemented + tested + merged,
   delete its row from the table outright. No "shipped" sub-sections, no struck-through entries.
   `git log` is the durable record. Exceptions: the "Open — parked" section keeps open-but-deferred
   items with a why-not-now annotation; the "Audit picks deliberately rejected" section keeps the
   rationale so future passes don't re-pick the same items.
-- When making major changes, rescan the whole project and create or update `TODO.md` with one
-  table per review category defined below. Each table uses the format:
-  `id | status | effort | description | notes`. "Whole project" scan scope is the `.py` and
-  `.sh` files in the root directory only — not subdirectories (e.g. `wip/`, `tests/`).
+- Organize open findings in `TODO.md` into one table per script, under a heading naming that script. Use the columns `id | status | severity | effort | description`, and include the review category and supporting notes in each description. Group documentation and test findings with the script they concern. Keep the "Blocked / Deferred" and "Rejected / Won't fix" tables as shared tables in their existing format; do not split them by script.
+- When making major changes, rescan the whole project and update the script tables in `TODO.md`. "Whole project" scan scope is the `.py` and `.sh` files in the root directory only — not subdirectories (e.g. `wip/`, `tests/`).
 - Keep every `TODO.md` table sorted by the `description` column. Each description starts with the
   affected `file:line`, so sorting clusters findings in the same file together — letting related
   items be fixed in one batch. Re-sort a table whenever you add or edit its rows.
