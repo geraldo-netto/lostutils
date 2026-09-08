@@ -268,17 +268,10 @@ class Plan:
         Path normalisation lives here rather than in `parse_args` so that
         unit tests can drive `Plan.from_args` with a synthesised Namespace
         without invoking argparse."""
-        # absolute() (not resolve()) for source: we must NOT follow the symlink
-        # if we already migrated, otherwise the idempotency check breaks.
-        src = Path(args.source).expanduser().absolute()
+        src = _normalize_source_path(args.source)
         dst_root = Path(args.dest_root).expanduser().resolve()
-        # rf-rel-30: a root-shaped source ("/" or a trailing-slash root) has an
-        # empty basename, so `dst_root / src.name == dst_root` and the src==target
-        # guard below would not fire — the run would proceed on a root path.
-        if not src.name:
-            raise ValueError(f"source has no basename to relocate: {src}")
         target = dst_root / src.name
-        canonical_source = _canonical_path_location(src)
+        canonical_source = src
         canonical_target = _canonical_path_location(target)
         if canonical_source == canonical_target:
             raise ValueError(f"source equals computed target: {src}")
@@ -301,6 +294,16 @@ class Plan:
             check_space=not getattr(args, "no_space_check", False),
             progress=getattr(args, "progress", False),
         )
+
+
+def _normalize_source_path(value: str) -> Path:
+    """Resolve parent aliases, keeping the leaf visible to symlink guards."""
+    source = Path(value).expanduser().absolute()
+    if source.name == "..":
+        raise ValueError(f"source must not end in '..'; name the directory explicitly: {source}")
+    if not source.name:
+        raise ValueError(f"source has no basename: {source}")
+    return _canonical_path_location(source)
 
 
 def _canonical_path_location(path: Path) -> Path:
@@ -3059,7 +3062,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         plan = Plan.from_args(ns)
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         _log().error(FAILED_MESSAGE, exc)  # NOSONAR -- expected CLI validation stays concise.
         return 2
     _log().info("plan: source=%s target=%s dry_run=%s verify=%s checksum=%s strict=%s",
@@ -3089,9 +3092,10 @@ def _run_recover(ns: argparse.Namespace) -> int:
             "--recover ignores dest_root (%s); recovery only restores the "
             "<source>.relocate-backup directory to <source>", ns.dest_root,
         )
-    source = Path(ns.source).expanduser().absolute()
-    if not source.name:
-        _log().error("FAILED: source has no basename to recover: %s", source)
+    try:
+        source = _normalize_source_path(ns.source)
+    except (OSError, RuntimeError, ValueError) as exc:
+        _log().error(FAILED_MESSAGE, exc)
         return 1
     backup_path = source.with_name(source.name + BACKUP_SUFFIX)
     if getattr(ns, "dry_run", False):

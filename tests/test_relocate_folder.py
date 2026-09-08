@@ -3755,7 +3755,7 @@ def test_main_recover_root_path_returns_1(tmp_path, caplog):
     root = Path(tmp_path.anchor)
     with caplog.at_level(logging.ERROR):
         assert rf.main(["--recover", str(root)]) == 1
-    assert any("source has no basename to recover" in r.message for r in caplog.records)
+    assert any("source has no basename" in r.message for r in caplog.records)
 
 
 def test_main_missing_dest_root_without_recover(tmp_path):
