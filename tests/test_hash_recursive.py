@@ -158,14 +158,23 @@ def test_size_collision_candidates_filters_and_sorts():
     assert (999, (1, 3)) not in cands
 
 
-def test_emit_groups_writes_only_real_duplicates():
-    aliases = {("k1",): ["/p1", "/p1b"], ("k2",): ["/p2"], ("k3",): ["/p3"]}
-    final_groups = {"digA": [("k1",)], "digB": [("k2",), ("k3",)]}
+def test_emit_groups_writes_only_real_duplicates(tmp_path):
+    paths = [tmp_path / name for name in ("p1", "p1b", "p2", "p3")]
+    paths[0].write_bytes(b"x")
+    os.link(paths[0], paths[1])
+    paths[2].write_bytes(b"x")
+    paths[3].write_bytes(b"x")
+    key1 = (paths[0].stat().st_dev, paths[0].stat().st_ino)
+    key2 = (paths[2].stat().st_dev, paths[2].stat().st_ino)
+    key3 = (paths[3].stat().st_dev, paths[3].stat().st_ino)
+    aliases = {key1: [str(paths[0]), str(paths[1])],
+               key2: [str(paths[2])], key3: [str(paths[3])]}
+    final_groups = {"digA": [key1], "digB": [key2, key3]}
     out = []
-    groups, paths = hr.emit_groups(final_groups, aliases, out.append)
+    groups, path_count = hr.emit_groups(final_groups, aliases, out.append)
     # digA expands to 2 alias paths (a hardlinked dup), digB to 2 distinct files
     assert groups == 2
-    assert paths == 4
+    assert path_count == 4
     # hr-perf-03: one `write` call per group, each containing every line for
     # that group (so the per-line count requires splitting on newline).
     assert len(out) == 2
@@ -637,14 +646,22 @@ def test_threaded_walk_handles_stat_failure_on_entry():
 
 # --- hr-perf-03: buffered emit ---------------------------------------------
 
-def test_emit_groups_writes_once_per_group():
-    aliases = {("k1",): ["/p1", "/p1b", "/p1c"],
-               ("k2",): ["/p2a", "/p2b"]}
-    final_groups = {"dA": [("k1",)], "dB": [("k2",)]}
+def test_emit_groups_writes_once_per_group(tmp_path):
+    paths = [tmp_path / name for name in ("p1", "p1b", "p1c", "p2a", "p2b")]
+    paths[0].write_bytes(b"x")
+    os.link(paths[0], paths[1])
+    os.link(paths[0], paths[2])
+    paths[3].write_bytes(b"x")
+    os.link(paths[3], paths[4])
+    key1 = (paths[0].stat().st_dev, paths[0].stat().st_ino)
+    key2 = (paths[3].stat().st_dev, paths[3].stat().st_ino)
+    aliases = {key1: [str(path) for path in paths[:3]],
+               key2: [str(path) for path in paths[3:]]}
+    final_groups = {"dA": [key1], "dB": [key2]}
     out = []
-    groups, paths = hr.emit_groups(final_groups, aliases, out.append)
+    groups, path_count = hr.emit_groups(final_groups, aliases, out.append)
     assert groups == 2
-    assert paths == 5
+    assert path_count == 5
     # hr-perf-03: one write call per group.
     assert len(out) == 2
     # Each chunk contains every path for that group.
@@ -655,12 +672,17 @@ def test_emit_groups_writes_once_per_group():
     assert "/p1c" in chunk_A
 
 
-def test_emit_groups_accepts_explicit_config():
-    aliases = {("d", 0): ["/a"], ("d", 1): ["/b"]}
+def test_emit_groups_accepts_explicit_config(tmp_path):
+    left, right = tmp_path / "a", tmp_path / "b"
+    left.write_bytes(b"x")
+    right.write_bytes(b"x")
+    key_left = (left.stat().st_dev, left.stat().st_ino)
+    key_right = (right.stat().st_dev, right.stat().st_ino)
+    aliases = {key_left: [str(left)], key_right: [str(right)]}
     written = []
     cfg = hr.RunConfig()
     groups, paths = hr.emit_groups(
-        {"hash": [("d", 0), ("d", 1)]}, aliases, written.append, config=cfg)
+        {"hash": [key_left, key_right]}, aliases, written.append, config=cfg)
     assert groups == 1
     assert paths == 2
     assert written
@@ -1135,21 +1157,29 @@ def test_expand_keys_to_paths_caps_each_inode_independently():
     assert out == ["/a", "/b", "/c", "/d"]
 
 
-def test_alias_cap_one_keeps_two_inode_representatives():
-    aliases = {("d", 0): ["/a", "/a2"], ("d", 1): ["/b", "/b2"]}
+def test_alias_cap_one_keeps_two_inode_representatives(tmp_path):
+    paths = [tmp_path / name for name in ("a", "a2", "b", "b2")]
+    paths[0].write_bytes(b"x")
+    os.link(paths[0], paths[1])
+    paths[2].write_bytes(b"x")
+    os.link(paths[2], paths[3])
+    key_a = (paths[0].stat().st_dev, paths[0].stat().st_ino)
+    key_b = (paths[2].stat().st_dev, paths[2].stat().st_ino)
+    aliases = {key_a: [str(paths[0]), str(paths[1])],
+               key_b: [str(paths[2]), str(paths[3])]}
     written = []
 
-    groups, paths = hr._emit_one_group(
+    groups, path_count = hr._emit_one_group(
         "digest",
-        list(aliases),
+        [key_a, key_b],
         aliases,
         written.append,
         hr.RunConfig(alias_cap=1),
     )
 
-    assert (groups, paths) == (1, 2)
-    assert "/a\n" in written[0]
-    assert "/b\n" in written[0]
+    assert (groups, path_count) == (1, 2)
+    assert f"{paths[0]}\n" in written[0]
+    assert f"{paths[2]}\n" in written[0]
 
 
 def test_expand_keys_to_paths_under_cap_no_sentinel():
@@ -1161,13 +1191,18 @@ def test_expand_keys_to_paths_under_cap_no_sentinel():
 ALIAS_CAP_LARGE = 100000
 
 
-def test_emit_groups_streaming_returns_callback_and_totals():
+def test_emit_groups_streaming_returns_callback_and_totals(tmp_path):
+    left, right = tmp_path / "left", tmp_path / "right"
+    left.write_bytes(b"x")
+    right.write_bytes(b"x")
+    key_left = (left.stat().st_dev, left.stat().st_ino)
+    key_right = (right.stat().st_dev, right.stat().st_ino)
     written = []
     cb, totals = hr.emit_groups_streaming(written.append)
     cb(("abc", None),
-       [("d", 1), ("d", 2)],
-       {("d", 1): ["/a/1"], ("d", 2): ["/a/2"]})
-    assert any("abc /a/1" in chunk for chunk in written)
+       [key_left, key_right],
+       {key_left: [str(left)], key_right: [str(right)]})
+    assert any(f"abc {left}" in chunk for chunk in written)
     groups, paths = totals()
     assert groups == 1
     assert paths == 2
@@ -2295,6 +2330,8 @@ def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
     # leave the dump flushed and closed. A digest recorded via on_hashed before
     # the interrupt still survives.
     (tmp_path / "a.bin").write_bytes(b"x")
+    path_key = (tmp_path.joinpath("a.bin").stat().st_dev,
+                tmp_path.joinpath("a.bin").stat().st_ino)
     out = tmp_path / "hashes.txt"
     digest = "ab" * 32                          # 64-char hex
 
@@ -2304,7 +2341,7 @@ def test_main_hashes_flushed_and_closed_on_keyboard_interrupt(
         list(files)                             # drain walk so threads finish
         if on_walk_done is not None:
             on_walk_done()
-        on_hashed(1, 1, digest, (1, 1), {(1, 1): [str(tmp_path / "a.bin")]})
+            on_hashed(1, 1, digest, path_key, {path_key: [str(tmp_path / "a.bin")]})
         raise KeyboardInterrupt
 
     monkeypatch.setattr(hr, "find_duplicate_groups", stub)
@@ -2319,6 +2356,8 @@ def test_main_hashes_file_written_before_finally(tmp_path, monkeypatch):
     # hr-rob-02: on_hashed writes and flushes the head digest immediately, so
     # a hard crash before main's finally would not lose every hashed entry.
     (tmp_path / "a.bin").write_bytes(b"x")
+    path_key = (tmp_path.joinpath("a.bin").stat().st_dev,
+                tmp_path.joinpath("a.bin").stat().st_ino)
     out = tmp_path / "hashes.txt"
     digest = "cd" * 32
     observed = {}
@@ -2329,7 +2368,7 @@ def test_main_hashes_file_written_before_finally(tmp_path, monkeypatch):
         list(files)
         if on_walk_done is not None:
             on_walk_done()
-        on_hashed(1, 1, digest, (1, 1), {(1, 1): [str(tmp_path / "a.bin")]})
+            on_hashed(1, 1, digest, path_key, {path_key: [str(tmp_path / "a.bin")]})
         observed["dump"] = out.read_text()
         raise KeyboardInterrupt
 
@@ -2398,6 +2437,8 @@ def test_main_hashes_closed_when_dump_write_interrupted(tmp_path, monkeypatch):
     # KeyboardInterrupt (not OSError); the fd must still be closed by the
     # finally rather than leaked.
     (tmp_path / "a.bin").write_bytes(b"x")
+    path_key = (tmp_path.joinpath("a.bin").stat().st_dev,
+                tmp_path.joinpath("a.bin").stat().st_ino)
     out = tmp_path / "hashes.txt"
     digest = "ab" * 32
     closed = {"n": 0}
@@ -2431,7 +2472,7 @@ def test_main_hashes_closed_when_dump_write_interrupted(tmp_path, monkeypatch):
         list(files)
         if on_walk_done is not None:
             on_walk_done()
-        on_hashed(1, 1, digest, (1, 1), {(1, 1): [str(tmp_path / "a.bin")]})
+            on_hashed(1, 1, digest, path_key, {path_key: [str(tmp_path / "a.bin")]})
 
     monkeypatch.setattr(hr, "find_duplicate_groups", stub)
     monkeypatch.setattr("builtins.open", fake_open)
@@ -2749,9 +2790,15 @@ def test_find_duplicate_groups_disabled_cap_skips_ingest_overflow(tmp_path):
     # hr-cx-01: with the cap disabled, no overflow dict is built and the
     # alias list is unbounded — exercises the `not alias_cap_active` arm.
     body = b"z" * 200
-    (tmp_path / "a.bin").write_bytes(body)
-    files = [(f"/synthetic/p{i}", len(body), 1, 100) for i in range(30)]
-    files += [(f"/synthetic/q{i}", len(body), 1, 200) for i in range(30)]
+    p0 = tmp_path / "p0"
+    q0 = tmp_path / "q0"
+    p0.write_bytes(body)
+    q0.write_bytes(body)
+    for i in range(1, 30):
+        os.link(p0, tmp_path / f"p{i}")
+        os.link(q0, tmp_path / f"q{i}")
+    files = [_walk_record(tmp_path / f"p{i}") for i in range(30)]
+    files += [_walk_record(tmp_path / f"q{i}") for i in range(30)]
     cfg = hr.RunConfig(alias_cap=0)   # disabled
 
     def stub_stage1(candidates, rep, jobs, config, cancel_event=None, **kwargs):
@@ -2766,7 +2813,7 @@ def test_find_duplicate_groups_disabled_cap_skips_ingest_overflow(tmp_path):
     # cap disabled → overflow never populated, all aliases retained.
     # hr-arch-01: overflow is returned on the result, not stashed on config.
     assert result.overflow is None
-    assert len(result.aliases[(1, 100)]) == 30
+    assert len(result.aliases[(p0.stat().st_dev, p0.stat().st_ino)]) == 30
 
 
 # --- hr-test-10: ThirdsStrategy size boundaries ----------------------------
@@ -2817,11 +2864,14 @@ def test_format_digest_none_tail_returns_head_unchanged():
 # --- hr-test-14: newline/space in path roundtrip ---------------------------
 
 def test_emit_groups_newline_path_cannot_inject_record_boundary(tmp_path):
+    normal = tmp_path / "normal"
+    newline = tmp_path / "with\nnewline"
+    normal.write_bytes(b"x")
+    os.link(normal, newline)
+    key = (normal.stat().st_dev, normal.stat().st_ino)
     written = []
-    aliases = {
-        ("d", 0): ["/normal", "/with\nnewline"],
-    }
-    final_groups = {"abc": [("d", 0)]}
+    aliases = {key: [str(normal), str(newline)]}
+    final_groups = {"abc": [key]}
     hr.emit_groups(final_groups, aliases, written.append)
     out = "".join(written)
     lines = out.splitlines()
@@ -2830,7 +2880,7 @@ def test_emit_groups_newline_path_cannot_inject_record_boundary(tmp_path):
     assert "@lostutils-json:" in lines[1]
     encoded_path = lines[1].split(" ", 1)[1]
     payload = encoded_path.removeprefix(hr._ESCAPED_PATH_PREFIX)
-    assert json.loads(payload) == "/with\nnewline"
+    assert json.loads(payload) == str(newline)
 
 
 @pytest.mark.parametrize(
@@ -3470,10 +3520,16 @@ def test_find_duplicate_groups_uses_ingest_alias_cap_via_result(tmp_path):
     # DedupResult AND handed to the on_group callback as its 4th arg —
     # never smuggled on config.
     body = b"shared body" * 200
-    (tmp_path / "a.bin").write_bytes(body)
-    files = [(f"/synthetic/p{i}", len(body), 1, 100) for i in range(20)]
+    p0 = tmp_path / "p0"
+    q0 = tmp_path / "q0"
+    p0.write_bytes(body)
+    q0.write_bytes(body)
+    for i in range(1, 20):
+        os.link(p0, tmp_path / f"p{i}")
+        os.link(q0, tmp_path / f"q{i}")
+    files = [_walk_record(tmp_path / f"p{i}") for i in range(20)]
     # Make a duplicate group via two inodes with same size.
-    files += [(f"/synthetic/q{i}", len(body), 1, 200) for i in range(20)]
+    files += [_walk_record(tmp_path / f"q{i}") for i in range(20)]
     cfg = hr.RunConfig(alias_cap=5)   # small cap → ingest drops
     captured = []
 
@@ -3517,20 +3573,27 @@ def test_expand_keys_to_paths_takes_overflow_explicitly():
     assert out == ["/a", "/b"]
 
 
-def test_emit_groups_forwards_overflow_to_cap_accounting():
+def test_emit_groups_forwards_overflow_to_cap_accounting(tmp_path):
     # hr-arch-01: the batched emit path receives overflow explicitly and
     # Ingest overflow is accounted for without synthetic output records.
-    aliases = {("d", 0): ["/a", "/b"], ("d", 1): ["/c"]}
-    final_groups = {"hash": [("d", 0), ("d", 1)]}
-    overflow = {("d", 0): 50}
+    paths = [tmp_path / name for name in ("a", "b", "c")]
+    paths[0].write_bytes(b"x")
+    os.link(paths[0], paths[1])
+    paths[2].write_bytes(b"x")
+    key_a = (paths[0].stat().st_dev, paths[0].stat().st_ino)
+    key_b = (paths[2].stat().st_dev, paths[2].stat().st_ino)
+    aliases = {key_a: [str(paths[0]), str(paths[1])],
+               key_b: [str(paths[2])]}
+    final_groups = {"hash": [key_a, key_b]}
+    overflow = {key_a: 50}
     written = []
-    groups, paths = hr.emit_groups(
+    groups, path_count = hr.emit_groups(
         final_groups, aliases, written.append, overflow=overflow)
     blob = "".join(written)
     # 3 stored paths are emitted; the 50 omitted aliases are not fabricated.
     assert groups == 1
-    assert "/a" in blob
-    assert "/c" in blob
+    assert str(paths[0]) in blob
+    assert str(paths[2]) in blob
 
 
 def test_dedup_result_overflow_field_default_none():
@@ -3796,6 +3859,203 @@ def test_retry_full_alias_returns_none_when_no_sibling_readable(monkeypatch):
     assert hr._retry_full_alias(("d", 9), "/x", 1, {}, None) is None
 
 
+def test_changed_alias_is_dropped_from_stdout_and_hash_dump(tmp_path):
+    payload = b"0123456789"
+    representative = tmp_path / "representative"
+    changed = tmp_path / "changed"
+    peer = tmp_path / "peer"
+    representative.write_bytes(payload)
+    os.link(representative, changed)
+    peer.write_bytes(payload)
+    records = [_walk_record(path) for path in (representative, changed, peer)]
+    changed.unlink()
+    changed.write_bytes(b"abcdefghij")
+
+    config = hr.RunConfig()
+    output = []
+    on_group, _totals = hr.emit_groups_streaming(output.append, config=config)
+    dump = tmp_path / "hashes.txt"
+    with dump.open("w+", encoding="utf-8") as handle:
+        state = {"writer": hr.HashDumpWriter(handle)}
+        on_hashed, on_composite, _progress = hr._build_dump_callbacks(
+            state, str(dump), mock.Mock(), False, config)
+        result = hr.find_duplicate_groups(
+            records,
+            jobs=1,
+            on_group=on_group,
+            config=config,
+            on_hashed=on_hashed,
+            on_composite=on_composite,
+        )
+        state["writer"].close()
+    stdout = "".join(output)
+    dump_text = dump.read_text()
+    assert str(changed) not in stdout
+    assert str(changed) not in dump_text
+    assert str(representative) in stdout and str(peer) in stdout
+    assert str(representative) in dump_text and str(peer) in dump_text
+    assert config.alias_identity_errors == 1
+    assert result.info["alias_identity_errors"] == 1
+    assert hr._run_exit_code(threading.Event(), {}, result.info, config) == 1
+
+
+def test_changed_alias_after_stage1_retry_is_dropped_from_output(
+        tmp_path, monkeypatch):
+    payload = b"0123456789"
+    representative = tmp_path / "representative"
+    changed = tmp_path / "changed"
+    peer = tmp_path / "peer"
+    representative.write_bytes(payload)
+    os.link(representative, changed)
+    peer.write_bytes(payload)
+    records = [_walk_record(path) for path in (representative, changed, peer)]
+    left_key = (representative.stat().st_dev, representative.stat().st_ino)
+    right_key = (peer.stat().st_dev, peer.stat().st_ino)
+
+    def fake_retry(key, _tried, _size, _aliases, *_args):
+        assert key == left_key
+        changed.unlink()
+        changed.write_bytes(b"abcdefghij")
+        return "head"
+
+    def fake_run_stage(*_args, **_kwargs):
+        return {left_key: None, right_key: "head"}, 1
+
+    monkeypatch.setattr(hr, "_run_stage", fake_run_stage)
+    monkeypatch.setattr(hr, "_retry_head_alias", fake_retry)
+    config = hr.RunConfig()
+    output = []
+    on_group, _totals = hr.emit_groups_streaming(output.append, config=config)
+    dump = tmp_path / "hashes.txt"
+    with dump.open("w+", encoding="utf-8") as handle:
+        state = {"writer": hr.HashDumpWriter(handle)}
+        on_hashed, on_composite, _progress = hr._build_dump_callbacks(
+            state, str(dump), mock.Mock(), False, config)
+        result = hr.find_duplicate_groups(
+            records,
+            jobs=1,
+            on_group=on_group,
+            config=config,
+            on_hashed=on_hashed,
+            on_composite=on_composite,
+        )
+        state["writer"].close()
+
+    stdout = "".join(output)
+    dump_text = dump.read_text()
+    assert str(changed) not in stdout
+    assert str(representative) in stdout and str(peer) in stdout
+    assert str(changed) not in dump_text
+    assert str(representative) in dump_text and str(peer) in dump_text
+    assert config.alias_identity_errors == 1
+    assert result.info["alias_identity_errors"] == 1
+    assert hr._run_exit_code(threading.Event(), {}, result.info, config) == 1
+
+
+def test_stage3_retry_swap_compacts_dump_without_touching_appended_records(
+        tmp_path, monkeypatch):
+    payload = b"01234567"
+    representative = tmp_path / "representative"
+    changed = tmp_path / "changed"
+    peer = tmp_path / "peer"
+    preexisting = tmp_path / "preexisting"
+    representative.write_bytes(payload)
+    os.link(representative, changed)
+    peer.write_bytes(payload)
+    preexisting.write_bytes(b"old")
+    records = [_walk_record(path) for path in (representative, changed, peer)]
+    dump = tmp_path / "hashes.txt"
+    dump.write_text(f"old-digest {preexisting}\n", encoding="utf-8")
+    config = hr.RunConfig(block_size=4, sample_size=1)
+    output = []
+    on_group, _totals = hr.emit_groups_streaming(output.append, config=config)
+    failed = {"value": False}
+
+    def fake_head(*_args, **_kwargs):
+        return "head"
+
+    def fake_tail(*_args, **_kwargs):
+        return "tail"
+
+    def fake_full(path, *_args, **_kwargs):
+        if path == str(representative) and not failed["value"]:
+            failed["value"] = True
+            changed.unlink()
+            changed.write_bytes(b"abcdefgh")
+            return None
+        return "full"
+
+    monkeypatch.setattr(hr, "hash_head", fake_head)
+    monkeypatch.setattr(hr, "hash_tail_and_samples", fake_tail)
+    monkeypatch.setattr(hr, "hash_full", fake_full)
+    with dump.open("r+", encoding="utf-8") as handle:
+        handle.seek(0, os.SEEK_END)
+        state = {"writer": hr.HashDumpWriter(handle)}
+        on_hashed, on_composite, _progress = hr._build_dump_callbacks(
+            state, str(dump), mock.Mock(), False, config)
+        result = hr.find_duplicate_groups(
+            records,
+            jobs=1,
+            on_group=on_group,
+            config=config,
+            on_hashed=on_hashed,
+            on_composite=on_composite,
+        )
+        previous_sigint = hr.signal.getsignal(hr.signal.SIGINT)
+        hr._finalize_hash_dump(
+            state, str(dump), previous_sigint, config)
+
+    stdout = "".join(output)
+    dump_lines = dump.read_text(encoding="utf-8").splitlines()
+    dump_text = "\n".join(dump_lines)
+    assert failed["value"]
+    assert str(changed) not in stdout and str(changed) not in dump_text
+    assert str(representative) in stdout and str(peer) in stdout
+    assert str(representative) in dump_text and str(peer) in dump_text
+    assert dump_lines[0] == f"old-digest {preexisting}"
+    assert all(line.strip() for line in dump_lines)
+    assert config.alias_identity_errors == 1
+    assert result.info["alias_identity_errors"] == 1
+    assert hr._run_exit_code(threading.Event(), {}, result.info, config) == 1
+
+
+def test_main_reports_dump_only_alias_swap_after_pipeline_result(
+        tmp_path, monkeypatch, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    representative = source / "representative"
+    late = source / "late"
+    other = source / "other"
+    old = tmp_path / "old"
+    representative.write_bytes(b"01234567")
+    os.link(representative, late)
+    other.write_bytes(b"abcdefgh")
+    old.write_bytes(b"old")
+    dump = tmp_path / "hashes.txt"
+    dump.write_text(f"old-digest {old}\n", encoding="utf-8")
+    real_find = hr.find_duplicate_groups
+
+    def find_then_swap(*args, **kwargs):
+        result = real_find(*args, **kwargs)
+        late.unlink()
+        late.write_bytes(b"changed!")
+        return result
+
+    monkeypatch.setattr(hr, "find_duplicate_groups", find_then_swap)
+    monkeypatch.setattr(
+        hr.sys, "argv", ["hr", str(source), "--hashes-file", str(dump)])
+    assert hr.main() == 1
+
+    captured = capsys.readouterr()
+    dump_text = dump.read_text(encoding="utf-8")
+    assert str(late) not in dump_text
+    assert str(representative) in dump_text
+    assert dump_text.splitlines()[0] == f"old-digest {old}"
+    assert str(late) not in captured.out
+    assert "dropped 1 alias" in captured.err
+    assert "ERROR: run incomplete" in captured.err
+
+
 def test_stage3_recovers_a_vanished_representative(monkeypatch):
     """hr-rel-50: the inode stays in its confirmed group and the recovery is
     not double-counted as a hash error."""
@@ -4002,7 +4262,7 @@ def test_composite_dump_failure_disables_writer(monkeypatch):
     monitor = mock.Mock()
     monkeypatch.setattr(hr, "_log_line", lambda *_args: None)
     _on_hashed, on_composite, _on_progress = hr._build_dump_callbacks(
-        state, "hashes.txt", monitor, False
+        state, "hashes.txt", monitor, False, hr.RunConfig()
     )
 
     on_composite(("dev", 1), "digest")
@@ -4204,7 +4464,7 @@ def test_main_recovered_alias_cannot_hide_independent_read_failure(
     assert str(live) in captured.out
     assert str(tmp_path / "d-healthy.bin") in captured.out
     if not quiet:
-        assert "hash_errors=1 " in captured.err
+        assert "hash_errors=2 " in captured.err
         assert "hash_skipped=1 " in captured.err
 
 

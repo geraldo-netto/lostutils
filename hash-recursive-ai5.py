@@ -163,6 +163,7 @@ class RunConfig:
         "block_size",
         "sample_size",
         "alias_cap_hits",
+        "alias_identity_errors",
         "hash_error_logged",
         "hash_error_suppressed",
         # Attempt counters include aliases later recovered; they cannot be
@@ -172,6 +173,7 @@ class RunConfig:
         # Failed (device, inode, size) attempts in the current stage. True
         # means at least one real failure; entries are consumed after retries.
         "_hash_failures",
+        "_alias_identity_reported",
         # hr-conc-06: lock for the cross-thread `+= 1` counters above.
         # CPython's GIL makes the bytecode effectively atomic today but
         # py3.13 free-threaded builds drop the GIL and the increments
@@ -196,11 +198,13 @@ class RunConfig:
         self.block_size = CAP if block_size is None else block_size
         self.sample_size = SAMPLE if sample_size is None else sample_size
         self.alias_cap_hits = 0
+        self.alias_identity_errors = 0
         self.hash_error_logged = 0
         self.hash_error_suppressed = 0
         self.hash_skipped_vanished = 0
         self.hash_skipped_shrank = 0
         self._hash_failures: dict[tuple[int, int, int], bool] = {}
+        self._alias_identity_reported: set[tuple[tuple, str]] = set()
         self._counter_lock = threading.Lock()
 
     @property
@@ -1354,6 +1358,56 @@ def _tick_alias_cap(config) -> None:
             config.alias_cap_hits += 1
 
 
+def _tick_alias_identity(config, invalid: list[tuple[tuple, str]]) -> None:
+    if config is not None and invalid:
+        with config._counter_lock:
+            fresh = set(invalid) - config._alias_identity_reported
+            config._alias_identity_reported.update(fresh)
+            config.alias_identity_errors += len(fresh)
+
+
+def _alias_stat(path):
+    try:
+        result = os.stat(path, follow_symlinks=False)
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(result.st_mode):
+        return None
+    return _stat_identity(result)
+
+
+def _retain_valid_aliases(key, paths, config=None, size=None) -> list:
+    """Drop aliases whose current regular-file identity differs from walk."""
+    expected = (key[0], key[1], size) if size is not None else None
+    valid = []
+    invalid = []
+    for path in paths:
+        actual = _alias_stat(path)
+        if actual is None or actual[:2] != key:
+            invalid.append((key, path))
+            continue
+        if expected is not None and actual != expected:
+            invalid.append((key, path))
+            continue
+        valid.append(path)
+    _tick_alias_identity(config, invalid)
+    return valid
+
+
+def _validate_candidate_aliases(candidates, aliases, overflow, config=None):
+    valid_candidates = []
+    for size, key in candidates:
+        valid = _retain_valid_aliases(key, aliases.get(key, ()), config, size)
+        if valid:
+            aliases[key] = valid
+            valid_candidates.append((size, key))
+            continue
+        aliases.pop(key, None)
+        if overflow is not None:
+            overflow.pop(key, None)
+    return valid_candidates
+
+
 def _encode_record_path(path: str) -> str:
     """Keep one physical line per record AND keep the path recoverable by a
     whitespace-splitting reader, for every legal filesystem path.
@@ -1391,6 +1445,9 @@ def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
 
     Returns ``(groups_delta, paths_delta)`` — ``(0, 0)`` for skipped
     groups, ``(1, real_count)`` for emitted ones."""
+    for key in keys:
+        aliases[key] = _retain_valid_aliases(
+            key, aliases.get(key, ()), config)
     all_paths = _expand_keys_to_paths(keys, aliases, config, overflow=overflow)
     if len(all_paths) <= 1:
         return 0, 0
@@ -1702,7 +1759,7 @@ def _emit_stage3_groups(by_full, on_composite, accept_group):
             accept_group((digest, None), keys)
 
 
-def _prepare_candidates(aliases, inode_size, overflow):
+def _prepare_candidates(aliases, inode_size, overflow, config=None):
     """Select size-collision candidates and build the per-inode
     representative map (hr-cx-01).
 
@@ -1721,6 +1778,8 @@ def _prepare_candidates(aliases, inode_size, overflow):
     _retain_candidate_keys(aliases, cand_keys)
     if overflow is not None:
         _retain_candidate_keys(overflow, cand_keys)
+    candidates = _validate_candidate_aliases(
+        candidates, aliases, overflow, config)
     rep = {key: _readable_rep(aliases[key]) for _, key in candidates}
     return candidates, rep
 
@@ -1846,7 +1905,8 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     if on_walk_done is not None:
         on_walk_done()
     n_inodes = len(aliases)
-    candidates, rep = _prepare_candidates(aliases, inode_size, overflow)
+    candidates, rep = _prepare_candidates(
+        aliases, inode_size, overflow, config)
     candidate_sizes = {key: size for size, key in candidates}
     # hr-scal-02: inode_size is no longer needed once candidates are
     # selected — drop it so it isn't live alongside aliases/rep at peak.
@@ -1902,6 +1962,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     info = {
         "inodes": n_inodes,
         "candidates": len(candidates),
+        "alias_identity_errors": config.alias_identity_errors,
         **stage1_info,
         **stage2_info,
         **stage3_info,
@@ -2135,21 +2196,27 @@ class HashDumpWriter:
 
     Stage 1 writes a unique provisional identity for every hashed inode.
     A later full-content result patches the fixed-width field with a reusable
-    digest; interrupted or failed entries remain visibly provisional.
+    digest; interrupted or failed entries remain visibly provisional. Before
+    close, current-run records are compacted after revalidating their paths,
+    while any preexisting appended records remain untouched.
     """
 
     def __init__(self, handle):
         self._handle = handle
+        self._run_start = handle.tell()
         self._offsets: dict = {}
         self._digests: dict = {}
+        self._paths: dict = {}
 
     def write_head(self, key, digest: str, paths) -> None:
         provisional = _provisional_digest(key, digest)
+        paths = list(paths)
         offsets = []
         for path in paths:
             offsets.append(self._write_line(provisional, path))
         self._offsets[key] = offsets
         self._digests[key] = provisional
+        self._paths[key] = paths
         self._handle.flush()
 
     def patch_composite(self, key, digest: str) -> None:
@@ -2166,6 +2233,22 @@ class HashDumpWriter:
             self._offsets.pop(key, None)
         finally:
             self._handle.seek(current)
+
+    def compact_invalid_aliases(self, config) -> None:
+        """Remove changed current-run aliases while preserving prior output."""
+        current = self._handle.tell()
+        records = []
+        for key, paths in self._paths.items():
+            valid = _retain_valid_aliases(key, paths, config)
+            self._paths[key] = valid
+            digest = self._digests[key]
+            records.extend((digest, path) for path in valid)
+        self._handle.seek(self._run_start)
+        self._handle.truncate()
+        for digest, path in records:
+            self._write_line(digest, path)
+        self._handle.flush()
+        self._handle.seek(current)
 
     def close(self) -> None:
         self._handle.close()
@@ -2287,6 +2370,10 @@ def _emit_run_warnings(config, cancel_event, quiet) -> None:
     cancel (hr-conc-05). Cancellation warnings remain visible under quiet."""
     if cancel_event.is_set():
         _log_line("WARNING: cancelled by SIGINT; results are partial.", False)
+    if config.alias_identity_errors:
+        _log_line(
+            f"WARNING: dropped {config.alias_identity_errors} alias(es) "
+            "whose identity changed during the run.", False)
     if quiet:
         return
     if config.alias_cap_hits > 0:
@@ -2303,7 +2390,7 @@ def _emit_run_warnings(config, cancel_event, quiet) -> None:
 
 
 def _real_hash_error_count(info, config) -> int:
-    return sum(
+    return config.alias_identity_errors + sum(
         info.get(f"stage{stage}_real_errors", info.get(f"stage{stage}_errors", 0))
         for stage in (1, 2, 3)
     )
@@ -2365,17 +2452,26 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
     )
 
 
-def _finalize_hash_dump(hashes_state, hashes_file, previous_sigint) -> None:
+def _finalize_hash_dump(hashes_state, hashes_file, previous_sigint, config) -> None:
     """Flush + close the hashes dump (if opened) and restore the SIGINT handler.
 
     Runs from main's finally on every exit path (normal return AND a second
-    Ctrl-C KeyboardInterrupt), so the fd is always released (hr-rob-01) and the
-    previous signal handler is always restored (hr-rel-20)."""
+    Ctrl-C KeyboardInterrupt), so current-run aliases are compacted, the fd
+    is always released (hr-rob-01), and the previous signal handler is always
+    restored (hr-rel-20)."""
     if hashes_state["writer"] is not None:
+        writer = hashes_state["writer"]
         try:
-            hashes_state["writer"].close()
+            writer.compact_invalid_aliases(config)
         except OSError as exc:
-            _log_line(f"WARNING: closing {hashes_file} failed: {exc}", False)
+            _log_line(f"WARNING: finalizing {hashes_file} failed: {exc}", False)
+        finally:
+            try:
+                writer.close()
+            except OSError as exc:
+                _log_line(f"WARNING: closing {hashes_file} failed: {exc}", False)
+            finally:
+                hashes_state["writer"] = None
     # `signal.getsignal` returns None when the previous handler was installed
     # from C; `signal.signal` rejects None, so fall back to SIG_DFL.
     signal.signal(
@@ -2422,6 +2518,7 @@ def _dump_hashed_file(
     hashes_state,
     hashes_file,
     stall_monitor,
+    config,
     _done,
     _total,
     head,
@@ -2433,7 +2530,9 @@ def _dump_hashed_file(
     if head is None or writer is None:
         return
     try:
-        writer.write_head(key, head, aliases.get(key, ()))
+        paths = _retain_valid_aliases(key, aliases.get(key, ()), config)
+        aliases[key] = paths
+        writer.write_head(key, head, paths)
     except OSError as exc:
         _disable_hash_dump(hashes_state, hashes_file, exc)
 
@@ -2471,7 +2570,8 @@ class _StageProgress:
         )
 
 
-def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet):
+def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet,
+                          config):
     """Wire the pipeline callbacks that feed the hashes dump and the live
     hashing progress log (hr-cx-06 extraction from :func:`main`).
 
@@ -2479,7 +2579,7 @@ def _build_dump_callbacks(hashes_state, hashes_file, stall_monitor, quiet):
     ``hashes_state`` — a one-key dict so :func:`_disable_hash_dump` and
     :func:`_finalize_hash_dump` observe the same writer slot as main."""
     on_hashed = partial(
-        _dump_hashed_file, hashes_state, hashes_file, stall_monitor)
+        _dump_hashed_file, hashes_state, hashes_file, stall_monitor, config)
     on_composite = partial(_dump_composite_hash, hashes_state, hashes_file)
     return on_hashed, on_composite, _StageProgress(stall_monitor, quiet)
 
@@ -2553,6 +2653,7 @@ def _run():
 
     hashes_state: dict = {"writer": None}
     stall_monitor = _ProgressStallMonitor()
+    dump_finalized = False
 
     try:
         stall_monitor.start("scan")
@@ -2579,7 +2680,7 @@ def _run():
         # empty because the callback consumes every group inline.
         on_group, totals = emit_groups_streaming(sys.stdout.write, config=config)
         on_hashed, on_composite, on_stage_progress = _build_dump_callbacks(
-            hashes_state, args.hashes_file, stall_monitor, args.quiet)
+            hashes_state, args.hashes_file, stall_monitor, args.quiet, config)
 
         # hr-log-01: wrap the walk so a progress line prints every N files;
         # find_duplicate_groups still consumes the stream exactly once.
@@ -2616,6 +2717,14 @@ def _run():
         walk_seconds = walk_end - t_start
         hash_seconds = t_end - walk_end
 
+        # Compact and validate the dump before deriving warnings and the
+        # process status, so aliases changed after their hash are reported.
+        try:
+            _finalize_hash_dump(
+                hashes_state, args.hashes_file, previous_sigint, config)
+        finally:
+            dump_finalized = True
+
         # hr-scal-04 / hr-obs-03 / hr-conc-05: one-shot end-of-run warnings.
         _emit_run_warnings(config, cancel_event, args.quiet)
         exit_code = _run_exit_code(cancel_event, walk_stats, info, config)
@@ -2631,7 +2740,9 @@ def _run():
         # the SIGINT handler on every exit path (normal return AND second
         # Ctrl-C KeyboardInterrupt).
         stall_monitor.stop()
-        _finalize_hash_dump(hashes_state, args.hashes_file, previous_sigint)
+        if not dump_finalized:
+            _finalize_hash_dump(
+                hashes_state, args.hashes_file, previous_sigint, config)
 
 
 def _fmt_count(n: int) -> str:
