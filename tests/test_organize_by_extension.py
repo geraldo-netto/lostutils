@@ -852,6 +852,21 @@ class PerfScanTests(unittest.TestCase):
             # If we'd followed the loop, "real" would appear many times.
             self.assertEqual(names.count("real"), 1)
 
+    def test_scan_skips_private_move_quarantine(self):
+        with TemporaryDirectory() as d:
+            root = Path(d)
+            private = root / ".lostutils-remove-interrupted"
+            private.mkdir()
+            (private / "source").write_text("orphan", encoding="utf-8")
+            valid = self.make_file(root, "valid.txt")
+
+            with self.assertLogs("organize_by_extension", level="WARNING") as cm:
+                files = list_files(root, [], ctx=SniffContext(sniff=False))
+
+            self.assertEqual(files, [valid])
+            self.assertTrue((private / "source").exists())
+            self.assertTrue(any("private move quarantine" in line for line in cm.output))
+
     def test_scan_skips_looping_symlink_and_continues(self):
         """oze-rob-80: an unresolvable link cannot abort valid-file scanning."""
         with TemporaryDirectory() as d:
@@ -4272,6 +4287,93 @@ def test_move_file_preserves_regular_replacement_during_link(
     assert not (dest / "file.bin").exists()
 
 
+def test_organize_reclaims_interrupted_same_fs_link(tmp_path):
+    """oze-rob-71: a same-inode target completes an interrupted move."""
+    source = tmp_path / "x.txt"
+    source.write_bytes(b"payload")
+    target = tmp_path / "txt" / "x00000" / "x.txt"
+    target.parent.mkdir(parents=True)
+    os.link(source, target)
+
+    stats = organize(tmp_path, sniff=False, num_threads=1)
+
+    assert stats.processed == 1
+    assert not source.exists()
+    assert target.read_bytes() == b"payload"
+    assert list(tmp_path.glob(".lostutils-remove-*")) == []
+
+
+def test_recovery_scans_later_bucket_after_gap(tmp_path):
+    source = tmp_path / "x.txt"
+    source.write_bytes(b"payload")
+    full = tmp_path / "txt" / "x00000"
+    full.mkdir(parents=True)
+    for index in range(BUCKET_SIZE):
+        (full / f"f{index}.txt").write_text("full", encoding="utf-8")
+    target = tmp_path / "txt" / "x00002" / "x.txt"
+    target.parent.mkdir()
+    os.link(source, target)
+
+    stats = organize(tmp_path, sniff=False, num_threads=1)
+
+    assert stats.processed == 1
+    assert not source.exists()
+    assert target.read_bytes() == b"payload"
+
+
+def test_recovery_scans_before_cursor_and_preserves_reservations(tmp_path):
+    source = tmp_path / "x.txt"
+    source.write_bytes(b"payload")
+    ext_dir = tmp_path / "txt"
+    target = ext_dir / "x00000" / "x.txt"
+    target.parent.mkdir(parents=True)
+    os.link(source, target)
+    manager = BucketManager(root=tmp_path)
+    manager.state_cache[target.parent] = organize_by_extension._BUCKET_FULL
+    manager._reserved_names[target.parent] = {"pending.txt"}
+    manager.indices_cache[(ext_dir, "x")] = [0, 2]
+    manager._first_non_full[(ext_dir, "x")] = 1
+
+    chosen = manager.choose(source, ext_dir, "x")
+
+    assert chosen.path == target.parent
+    assert "pending.txt" in manager.state_cache[target.parent].regular
+    assert "x.txt" in manager.state_cache[target.parent].regular
+
+
+@pytest.mark.parametrize("exists", [False, True])
+def test_recovery_avoids_bucket_probes_without_a_hardlink(tmp_path, monkeypatch, exists):
+    source = tmp_path / "x.txt"
+    if exists:
+        source.write_bytes(b"single link")
+    manager = BucketManager(root=tmp_path)
+
+    def unexpected_probe(*_args):
+        pytest.fail("single-link files cannot have an interrupted hardlink target")
+
+    monkeypatch.setattr(organize_by_extension, "_same_regular_file", unexpected_probe)
+    assert manager._find_recovery_bucket(source, tmp_path / "txt", "x", list(range(1000))) is None
+
+
+def test_interrupted_source_removal_preserves_recoverable_filename(tmp_path, monkeypatch):
+    source = tmp_path / "important.txt"
+    source.write_bytes(b"recover this")
+    destination = tmp_path / "bucket"
+    real_unlink = os.unlink
+
+    def interrupt_private_removal(path):
+        if Path(path).parent.name.startswith(organize_by_extension.PRIVATE_REMOVE_PREFIX):
+            raise KeyboardInterrupt
+        return real_unlink(path)
+
+    monkeypatch.setattr(organize_by_extension.os, "unlink", interrupt_private_removal)
+    with pytest.raises(KeyboardInterrupt):
+        move_file(source, destination)
+    private, = tmp_path.glob(".lostutils-remove-*")
+    assert (private / source.name).read_bytes() == b"recover this"
+    assert (destination / source.name).samefile(private / source.name)
+
+
 def test_move_file_preserves_symlink_replacement_during_link(
         tmp_path, monkeypatch):
     src = tmp_path / "file.bin"
@@ -4363,6 +4465,13 @@ def test_private_quarantine_cleanup_failure_is_logged(tmp_path, monkeypatch, cap
         oze._remove_quarantine_dir(tmp_path)
 
     assert "could not remove private quarantine directory" in caplog.text
+
+
+def test_source_failure_without_target_preserves_error():
+    error = OSError("source removal failed")
+    with pytest.raises(OSError, match="source removal failed") as caught:
+        oze._raise_source_failure(None, error)
+    assert caught.value is error
 
 
 def test_move_worker_reports_actual_dest_from_move_file(tmp_path, monkeypatch):

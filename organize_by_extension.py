@@ -37,6 +37,7 @@ import shutil
 from typing import BinaryIO, Callable, Iterable, Iterator, NamedTuple, NoReturn, Protocol, Set
 
 BUCKET_SIZE = 500
+PRIVATE_REMOVE_PREFIX = ".lostutils-remove-"
 PROGRESS_EVERY = 10_000   # oze-obs-02: emit a progress line every N done items
 # Outstanding-futures cap relative to ``num_threads`` (oze-scal-04 / oze-conc-03).
 # The planner blocks on a drain when the in-flight set reaches
@@ -847,7 +848,16 @@ def _walk_subdirectory(
     entry: os.DirEntry, stats: _RunStats | None,
 ) -> Path | None:
     try:
-        return Path(entry.path) if entry.is_dir(follow_symlinks=False) else None
+        if not entry.is_dir(follow_symlinks=False):
+            return None
+        if entry.name.startswith(PRIVATE_REMOVE_PREFIX):
+            logger.warning(
+                "skipping private move quarantine %s; recover its contents "
+                "before rerunning",
+                entry.path,
+            )
+            return None
+        return Path(entry.path)
     except OSError as exc:
         _record_scan_error(Path(entry.path), exc, stats)
         return None
@@ -1000,6 +1010,19 @@ def _read_bucket_contents(bucket_path: Path, folds: bool) -> _BucketState:
     return _BucketState(occupied, regular)
 
 
+def _same_regular_file(first: Path, second: Path) -> bool:
+    try:
+        first_stat = os.lstat(first)
+        second_stat = os.lstat(second)
+    except OSError:
+        return False
+    if not (_stat.S_ISREG(first_stat.st_mode)
+            and _stat.S_ISREG(second_stat.st_mode)):
+        return False
+    return (first_stat.st_dev, first_stat.st_ino) == (
+        second_stat.st_dev, second_stat.st_ino)
+
+
 class BucketChoice(NamedTuple):
     """Result of :func:`_find_reusable_bucket` (oze-cx-02).
 
@@ -1047,7 +1070,8 @@ def _find_reusable_bucket(
         if index > next_expected:
             break                           # first gap: caller fills it
         bucket_path, full = _reusable_bucket_at_index(
-            ext_dir, prefix, filename, state_cache, index, bucket_size, folds)
+            ext_dir, prefix, filename, state_cache, index, bucket_size, folds,
+        )
         if full:
             next_expected = index + 1
             first_non_full = index + 1
@@ -1216,6 +1240,25 @@ class BucketManager:
         self.indices_cache[(ext_dir, prefix)] = indices
         return indices
 
+    def _find_recovery_bucket(
+        self, source: Path, ext_dir: Path, prefix: str, indices: list[int],
+    ) -> Path | None:
+        try:
+            if os.lstat(source).st_nlink < 2:
+                return None
+        except OSError:
+            return None
+        for index in indices:
+            bucket_path = ext_dir / bucket_name(prefix, index)
+            if not _same_regular_file(source, bucket_path / source.name):
+                continue
+            state = _read_bucket_contents(bucket_path, self.folds_case)
+            for name in self._reserved_names.get(bucket_path, set()):
+                state.reserve(name)
+            self.state_cache[bucket_path] = state
+            return bucket_path
+        return None
+
     def choose(self, source: Path, ext_dir: Path, prefix: str) -> Bucket:
         """Reserve a bucket for ``source.name`` under ``ext_dir`` and return
         a :class:`Bucket` value object (oze-pat-01).
@@ -1235,9 +1278,14 @@ class BucketManager:
         pre_indices = len(indices)
         cursor_key = (ext_dir, prefix)
         cursor = self._first_non_full.get(cursor_key, 0)
-        bucket_path, new_cursor = choose_bucket(
-            ext_dir, prefix, source.name, self.state_cache, indices, cursor,
-            self.bucket_size, self.folds_case)
+        recovery_bucket = self._find_recovery_bucket(
+            source, ext_dir, prefix, indices)
+        if recovery_bucket is None:
+            bucket_path, new_cursor = choose_bucket(
+                ext_dir, prefix, source.name, self.state_cache, indices, cursor,
+                self.bucket_size, self.folds_case)
+        else:
+            bucket_path, new_cursor = recovery_bucket, cursor
         self._first_non_full[cursor_key] = new_cursor
         names = self.state_cache[bucket_path]
         if not isinstance(names, _BucketState):
@@ -1387,6 +1435,12 @@ def _rollback_link(target: Path, source_exc: OSError) -> NoReturn:
     raise source_exc
 
 
+def _raise_source_failure(target: Path | None, source_exc: OSError) -> NoReturn:
+    if target is None:
+        raise source_exc
+    _rollback_link(target, source_exc)
+
+
 def _restore_quarantined_source(quarantine: Path, source: Path) -> bool:
     try:
         os.link(quarantine, source, follow_symlinks=False)
@@ -1420,20 +1474,20 @@ def _remove_quarantine_dir(quarantine_dir: Path) -> None:
 
 
 def _unlink_with_rollback(
-    source: Path, target: Path, expected: os.stat_result,
+    source: Path, target: Path | None, expected: os.stat_result,
 ) -> None:
     """Remove a verified source after linking; preserve raced replacements."""
     try:
         quarantine_dir = Path(tempfile.mkdtemp(
-            prefix=".lostutils-remove-", dir=source.parent))
+            prefix=PRIVATE_REMOVE_PREFIX, dir=source.parent))
     except OSError as exc:
-        _rollback_link(target, exc)
-    quarantine = quarantine_dir / "source"
+        _raise_source_failure(target, exc)
+    quarantine = quarantine_dir / source.name
     try:
         os.rename(source, quarantine)
     except OSError as exc:
         _remove_quarantine_dir(quarantine_dir)
-        _rollback_link(target, exc)
+        _raise_source_failure(target, exc)
     try:
         current = os.lstat(quarantine)
         if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
@@ -1443,7 +1497,7 @@ def _unlink_with_rollback(
         restored = _restore_quarantined_source(quarantine, source)
         if restored:
             _remove_quarantine_dir(quarantine_dir)
-        _rollback_link(target, exc)
+        _raise_source_failure(target, exc)
     else:
         _remove_quarantine_dir(quarantine_dir)
 
@@ -1493,6 +1547,9 @@ def move_file(path: Path, destination: Path) -> Path:
     source_identity = os.lstat(path)
     ensure_directory(destination)
     target = destination / path.name
+    if target != path and _same_regular_file(path, target):
+        _unlink_with_rollback(path, None, source_identity)
+        return target
     try:
         _link_exclusive(path, target)
     except OSError as exc:

@@ -89,6 +89,8 @@ Bucket paths are shaped as `<extension>/<first-letter>00000/<filename>`, with up
 
 Exit codes: `0` every planned file was placed, `1` the run could not complete (unusable root or planning spool, stalled move stage, interrupt), `2` command-line error, `3` the run finished but skipped files or left a duplicate behind after a partial move.
 
+Rerunning completes an interrupted hardlink move when its existing destination still names the same file. Private `.lostutils-remove-*` directories are reserved for source-removal recovery: scans leave them untouched and report their location for manual inspection.
+
 ### `relocate_folder.py`
 
 Copies a directory to `<dest_root>/<source-basename>`, verifies the copy, then atomically replaces the original source directory with a symlink. POSIX-only: it preserves uid/gid through `os.chown` and opens the source `O_NOFOLLOW|O_DIRECTORY` to keep the swap safe from a symlink-substitution race, so on a host without those it refuses to start and exits `2`.
