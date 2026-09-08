@@ -25,11 +25,12 @@ def test_plan_refuses_terminal_dotdot(tmp_path, monkeypatch, source):
 @pytest.mark.parametrize("recover", [False, True])
 def test_cli_rejects_dotdot_before_filesystem_work(tmp_path, monkeypatch, caplog, recover):
     monkeypatch.chdir(tmp_path)
-    argv = ["..", "--dry-run", "--force"]
+    argv = [".."]
     if recover:
         argv.append("--recover")
     else:
         argv.append(str(tmp_path / "destination"))
+    argv += ["--dry-run", "--force"]
     assert rf.main(argv) == (1 if recover else 2)
     assert "source must not end in" in caplog.text
     assert list(tmp_path.iterdir()) == []
@@ -109,8 +110,9 @@ def test_cli_surfaces_parent_resolution_failure(tmp_path, monkeypatch, caplog, r
         raise error
 
     monkeypatch.setattr(Path, "resolve", failed_resolution)
-    argv = [str(tmp_path / "source"), "--force"]
+    argv = [str(tmp_path / "source")]
     argv += ["--recover"] if recover else [str(tmp_path / "destination")]
+    argv.append("--force")
     assert rf.main(argv) == (1 if recover else 2)
     assert str(error) in caplog.text
     assert list(tmp_path.iterdir()) == []
