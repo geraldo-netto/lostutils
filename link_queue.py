@@ -2480,6 +2480,36 @@ class Dispatcher:
         except OSError:  # pragma: no cover - proc already exited
             pass
 
+    @staticmethod
+    def _process_group_alive(proc) -> bool:
+        # POSIX commands start their own session; the leader PID remains the
+        # group ID while descendants survive, even after Popen reaps the leader.
+        pid = getattr(proc, "pid", None)
+        if sys.platform == "win32" or not hasattr(os, "killpg"):
+            return False
+        if not isinstance(pid, int) or pid <= 0:
+            return False
+        try:
+            os.killpg(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+
+    @classmethod
+    def _wait_process_tree(cls, proc, deadline: float) -> bool:
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            return False
+        while cls._process_group_alive(proc):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+        return True
+
     def _on_command_timeout(self, proc, label, url, timeout) -> None:
         setattr(proc, "_link_queue_timed_out", True)
         self._record_metric("timeouts")
@@ -2487,9 +2517,7 @@ class Dispatcher:
             f"[{label} timeout] {timeout}s expired, terminating  url={url}"
         )
         self._terminate_process_tree(proc)
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:  # pragma: no cover - subprocess ignored SIGTERM
+        if not self._wait_process_tree(proc, time.monotonic() + 5):
             self._log(
                 f"[{label} timeout] terminate ignored, killing  url={url}"
             )
@@ -2539,12 +2567,14 @@ class Dispatcher:
             interrupted = self.stop_event.is_set() and self._mark_process_interrupted(proc)
         if interrupted:
             self._terminate_process_tree(proc)
+            if not self._wait_process_tree(proc, time.monotonic() + 1):
+                self._kill_process_tree(proc)
 
     @staticmethod
     def _mark_process_interrupted(proc) -> bool:
         # Completed children must not become retries merely because shutdown
         # overlaps their worker's final bookkeeping.
-        if proc.poll() is not None:
+        if proc.poll() is not None and not Dispatcher._process_group_alive(proc):
             return False
         setattr(proc, "_link_queue_interrupted", True)
         return True
@@ -2567,10 +2597,7 @@ class Dispatcher:
         for proc in processes:
             self._terminate_process_tree(proc)
         for proc in processes:
-            remaining = max(0.0, deadline - time.monotonic())
-            try:
-                proc.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
+            if not self._wait_process_tree(proc, deadline):
                 self._kill_process_tree(proc)
                 try:
                     proc.wait(timeout=1.0)

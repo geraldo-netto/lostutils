@@ -58,7 +58,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| lq-rob-81 | open | high | medium | link_queue.py:2480 — [robustness / recovery] Escalate termination for surviving descendants even when the process-group leader has already exited. Timeout and shutdown at line 2560 send SIGTERM to the group but send SIGKILL only when proc.wait times out; a descendant ignoring SIGTERM survives the leader and is dropped from tracking. Reproduced using only temporary Python sleeper processes, explicitly cleaned up afterward. Check remaining group liveness after the grace period and cover leader-exits-first behavior on timeout and shutdown. |
 | lq-rob-80 | open | high | medium | link_queue.py:2798 — [robustness / recovery] Preserve descriptor ownership when closing subprocess output at a deadline; os.close(stdout.fileno()) leaves TextIOWrapper owning the closed descriptor number. Temporary-file reproduction: the next file reuses that descriptor, then closing the original wrapper closes the unrelated file and fstat raises EBADF. Arrange bounded reader/wrapper cleanup without raw-closing a live wrapper's descriptor, and cover descriptor reuse after timeout. |
 
 ### `minikeypad.py`

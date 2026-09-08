@@ -2246,6 +2246,9 @@ def test_register_process_during_shutdown_terminates_it(
         def poll(self):
             return None
 
+        def wait(self, timeout):
+            return 0
+
     proc = Proc()
     terminated = []
     monkeypatch.setattr(
@@ -3813,7 +3816,12 @@ def test_command_timeout_increments_metric(headless_dispatcher, monkeypatch):
             pass
 
     calls = []
-    monkeypatch.setattr(link_queue.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+    def killpg(pid, sig):
+        if sig == 0:
+            raise ProcessLookupError("group exited")
+        calls.append((pid, sig))
+
+    monkeypatch.setattr(link_queue.os, "killpg", killpg)
     timer = headless_dispatcher._arm_command_timeout(Proc(), "queue#1", "http://u", 1)
     try:
         timer.function()
@@ -5107,6 +5115,66 @@ def test_windows_timeout_targets_full_process_tree(
     assert calls[0][0] == ["taskkill", "/PID", "456", "/T"]
     assert calls[1][0] == ["taskkill", "/PID", "456", "/T", "/F"]
     assert all(call[1]["check"] is False for call in calls)
+
+
+@pytest.mark.parametrize("error, expected", [
+    (None, True), (ProcessLookupError("gone"), False), (PermissionError("denied"), True),
+])
+def test_process_group_liveness_distinguishes_absent_and_unsignalable(monkeypatch, error, expected):
+    calls = []
+
+    def killpg(pid, sent_signal):
+        calls.append((pid, sent_signal))
+        if error is not None:
+            raise error
+
+    monkeypatch.setattr(link_queue.sys, "platform", "linux")
+    monkeypatch.setattr(link_queue.os, "killpg", killpg, raising=False)
+    assert link_queue.Dispatcher._process_group_alive(types.SimpleNamespace(pid=123)) is expected
+    assert calls == [(123, 0)]
+
+
+@pytest.mark.parametrize("pid", [None, 0, -1])
+def test_process_group_probe_never_signals_invalid_group(monkeypatch, pid):
+    monkeypatch.setattr(link_queue.sys, "platform", "linux")
+    monkeypatch.setattr(link_queue.os, "killpg", lambda *_args: pytest.fail("unsafe group probe"), raising=False)
+    assert not link_queue.Dispatcher._process_group_alive(types.SimpleNamespace(pid=pid))
+
+
+@pytest.mark.parametrize("platform", ["windows", "no-killpg"])
+def test_process_group_probe_degrades_to_single_process_check(monkeypatch, platform):
+    if platform == "windows":
+        monkeypatch.setattr(link_queue.sys, "platform", "win32")
+    else:
+        monkeypatch.delattr(link_queue.os, "killpg", raising=False)
+    assert not link_queue.Dispatcher._process_group_alive(types.SimpleNamespace(pid=123))
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_wait_process_tree_checks_group_after_leader_exits(monkeypatch, expired):
+    alive = iter([True, True, False])
+    monkeypatch.setattr(link_queue.Dispatcher, "_process_group_alive", lambda _proc: next(alive))
+    proc = types.SimpleNamespace(wait=lambda timeout: 0)
+    deadline = time.monotonic() + (-1 if expired else 1)
+    assert link_queue.Dispatcher._wait_process_tree(proc, deadline) is not expired
+
+
+def test_shutdown_registration_escalates_when_tree_ignores_termination(headless_dispatcher, monkeypatch):
+    dispatcher = headless_dispatcher
+    class Proc:
+        def poll(self):
+            return None
+
+    proc = Proc()
+    actions = []
+    monkeypatch.setattr(dispatcher, "_terminate_process_tree", lambda _proc: actions.append("terminate"))
+    monkeypatch.setattr(dispatcher, "_wait_process_tree", lambda _proc, _deadline: False)
+    monkeypatch.setattr(dispatcher, "_kill_process_tree", lambda _proc: actions.append("kill"))
+    dispatcher.stop_event.set()
+    dispatcher._register_process(proc)
+    dispatcher._unregister_process(proc)
+    assert actions == ["terminate", "kill"]
+    assert proc._link_queue_interrupted
 
 
 @pytest.mark.parametrize(
