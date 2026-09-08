@@ -889,6 +889,7 @@ class ConfigStore(dict):
         super().__init__()
         self.config_file = config_file
         self.legacy_file = legacy_file
+        self.load_error: str | None = None
         _sweep_temp_siblings(self.config_file)
         self.update(self._load())
 
@@ -902,7 +903,7 @@ class ConfigStore(dict):
         # fresh install, or the merged contents when migrating from JSON. The
         # legacy JSON, if any, is left untouched as a backup.
         wrote_first_run = False
-        if not os.path.exists(self.config_file):
+        if self.load_error is None and not os.path.exists(self.config_file):
             try:
                 self._write_config_file(cfg)
                 wrote_first_run = not migrated
@@ -920,7 +921,16 @@ class ConfigStore(dict):
     def save(self) -> None:
         """Write the current config to disk (raw — gating/deferral is the
         caller's concern)."""
+        if self.load_error is not None:
+            raise OSError(
+                f"refusing to overwrite configuration after a load failure: {self.load_error}; "
+                "repair the file and restart before saving settings"
+            )
         self._write_config_file(dict(self))
+
+    def _note_load_failure(self, path: str, error: Exception) -> None:
+        self.load_error = f"could not read {path}: {error}"
+        print(f"[warn] {self.load_error}", file=sys.stderr)
 
     def _read_user_config_dict(self) -> "tuple[dict | None, bool]":
         """Read the user's config from YAML if present, falling back to
@@ -931,16 +941,14 @@ class ConfigStore(dict):
                 with open(self.config_file, "r", encoding="utf-8") as f:
                     return (_yaml_load(f) or {}), False
             except Exception as e:
-                print(f"[warn] could not read {self.config_file}: {e}",
-                      file=sys.stderr)
+                self._note_load_failure(self.config_file, e)
                 return None, False
         if os.path.exists(self.legacy_file):
             try:
                 with open(self.legacy_file, "r", encoding="utf-8") as f:
                     return json.load(f), True
             except Exception as e:  # pragma: no cover - legacy-config read OSError
-                print(f"[warn] could not read legacy {self.legacy_file}: {e}",  # pragma: no cover - stderr emit on legacy-config failure
-                      file=sys.stderr)  # pragma: no cover - stderr emit on legacy-config failure
+                self._note_load_failure(self.legacy_file, e)
                 return None, False  # pragma: no cover - return after legacy-config failure
         return None, False
 
@@ -3863,6 +3871,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         self._tk_poll_id: str | None = None
 
         self._build_ui()
+        if self.config.load_error is not None:
+            self._log(f"[error] {self.config.load_error}; repair the file and restart before saving settings")
         self._refresh_protocols_tree()
         self._refresh_mappings_tree()
         self._refresh_queue_list()

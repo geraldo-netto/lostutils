@@ -6181,3 +6181,37 @@ def test_log_sink_counts_batches_lost_before_path_recovers(tmp_path, capsys):
     finally:
         with sink._lock:
             sink._close_locked()
+
+
+def test_corrupt_configuration_survives_gui_load_and_save(tmp_path, request):
+    path = tmp_path / "cfg.yaml"
+    original = "protocols: [unfinished\n# custom command: yt-dlp\n"
+    path.write_text(original)
+    instance = request.getfixturevalue("app")
+
+    assert instance.config.load_error is not None
+    with pytest.raises(OSError, match="refusing to overwrite"):
+        instance.config.save()
+    instance.config["sleep_between_items"] = 7
+    instance._save_config()
+    pump(instance, 0.1)
+
+    assert path.read_text() == original
+    log = instance.log_text.get("1.0", "end")
+    assert "could not read" in log
+    assert "repair the file and restart" in log
+
+
+def test_failed_legacy_config_load_does_not_create_replacement_yaml(tmp_path):
+    legacy = tmp_path / "cfg.json"
+    original = '{"protocols": unfinished'
+    legacy.write_text(original)
+    replacement = tmp_path / "cfg.yaml"
+
+    store = link_queue.ConfigStore(str(replacement), str(legacy))
+
+    assert store.load_error is not None
+    with pytest.raises(OSError, match="refusing to overwrite"):
+        store.save()
+    assert legacy.read_text() == original
+    assert not replacement.exists()
