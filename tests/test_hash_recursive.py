@@ -5,6 +5,9 @@ import io
 import json
 import os
 import re
+import shlex
+import subprocess
+import sys
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -250,8 +253,7 @@ def test_center_block_catches_middle_only_difference(tmp_path):
     files, _ = _drain_walk(tmp_path, 1)
     result = hr.find_duplicate_groups(files, 1)
     for keys in result.groups.values():
-        paths = [p for k in keys for p in result.aliases[k]
-                 if not isinstance(p, hr._MoreSentinel)]
+        paths = [p for k in keys for p in result.aliases[k]]
         names = sorted(Path(p).name for p in paths)
         assert names != ["a.bin", "b.bin"], \
             "center block failed to catch a midpoint-only difference"
@@ -1100,10 +1102,8 @@ def test_expand_keys_to_paths_caps_at_alias_cap():
     keys = list(aliases)
     out = hr._expand_keys_to_paths(keys, aliases, cap=50)
     # The cap applies independently to each inode, preserving representatives.
-    assert len(out) == 20 * 51
-    assert hr._count_real_paths(out) == 20 * 50
-    assert out[-1].startswith("+")
-    assert "more" in out[-1]
+    assert len(out) == 20 * 50
+    assert all(path.startswith("/p/") for path in out)
 
 
 def test_expand_keys_to_paths_extends_only_up_to_remaining_room():
@@ -1121,7 +1121,7 @@ def test_expand_keys_to_paths_extends_only_up_to_remaining_room():
     big_bucket = TrackingList(f"/p/{i}" for i in range(100_000))
     aliases = {("d", 0): big_bucket}
     out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=10)
-    assert hr._count_real_paths(out) == 10
+    assert len(out) == 10
     # The bucket was sliced to the remaining room (10), never extended whole.
     assert 10 in TrackingList.sliced_with
 
@@ -1129,10 +1129,10 @@ def test_expand_keys_to_paths_extends_only_up_to_remaining_room():
 def test_expand_keys_to_paths_caps_each_inode_independently():
     aliases = {("d", 0): ["/a", "/b"], ("d", 1): ["/c", "/d", "/e"]}
     out = hr._expand_keys_to_paths([("d", 0), ("d", 1)], aliases, cap=2)
-    assert hr._count_real_paths(out) == 4
+    assert len(out) == 4
     assert out[:2] == ["/a", "/b"]
     assert out[2:4] == ["/c", "/d"]
-    assert str(out[-1]) == "+1 more"
+    assert out == ["/a", "/b", "/c", "/d"]
 
 
 def test_alias_cap_one_keeps_two_inode_representatives():
@@ -1860,33 +1860,25 @@ def test_run_stage_partial_results_annotated(tmp_path, monkeypatch):
     assert any("items hashed" in n for n in notes)
 
 
-def test_expand_keys_to_paths_more_sentinel_type():
-    # hr-hyg-02: truncation sentinel is _MoreSentinel (str subclass).
+def test_expand_keys_to_paths_cap_returns_only_real_paths():
+    # Alias caps must never add synthetic records to consumer input.
     aliases = {("d", 0): [f"/p/{i}" for i in range(2000)]}
     out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=10)
-    assert len(out) == 11   # 10 paths + 1 sentinel
-    assert isinstance(out[-1], hr._MoreSentinel)
-    assert isinstance(out[0], str)
-    assert not isinstance(out[0], hr._MoreSentinel)
+    assert out == [f"/p/{i}" for i in range(10)]
 
 
-def test_count_real_paths_excludes_sentinel():
+def test_expand_keys_to_paths_cap_counts_only_real_paths():
     aliases = {("d", 0): [f"/p/{i}" for i in range(100)]}
     out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=5)
-    assert hr._count_real_paths(out) == 5   # ignores the sentinel
+    assert len(out) == 5
 
 
-def test_emit_groups_does_not_double_count_sentinel():
-    # hr-hyg-02: a 1-real-path group with a sentinel must NOT be emitted
-    # (real_count == 1 even though list len == 2).
+def test_emit_groups_skips_single_path_group():
+    # A one-path group must not be emitted.
     aliases = {("d", 0): [f"/p/{i}" for i in range(2)]}
     written = []
     cb, totals = hr.emit_groups_streaming(written.append)
-    # Force a sentinel by passing a small cap externally — emulate by
-    # building an expansion that yields [path, sentinel]
-    final_groups = {"hash": [("d", 0)]}
     aliases_truncated = {("d", 0): ["/only"]}
-    # With one real path, dup_groups stays 0 (filter is `> 1`).
     cb("hash", [("d", 0)], aliases_truncated)
     g, p = totals()
     assert g == 0
@@ -2678,20 +2670,16 @@ def test_iter_batches_empty_input():
 
 # --- hr-test-07/08: _expand_keys_to_paths cap=0 / cap=-1 -------------------
 
-def test_expand_keys_to_paths_cap_zero_emits_only_sentinel():
+def test_expand_keys_to_paths_cap_zero_emits_no_paths():
     aliases = {("d", 0): ["/a", "/b", "/c"]}
     out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=0)
-    assert len(out) == 1
-    assert isinstance(out[0], hr._MoreSentinel)
-    assert hr._count_real_paths(out) == 0
+    assert out == []
 
 
 def test_expand_keys_to_paths_negative_cap_behaves_like_zero():
-    # cap=-1 is shorter than every list, so the sentinel fires.
     aliases = {("d", 0): ["/a"]}
     out = hr._expand_keys_to_paths([("d", 0)], aliases, cap=-1)
-    # No real paths fit (len(out) < cap=-1 is never True), sentinel appended.
-    assert any(isinstance(p, hr._MoreSentinel) for p in out)
+    assert out == []
 
 
 # --- hr-test-09: RunConfig clamps ------------------------------------------
@@ -2746,14 +2734,14 @@ def test_alias_cap_active_default_is_active():
     assert cfg.alias_cap_active is True
 
 
-def test_expand_keys_to_paths_disabled_cap_returns_all_no_sentinel():
+def test_expand_keys_to_paths_disabled_cap_returns_all_paths():
     # hr-cmplx-01: a config with the cap disabled (None) returns every
-    # path with no truncation and no `+N more` sentinel.
+    # Disabled caps preserve every real path.
     cfg = hr.RunConfig(alias_cap=0)
     aliases = {("d", 0): [f"/p/{i}" for i in range(5000)]}
     out = hr._expand_keys_to_paths([("d", 0)], aliases, config=cfg)
     assert len(out) == 5000
-    assert not any(isinstance(p, hr._MoreSentinel) for p in out)
+    assert all(path.startswith("/p/") for path in out)
     assert cfg.alias_cap_hits == 0
 
 
@@ -3467,12 +3455,10 @@ def test_index_inodes_no_cap_preserves_default_behaviour():
 def test_expand_keys_to_paths_includes_overflow_in_total():
     aliases = {("d", 0): ["/a", "/b"]}
     overflow = {("d", 0): 100}
-    # cap=5 with 2 stored + 100 elided = 102 total > 5 → sentinel says "+97 more".
+    # Ingest overflow still marks the cap as hit, but never becomes a path.
     out = hr._expand_keys_to_paths(
         [("d", 0)], aliases, cap=5, overflow=overflow)
-    assert any(isinstance(p, hr._MoreSentinel) for p in out)
-    sentinel = next(p for p in out if isinstance(p, hr._MoreSentinel))
-    assert "97" in str(sentinel)
+    assert out == ["/a", "/b"]
 
 
 # ===== hr-decoup-04: alias_cap plumbed through main pipeline ============
@@ -3528,15 +3514,12 @@ def test_expand_keys_to_paths_takes_overflow_explicitly():
     aliases = {("d", 0): ["/a", "/b"]}
     out = hr._expand_keys_to_paths(
         [("d", 0)], aliases, config=cfg, overflow={("d", 0): 100})
-    sentinel = next((p for p in out if isinstance(p, hr._MoreSentinel)), None)
-    assert sentinel is not None
-    # 2 stored + 100 overflow = 102 total. cap=5 → "+97 more".
-    assert "97" in str(sentinel)
+    assert out == ["/a", "/b"]
 
 
-def test_emit_groups_forwards_overflow_to_sentinel():
+def test_emit_groups_forwards_overflow_to_cap_accounting():
     # hr-arch-01: the batched emit path receives overflow explicitly and
-    # the +N more sentinel reflects it.
+    # Ingest overflow is accounted for without synthetic output records.
     aliases = {("d", 0): ["/a", "/b"], ("d", 1): ["/c"]}
     final_groups = {"hash": [("d", 0), ("d", 1)]}
     overflow = {("d", 0): 50}
@@ -3544,8 +3527,7 @@ def test_emit_groups_forwards_overflow_to_sentinel():
     groups, paths = hr.emit_groups(
         final_groups, aliases, written.append, overflow=overflow)
     blob = "".join(written)
-    # 3 stored paths + 50 overflow = 53; with default cap (1024) no
-    # sentinel, but the real count includes the overflow-bearing inode.
+    # 3 stored paths are emitted; the 50 omitted aliases are not fabricated.
     assert groups == 1
     assert "/a" in blob
     assert "/c" in blob
@@ -3887,21 +3869,72 @@ def test_hash_dump_provisional_tokens_are_unique_per_inode(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="hardlinks via os.link (POSIX)")
-def test_main_dump_marks_aliases_elided_by_cap(tmp_path, monkeypatch):
-    """hr-obs-10: hardlinks elided at ingest by --alias-cap must be surfaced in
-    the dump with a `+N more (alias-cap)` marker, not silently omitted."""
+def test_alias_cap_artifact_round_trips_through_consumers(tmp_path):
+    """hr-api-70: real producer output remains valid for both consumers."""
     payload = b"shared-content-payload"
     a = tmp_path / "a1.bin"; a.write_bytes(payload)
     os.link(a, tmp_path / "a2.bin")     # 3 hardlinks to inode A
     os.link(a, tmp_path / "a3.bin")
-    (tmp_path / "b.bin").write_bytes(payload)   # 2nd inode, same size -> candidate
-    out = tmp_path / "hashes.txt"
-    monkeypatch.setattr(hr.sys, "argv", [
-        "hr", "--hashes-file", str(out), "--alias-cap", "1", str(tmp_path)])
-    hr.main()
-    text = out.read_text()
-    assert "more (alias-cap)" in text
-    assert "+2 more (alias-cap)" in text   # inode A had 3 aliases, 1 shown
+    real_marker_name = tmp_path / "+2 more"
+    real_marker_name.write_bytes(payload)       # 2nd inode, same size -> candidate
+    artifact = tmp_path / "hashes.txt"
+    dump = tmp_path.parent / (tmp_path.name + ".dump")
+    produced = subprocess.run(
+        [
+            os.fspath(sys.executable),
+            os.fspath(_PATH),
+            "--alias-cap", "1",
+            "--hashes-file", str(dump),
+            str(tmp_path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    artifact.write_text(produced.stdout, encoding="utf-8")
+    assert str(real_marker_name) in produced.stdout
+    assert "+2 more (alias-cap)" not in produced.stdout
+    assert "alias cap" in produced.stderr
+    dumped_paths = [line.split(maxsplit=1)[1] for line in dump.read_text().splitlines()]
+    assert str(real_marker_name) in dumped_paths
+    assert all(Path(path).is_file() for path in dumped_paths)
+
+    remove = subprocess.run(
+        [
+            os.fspath(sys.executable),
+            os.fspath(_PATH.parent / "remove-deduplv3.py"),
+            os.fspath(artifact),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    remove_paths = []
+    for line in remove.stdout.splitlines():
+        if line.startswith("# saving: "):
+            remove_paths.append(line.removeprefix("# saving: "))
+        elif line.startswith("rm -f -- "):
+            remove_paths.extend(shlex.split(line.removeprefix("rm -f -- ")))
+    assert remove_paths
+    assert str(real_marker_name) in remove_paths
+    assert all(Path(path).is_file() for path in remove_paths)
+
+    numpy = subprocess.run(
+        [
+            os.fspath(sys.executable),
+            os.fspath(_PATH.parent / "dedupl_numpy.py"),
+            os.fspath(artifact),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=10,
+    )
+    numpy_paths = [os.fsdecode(path) for path in numpy.stdout.splitlines()]
+    assert numpy_paths
+    assert os.fsdecode(os.fsencode(str(real_marker_name))) in numpy_paths
+    assert all(Path(path).is_file() for path in numpy_paths)
 
 
 def test_progress_stall_monitor_worker_checks_until_stopped(monkeypatch):

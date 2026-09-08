@@ -1208,8 +1208,8 @@ def index_inodes(files, alias_cap=None, overflow=None):
     list is capped at that length AT INGEST TIME — a single hardlink-
     heavy inode (100k aliases) no longer materialises all 100k path
     strings in RAM during the walk. Elided counts are recorded into
-    ``overflow[(dev,ino)]`` (a caller-supplied dict) so the emit-side
-    sentinel can still report ``+N more`` honestly. ``alias_cap=None``
+    ``overflow[(dev,ino)]`` (a caller-supplied dict) so callers can report
+    omitted aliases. ``alias_cap=None``
     preserves the original unbounded behaviour for callers that don't
     care about the worst-case alias count."""
     aliases = defaultdict(list)
@@ -1283,8 +1283,7 @@ class DedupResult(NamedTuple):
     `overflow` (hr-arch-01): the per-inode ingest-elided alias counts
     (``{(dev, ino): n_elided}``), or ``None`` when the alias cap was
     disabled. It is returned EXPLICITLY here instead of being smuggled on
-    `config`; a batched caller forwards it to :func:`emit_groups` so the
-    ``+N more`` sentinel still reports the true total.
+    `config`; callers can use it to report omitted aliases.
     """
 
     groups: dict
@@ -1293,25 +1292,15 @@ class DedupResult(NamedTuple):
     overflow: dict | None = None
 
 
-class _MoreSentinel(str):
-    """`str` subclass that wraps a `+N more` truncation marker
-    (hr-hyg-02). Inherits all `str` behaviour so existing callers that
-    write it to a stream still work, but `isinstance(p, _MoreSentinel)`
-    lets emit-side filters distinguish it from a real path."""
-
-    __slots__ = ()
-
-
 def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
                           overflow=None) -> list:
     """Expand inode `keys` to their alias paths (hr-arch-04), truncating
-    at the alias cap with a ``+N more`` sentinel (hr-scal-03 / hr-hyg-02
-    / hr-arch-05).
+    at the alias cap (hr-scal-03 / hr-arch-05).
 
     A single inode with millions of hardlinks otherwise materialises the
     full list both here and via :func:`emit_groups`. Capping the output
-    keeps the printed group bounded; the sentinel records how many paths
-    were elided so the user knows the count is not the truth.
+    keeps the printed group bounded; the omitted count is reported through
+    `overflow` and the warning counter.
 
     Cap resolution order: explicit ``cap=`` kwarg > ``config.alias_cap``
     > :data:`DEFAULT_ALIAS_CAP`. The kwarg form preserves back-compat
@@ -1321,21 +1310,16 @@ def _expand_keys_to_paths(keys, aliases, config=None, *, cap=None,
 
     hr-scal-06 / hr-arch-01: when ``overflow`` is supplied (explicitly by
     the caller — never read off ``config``), the per-inode counts of
-    paths elided AT INGEST (by :func:`index_inodes` with `alias_cap`)
-    are added to the displayed ``+N more`` so the sentinel still
-    reports the real total even though the alias list itself was
-    bounded at scan time.
-
-    The sentinel is a typed :class:`_MoreSentinel` instance so emit-side
-    :func:`_count_real_paths` can exclude it from the duplicate-group
-    filter — a pair like ``[path0, "+1 more"]`` is NOT actually 2
-    duplicates."""
+    paths elided at ingest (by :func:`index_inodes` with `alias_cap`) are
+    included when deciding whether the cap was hit. They never become
+    synthetic path records."""
     if cap is None:
         cap = config.alias_cap if config is not None else DEFAULT_ALIAS_CAP
     # hr-cmplx-01: a resolved cap of None means the cap is disabled —
-    # return every path with no truncation and no sentinel.
+    # return every path without truncation.
     if cap is None:
         return _expand_uncapped_aliases(keys, aliases)
+    cap = max(0, cap)
     # hr-arch-01: `overflow` is now passed explicitly by the emit layer
     # (`_emit_one_group` threads it from `on_group`/`emit_groups`). It is
     # no longer smuggled on `config`, so emit correctness no longer
@@ -1360,7 +1344,6 @@ def _expand_capped_aliases(key, aliases, overflow, cap: int, config) -> list:
     out = list(paths[:cap])
     if total > cap:
         _tick_alias_cap(config)
-        out.append(_MoreSentinel(f"+{total - cap} more"))
     return out
 
 
@@ -1369,12 +1352,6 @@ def _tick_alias_cap(config) -> None:
         # Guard against torn `+= 1` on free-threaded Python builds.
         with config._counter_lock:
             config.alias_cap_hits += 1
-
-
-def _count_real_paths(expanded) -> int:
-    """Number of REAL paths in an `_expand_keys_to_paths` result —
-    excludes any trailing `_MoreSentinel` (hr-hyg-02)."""
-    return sum(1 for p in expanded if not isinstance(p, _MoreSentinel))
 
 
 def _encode_record_path(path: str) -> str:
@@ -1404,25 +1381,24 @@ def _emit_one_group(digest_key, keys, aliases, write, config, overflow=None):
 
     Shared core of :func:`emit_groups` and the callback returned by
     :func:`emit_groups_streaming`. Expands keys via
-    :func:`_expand_keys_to_paths`, skips groups whose real path count
-    is ≤ 1, then writes ``"<label> <path>\\n"`` lines joined into one
+    :func:`_expand_keys_to_paths`, skips groups with ≤ 1 path, then writes
+    ``"<label> <path>\\n"`` lines joined into one
     ``write()`` call (hr-perf-03).
 
     `overflow` (hr-arch-01): per-inode ingest-elided counts, passed
-    explicitly from the emit caller so the ``+N more`` sentinel reports
-    the true total without reading it off ``config``.
+    explicitly from the emit caller so alias-cap accounting does not read
+    the data off ``config``.
 
     Returns ``(groups_delta, paths_delta)`` — ``(0, 0)`` for skipped
     groups, ``(1, real_count)`` for emitted ones."""
     all_paths = _expand_keys_to_paths(keys, aliases, config, overflow=overflow)
-    real_count = _count_real_paths(all_paths)
-    if real_count <= 1:
+    if len(all_paths) <= 1:
         return 0, 0
     label = _format_digest(digest_key)
     write("".join(
-        f"{label} {_encode_record_path(p)}\n" for p in all_paths
+        f"{label} {_encode_record_path(path)}\n" for path in all_paths
     ))
-    return 1, real_count
+    return 1, len(all_paths)
 
 
 def _retry_alias(key, tried, aliases, hash_alias, cancel_event=None,
@@ -1816,7 +1792,7 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     ...]; `.aliases` is the per-key path list; `.info` holds the
     per-stage counters for the summary; `.overflow` holds the per-inode
     ingest-elided alias counts, or ``None`` when the cap was disabled —
-    forward it to :func:`emit_groups` for an accurate ``+N more``).
+    forward it to :func:`emit_groups` for accurate alias-cap accounting).
 
     Hashing is split into stage helpers so each piece stays under the
     AGENTS.md cyclomatic-complexity ceiling.
@@ -1851,12 +1827,12 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
     second Ctrl-C. Already-confirmed groups stay in the partial result.
 
     Ingest-time alias cap (hr-decoup-04): when ``config.alias_cap`` is
-    set to a meaningful (non-sentinel) value, the per-inode path list
+    set to a meaningful value, the per-inode path list
     is bounded at scan time (hr-scal-06) so a single hardlink-heavy
     inode no longer materialises every alias in RAM. The elided count
     per inode is collected into ``overflow`` and threaded into
-    :func:`_expand_keys_to_paths` so the emit-side ``+N more``
-    sentinel still reports the real total."""
+    :func:`_expand_keys_to_paths` so the emit stage can account for
+    omitted aliases without creating synthetic path records."""
     if config is None:
         config = RunConfig()
     # hr-decoup-04: thread the alias cap from config into index_inodes
@@ -1884,9 +1860,8 @@ def find_duplicate_groups(files, jobs, on_group=None, config=None,
 
         hr-decoup-04 / hr-arch-01: the streaming callback receives the
         alias dict and the overflow dict EXPLICITLY (4th arg) — when the
-        ingest cap is active emit-side includes the ingest-time elisions
-        in the `+N more` sentinel without the pipeline mutating
-        ``config``."""
+        ingest cap is active emit-side accounts for ingest-time elisions
+        without the pipeline mutating ``config``."""
         if on_group is not None:
             on_group(digest_key, list(keys), aliases, overflow)
         else:
@@ -1960,8 +1935,8 @@ def emit_groups(final_groups, aliases, write, config=None, overflow=None):
     ``alias_cap_hits``. Defaults to a fresh :class:`RunConfig`.
 
     `overflow` (hr-arch-01): per-inode ingest-elided counts from
-    :attr:`DedupResult.overflow`, passed explicitly so the ``+N more``
-    sentinel reflects the true total. ``None`` (default) means the alias
+    :attr:`DedupResult.overflow`, passed explicitly so alias-cap warnings
+    account for paths omitted at ingest. ``None`` (default) means the alias
     cap was disabled / no paths were elided at ingest."""
     if config is None:
         config = RunConfig()
@@ -1981,8 +1956,8 @@ def emit_groups_streaming(write, config=None):
     pipeline.
 
     hr-arch-01: the callback's 4th parameter ``overflow`` carries the
-    per-inode ingest-elided counts explicitly from the pipeline, so the
-    ``+N more`` sentinel reports the true total without the pipeline
+    per-inode ingest-elided counts explicitly from the pipeline, so alias
+    cap accounting includes paths omitted at ingest without the pipeline
     smuggling the overflow dict onto ``config``.
 
     Returns ``(cb, totals_fn)`` where ``totals_fn()`` yields
@@ -2192,14 +2167,6 @@ class HashDumpWriter:
         finally:
             self._handle.seek(current)
 
-    def write_overflow(self, overflow) -> None:
-        self._handle.seek(0, os.SEEK_END)
-        for key, elided in overflow.items():
-            if elided > 0 and key in self._digests:
-                self._write_line(
-                    self._digests[key], f"+{elided} more (alias-cap)")
-        self._handle.flush()
-
     def close(self) -> None:
         self._handle.close()
 
@@ -2285,11 +2252,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
               "stall diagnostics, and SIGINT partial-results warnings "
               "remain visible."))
     ap.add_argument("--alias-cap", type=int, default=DEFAULT_ALIAS_CAP,
-                    help=("Max paths printed per inode group "
-                          f"(default: {DEFAULT_ALIAS_CAP}, <= 0 = no cap). "
-                          "When the cap fires, a `+N more` sentinel is "
-                          "appended and a WARNING surfaces once at end "
-                          "of run (hr-scal-04)."))
+        help=("Max paths printed per inode group "
+              f"(default: {DEFAULT_ALIAS_CAP}, <= 0 = no cap). "
+              "When the cap fires, a warning reports omitted aliases at end "
+              "of run (hr-scal-04)."))
     ap.add_argument(
         "--hash-error-verbose-cap", type=int,
         default=DEFAULT_HASH_ERROR_VERBOSE_CAP,
@@ -2399,8 +2365,7 @@ def _print_run_summary(walk_stats, info, config, dup_groups, dup_paths,
     )
 
 
-def _finalize_hash_dump(hashes_state, dump_overflow, hashes_file,
-                        previous_sigint) -> None:
+def _finalize_hash_dump(hashes_state, hashes_file, previous_sigint) -> None:
     """Flush + close the hashes dump (if opened) and restore the SIGINT handler.
 
     Runs from main's finally on every exit path (normal return AND a second
@@ -2408,15 +2373,9 @@ def _finalize_hash_dump(hashes_state, dump_overflow, hashes_file,
     previous signal handler is always restored (hr-rel-20)."""
     if hashes_state["writer"] is not None:
         try:
-            # hr-obs-10: surface hardlinks elided at ingest by the alias cap.
-            hashes_state["writer"].write_overflow(dump_overflow)
+            hashes_state["writer"].close()
         except OSError as exc:
-            _log_line(f"WARNING: writing {hashes_file} failed: {exc}", False)
-        finally:
-            try:
-                hashes_state["writer"].close()
-            except OSError as exc:
-                _log_line(f"WARNING: closing {hashes_file} failed: {exc}", False)
+            _log_line(f"WARNING: closing {hashes_file} failed: {exc}", False)
     # `signal.getsignal` returns None when the previous handler was installed
     # from C; `signal.signal` rejects None, so fall back to SIG_DFL.
     signal.signal(
@@ -2593,10 +2552,6 @@ def _run():
     previous_sigint = _install_sigint_cancel(cancel_event)
 
     hashes_state: dict = {"writer": None}
-    # hr-obs-10: per-inode count of aliases elided AT INGEST by the alias cap, so
-    # the dump can append a `+N more` marker instead of silently omitting
-    # hardlinks past the cap.
-    dump_overflow: dict = {}
     stall_monitor = _ProgressStallMonitor()
 
     try:
@@ -2640,8 +2595,6 @@ def _run():
             on_stage_progress=on_stage_progress, on_composite=on_composite,
             on_chunk=lambda: stall_monitor.touch("hash"),
         )
-        if result.overflow:
-            dump_overflow.update(result.overflow)
         t_end = time.perf_counter()
         walk_stats = walk_iter.stats
         info = result.info
@@ -2678,8 +2631,7 @@ def _run():
         # the SIGINT handler on every exit path (normal return AND second
         # Ctrl-C KeyboardInterrupt).
         stall_monitor.stop()
-        _finalize_hash_dump(hashes_state, dump_overflow, args.hashes_file,
-                            previous_sigint)
+        _finalize_hash_dump(hashes_state, args.hashes_file, previous_sigint)
 
 
 def _fmt_count(n: int) -> str:
