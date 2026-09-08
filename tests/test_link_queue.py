@@ -6076,3 +6076,20 @@ def test_invalid_protocol_keys_are_skipped_at_gui_startup(
     assert "git+ssh" in instance.config["protocols"]
     assert invalid_name not in instance.config["protocols"]
     assert "invalid protocol name" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("keep_custom", [False, True])
+def test_deleted_builtin_protocols_stay_deleted_after_save_and_gui_restart(
+        tmp_path, request, keep_custom):
+    config_path = tmp_path / "cfg.yaml"
+    store = link_queue.ConfigStore(str(config_path), str(tmp_path / "missing.json"))
+    assert "https" in store["protocols"]
+    store["protocols"].clear()
+    if keep_custom:
+        store["protocols"]["custom"] = {"command": "echo {url}", "mode": "queue", "shell": False}
+    store.save()
+
+    instance = request.getfixturevalue("app")
+
+    assert set(instance.config["protocols"]) == ({"custom"} if keep_custom else set())
+    instance._refresh_protocols_tree()

@@ -167,7 +167,7 @@ Opens a Tk GUI that routes pasted URLs to command templates by protocol:
 python3 link_queue.py
 ```
 
-Protocols can run immediately in background workers or enter a queue consumed with configurable delays and per-domain limits. Command templates support `{url}`, `{url_quoted}`, and `{protocol}` placeholders. Shell execution is configurable per protocol; the default path uses argv-style subprocess calls.
+Protocols can run immediately in background workers or enter a queue consumed with configurable delays and per-domain limits. Command templates support `{url}`, `{url_quoted}`, and `{protocol}` placeholders. Shell execution is configurable per protocol; the default path uses argv-style subprocess calls. A saved `protocols` mapping defines the complete handler set, including an empty mapping; deleted built-in handlers stay deleted after restart.
 
 Current config and queue state are YAML files named `link_queue_config.yaml` and `link_queue_state.yaml`. The preferred location is `$XDG_CONFIG_HOME/link_queue` or `~/.config/link_queue`; pre-existing files next to the script are reused so older in-flight queues are not orphaned. Legacy `link_queue_config.json` is read and migrated when present.
 

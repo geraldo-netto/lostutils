@@ -946,9 +946,7 @@ class ConfigStore(dict):
 
     @staticmethod
     def _merge_user_config(cfg: dict, user: "dict | None") -> None:
-        """Merge user-provided keys into cfg in place. Protocols are merged
-        protocol-by-protocol so built-ins survive if the user file only
-        overrides a subset."""
+        """Apply saved settings; an explicit protocol map is the complete set."""
         if not isinstance(user, dict):
             return
         for k, v in user.items():
@@ -966,6 +964,7 @@ class ConfigStore(dict):
                 file=sys.stderr,
             )
             return
+        cfg["protocols"] = {}
         for name, protocol_config in protocols.items():
             if not _valid_protocol_name(name):
                 print(f"[warn] config: ignoring invalid protocol name {name!r}", file=sys.stderr)
