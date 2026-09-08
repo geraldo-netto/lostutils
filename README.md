@@ -89,7 +89,7 @@ Bucket paths are shaped as `<extension>/<first-letter>00000/<filename>`, with up
 
 Exit codes: `0` every planned file was placed, `1` the run could not complete (unusable root or planning spool, stalled move stage, interrupt), `2` command-line error, `3` the run finished but skipped files or left a duplicate behind after a partial move.
 
-Rerunning completes an interrupted hardlink move when its existing destination still names the same file. Private `.lostutils-remove-*` directories are reserved for source-removal recovery: scans leave them untouched and report their location for manual inspection.
+Rerunning completes an interrupted hardlink move when its existing destination still names the same file. Cross-device moves copy into private staging and publish the complete file atomically without overwriting an existing destination. If the destination filesystem supports neither hardlinks nor atomic no-replace renames, the move fails with the source preserved. Private `.lostutils-remove-*` and `.lostutils-copy-*` directories are reserved for recovery: scans leave them untouched and report their location for manual inspection. Stale `.<name>.<16-hex-digits>.tmp` files from earlier cross-device copies are also skipped for recovery.
 
 ### `relocate_folder.py`
 

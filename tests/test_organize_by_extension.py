@@ -1,6 +1,8 @@
 import io
 import os
+import subprocess
 import sys
+import signal
 import time
 import errno
 import unittest
@@ -47,7 +49,6 @@ from organize_by_extension import (  # noqa: E402 — refactor surface (cx-02/ar
     _family_for,
     _link_exclusive,
     _parse_extra_zip_family,
-    _reserve_target,
     _safe_scandir,
     _scan_bucket_indices,
     _read_bucket_contents,
@@ -429,8 +430,11 @@ class OrganizeByExtensionTest(unittest.TestCase):
             dest = root / "bucket"
             src = self.make_file(root, "data.txt")
             exdev = OSError(errno.EXDEV, "cross-device link")
-            with patch('organize_by_extension.os.link', side_effect=exdev), \
-                 patch('organize_by_extension.shutil.copyfileobj', side_effect=OSError("disk full")):
+            def fail_initial_link(*_args, **_kwargs):
+                raise exdev
+            with patch('organize_by_extension.os.link', side_effect=fail_initial_link), \
+                 patch('organize_by_extension._fsync_file',
+                       side_effect=OSError("disk full")):
                 with self.assertRaises(OSError):
                     move_file(src, dest)
             target = dest / "data.txt"
@@ -445,7 +449,17 @@ class OrganizeByExtensionTest(unittest.TestCase):
             src = self.make_file(root, "data.txt")
             src.write_text("payload")
             exdev = OSError(errno.EXDEV, "cross-device link")
-            with patch('organize_by_extension.os.link', side_effect=exdev):
+            real_link = os.link
+            calls = 0
+
+            def fail_initial_link(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise exdev
+                return real_link(*args, **kwargs)
+
+            with patch('organize_by_extension.os.link', side_effect=fail_initial_link):
                 result = move_file(src, dest)
             self.assertEqual(result, dest / "data.txt")
             self.assertEqual((dest / "data.txt").read_text(), "payload")
@@ -654,15 +668,25 @@ class OrganizeByExtensionTest(unittest.TestCase):
             self.assertFalse(src.exists())
 
     def test_move_file_cross_device_refuses_existing_target(self):
-        """Cross-device path honors no-overwrite via O_EXCL reservation."""
+        """Cross-device publication honors no-overwrite hardlink semantics."""
         with TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
             src = self.make_file(root, "f.txt")
             dest = root / "bucket"
             dest.mkdir()
             (dest / "f.txt").write_text("existing")
+            real_link = os.link
+            calls = 0
+
+            def fail_initial_link(*args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise OSError(errno.EXDEV, "cross-device")
+                return real_link(*args, **kwargs)
+
             with patch('organize_by_extension.os.link',
-                       side_effect=OSError(errno.EXDEV, "cross-device")):
+                       side_effect=fail_initial_link):
                 with self.assertRaises(FileExistsError):
                     move_file(src, dest)
             self.assertEqual((dest / "f.txt").read_text(), "existing")
@@ -1553,15 +1577,6 @@ class LinkExclusiveTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 _link_exclusive(src, dst)
 
-    def test_reserve_target_rejects_existing_target(self):
-        with TemporaryDirectory() as d:
-            root = Path(d)
-            dst = root / "b"
-            dst.write_text("blocking")
-            with self.assertRaises(FileExistsError):
-                _reserve_target(dst)
-
-
 class CrossDeviceCleanupLogging(unittest.TestCase):
     """oze-cx-03: cleanup loop logs OSError at debug instead of swallowing
     silently. Verifies the warning class is right and the log line fires."""
@@ -1573,11 +1588,11 @@ class CrossDeviceCleanupLogging(unittest.TestCase):
             src.write_text("hi")
             bucket = root / "bucket"
             bucket.mkdir()
-            # Force the cross-device copy path: os.link raises EXDEV; copying
-            # then raises OSError; a cleanup unlink failure must be logged.
+            # Force the cross-device path, then fail before publication so the
+            # private staging cleanup logs its unlink failure.
             exdev = OSError(errno.EXDEV, "fake xdev")
             with patch("organize_by_extension.os.link", side_effect=exdev), \
-                 patch("organize_by_extension.shutil.copyfileobj",
+                 patch("organize_by_extension._fsync_file",
                        side_effect=OSError("disk full")), \
                  patch("organize_by_extension.os.unlink",
                        side_effect=OSError("cleanup denied")), \
@@ -3997,12 +4012,8 @@ def test_read_head_bytes_unreadable_returns_singleton(tmp_path, monkeypatch):
 
 def test_cross_device_tmp_uses_random_suffix(tmp_path, monkeypatch):
     captured: dict = {}
-    real_copy = oze.shutil.copyfileobj
-
-    def spy_copy(src, dst, *a, **kw):
-        captured["dst"] = str(dst.name)
-        return real_copy(src, dst, *a, **kw)
-    monkeypatch.setattr(oze.shutil, "copyfileobj", spy_copy)
+    monkeypatch.setattr(
+        oze, "_fsync_file", lambda path: captured.setdefault("dst", path.name))
     src = tmp_path / "src.bin"; src.write_bytes(b"x")
     dst = tmp_path / "dst.bin"
     oze._move_cross_device(src, dst)
@@ -4036,6 +4047,93 @@ def test_cross_device_different_content_still_collides(tmp_path):
     assert dst.read_bytes() == b"existing", "target clobbered on genuine collision"
 
 
+def test_cross_device_unsupported_publish_does_not_clobber_raced_target(
+        tmp_path, monkeypatch):
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    src.write_bytes(b"trusted")
+
+    def unsupported_link(*_args, **_kwargs):
+        raise OSError(errno.EPERM, "hardlinks unavailable")
+
+    native_rename = oze.os.rename if oze.os.name == "nt" else oze._rename_noreplace
+
+    def race_rename(_source, target):
+        dst.write_bytes(b"raced")
+        return native_rename(_source, target)
+
+    monkeypatch.setattr(oze.os, "link", unsupported_link)
+    if oze.os.name == "nt":
+        monkeypatch.setattr(oze.os, "rename", race_rename)
+    else:
+        monkeypatch.setattr(oze, "_rename_noreplace", race_rename)
+
+    with pytest.raises((FileExistsError, RuntimeError)):
+        oze._move_cross_device(src, dst)
+
+    assert dst.read_bytes() == b"raced"
+    assert src.read_bytes() == b"trusted"
+
+
+def test_cross_device_unsupported_publish_recovers_same_target(
+        tmp_path, monkeypatch):
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    src.write_bytes(b"trusted")
+    dst.write_bytes(b"trusted")
+
+    def unsupported_link(*_args, **_kwargs):
+        raise OSError(errno.EPERM, "hardlinks unavailable")
+
+    monkeypatch.setattr(
+        oze.os, "link", unsupported_link,
+    )
+
+    oze._move_cross_device(src, dst)
+
+    assert dst.read_bytes() == b"trusted"
+    assert not src.exists()
+
+
+@pytest.mark.parametrize(
+    ("native_error", "expected"),
+    [
+        (errno.EEXIST, FileExistsError),
+        (errno.ENOSYS, RuntimeError),
+        (errno.EIO, OSError),
+    ],
+)
+def test_rename_noreplace_reports_native_errors(
+        tmp_path, monkeypatch, native_error, expected):
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.write_bytes(b"payload")
+
+    def native_rename(*_args):
+        oze.ctypes.set_errno(native_error)
+        return -1
+
+    class FakeLibc:
+        renameat2 = staticmethod(native_rename)
+        renamex_np = staticmethod(native_rename)
+
+    monkeypatch.setattr(oze.ctypes, "CDLL", lambda *_args, **_kwargs: FakeLibc())
+
+    with pytest.raises(expected):
+        oze._rename_noreplace(source, target)
+    assert source.read_bytes() == b"payload"
+
+
+def test_rename_noreplace_reports_missing_native_api(tmp_path, monkeypatch):
+    def missing_api(*_args, **_kwargs):
+        raise OSError("missing renameat2")
+
+    monkeypatch.setattr(oze.ctypes, "CDLL", missing_api)
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        oze._rename_noreplace(tmp_path / "source", tmp_path / "target")
+
+
 def test_cross_device_late_interrupt_keeps_completed_target(tmp_path, monkeypatch):
     """oze-di-01: Ctrl+C in the replace->unlink(source) window must keep the
     just-completed target (not delete it) and leave the source for re-run
@@ -4056,6 +4154,49 @@ def test_cross_device_late_interrupt_keeps_completed_target(tmp_path, monkeypatc
     oze._move_cross_device(src, dst)
     assert not src.exists()
     assert dst.read_bytes() == b"payload"
+
+
+@pytest.mark.skipif(
+    not hasattr(signal, "SIGKILL"), reason="SIGKILL is unavailable on this OS")
+def test_cross_device_sigkill_before_publish_leaves_recoverable_staging(
+        tmp_path):
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    src.write_bytes(b"payload")
+    script = (
+        "import os, signal, sys\n"
+        "from pathlib import Path\n"
+        "import organize_by_extension as oze\n"
+        "oze._fsync_file = lambda _path: os.kill(os.getpid(), signal.SIGKILL)\n"
+        "oze._move_cross_device(Path(sys.argv[1]), Path(sys.argv[2]))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(src), str(dst)], check=False)
+
+    assert result.returncode == -signal.SIGKILL
+    staging = list(tmp_path.glob(f"{oze.PRIVATE_COPY_PREFIX}*"))
+    assert src.read_bytes() == b"payload"
+    assert not dst.exists()
+    assert staging and any(any(staging_dir.iterdir()) for staging_dir in staging)
+
+    oze._move_cross_device(src, dst)
+
+    assert dst.read_bytes() == b"payload"
+    assert not src.exists()
+
+
+def test_cross_device_reports_copied_bytes(tmp_path):
+    src = tmp_path / "src.bin"
+    dst = tmp_path / "dst.bin"
+    payload = b"x" * (oze._CONTENT_CMP_CHUNK * 2 + 17)
+    src.write_bytes(payload)
+    copied = []
+
+    oze._move_cross_device(src, dst, copied.append)
+
+    assert sum(copied) == len(payload)
+    assert dst.read_bytes() == payload
+    assert not src.exists()
 
 
 def test_drain_futures_skips_unexpected_worker_exception(tmp_path):
@@ -4154,17 +4295,12 @@ def test_cross_device_copies_pinned_source_and_refuses_swapped_path(
     moved = tmp_path / "moved-original.bin"
     dst = tmp_path / "dst.bin"
     src.write_bytes(b"trusted payload")
-    real_copy = oze.shutil.copyfileobj
-
-    def swap_then_copy(source_stream, target_stream, *args, **kwargs):
+    def swap_after_chunk(_count):
         os.replace(src, moved)
         src.write_bytes(b"attacker replacement")
-        return real_copy(source_stream, target_stream, *args, **kwargs)
-
-    monkeypatch.setattr(oze.shutil, "copyfileobj", swap_then_copy)
 
     with pytest.raises(oze.PartialMoveError, match="source changed"):
-        oze._move_cross_device(src, dst)
+        oze._move_cross_device(src, dst, swap_after_chunk)
 
     assert dst.read_bytes() == b"trusted payload"
     assert src.read_bytes() == b"attacker replacement"
@@ -4655,8 +4791,9 @@ def test_cross_device_fsyncs_destination_before_source_directory(
 
     oze._move_cross_device(src, dst)
 
-    assert calls == [
-        ("file", dst.parent),
+    assert calls[0][0] == "file"
+    assert calls[0][1].name.startswith(oze.PRIVATE_COPY_PREFIX)
+    assert calls[1:] == [
         ("dir", dst.parent),
         ("dir", src.parent),
     ]
@@ -5355,6 +5492,7 @@ def test_cross_device_cleanup_preserves_unowned_temp_file(tmp_path, monkeypatch)
     source = tmp_path / "source.txt"
     target = tmp_path / "target.txt"
     source.write_text("source", encoding="utf-8")
+    target.write_text("different", encoding="utf-8")
     foreign_temp = tmp_path / ".target.txt.existing.tmp"
     foreign_temp.write_text("unrelated", encoding="utf-8")
     monkeypatch.setattr(organize_by_extension.secrets, "token_hex", lambda _length: "existing")
@@ -5364,7 +5502,7 @@ def test_cross_device_cleanup_preserves_unowned_temp_file(tmp_path, monkeypatch)
 
     assert source.read_text(encoding="utf-8") == "source"
     assert foreign_temp.read_text(encoding="utf-8") == "unrelated"
-    assert not target.exists()
+    assert target.read_text(encoding="utf-8") == "different"
 
 
 def test_cross_device_cleanup_preserves_published_copy_after_interrupt(tmp_path, monkeypatch):
@@ -5383,6 +5521,33 @@ def test_cross_device_cleanup_preserves_published_copy_after_interrupt(tmp_path,
     assert source.read_text(encoding="utf-8") == "source"
     assert target.read_text(encoding="utf-8") == "source"
     assert set(tmp_path.iterdir()) == {source, target}
+
+
+def test_scan_skips_private_cross_device_staging(tmp_path, caplog):
+    staging = tmp_path / f"{oze.PRIVATE_COPY_PREFIX}stale"
+    staging.mkdir()
+    (staging / "payload.bin").write_bytes(b"payload")
+
+    with caplog.at_level("WARNING"):
+        files = oze.list_files(
+            tmp_path, [], ctx=oze.SniffContext(sniff=False))
+
+    assert files == []
+    assert "private cross-device staging" in caplog.text
+
+
+def test_scan_skips_legacy_cross_device_temp_without_deleting_it(
+        tmp_path, caplog):
+    stale = tmp_path / (".target.bin." + "a" * 16 + ".tmp")
+    stale.write_bytes(b"recover me")
+
+    with caplog.at_level("WARNING"):
+        files = oze.list_files(
+            tmp_path, [], ctx=oze.SniffContext(sniff=False))
+
+    assert files == []
+    assert stale.read_bytes() == b"recover me"
+    assert "stale cross-device temp" in caplog.text
 
 
 def test_open_pinned_regular_rejects_directory_before_open(tmp_path, monkeypatch):

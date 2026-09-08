@@ -16,6 +16,7 @@ and revert to extension-only bucketing.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import errno
 import logging
 import os
@@ -33,11 +34,13 @@ from dataclasses import dataclass, field
 from functools import partial
 from itertools import pairwise
 from pathlib import Path
-import shutil
+import sys
 from typing import BinaryIO, Callable, Iterable, Iterator, NamedTuple, NoReturn, Protocol, Set
 
 BUCKET_SIZE = 500
 PRIVATE_REMOVE_PREFIX = ".lostutils-remove-"
+PRIVATE_COPY_PREFIX = ".lostutils-copy-"
+LEGACY_COPY_TEMP_PATTERN = re.compile(r"^\..+\.[0-9a-f]{16}\.tmp$")
 PROGRESS_EVERY = 10_000   # oze-obs-02: emit a progress line every N done items
 # Outstanding-futures cap relative to ``num_threads`` (oze-scal-04 / oze-conc-03).
 # The planner blocks on a drain when the in-flight set reaches
@@ -704,6 +707,12 @@ def _scan_regular_path(
         if _stat.S_ISLNK(mode):
             _warn_if_symlink_escapes_root(Path(entry.path), root, symlink_resolve_cache)
         return None
+    if LEGACY_COPY_TEMP_PATTERN.fullmatch(entry.name):
+        logger.warning(
+            "skipping stale cross-device temp %s; recover it before rerunning",
+            entry.path,
+        )
+        return None
     if entry.path in skip:
         return None
     return Path(entry.path)
@@ -853,6 +862,13 @@ def _walk_subdirectory(
         if entry.name.startswith(PRIVATE_REMOVE_PREFIX):
             logger.warning(
                 "skipping private move quarantine %s; recover its contents "
+                "before rerunning",
+                entry.path,
+            )
+            return None
+        if entry.name.startswith(PRIVATE_COPY_PREFIX):
+            logger.warning(
+                "skipping private cross-device staging %s; recover its contents "
                 "before rerunning",
                 entry.path,
             )
@@ -1388,9 +1404,7 @@ def ensure_directory(path: Path) -> None:
 
 
 def _reject_existing_target(target: Path, exc: FileExistsError) -> NoReturn:
-    """Raise the unified 'target already exists' error from a no-overwrite
-    reservation failure (oze-dup-01) — shared by the same-fs link path and
-    the cross-fs O_EXCL path so both produce the same message."""
+    """Raise the unified target-collision error for same-fs linking."""
     raise FileExistsError(f"Target file already exists: {target}") from exc
 
 
@@ -1406,21 +1420,6 @@ def _link_exclusive(src: Path, dst: Path) -> None:
         _link_with_transient_retry(src, dst)
     except FileExistsError as exc:
         _reject_existing_target(dst, exc)
-
-
-def _reserve_target(target: Path) -> None:
-    """Reserve ``target`` with ``O_CREAT|O_EXCL`` (oze-dup-02).
-
-    Atomic no-overwrite create — the symmetric primitive of
-    :func:`_link_exclusive` for the cross-device copy path. Closes the
-    descriptor immediately; ``os.replace`` later atomically swaps the
-    completed temp file into this reserved slot.
-    """
-    try:
-        fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError as exc:
-        _reject_existing_target(target, exc)
-    os.close(fd)
 
 
 def _rollback_link(target: Path, source_exc: OSError) -> NoReturn:
@@ -1522,9 +1521,9 @@ def move_file(path: Path, destination: Path) -> Path:
 
     Same-filesystem moves use an atomic hardlink+unlink: `os.link` fails with
     FileExistsError if the target name is taken, closing the TOCTOU window of a
-    separate exists()-then-move check (conc-02). Cross-filesystem moves fall back
-    to copy-to-temp + atomic rename, so an interrupted copy never leaves a partial
-    file at the target (conc-03).
+    separate exists()-then-move check (conc-02). Cross-filesystem moves copy into
+    private staging and publish with an atomic no-replace operation, so an
+    interrupted copy never leaves a partial file at the target (conc-03).
 
     Transient FD-exhaustion errnos (EMFILE/ENFILE/EAGAIN) are retried with
     jittered exponential backoff (oze-perf-07) before we fall through to the
@@ -1948,47 +1947,34 @@ def _same_file_content(
         return False
 
 
-def _move_cross_device(source: Path, target: Path) -> None:
+def _move_cross_device(
+    source: Path,
+    target: Path,
+    progress_callback: Callable[[int], None] | None = None,
+) -> None:
     """Move a file across filesystems, kill-safe and idempotent (oze-di-01).
 
-    Reserves the final name with O_EXCL (no-overwrite), copies to a temp file,
-    then atomically renames it into place. Any failure before the rename rolls
-    back the temp and reservation so no partial file survives.
+    Copies into a private staging directory, then publishes the completed file
+    with an atomic no-replace link or rename. The final name never exposes a
+    partial or zero-byte placeholder. Private staging leftovers are skipped by
+    the scanner and left available for manual recovery.
 
-    The window between ``os.replace`` and ``os.unlink(source)`` is NOT
+    The window between publication and ``os.unlink(source)`` is NOT
     crash-atomic: a kill there (Ctrl+C at any moment, SIGKILL, power loss)
     leaves the file at BOTH paths. Recovery is idempotent — a re-run finds the
     target already holding this exact content and finishes the move by removing
-    the leftover source, instead of failing the O_EXCL reservation forever and
-    endlessly re-suffixing ``.collision<n>``. A target with *different* content
-    is a real name collision and still raises.
+    the leftover source. A target with *different* content is a real name
+    collision and still raises.
     """
     with _open_pinned_regular(source) as (source_stream, source_stat):
-        if _prepare_cross_device_target(
-                source, source_stream, source_stat, target):
-            return
-        # oze-sec-01: randomise the private copy name so another writer cannot
-        # predict it between reservation and publication.
-        tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
-        _copy_cross_device_target(source_stream, source_stat, target, tmp)
+        staging_dir = Path(tempfile.mkdtemp(
+            prefix=PRIVATE_COPY_PREFIX, dir=target.parent))
+        # Randomise the private copy name as well as the directory name so a
+        # recovered staging directory cannot be mistaken for a new copy.
+        tmp = staging_dir / f"{target.name}.{secrets.token_hex(8)}.tmp"
+        _copy_cross_device_target(
+            source_stream, source_stat, target, tmp, progress_callback)
         _unlink_cross_device_source(source, source_stream, source_stat, target)
-
-
-def _prepare_cross_device_target(
-    source: Path,
-    source_stream: BinaryIO,
-    source_stat: os.stat_result,
-    target: Path,
-) -> bool:
-    try:
-        _reserve_target(target)
-        return False
-    except FileExistsError:
-        if _same_file_content(source_stream, source_stat, target):
-            _unlink_cross_device_source(
-                source, source_stream, source_stat, target)
-            return True
-        raise
 
 
 def _fsync_file(path: Path) -> None:
@@ -2014,44 +2000,149 @@ def _copy_cross_device_target(
     source_stat: os.stat_result,
     target: Path,
     tmp: Path,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> None:
-    replaced = False
     tmp_created = False
     try:
         source_stream.seek(0)
         with open(tmp, "xb") as target_stream:
             tmp_created = True
-            shutil.copyfileobj(source_stream, target_stream)
+            while True:
+                chunk = source_stream.read(_CONTENT_CMP_CHUNK)
+                if not chunk:
+                    break
+                target_stream.write(chunk)
+                if progress_callback is not None:
+                    progress_callback(len(chunk))
         os.chmod(tmp, _stat.S_IMODE(source_stat.st_mode))
         os.utime(tmp, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
         _fsync_file(tmp)
-        os.replace(tmp, target)  # atomic: target only ever holds the complete file
-        replaced = True
+        _publish_cross_device_copy(source_stream, source_stat, tmp, target)
         _fsync_directory(target.parent)
-    except BaseException:
-        # oze-cx-03: cleanup must never mask the real failure. Narrow to OSError
-        # (the only thing os.unlink can raise on a missing/locked leftover) and
-        # log at debug so unexpected exception classes still surface. Once the
-        # rename succeeded the target IS the completed file — never unlink it on
-        # a late interrupt; leave it for the idempotent re-run above.
-        _cleanup_cross_device_copy(target, tmp, replaced, tmp_created)
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning(
+                "published cross-device staging link %s could not be removed: %s",
+                tmp, exc,
+            )
+        return None
+    finally:
+        # Once publication succeeds, the target is complete; cleanup only the
+        # private staging link and never the user-visible target.
+        _cleanup_cross_device_copy(tmp.parent, tmp, tmp_created)
+
+
+def _publish_cross_device_copy(
+    source_stream: BinaryIO,
+    source_stat: os.stat_result,
+    tmp: Path,
+    target: Path,
+) -> None:
+    """Publish a completed staging file without replacing a target."""
+    try:
+        _link_with_transient_retry(tmp, target)
+        return
+    except FileExistsError:
+        if _same_file_content(source_stream, source_stat, target):
+            return
         raise
+    except OSError as exc:
+        if exc.errno != errno.EXDEV and not _link_unsupported(exc):
+            raise
+        return _publish_without_hardlink(
+            source_stream, source_stat, tmp, target, exc)
+
+
+def _publish_without_hardlink(
+    source_stream: BinaryIO,
+    source_stat: os.stat_result,
+    tmp: Path,
+    target: Path,
+    link_error: OSError,
+) -> None:
+    if os.name == "nt":  # pragma: no cover - Windows-only rename semantics
+        try:
+            os.rename(tmp, target)
+        except FileExistsError:
+            if _same_file_content(source_stream, source_stat, target):
+                return
+            raise FileExistsError(
+                f"Target file already exists: {target}") from link_error
+        return
+    try:
+        _rename_noreplace(tmp, target)
+    except FileExistsError:
+        if _same_file_content(source_stream, source_stat, target):
+            return
+        raise FileExistsError(
+            f"Target file already exists: {target}") from link_error
+
+
+_RENAME_NOREPLACE = 1
+_RENAME_EXCL = 0x00000004
+
+
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """Atomically rename ``source`` to an absent ``target`` or fail closed."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == "darwin":
+            rename = libc.renamex_np
+            rename.restype = ctypes.c_int
+            rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+            result = rename(
+                os.fsencode(source), os.fsencode(target), _RENAME_EXCL)
+        else:
+            rename = libc.renameat2
+            rename.restype = ctypes.c_int
+            rename.argtypes = [
+                ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                ctypes.c_char_p, ctypes.c_uint,
+            ]
+            result = rename(
+                -100, os.fsencode(source), -100, os.fsencode(target),
+                _RENAME_NOREPLACE)
+    except (OSError, AttributeError) as exc:
+        raise RuntimeError(
+            "atomic no-replace publication is unavailable on this POSIX host"
+        ) from exc
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise FileExistsError(
+            error, f"destination already exists; refusing to replace {target}",
+            target)
+    if error in {
+        errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP,
+        getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+    }:
+        raise RuntimeError(
+            f"filesystem does not support atomic no-replace publication: {target}")
+    raise OSError(error, os.strerror(error), target)
 
 
 def _cleanup_cross_device_copy(
-    target: Path, tmp: Path, replaced: bool, tmp_created: bool,
+    staging_dir: Path, tmp: Path, tmp_created: bool,
 ) -> None:
-    leftovers = (tmp,) if replaced else (target,)
-    if tmp_created and not replaced:
-        leftovers = (tmp, target)
-    for leftover in leftovers:
+    if tmp_created:
         try:
-            os.unlink(leftover)
+            os.unlink(tmp)
         except OSError as unlink_exc:
             logger.debug(
                 "cross-device cleanup: could not unlink %s: %s",
-                leftover, unlink_exc,
+                tmp, unlink_exc,
             )
+    try:
+        staging_dir.rmdir()
+    except OSError as rmdir_exc:
+        logger.debug(
+            "cross-device cleanup: could not remove %s: %s",
+            staging_dir, rmdir_exc,
+        )
 
 
 def _unlink_cross_device_source(
@@ -2061,11 +2152,9 @@ def _unlink_cross_device_source(
     target: Path,
 ) -> None:
     # oze-robust-01: the copy is committed at `target`; source removal has no
-    # rollback (cross-fs target is an independent copy, not a hardlink). If the
-    # unlink fails the file exists at BOTH paths as full copies — surface it
-    # loudly instead of as a bare OSError so the orphaned duplicate is visible.
-    # The move itself succeeded, so don't re-raise; an idempotent re-run reclaims
-    # the source via the same-content check above.
+    # rollback (cross-fs target is an independent copy, not a hardlink). If
+    # removal fails, the file exists at BOTH paths as full copies; surface a
+    # PartialMoveError so the orphaned duplicate is visible and recoverable.
     current_fd = os.fstat(source_stream.fileno())
     try:
         current_path = os.lstat(source)
@@ -2078,7 +2167,7 @@ def _unlink_cross_device_source(
             errno.EBUSY, "source changed during cross-device move", source)
         raise PartialMoveError(source, target, changed) from changed
     try:
-        os.unlink(source)
+        _unlink_with_rollback(source, None, source_stat)
     except OSError as unlink_exc:
         logger.warning(
             "moved %s -> %s but could not remove source (%s); "
