@@ -92,6 +92,41 @@ def test_hash_cli_compares_files_with_unicode_names(isolated):
     assert hashes.exists() and hashes.stat().st_size > 0
 
 
+def test_hash_dump_excludes_competing_writers(isolated):
+    work, env = isolated
+    module = _load_script(work, "hash-recursive-ai5.py")
+    dump = work / "hashes.txt"
+    child_code = _LOAD_CHILD + """
+writer = module.HashDumpWriter(module._open_hash_dump(sys.argv[2]))
+writer.write_head((1, 1), "aa" * 32, ["first"])
+writer.patch_composite((1, 1), "cc" * 32)
+print("locked", flush=True)
+sys.stdin.readline()
+writer.close()
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code, str(work / "hash-recursive-ai5.py"), str(dump)],
+        cwd=work, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        with pytest.raises(OSError):
+            module._open_hash_dump(str(dump))
+    finally:
+        child.stdin.close()
+        child.wait(timeout=10)
+    assert child.returncode == 0, child.stderr.read()
+    writer = module.HashDumpWriter(module._open_hash_dump(str(dump)))
+    writer.write_head((2, 2), "bb" * 32, ["second"])
+    writer.patch_composite((2, 2), "bb" * 32)
+    writer.close()
+    lines = dump.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("cc" * 32) and lines[0].endswith(" first")
+    assert lines[1].startswith("bb" * 32) and lines[1].endswith(" second")
+
+
 def test_organizer_cli_preview_then_move(isolated):
     work, _ = isolated
     source = work / "inputs"

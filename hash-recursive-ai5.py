@@ -2499,15 +2499,47 @@ class HashDumpWriter:
         return offset
 
 
+def _acquire_dump_lock(fd: int) -> None:
+    """Take a nonblocking byte-zero lock without modifying the dump."""
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
 def _open_hash_dump(path: str):
+    """Open and lock a dump before seeking to its append position.
+
+    The lock is held by the returned handle until its close, so another
+    process cannot interleave appends, patches, or compaction.
+    """
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    if os.name != "nt":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = None
+    fh = None
     try:
-        fh = open(path, "r+", buffering=1, encoding="utf-8",  # NOSONAR -- explicit CLI output.
-                  errors="surrogateescape")
-    except FileNotFoundError:
-        fh = open(path, "w+", buffering=1, encoding="utf-8",  # NOSONAR -- explicit CLI output.
-                  errors="surrogateescape")
-    fh.seek(0, os.SEEK_END)
-    return fh
+        fd = os.open(path, flags, 0o666)
+        _acquire_dump_lock(fd)
+        fh = os.fdopen(fd, "r+", buffering=1, encoding="utf-8",
+                       errors="surrogateescape")
+        fd = None
+        fh.seek(0, os.SEEK_END)
+        return fh
+    except BaseException:
+        if fh is not None:
+            try:
+                fh.close()
+            except OSError:
+                pass
+        elif fd is not None:
+            os.close(fd)
+        raise
 
 
 def _configure_stdio_encoding() -> None:
@@ -2727,12 +2759,19 @@ def _setup_hash_dump(hashes_file, hashes_state):
     proceeds without a dump)."""
     if hashes_file is None:
         return None
+    writer = None
     try:
         writer = HashDumpWriter(_open_hash_dump(hashes_file))
         hashes_state["writer"] = writer
         dump_stat = os.fstat(writer.fileno())
         return (dump_stat.st_dev, dump_stat.st_ino)
     except OSError as exc:
+        if writer is not None:
+            hashes_state["writer"] = None
+            try:
+                writer.close()
+            except OSError:
+                pass
         _log_line(f"WARNING: cannot write {hashes_file}: {exc}", False)
         return None
 

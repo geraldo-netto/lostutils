@@ -38,6 +38,8 @@ The output shape is `<digest> <path>`. Paths containing a line break, or the res
 
 Directory walks pin their root and verify queued ancestor identities before descending. Windows traversal uses native directory handles and skips reparse points. Directory substitution or failure to traverse safely marks the scan incomplete.
 
+Only one run can write a given hash dump at a time. The dump remains locked through appending, digest updates, and finalization; a competing writer reports the conflict and leaves the existing output intact.
+
 Useful options include `--jobs`, `--quiet`, `--alias-cap`, `--hash-error-verbose-cap`, `--block-size`, and `--sample-size`. Quiet mode suppresses routine logs, advisory warnings, and the summary; hash errors, dump output, filesystem stall diagnostics, and SIGINT partial-results warnings remain visible. If a downstream pipe closes early, the command exits 1 without a traceback and finalizes any requested hash dump.
 
 ### `deduplicate-by-namev3.py`

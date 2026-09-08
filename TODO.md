@@ -32,7 +32,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| hr-dist-80 | open | medium | medium | hash-recursive-ai5.py:2134 — [distributed systems] Serialize writers to the same --hashes-file for the full append-and-patch lifecycle; r+/w+ followed by seek-to-end does not reserve an append offset or protect later digest patches. Reproduced with two independently opened HashDumpWriters: the second write_head overwrites the first writer's path and leaves a trailing fragment. Lock the dump before seeking and retain the lock through finalization; test separate processes sharing an output. |
 | hr-obs-80 | open | medium | low | hash-recursive-ai5.py:2564 — [observability / operability] Include requested hash-dump failures in the final exit status; setup, write, patch, and close errors only warn and never reach _run_exit_code. Reproduced --hashes-file with a missing parent: no dump is created but the CLI exits 0. Track dump failure through finalization and return nonzero while preserving useful duplicate stdout. Three pillars: logs expose the error, process health falsely reports success. |
 
 ### `import_events.py`

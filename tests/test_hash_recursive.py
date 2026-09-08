@@ -2445,12 +2445,10 @@ def test_main_hashes_close_failure_warns(tmp_path, monkeypatch, capsys):
         def __getattr__(self, name):
             return getattr(self._f, name)
 
-    def fake_open(path, *a, **kw):
-        if str(path) == str(out):
-            return _FH(real_open(path, *a, **kw))
-        return real_open(path, *a, **kw)
+    def fake_open_dump(path):
+        return _FH(real_open(path, "w+", encoding="utf-8"))
 
-    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(hr, "_open_hash_dump", fake_open_dump)
     monkeypatch.setattr(
         hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
     hr.main()                                   # must not raise
@@ -2488,10 +2486,8 @@ def test_main_hashes_closed_when_dump_write_interrupted(tmp_path, monkeypatch):
         def __getattr__(self, name):
             return getattr(self._f, name)
 
-    def fake_open(path, *a, **kw):
-        if str(path) == str(out):
-            return _FH(real_open(path, *a, **kw))
-        return real_open(path, *a, **kw)
+    def fake_open_dump(path):
+        return _FH(real_open(path, "w+", encoding="utf-8"))
 
     def stub(files, jobs, on_group=None, config=None, on_walk_done=None,
              cancel_event=None, on_hashed=None, on_stage_progress=None,
@@ -2502,7 +2498,7 @@ def test_main_hashes_closed_when_dump_write_interrupted(tmp_path, monkeypatch):
             on_hashed(1, 1, digest, path_key, {path_key: [str(tmp_path / "a.bin")]})
 
     monkeypatch.setattr(hr, "find_duplicate_groups", stub)
-    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(hr, "_open_hash_dump", fake_open_dump)
     monkeypatch.setattr(
         hr.sys, "argv", ["hr", "--hashes-file", str(out), str(tmp_path)])
     with pytest.raises(KeyboardInterrupt):
@@ -2541,6 +2537,145 @@ def test_setup_hash_dump_returns_skip_ino_and_sets_writer(tmp_path, capsys):
     assert hr._setup_hash_dump(str(bad), state_bad) is None
     assert state_bad["writer"] is None
     assert "cannot write" in capsys.readouterr().err
+
+
+def test_hash_dump_lock_serializes_process_lifecycles(tmp_path, capsys):
+    dump = tmp_path / "hashes.txt"
+    marker = tmp_path / "marker"
+    child_code = """
+import importlib.util
+import sys
+import time
+spec = importlib.util.spec_from_file_location("hash_recursive", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+handle = module._open_hash_dump(sys.argv[2])
+writer = module.HashDumpWriter(handle)
+writer.write_head((1, 1), "aa" * 32, [sys.argv[3]])
+print("locked", flush=True)
+sys.stdin.readline()
+writer.close()
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code, str(_PATH), str(dump),
+         str(marker)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "locked"
+        before = dump.read_bytes()
+        state = {"writer": None}
+        assert hr._setup_hash_dump(str(dump), state) is None
+        assert state["writer"] is None
+        assert dump.read_bytes() == before
+    finally:
+        if child.stdin is not None:
+            child.stdin.close()
+        child.wait(timeout=5)
+    assert child.returncode == 0, child.stderr.read() if child.stderr else ""
+
+    state = {"writer": None}
+    assert hr._setup_hash_dump(str(dump), state) is not None
+    writer = state["writer"]
+    writer.write_head((2, 2), "bb" * 32, [str(marker)])
+    writer.close()
+    lines = dump.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert "aa" in lines[0] and "bb" in lines[1]
+    assert "cannot write" in capsys.readouterr().err
+
+
+def test_windows_dump_lock_uses_byte_zero_without_writing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    dump = tmp_path / "hashes.txt"
+    dump.write_bytes(b"existing")
+    descriptor = os.open(dump, os.O_RDWR)
+    calls = []
+
+    def locking(fd, mode, length):
+        calls.append((fd, mode, length, os.lseek(fd, 0, os.SEEK_CUR)))
+
+    monkeypatch.setattr(hr, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_NBLCK=7, locking=locking))
+    try:
+        os.lseek(descriptor, 3, os.SEEK_SET)
+        hr._acquire_dump_lock(descriptor)
+        assert calls == [(descriptor, 7, 1, 0)]
+    finally:
+        os.close(descriptor)
+    assert dump.read_bytes() == b"existing"
+
+
+def test_open_hash_dump_closes_owned_descriptor_on_setup_failures(
+        tmp_path, monkeypatch):
+    dump = tmp_path / "hashes.txt"
+    opened = []
+    closed = []
+    real_open = hr.os.open
+    real_close = hr.os.close
+
+    def tracked_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def tracked_close(fd):
+        closed.append(fd)
+        real_close(fd)
+
+    monkeypatch.setattr(hr.os, "open", tracked_open)
+    monkeypatch.setattr(hr.os, "close", tracked_close)
+    def fail_lock(_fd):
+        raise OSError(11, "busy")
+
+    monkeypatch.setattr(hr, "_acquire_dump_lock", fail_lock)
+    with pytest.raises(OSError, match="busy"):
+        hr._open_hash_dump(str(dump))
+    assert closed == opened
+
+    closed.clear()
+    monkeypatch.setattr(hr, "_acquire_dump_lock", lambda _fd: None)
+    real_fdopen = hr.os.fdopen
+    wrapped = []
+
+    class _FailingSeek:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def seek(self, *_args):
+            raise OSError("seek failed")
+
+        def close(self):
+            wrapped.append(True)
+            self._handle.close()
+
+    def failing_fdopen(fd, *args, **kwargs):
+        return _FailingSeek(real_fdopen(fd, *args, **kwargs))
+
+    monkeypatch.setattr(hr.os, "fdopen", failing_fdopen)
+    with pytest.raises(OSError, match="seek failed"):
+        hr._open_hash_dump(str(dump))
+    assert wrapped == [True]
+
+    monkeypatch.undo()
+    real_fstat = hr.os.fstat
+
+    def fail_fstat(_fd):
+        raise OSError("stat failed")
+
+    monkeypatch.setattr(hr.os, "fstat", fail_fstat)
+    state = {"writer": None}
+    assert hr._setup_hash_dump(str(dump), state) is None
+    assert state["writer"] is None
+    monkeypatch.setattr(hr.os, "fstat", real_fstat)
+    state = {"writer": None}
+    assert hr._setup_hash_dump(str(dump), state) is not None
+    state["writer"].close()
 
 
 def test_read_window_chunks_match_single_read(tmp_path, monkeypatch):
