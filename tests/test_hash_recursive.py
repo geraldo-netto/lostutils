@@ -4328,8 +4328,8 @@ def test_hash_dump_provisional_tokens_are_unique_per_inode(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="hardlinks via os.link (POSIX)")
-def test_alias_cap_artifact_round_trips_through_consumers(tmp_path):
-    """hr-api-70: real producer output remains valid for both consumers."""
+def test_alias_cap_artifact_round_trips_through_removal_planner(tmp_path):
+    """hr-api-70: real producer output remains valid for the removal planner."""
     payload = b"shared-content-payload"
     a = tmp_path / "a1.bin"; a.write_bytes(payload)
     os.link(a, tmp_path / "a2.bin")     # 3 hardlinks to inode A
@@ -4379,21 +4379,6 @@ def test_alias_cap_artifact_round_trips_through_consumers(tmp_path):
     assert remove_paths
     assert str(real_marker_name) in remove_paths
     assert all(Path(path).is_file() for path in remove_paths)
-
-    numpy = subprocess.run(
-        [
-            os.fspath(sys.executable),
-            os.fspath(_PATH.parent / "dedupl_numpy.py"),
-            os.fspath(artifact),
-        ],
-        check=True,
-        capture_output=True,
-        timeout=10,
-    )
-    numpy_paths = [os.fsdecode(path) for path in numpy.stdout.splitlines()]
-    assert numpy_paths
-    assert os.fsdecode(os.fsencode(str(real_marker_name))) in numpy_paths
-    assert all(Path(path).is_file() for path in numpy_paths)
 
 
 def test_progress_stall_monitor_worker_checks_until_stopped(monkeypatch):

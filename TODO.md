@@ -7,18 +7,6 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 
-### `dedupl_numpy.py`
-
-| id | status | severity | effort | description |
-|---|---|---|---|---|
-| dnp-doc-60 | open | high | low | README.md:64 — [documentation] Replace the destructive `dedupl_numpy.py --print0` example with a non-destructive consumer or explicitly explain that it deletes every copy; `group_duplicates` selects all members of each repeated-hash group, so the documented `xargs -0 rm -f --` pipeline preserves no survivor. Also correct line 59: hash width is inferred, not fixed at 32 bytes. |
-| dnp-val-70 | open | low | low | dedupl_numpy.py:132 — [input validation / command safety] `_decode_record_path` catches only `JSONDecodeError`/`ValueError`; a `@lostutils-json:[[[[...` payload with 100k brackets raises `RecursionError` and crashes with a traceback instead of counting a skipped record (same at remove-deduplv3.py:78). Add `RecursionError` to the except clause or bound payload length. |
-| dnp-val-60 | open | medium | low | dedupl_numpy.py:140 — [input validation / command safety] Reject empty paths, embedded NULs, and unencodable JSON surrogates before emitting decoded paths; `"first\u0000second"` produces two operands under `--print0`, `"\ud800"` raises an uncaught UnicodeEncodeError, and a CRLF record with an empty path is accepted. Validate decoded and raw paths and report malformed records consistently. |
-| dnp-obs-71 | open | low | low | dedupl_numpy.py:163-165 — [observability / operability] In line mode a raw path containing `\r` is flagged `unprintable` and "kept escaped" via `path = raw`, but `raw` is the same bytes, so the CR is written anyway while stderr claims it was left escaped. Only fall back to `raw` for tagged forms; otherwise drop the record and report it as malformed. |
-| dnp-rel-70 | open | high | low | dedupl_numpy.py:44-48 — [reliability / correctness] `_record_layout` sets `path_offset = first_space + 1`, but hash-recursive-ai5.py's `--hashes-file` dump pads the digest with `ljust(158)`, so every emitted path carries the padding (reproduced: 94 leading spaces per path; `--print0 \| xargs -0 rm` targets nonexistent names). Locate the path start as the first non-space byte after the digest. |
-| dnp-ux-70 | open | low | low | dedupl_numpy.py:51-52 — [UI / UX] A single empty line (e.g. trailing `\n\n` after concatenating hash files) aborts the run with `error: every record must contain a hash and nonempty path` and no line number, whereas remove-deduplv3.py skips and counts such lines. Skip empty records and report the first offending 1-based line in every layout error. |
-| dnp-obs-70 | open | low | low | dedupl_numpy.py:64-65 — [observability / operability] `_open_input` returns `None` when `st_size == 0`, which `fstat` also reports for a pipe, so `cat hashes.txt \| dedupl_numpy.py /dev/stdin` exits 0 with no output and no message. Check `stat.S_ISREG` and fail with a clear error for non-regular input, and print the `equal files: 0 / 0` summary for a genuinely empty file. |
-
 ### `deduplicate-by-namev3.py`
 
 | id | status | severity | effort | description |
@@ -64,6 +52,7 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
+| dnp-val-70 | open | low | low | remove-deduplv3.py:78 — [input validation / command safety] `_decode_record_path` still raises an uncaught `RecursionError` for a `@lostutils-json:[[[[...` payload with 100k brackets. Catch the recursion failure or bound payload nesting and count the record as skipped. Add a permanent CLI regression proving malformed nested JSON does not produce a traceback and valid records still reach the removal plan. |
 
 ## Blocked / Deferred
 
@@ -80,7 +69,6 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 | bt-dead-50 | wont_fix | low | — | bookmark-tidy.py:1754-1758 — Keep the private helper's defensive missing-model guard; direct callers get a typed `UserError` even though the production caller already guards it. |
-| dnp-i18n-01 | wont_fix | low | — | dedupl_numpy.py:21-30,228-259 — No translation catalog for this developer CLI unless localization becomes a product requirement; hard-coded English is accepted. |
 | dnv3-i18n-01 | wont_fix | low | — | deduplicate-by-namev3.py:54-62,162-261 — No translation catalog for this developer CLI unless localization becomes a product requirement; hard-coded English is accepted. |
 | hr-plat-05 | rejected | low | — | hash-recursive-ai5.py:2028-2041 — Text-mode hash-dump offsets remain valid on Windows because `tell()`/`seek()` use compatible cookies and the patched fixed-width digest contains no newline. |
 | ie-obs-51 | rejected | low | — | import_events.py:1000-1022 — `_redirect_stdout_stderr` does not swallow other-worker logs because startup logging owns a duplicated real stderr descriptor. |

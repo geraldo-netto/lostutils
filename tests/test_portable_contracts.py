@@ -14,7 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PORTABLE_SCRIPTS = (
-    "bookmark-tidy.py", "dedupl_numpy.py", "deduplicate-by-namev3.py",
+    "bookmark-tidy.py", "deduplicate-by-namev3.py",
     "hash-recursive-ai5.py", "import_events.py", "link_queue.py",
     "minikeypad.py", "organize_by_extension.py", "remove-deduplv3.py",
 )

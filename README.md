@@ -10,7 +10,6 @@ There is no repository-wide requirements file. Install only the third-party pack
 | --- | --- | --- |
 | `bookmark-tidy.py` | Merge Chrome, Edge, Firefox, and Netscape bookmark exports or plain-text URL lists, dedupe URLs, preserve immutable folders, and recategorize mutable links with a local llama.cpp model. | Optional `llama-cpp-python` for categorization |
 | `deduplicate-by-namev3.py` | Find near-duplicate text lines with batched Levenshtein distance. | `numpy`, `rapidfuzz` |
-| `dedupl_numpy.py` | Fast duplicate-path extraction from a legacy fixed-width hash file. | `numpy` |
 | `hash-recursive-ai5.py` | Recursively find duplicate files with staged BLAKE3 hashing. | `blake3` |
 | `import_events.py` | Extract calendar events from `.ics`, text, image, and PDF files. | Optional extraction backends; see below. |
 | `link_queue.py` | Tk GUI for routing pasted links to configured commands. | `pyyaml`; Tk bindings for Python |
@@ -52,29 +51,16 @@ python3 deduplicate-by-namev3.py names.txt --threshold 7 --workers -1
 
 The script lowercases and normalizes each line before comparing. `--threshold` is the maximum Levenshtein distance to report, clamped internally to the `uint8` matrix limit. `--workers -1` uses all cores supported by RapidFuzz.
 
-### `dedupl_numpy.py`
-
-Processes a legacy hash file in a vectorized NumPy pass:
-
-```bash
-python3 dedupl_numpy.py hashes.txt
-```
-
-It groups records by a 32-byte hash at the start of each line, prints duplicate paths, then prints an `equal files:` summary.
-
-Paths written in the tagged JSON form `@lostutils-json:<json>` (what `hash-recursive-ai5.py` emits for a filename that would not survive the `<hash> <path>` split) are decoded back to the real path, the same way `remove-deduplv3.py` decodes them. A path containing a newline cannot be written into a newline-separated stream, so it stays escaped and is reported on stderr; `--print0` (`-0`) separates records with NUL instead and emits those paths literally:
-
-```bash
-python3 dedupl_numpy.py --print0 hashes.txt | xargs -0 rm -f --
-```
-
 ### `remove-deduplv3.py`
 
 Reads a hash file where each line is `<hash><whitespace><path>` (including the tagged JSON path representation emitted for line-breaking filenames) and emits quoted `rm -f` commands for duplicates while keeping the entry with the longest basename:
 
 ```bash
-python3 remove-deduplv3.py hashes.txt > remove-duplicates.sh
+python3 hash-recursive-ai5.py /path/to/tree > hashes.txt &&
+  python3 remove-deduplv3.py hashes.txt > remove-duplicates.sh
 ```
+
+This creates the removal plan only after a successful scan. Review `remove-duplicates.sh` before executing it; these two commands do not delete files.
 
 It auto-detects common Unicode BOMs, defaults to UTF-8 with `surrogateescape`, and accepts `--encoding` or `--strict` when needed. The script writes a summary to stderr.
 
