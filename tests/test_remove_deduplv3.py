@@ -2,6 +2,8 @@
 import builtins
 import io
 import importlib.util
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,23 @@ _PATH = Path(__file__).resolve().parent.parent / "remove-deduplv3.py"
 _spec = importlib.util.spec_from_file_location("remove_deduplv3", _PATH)
 rd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rd)
+
+
+@pytest.mark.parametrize("comment_kind", ["saving", "case_conflict"])
+def test_rdv3_sec_60_comments_cannot_execute_shell_commands(tmp_path, comment_kind):
+    if shutil.which("sh") is None:
+        pytest.skip("POSIX shell unavailable")
+    payload = "long-survivor-name\nprintf AUDIT_MARKER\n#"
+    paths = [payload, payload.upper()] if comment_kind == "case_conflict" else [payload, "x"]
+    out = []
+    rd._emit_remove_commands({"h": paths}, out.append)
+    result = subprocess.run(
+        ["sh"], input="rm() { :; }\n" + "".join(out), text=True,
+        capture_output=True, cwd=tmp_path, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert "\\n" in "".join(out)
 
 
 def test_missing_input_clean_error_exit2(monkeypatch, tmp_path, capsys):

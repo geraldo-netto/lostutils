@@ -211,15 +211,20 @@ def _case_variant_conflicts(paths):
     return {path for same in by_fold.values() if len(same) > 1 for path in same}
 
 
+def _comment_text(value):
+    """Keep untrusted text on one shell comment line (rdv3-sec-60)."""
+    return json.dumps(value, ensure_ascii=True)[1:-1]
+
+
 def _emit_case_variant_warning(digest, conflicts, out):
     out(
         "# duplicates: {hash}\n"
         "# SKIPPED: these paths differ only by letter case, so on a\n"
         "#   case-insensitive filesystem they are one file and removing\n"
         "#   either would delete the copy the other one names:\n"
-    .format(hash=digest))
+    .format(hash=_comment_text(digest)))
     for path in sorted(conflicts):
-        out(f"#   {path}\n")
+        out(f"#   {_comment_text(path)}\n")
     out("\n")
 
 
@@ -248,7 +253,8 @@ def _emit_group_commands(digest, paths, out):
         return 0
     keep = _survivor(paths)
     to_remove = [p for p in paths if p != keep]
-    out("# duplicates: {hash}\n# saving: {path}\n".format(hash=digest, path=keep))
+    out("# duplicates: {hash}\n# saving: {path}\n".format(
+        hash=_comment_text(digest), path=_comment_text(keep)))
     for quoted in _chunked_quoted(to_remove):
         out(f"{RM_COMMAND_PREFIX} {quoted}\n")
     out("\n")
