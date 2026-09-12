@@ -23,6 +23,36 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+def test_ie_dep_70_missing_llama_aborts_before_download(tmp_path, monkeypatch):
+    folder = tmp_path / "input"
+    folder.mkdir()
+    for index in range(3):
+        (folder / f"{index}.txt").write_text("Meeting details")
+    attempts = []
+    monkeypatch.setattr(import_events, "ensure_models_exist", lambda cfg: attempts.append(True))
+    monkeypatch.setitem(sys.modules, "llama_cpp", None)
+    import_events.reset_llm_cache()
+    output = tmp_path / "events.json"
+    code = import_events._run_main([str(folder), "-o", str(output), "--workers", "1"])
+    assert code == 2
+    assert attempts == []
+    assert json.loads(output.read_text()) == []
+    assert import_events.extraction_failure_count() == 0
+
+
+def test_ie_dep_70_bootstrap_failure_is_model_unavailable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "llama_cpp", types.SimpleNamespace(Llama=object, llama_cpp=object()))
+    monkeypatch.setitem(sys.modules, "llama_cpp.llama_chat_format",
+                        types.SimpleNamespace(Qwen25VLChatHandler=object))
+
+    def broken(config):
+        raise ValueError("invalid projector")
+
+    monkeypatch.setattr(import_events, "ensure_models_exist", broken)
+    with pytest.raises(import_events.ModelUnavailableError, match="invalid projector"):
+        import_events.get_llm()
+
+
 def test_ie_watch_70_trickle_reads_preserve_received_bytes(tmp_path):
     client, server = socket.socketpair()
     client.settimeout(0.3)

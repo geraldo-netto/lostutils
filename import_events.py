@@ -1322,7 +1322,7 @@ def _download_to_cache(url: str, path_str: str) -> None:
 
 
 class ModelUnavailableError(RuntimeError):
-    """A required model could not be downloaded/verified after retries.
+    """A required model/runtime could not be imported, obtained, or initialized.
 
     Carries the events extracted before the failure (ie-robust-01) so the run
     can still emit a partial result before aborting instead of losing all
@@ -1541,26 +1541,35 @@ def _llm_cache_key(config: ModelConfig) -> Tuple[Any, ...]:
 
 def get_llm(config: Optional[ModelConfig] = None):
     """Lazily initializes the local Qwen2.5-VL model with a bounded LRU cache."""
-    config = config or ModelConfig()
+    try:
+        return _get_llm_client(config or ModelConfig())
+    except ModelUnavailableError:
+        raise
+    except Exception as exc:
+        raise ModelUnavailableError(f"LLM bootstrap failed: {exc}") from exc
+
+
+def _get_llm_client(config: ModelConfig):
     cache_limit = max(0, config.llm_cache_size)
     with _LLM_CACHE_LOCK:
+        key = _llm_cache_key(config)
+        cached = _LLM_CACHE.get(key) if cache_limit else None
+        if cached is not None:
+            ensure_models_exist(config)
+            _LLM_CACHE.move_to_end(key)
+            _trim_llm_cache(cache_limit)
+            return cached
+
+        _prepare_vulkan_environment()
+        from llama_cpp import Llama, llama_cpp
+        from llama_cpp.llama_chat_format import Qwen25VLChatHandler
+
         ensure_models_exist(config)
         key = _llm_cache_key(config)
         if cache_limit == 0:
             cached = _LLM_CACHE.pop(key, None)
             if cached is not None:
                 _close_cached_llm(cached)
-        else:
-            cached = _LLM_CACHE.get(key)
-            if cached is not None:
-                _LLM_CACHE.move_to_end(key)
-                _trim_llm_cache(cache_limit)
-                return cached
-
-        _prepare_vulkan_environment()
-        from llama_cpp import Llama, llama_cpp
-        from llama_cpp.llama_chat_format import Qwen25VLChatHandler
-
         cached, effective_gpu_layers = _load_llm_client(
             config, Llama, Qwen25VLChatHandler, llama_cpp)
         _log_llm_device(config, effective_gpu_layers)
