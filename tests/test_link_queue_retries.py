@@ -246,3 +246,29 @@ def test_lq_rel_91_real_worker_retries_after_cooldown_until_process_succeeds(dis
             dispatcher._dispatch_cv.notify_all()
         worker.join(2)
         assert not worker.is_alive()
+
+
+@pytest.mark.parametrize('blocked_by', ['cap', 'cooldown'])
+def test_lq_rel_92_credentials_share_domain_limits(dispatcher, blocked_by):
+    first = item('https://alice:secret@www.Example.test:8443/a')
+    second = item('https://bob:other@example.test:8443/b')
+    dispatcher.config['max_per_domain'] = 1
+    dispatcher.queue_items[:] = [first, second]
+    if blocked_by == 'cooldown':
+        dispatcher._trigger_failure_cooldown(0, first, 1)
+        dispatcher.queue_items[:] = [second]
+    with dispatcher._dispatch_cv:
+        if blocked_by == 'cap':
+            assert dispatcher._try_claim_item(0) == first
+        assert dispatcher._try_claim_item(1) is None
+    assert dispatcher._domain_of(first) == 'example.test:8443'
+
+
+@pytest.mark.parametrize('url,expected', [
+    ('https://user:secret@[2001:db8::1]:8443/a', '[2001:db8::1]:8443'),
+    ('https://user:secret@[2001:db8::1]/a', '[2001:db8::1]'),
+    ('https://user:secret@example.test:invalid/a', '_unknown'),
+    ('https://user:secret@example.test:99999/a', '_unknown'),
+])
+def test_lq_rel_92_domain_keys_handle_ipv6_and_invalid_ports(dispatcher, url, expected):
+    assert dispatcher._domain_of(url) == expected

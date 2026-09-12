@@ -2217,7 +2217,7 @@ class Dispatcher:
         when other domains (vimeo, bandcamp, …) are also queued.
 
         Normalises:
-          * uses urlparse netloc (host[:port])
+          * uses hostname without credentials, retaining explicit ports
           * lower-cases
           * strips a leading "www." so "www.youtube.com" and "youtube.com"
             count as the SAME domain
@@ -2228,13 +2228,14 @@ class Dispatcher:
         url = item.url if isinstance(item, QueueItem) else str(item)
         try:
             parsed = urlparse(url)
+            host = (parsed.hostname or "").lower().removeprefix("www.")
+            port = parsed.port
         except Exception:
             return "_unknown"
-        host = (parsed.netloc or "").lower()
-        if host.startswith("www."):
-            host = host[4:]
         if host:
-            return host
+            if ":" in host:
+                host = f"[{host}]"
+            return f"{host}:{port}" if port is not None else host
         scheme = (parsed.scheme or "").lower()
         return scheme or "_unknown"
 
