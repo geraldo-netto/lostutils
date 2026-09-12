@@ -21,6 +21,15 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+@pytest.mark.parametrize("end", ["2026-02-01", "2026-02-01T12:00:00"])
+def test_ie_api_70_all_day_equal_end_is_omitted(end):
+    from icalendar import Calendar
+    raw = import_events.build_ics([{"title": "Meeting", "start": "2026-02-01", "end": end}])
+    event = Calendar.from_ical(raw).walk("VEVENT")[0]
+    assert event.decoded("DTSTART") == date(2026, 2, 1)
+    assert "DTEND" not in event
+
+
 @pytest.mark.parametrize("title", ["2 Marathon", "2 Runners", "2 Topics: follow-up", "2 Hikers"])
 def test_ie_rel_81_bare_title_number_is_not_a_clock(title):
     text = f"Calendar 2026\nDate Activity\n01/02 {title}"

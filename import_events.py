@@ -4631,6 +4631,9 @@ def _add_ics_end(component: Any, event: Dict[str, Any], start: Any) -> None:
     if end is None:
         return
     matched_end = _match_end_to_start(start, end)
+    if not isinstance(start, datetime) and matched_end == start:
+        # A DATE DTEND is exclusive; omitting it means one day (ie-api-70).
+        return
     if _end_precedes_start(start, matched_end):
         logger.warning("Skipping event end before start for %s: %r < %r",
                        event.get("title"), event.get("end"), event.get("start"))
