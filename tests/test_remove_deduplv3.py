@@ -16,6 +16,44 @@ rd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rd)
 
 
+@pytest.mark.parametrize("alias", ["./file.txt", "sub/../file.txt", "absolute", "dir_link/file.txt"])
+def test_rdv3_di_60_path_alias_cannot_remove_its_survivor(tmp_path, monkeypatch, alias):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "file.txt").write_bytes(b"keep")
+    (tmp_path / "sub").mkdir()
+    if alias.startswith("dir_link"):
+        (tmp_path / "dir_link").symlink_to(tmp_path, target_is_directory=True)
+    if alias == "absolute":
+        alias = str(tmp_path / "file.txt")
+    output = []
+    counts = rd._emit_remove_commands({"h": ["file.txt", alias]}, output.append)
+    assert counts == (0, 0)
+    assert "rm -f --" not in "".join(output)
+    assert (tmp_path / "file.txt").read_bytes() == b"keep"
+
+
+def test_rdv3_di_60_keeps_distinct_hardlink_entries(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "long-survivor.txt"
+    source.write_bytes(b"keep")
+    (tmp_path / "short.txt").hardlink_to(source)
+    output = []
+    assert rd._emit_remove_commands(
+        {"h": ["long-survivor.txt", "./long-survivor.txt", "short.txt"]},
+        output.append,
+    ) == (1, 1)
+    assert "rm -f -- short.txt\n" in "".join(output)
+
+
+def test_rdv3_di_60_normalized_case_aliases_are_withheld(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    output = []
+    assert rd._emit_remove_commands(
+        {"h": ["Photos/image.jpg", "photos/./image.jpg"]}, output.append,
+    ) == (0, 0)
+    assert "SKIPPED" in "".join(output)
+
+
 @pytest.mark.parametrize("value, flags, skipped", [
     ("\udcff", ["--strict"], True), ("\ud800", [], True),
     ("\udcff", [], False), ("café", ["--strict"], False),

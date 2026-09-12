@@ -75,7 +75,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| rdv3-di-60 | open | high | medium | remove-deduplv3.py:234 — [data integrity] Collapse or conservatively reject path aliases before selecting a survivor; records for `file.txt` and `./file.txt` currently promise to save `file.txt` while emitting `rm -f -- ./file.txt`, deleting that same directory entry. Cover normalized relative/absolute spellings and directory aliases without conflating distinct hardlink entries. |
 | rdv3-rob-80 | open | low | low | remove-deduplv3.py:318 — [robustness / recovery] Flush stdout inside the BrokenPipeError handler's protected block. For a small hash group, writes stay buffered until interpreter shutdown, bypassing the existing _silence_stdout_after_broken_pipe call; a subprocess with its pipe reader already closed exits 120 with 'Exception ignored while flushing sys.stdout'. Flush before reporting success and cover a real closed pipe, not only a write stub. |
 
 ## Blocked / Deferred

@@ -28,6 +28,7 @@ import argparse
 import io
 import json
 import os
+import posixpath
 import shlex
 import sys
 from collections import defaultdict
@@ -202,7 +203,20 @@ def _chunked_quoted(paths, limit=RM_ARGV_BYTE_LIMIT):
         yield " ".join(chunk)
 
 
-def _case_variant_conflicts(paths):
+def _path_entries(paths):
+    """Identify directory entries, preserving distinct hardlink basenames."""
+    parents = {}
+    entries = {}
+    for path in paths:
+        parent, name = posixpath.split(path)
+        if parent not in parents:
+            parents[parent] = os.path.realpath(parent or ".")
+        key = posixpath.join(parents[parent], name)
+        entries.setdefault(key, path)
+    return entries
+
+
+def _case_variant_conflicts(entries):
     """Paths in a group that another path matches except for letter case.
 
     rdv3-plat-03: on NTFS or the APFS default those spellings name one file,
@@ -212,8 +226,8 @@ def _case_variant_conflicts(paths):
     so the conservative reading wins on both.
     """
     by_fold = {}
-    for path in paths:
-        by_fold.setdefault(path.casefold(), []).append(path)
+    for key, path in entries.items():
+        by_fold.setdefault(key.casefold(), []).append(path)
     return {path for same in by_fold.values() if len(same) > 1 for path in same}
 
 
@@ -246,11 +260,11 @@ def _emit_remove_commands(groups, out):
 
 
 def _unambiguous_paths(digest, paths, out):
-    paths = list(dict.fromkeys(paths))
-    conflicts = _case_variant_conflicts(paths)
+    entries = _path_entries(paths)
+    conflicts = _case_variant_conflicts(entries)
     if conflicts:
         _emit_case_variant_warning(digest, conflicts, out)
-    return [p for p in paths if p not in conflicts]
+    return [p for p in entries.values() if p not in conflicts]
 
 
 def _emit_group_commands(digest, paths, out):
