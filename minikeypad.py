@@ -241,10 +241,7 @@ class KeypadDevice:
         self.ep_out: Any = None    # OUT endpoint, or None -> control SET_REPORT
         self.intf: Any = None
         self._detached = False
-        # mkp-plat-01: the connection poller runs once a second for the life of
-        # the process, so a permanent condition must be reported once, not
-        # every tick.
-        self._backend_missing_logged = False
+        self._connection_errors: tuple[str, ...] = ()
         self._lock = threading.RLock()
 
     @property
@@ -259,11 +256,12 @@ class KeypadDevice:
             if self.dev is not None:
                 return True
             dev: Any = None
+            errors: list[str] = []
             try:
                 dev = usb.core.find(idVendor=VID, idProduct=PID)
                 if dev is None:
                     return False
-                self._detach_kernel_driver(dev)
+                self._detach_kernel_driver(dev, errors)
                 intf = self._claim_interface(dev)
                 ep_out: Any = usb.util.find_descriptor(
                     intf,
@@ -278,34 +276,30 @@ class KeypadDevice:
                          f"out_ep={'ctrl' if ep_out is None else hex(ep_out.bEndpointAddress)}")
                 return True
             except usb.core.NoBackendError:
-                self._report_missing_backend()
+                errors.append(
+                    "No USB backend: pyusb is installed but libusb-1.0 is not. "
+                    "Install libusb-1.0 (Windows: a libusb driver/DLL; "
+                    "macOS: `brew install libusb`). Retrying quietly.")
                 self._rollback_connect(dev)
                 return False
             except usb.core.USBError as e:
-                self.log(f"USB error on connect: {e}")
+                errors.append(f"USB error on connect: {e}")
                 self._rollback_connect(dev)
                 return False
             except Exception as e:  # pragma: no cover
-                self.log(f"connect() failed: {e}")
+                errors.append(f"connect() failed: {e}")
                 self._rollback_connect(dev)
                 return False
+            finally:
+                self._log_connection_changes(errors)
 
-    def _report_missing_backend(self) -> None:
-        """Say what is missing once, instead of once per poll.
-
-        mkp-plat-01: pyusb imports fine without libusb, which is the default
-        state on Windows and macOS, and then every `usb.core.find` raises
-        NoBackendError. On Linux with no device attached `find` just returns
-        None and the poll is silent, so this noise is platform-asymmetric —
-        and the generic handler's message never said libusb was the problem.
-        """
-        if self._backend_missing_logged:
-            return
-        self._backend_missing_logged = True
-        self.log(
-            "No USB backend: pyusb is installed but libusb-1.0 is not. "
-            "Install libusb-1.0 (Windows: a libusb driver/DLL; "
-            "macOS: `brew install libusb`). Retrying quietly.")
+    def _log_connection_changes(self, errors: list[str]) -> None:
+        # Compare whole polls: detach and claim can both fail on every attempt.
+        # An error-free poll resets suppression so a recurrence is reported.
+        previous, self._connection_errors = self._connection_errors, tuple(errors)
+        for message in errors:
+            if message not in previous:
+                self.log(message)
 
     def _rollback_connect(self, dev: Any) -> None:
         if dev is None:
@@ -313,7 +307,7 @@ class KeypadDevice:
         self.dev = dev
         self.close()
 
-    def _detach_kernel_driver(self, dev: Any):
+    def _detach_kernel_driver(self, dev: Any, errors: list[str]):
         """Detach usbhid from the HID interface so we can claim it (Linux)."""
         try:
             if dev.is_kernel_driver_active(HID_INTERFACE):
@@ -322,8 +316,8 @@ class KeypadDevice:
         except NotImplementedError:
             pass  # non-Linux backend: nothing to detach
         except usb.core.USBError as e:
-            self.log(f"Cannot detach kernel driver on interface {HID_INTERFACE} "
-                     f"(need root or a udev rule?): {e}")
+            errors.append(f"Cannot detach kernel driver on interface {HID_INTERFACE} "
+                          f"(need root or a udev rule?): {e}")
 
     @staticmethod
     def _claim_interface(dev: Any) -> Any:

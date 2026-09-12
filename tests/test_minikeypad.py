@@ -2976,8 +2976,8 @@ def test_missing_libusb_backend_is_reported_once(monkeypatch):
     assert "libusb" in logs[0]
 
 
-def test_a_real_usb_error_is_still_reported_every_time(monkeypatch):
-    """Only the permanent no-backend condition is deduplicated."""
+def test_mkp_obs_70_repeated_usb_error_is_reported_once(monkeypatch):
+    """mkp-obs-70: unchanged connection failures must not flood the log."""
     usb, USBError = make_usb()
 
     def failing(**_kwargs):
@@ -2991,8 +2991,54 @@ def test_a_real_usb_error_is_still_reported_every_time(monkeypatch):
     assert device.connect() is False
     assert device.connect() is False
 
-    assert len(logs) == 2
+    assert len(logs) == 1
     assert all("device busy" in message for message in logs)
+
+
+@pytest.mark.parametrize("recovery", ["absent", "connected"])
+def test_mkp_obs_70_changed_and_recurring_usb_errors_are_reported(monkeypatch, recovery):
+    usb, USBError = make_usb(ep=FakeEP())
+    state = ["busy"]
+
+    def find(**_kwargs):
+        if state[0] is not None:
+            raise USBError(state[0])
+        if recovery == "connected":
+            return FakeUsbDev(cfg={(1, 0): FakeIntf(1)})
+        return None
+
+    usb.core.find = find
+    _install_usb(monkeypatch, usb)
+    logs = []
+    device = minikeypad.KeypadDevice(log=logs.append)
+    for error in ["busy", "busy", "denied", "denied", "busy", None, "busy"]:
+        state[0] = error
+        device.connect()
+        if device.connected:
+            device.close()
+
+    errors = [message for message in logs if "USB error" in message]
+    assert errors == [f"USB error on connect: {error}" for error in ["busy", "denied", "busy", "busy"]]
+
+
+def test_mkp_obs_70_detach_and_claim_errors_are_deduplicated_together(monkeypatch):
+    usb, USBError = make_usb()
+    dev = FakeUsbDev(detach_exc=USBError("denied"), cfg_exc=USBError("denied"))
+    usb.core._find_dev = dev
+    _install_usb(monkeypatch, usb)
+    logs = []
+    device = minikeypad.KeypadDevice(log=logs.append)
+
+    for _ in range(5):
+        assert device.connect() is False
+    assert len(logs) == 2
+    assert "Cannot detach" in logs[0]
+    assert "USB error on connect" in logs[1]
+
+    dev.cfg_exc = USBError("device busy")
+    assert device.connect() is False
+    assert len(logs) == 3
+    assert logs[-1] == "USB error on connect: device busy"
 
 
 # --- mkp-plat-02: named fonts are whole specs, not family names ------------

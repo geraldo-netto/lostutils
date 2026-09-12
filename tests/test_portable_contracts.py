@@ -290,8 +290,10 @@ def test_usb_backend_without_kernel_driver_support_degrades(isolated):
             raise NotImplementedError("backend has no kernel-driver interface")
 
     device = module.KeypadDevice()
-    device._detach_kernel_driver(UnsupportedKernelDriver())
+    errors = []
+    device._detach_kernel_driver(UnsupportedKernelDriver(), errors)
     assert not device._detached
+    assert errors == []
 
 
 def test_hardlink_fallback_when_no_follow_keyword_is_unsupported(isolated, monkeypatch):
