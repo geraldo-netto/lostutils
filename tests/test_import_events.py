@@ -21,6 +21,17 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+@pytest.mark.parametrize("text, limit", [("€" * 100, 16), ("ação " * 100, 17), ("😀" * 100, 19)])
+def test_ie_rel_70_utf8_window_does_not_trigger_encoding_sniffer(tmp_path, monkeypatch, text, limit):
+    source = tmp_path / "text.txt"
+    source.write_text(text, encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(import_events, "_sniff_text_encoding", lambda raw: calls.append(raw) or "latin-1")
+    result = import_events._read_text(source, max_chars=100, max_bytes=limit)
+    assert result == text.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+    assert calls == []
+
+
 @pytest.fixture(autouse=True)
 def _reset_paddle_runtime_state():
     import_events.reset_model_verification_cache()

@@ -16,6 +16,7 @@ import importlib.metadata
 import secrets
 import logging
 import argparse
+import codecs
 import faulthandler
 import math
 import tempfile
@@ -2547,14 +2548,14 @@ def _sniff_text_encoding(raw: bytes) -> Optional[str]:
         return None
 
 
-def _decode_text_bytes(raw: bytes, source: str) -> str:
+def _decode_text_bytes(raw: bytes, source: str, *, final: bool = True) -> str:
     """Decode untrusted document bytes, preferring real encodings over the old
     lossy UTF-8 (ie-i18n-02). Clean UTF-8 (the common case) is unchanged and
     silent; a non-UTF-8 document is decoded via a sniffed encoding when a
     detector is available, else lossily with a WARNING so mangling is visible
     rather than silent. latin-1 / errors='replace' never raise."""
     try:
-        return raw.decode("utf-8")
+        return codecs.getincrementaldecoder("utf-8")().decode(raw, final=final)
     except UnicodeDecodeError:
         pass
     encoding = _sniff_text_encoding(raw)
@@ -2580,7 +2581,8 @@ def _read_text(file_path: Path, max_chars: int = MAX_CONTENT_CHARS,
     # usable, unlike a prefix of an image.
     with open(file_path, "rb") as f:
         raw = f.read(min(max(1, max_chars) * 4, max_bytes))
-    return _decode_text_bytes(raw, file_path.name)[:max_chars]
+        complete = len(raw) >= os.fstat(f.fileno()).st_size
+    return _decode_text_bytes(raw, file_path.name, final=complete)[:max_chars]
 
 
 def _warn_once(key: str, message: str, *args: Any) -> None:
