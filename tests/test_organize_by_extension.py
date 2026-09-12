@@ -18,6 +18,29 @@ import pytest
 from hypothesis import given, settings, strategies as st
 
 import organize_by_extension
+
+
+@pytest.mark.parametrize("failure", ["mkdir", "rename"])
+def test_oze_test_82_quarantine_setup_rolls_back_move(tmp_path, monkeypatch, failure):
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"preserve me")
+    destination = tmp_path / "bucket"
+
+    def refuse(*args, **kwargs):
+        raise OSError(errno.EACCES, "quarantine setup denied")
+
+    if failure == "mkdir":
+        monkeypatch.setattr(organize_by_extension.tempfile, "mkdtemp", refuse)
+    else:
+        monkeypatch.setattr(organize_by_extension.os, "rename", refuse)
+    with pytest.raises(OSError, match="quarantine setup denied"):
+        organize_by_extension.move_file(source, destination)
+
+    assert source.read_bytes() == b"preserve me"
+    assert list(destination.iterdir()) == []
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bucket", "source.txt"]
+
+
 from organize_by_extension import (
     ROOT_MAX_LENGTH,
     bucket_name,
