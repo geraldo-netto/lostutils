@@ -317,3 +317,25 @@ def test_lq_time_92_invalid_cooldowns_preserve_state(dispatcher, cooldowns):
     assert dispatcher.state_load_error
     dispatcher._save_state()
     assert path.read_bytes() == original
+
+
+def test_lq_ui_93_interrupted_rerun_restores_once(dispatcher):
+    original = item()._replace(attempts=2)
+    dispatcher.queue_items.append(original)
+    with dispatcher._dispatch_cv:
+        assert dispatcher._try_claim_item(0) is original
+    assert dispatcher._rerun_item(original)
+    assert not dispatcher._rerun_item(original)
+    dispatcher.stop_event.set()
+    assert not dispatcher._rerun_item(original)
+    dispatcher._release_item(0, original, interrupted=True)
+    dispatcher._save_state()
+    restored = lq.Dispatcher.headless(dict(dispatcher.config), state_path=dispatcher.state_path)
+    try:
+        restored._restore_queue_from_state()
+        assert list(restored.queue_items) == [original._replace(attempts=0)]
+        assert restored._domain_active == {}
+        assert not restored._rerun_item(item('https://stale.test/finished'))
+    finally:
+        restored.stop_event.set()
+        restored.close()

@@ -172,6 +172,8 @@ Every command attempt has a 30-minute timeout by default and may be shortened wi
 
 Queued links retry failed commands automatically. Set **Queued link attempts (including first)** in Settings → Dispatcher, or `max_attempts` in the YAML configuration. The default is **3 total attempts** (the initial try plus up to two retries); the minimum is **1**, which disables retries. Failed links remain in the pending queue and saved state while waiting, and their completed attempt count survives restart. They leave the queue after success or exhaustion, which is logged. Changing the limit applies to pending retries as well as new links. Command exit failures respect the existing per-domain `failure_sleep_seconds` cooldown (default 300 seconds), while other domains can continue; launch failures and timeouts retain the normal inter-item delay. Immediate-mode protocols still execute once.
 
+**Re-run** moves a selected pending item to the back with a fresh attempt budget. For a running item it schedules one fresh run after the current attempt finishes, replacing any automatic retry; repeated clicks while that attempt runs coalesce. The command and mapped flags are retained, cooldowns still apply, and the fresh budget survives shutdown or restart.
+
 In POSIX shell mode, write `{url_quoted}` and `{protocol}` as standalone words without surrounding quotes, for example `curl -- {url_quoted}`. Values are passed as shell arguments. The editor and runner reject bare `{url}`, quoted or embedded placeholders, backticks, and here-documents; use `$(...)` for command substitution. Shell mode is unavailable on Windows.
 
 On Windows, command output capture requires Python 3.12 or newer. Unsupported nonblocking pipes are reported as command failures.

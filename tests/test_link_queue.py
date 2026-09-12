@@ -2021,14 +2021,14 @@ def test_queue_copy_cmd(app):
 def test_queue_rerun(app):
     _setup_two_selected(app)
     app.pause_event.set()
-    app._on_queue_rerun()  # re-queues (already-pending -> duplicates skipped)
+    app._on_queue_rerun()  # resets the selected pending items
     pump(app, 0.2)
 
 
 def test_queue_rerun_logs_non_duplicate_count(app, monkeypatch):
     _setup_two_selected(app)
-    outcomes = iter(["duplicate", "queue"])
-    monkeypatch.setattr(app.dispatcher, "_process_link", lambda _url, _extra=(): next(outcomes))
+    outcomes = iter([False, True])
+    monkeypatch.setattr(app.dispatcher, "_rerun_item", lambda _item: next(outcomes))
 
     app._on_queue_rerun()
     pump(app, 0.2)
@@ -2048,10 +2048,9 @@ def test_queue_rerun_preserves_extra(app):
     app._do_refresh_queue_list()
     pump(app, 0.1)
     app.queue_tree.selection_set(*app.queue_tree.get_children())
-    captured = []
-    app.dispatcher._process_link = lambda url, extra=(): captured.append((url, extra))
     app._on_queue_rerun()
-    assert captured == [("http://x/1", (("-o", "clip.mp4"),))]
+    assert list(app.queue_items) == [item]
+    assert app.queue_items[0].extra == (("-o", "clip.mp4"),)
 
 
 def test_queue_actions_empty_selection(app):
@@ -6517,3 +6516,42 @@ def test_lq_ui_92_fast_retry_reorders_rows_preserving_selection(app):
     assert [app.queue_tree.set(iid, 'idx') for iid in children] == ['1', '2']
     assert app.queue_tree.selection() == (selected,)
     assert app.queue_tree.focus() == selected
+
+
+def test_lq_ui_93_pending_rerun_resets_budget_and_moves_to_back(app):
+    stop_bg_workers(app)
+    original = q('https://a.test/a', template='custom {url}')._replace(
+        attempts=2, extra=(('-o', 'keep name'),))
+    other = q('https://b.test/b')
+    app.queue_items[:] = [original, other]
+    app._do_refresh_queue_list()
+    app.queue_tree.selection_set(link_queue._queue_iid_for_item(original))
+    app._on_queue_rerun()
+    assert list(app.queue_items) == [other, original._replace(attempts=0)]
+    pump(app, 0.05)
+    assert 're-queued 1 item(s)' in app.log_text.get('1.0', 'end')
+
+
+def test_lq_ui_93_running_rerun_waits_and_persists_fresh_budget(app, monkeypatch):
+    stop_bg_workers(app)
+    dispatcher = app.dispatcher
+    original = q('https://a.test/a')._replace(attempts=1, extra=(('-o', 'keep name'),))
+    dispatcher.queue_items.append(original)
+    with dispatcher._dispatch_cv:
+        assert dispatcher._try_claim_item(0) == original
+    app._do_refresh_queue_list()
+    app.queue_tree.selection_set('r:0')
+    app._on_queue_rerun()
+    dispatcher._save_state()
+    assert dispatcher._load_state_items() == ([original._replace(attempts=0)], [])
+    with dispatcher._dispatch_cv:
+        assert dispatcher._try_claim_item(1) is None
+    app._on_queue_rerun()  # Coalesce repeated clicks while this attempt runs.
+    dispatcher._release_item(0, original, retry=original._replace(attempts=2))
+    assert list(dispatcher.queue_items) == [original._replace(attempts=0)]
+    calls = []
+    monkeypatch.setattr(dispatcher, '_run_item', lambda it, _: calls.append(it) or 0)
+    monkeypatch.setattr(dispatcher, '_get_sleep', lambda: 0)
+    dispatcher._worker_step(1, threading.Event())
+    assert calls == [original._replace(attempts=0)]
+    assert not dispatcher.queue_items

@@ -1363,6 +1363,7 @@ class Dispatcher:
         self._batch_dispatch_depth = 0
         self._batch_save_dirty = False
         self.current_items: dict[int, QueueItem | None] = {}
+        self._rerun_after: dict[int, QueueItem] = {}
         # Shutdown stops further claims, bounding these lists by active workers.
         self._interrupted_queue: list[QueueItem] = []
         self.metrics = {"timeouts": 0, "failures": 0, "completions": 0}
@@ -1518,8 +1519,8 @@ class Dispatcher:
         with self.queue_lock:
             pending = [self._serialize_item(it) for it in self.queue_items]
             in_flight = [
-                self._serialize_item(it)
-                for it in self.current_items.values() if it is not None
+                self._serialize_item(self._rerun_after.get(idx, it))
+                for idx, it in self.current_items.items() if it is not None
             ]
             in_flight.extend(self._serialize_item(it) for it in self._interrupted_queue)
         with self._immediate_lock:
@@ -2220,6 +2221,30 @@ class Dispatcher:
         ):
             return "running"
         return None
+
+    def _rerun_item(self, item: QueueItem) -> bool:
+        """Start a fresh budget for a selected item, retaining its command."""
+        fresh = item._replace(attempts=0)
+        with self._dispatch_cv:
+            if self.stop_event.is_set():
+                return False
+            if self.queue_items.urls.get(_pending_key(item)) is item:
+                self.queue_items.remove(item)
+                self.queue_items.append(fresh)
+            elif not self._schedule_running_rerun(item, fresh):
+                return False
+            self._dispatch_cv.notify_all()
+        self._refresh_queue_list()
+        self._persist_after_enqueue()
+        return True
+
+    def _schedule_running_rerun(self, item: QueueItem, fresh: QueueItem) -> bool:
+        # Caller owns queue_lock; one follow-up replaces automatic retries.
+        for idx, current in self.current_items.items():
+            if current is item and idx not in self._rerun_after:
+                self._rerun_after[idx] = fresh
+                return True
+        return False
 
     def _persist_after_enqueue(self) -> None:
         """Request a (debounced) save, or mark the batch save dirty so
@@ -3186,12 +3211,7 @@ class Dispatcher:
         the cv so any other waiting worker can re-evaluate."""
         domain = self._domain_of(item)
         with self._dispatch_cv:
-            if interrupted and self.current_items.get(idx) is item:
-                self._interrupted_queue.append(item)
-            elif retry is not None and self.current_items.get(idx) is item:
-                # Publish the retry and release its slot under the same lock:
-                # neither another worker nor a state snapshot may see both.
-                self.queue_items.append(retry)
+            self._publish_released_item(idx, item, interrupted, retry)
             self._domain_active[domain] = max(
                 0, self._domain_active.get(domain, 0) - 1
             )
@@ -3202,6 +3222,16 @@ class Dispatcher:
             self.current_items[idx] = None
             self._dispatch_cv.notify()
         self._request_save_state()
+
+    def _publish_released_item(self, idx, item, interrupted, retry) -> None:
+        # Publication and slot release share queue_lock, preventing overlap.
+        if self.current_items.get(idx) is not item:
+            return
+        rerun = self._rerun_after.pop(idx, None)
+        if interrupted:
+            self._interrupted_queue.append(rerun or item)
+        elif next_item := rerun or retry:
+            self.queue_items.append(next_item)
 
     def _worker_loop(self, idx: int, stop_self: threading.Event) -> None:
         # Register our current-items slot (WorkerPool no longer does this for
@@ -5765,9 +5795,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         requeued = 0
         with self._batch_dispatch():
             for it in items:
-                # lq-rel-03: carry the item's mapped flags through the re-run so
-                # re-queueing doesn't silently drop e.g. ("-o", "clip.mp4").
-                if self._process_link(it.url, it.extra) != "duplicate":
+                if self._rerun_item(it):
                     requeued += 1
         self._log(f"[queue] re-queued {requeued} item(s)")
 

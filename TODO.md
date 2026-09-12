@@ -21,7 +21,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| lq-ui-93 | open | low | medium | link_queue.py:5702 — [wiring gaps] Make the queue's Re-run action perform an explicit rerun. Selection resolves only currently pending/running items, and `_on_queue_rerun` routes each through the same duplicate guard, so a selected queued item with unchanged routing always reports `re-queued 0 item(s)`; completed items have no selectable row. Implement deliberate rerun semantics separately from ordinary paste deduplication, and count only accepted submissions; cover pending and running selections. |
 | lq-plat-92 | open | medium | low | link_queue.py:5968 — [platform / UI / UX] Reject or disable Shell mode in the Windows protocol editor and context-menu toggle. The editor labels it `cmd.exe /c` and accepts `echo {url_quoted}` with shell=True, but `_spawn_shell_proc` always refuses shell=True on Windows, so a configuration accepted by the UI consumes the queued retry budget without launching. Reproduced the editor/runner mismatch with the Windows platform branch selected; make the UI explain the unsupported mode and cover both editor save and toggle. |
 
 ### `minikeypad.py`
