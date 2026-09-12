@@ -2386,9 +2386,12 @@ def parse_llm_events(text_output: str, file_path: Path, event_type: str) -> List
     clean_json = text_output.replace("```json", "").replace("```", "").strip()
     decoded_events = _decode_event_payload_or_none(clean_json)
     raw_events = decoded_events or []
-    if decoded_events is None and clean_json:
-        logger.warning("Failed to decode JSON from LLM response in %s (%s)",
-                       file_path.name, _llm_response_log_context(clean_json))
+    if decoded_events is None:
+        _record_extraction_failure(
+            file_path,
+            ValueError(f"Failed to decode JSON from LLM response ({_llm_response_log_context(clean_json)})"),
+            "Invalid extraction from",
+        )
 
     formatted_events: List[Dict[str, Any]] = []
     for e in raw_events:
@@ -3444,7 +3447,7 @@ def _run_text_llm(
         "prompt_sha256": _llm_text_prompt_digest(),
     }
     if llm_client is None:
-        cached = _read_stage_cache_text(runtime_config, file_path, "llm_text", cache_options)
+        cached = _read_valid_llm_cache(runtime_config, file_path, cache_options)
         if cached is not None:
             return _filter_events_by_policy(
                 parse_llm_events(cached, file_path, event_type), runtime_config)
@@ -3452,10 +3455,37 @@ def _run_text_llm(
                                      event_type, llm_client, runtime_config)
     if text_output is None:
         return []
-    if llm_client is None:
+    events = parse_llm_events(text_output, file_path, event_type)
+    if llm_client is None and _cacheable_llm_response(text_output):
         _write_stage_cache_text(runtime_config, file_path, "llm_text", cache_options, text_output)
-    return _filter_events_by_policy(
-        parse_llm_events(text_output, file_path, event_type), runtime_config)
+    return _filter_events_by_policy(events, runtime_config)
+
+
+def _cacheable_llm_response(text: str) -> bool:
+    events = _decode_event_payload_or_none(text)
+    if events is None:
+        return False
+    return all(
+        isinstance(event, dict)
+        and isinstance(event.get("title"), (str, type(None)))
+        and _parse_iso(_coerce_start(event)) is not None
+        for event in events
+    )
+
+
+def _read_valid_llm_cache(config: ModelConfig, file_path: Path,
+                          options: Dict[str, Any]) -> Optional[str]:
+    cached = _read_stage_cache_text(config, file_path, "llm_text", options)
+    if cached is None or _cacheable_llm_response(cached):
+        return cached
+    logger.warning("Ignoring invalid LLM cache for %s; retrying extraction", file_path.name)
+    key = _stage_cache_key(file_path, "llm_text", options)
+    if key is not None:
+        try:
+            _stage_cache_path(config, key).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove invalid LLM cache for %s: %s", file_path.name, exc)
+    return None
 
 
 def extract_with_llm(

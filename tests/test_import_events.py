@@ -21,6 +21,43 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+@pytest.mark.parametrize("response", ["I cannot help with that", "", "{broken json"])
+def test_ie_cache_80_invalid_llm_output_fails_and_is_not_cached(tmp_path, monkeypatch, response):
+    source = tmp_path / "notes.txt"
+    source.write_text("event notes")
+    cfg = import_events.ModelConfig(stage_cache="on", stage_cache_dir=str(tmp_path / "cache"))
+    client = FakeLlm(response)
+    monkeypatch.setattr(import_events, "get_llm", lambda config: client)
+    import_events.reset_extraction_failures()
+    for _ in range(2):
+        assert import_events._run_text_llm("event notes", "en", source, "Text/LLM", None, cfg) == []
+    assert len(client.messages) == 2
+    assert import_events.extraction_failure_count() == 2
+    assert not list((tmp_path / "cache").glob("*.json"))
+
+
+@pytest.mark.parametrize("poison", [
+    "refusal", '[{"title": [], "start": "2026-01-01"}]',
+    '[{"title": "Broken", "start": "not a date"}]',
+])
+def test_ie_cache_80_poisoned_cache_is_replaced_with_valid_empty_result(tmp_path, monkeypatch, poison):
+    source = tmp_path / "notes.txt"
+    source.write_text("event notes")
+    cfg = import_events.ModelConfig(stage_cache="on", stage_cache_dir=str(tmp_path / "cache"))
+    client = FakeLlm("[]")
+    monkeypatch.setattr(import_events, "get_llm", lambda config: client)
+    import_events.reset_extraction_failures()
+    run = lambda: import_events._run_text_llm("event notes", "en", source, "Text/LLM", None, cfg)
+    assert run() == []
+    cache_path = next((tmp_path / "cache").glob("*.json"))
+    cache_path.write_text(json.dumps({"text": poison}))
+    assert run() == []
+    assert run() == []
+    assert len(client.messages) == 2
+    assert json.loads(cache_path.read_text())["text"] == "[]"
+    assert import_events.extraction_failure_count() == 0
+
+
 def test_ie_cache_70_failed_ocr_is_retried_then_cached(tmp_path, monkeypatch):
     source = tmp_path / "scan.pdf"
     source.write_bytes(b"pdf")
