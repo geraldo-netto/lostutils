@@ -20,6 +20,29 @@ from hypothesis import given, settings, strategies as st
 import organize_by_extension
 
 
+@pytest.mark.parametrize("name, expected", [
+    ("txt.collision1", "no_extension"),
+    ("note.TXT.collision12.collision3", "txt"),
+    ("note.collisionary", "collisionary"),
+])
+def test_oze_rel_71_collision_suffix_keeps_original_extension(name, expected):
+    assert organize_by_extension.normalize_extension(Path(name)) == expected
+
+
+def test_oze_rel_71_second_run_keeps_collision_placement(tmp_path):
+    (tmp_path / "txt").write_text("blocker")
+    (tmp_path / "note.txt").write_text("note")
+    first = organize_by_extension.organize(tmp_path, sniff=False)
+    before = {p.relative_to(tmp_path): p.read_bytes()
+              for p in tmp_path.rglob("*") if p.is_file()}
+    second = organize_by_extension.organize(tmp_path, sniff=False)
+    after = {p.relative_to(tmp_path): p.read_bytes()
+             for p in tmp_path.rglob("*") if p.is_file()}
+    assert first.processed == 2
+    assert second.processed == 0
+    assert before == after
+
+
 @pytest.mark.parametrize("failure", ["mkdir", "rename"])
 def test_oze_test_82_quarantine_setup_rolls_back_move(tmp_path, monkeypatch, failure):
     source = tmp_path / "source.txt"

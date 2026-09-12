@@ -118,7 +118,8 @@ def normalize_extension(path: Path) -> str:
     Files without a valid suffix (no dot, suffix with spaces, etc.)
     are grouped under `no_extension`.
     """
-    suffix = path.suffix
+    # Collision names retain the original type on subsequent runs (oze-rel-71).
+    suffix = Path(re.sub(r"(?:\.collision[0-9]+)+$", "", path.name)).suffix
     # Heuristic: valid extensions are non-empty and free of whitespace/control
     # characters (a control char would leak into the bucket directory name).
     if not suffix or suffix == '.' or any(c.isspace() or ord(c) < 0x20 for c in suffix):
