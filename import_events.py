@@ -5004,6 +5004,14 @@ def _resolve_input_directory(
 
 def _run_main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    try:
+        return _run_import(args)
+    except OSError as exc:
+        logger.error("Setup or output error: %s", exc)
+        return 2
+
+
+def _run_import(args: argparse.Namespace) -> int:
     if not _outputs_are_distinct(args):
         logger.error("--output and --emit-ics must name different files")
         return 2
@@ -5019,11 +5027,7 @@ def _run_main(argv: Optional[List[str]] = None) -> int:
     folder, stop_code = _resolve_input_directory(args)
     if folder is None:
         return stop_code
-    try:
-        _prepare_output_parents(args)
-    except OSError as exc:
-        logger.exception("Could not prepare output directory: %s", exc)
-        return 2
+    _prepare_output_parents(args)
 
     try:
         events = process_folder(str(folder), recursive=args.recursive,

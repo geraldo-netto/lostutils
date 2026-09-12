@@ -23,6 +23,55 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+def test_ie_api_71_live_output_lock_is_setup_error(tmp_path, monkeypatch, caplog):
+    output = tmp_path / "events.json"
+    output.write_text("old output")
+    monkeypatch.setattr(import_events, "process_folder", lambda *args, **kwargs: [])
+    with import_events._output_lock(output):
+        assert import_events._run_main([str(tmp_path), "-o", str(output)]) == 2
+    assert output.read_text() == "old output"
+    assert "Traceback" not in caplog.text
+
+
+def test_ie_api_71_unreadable_scan_is_setup_error(tmp_path, monkeypatch, caplog):
+    folder = tmp_path / "input"
+    folder.mkdir()
+    original = Path.iterdir
+
+    def unreadable(path):
+        if path == folder:
+            raise PermissionError("input access denied")
+        return original(path)
+
+    monkeypatch.setattr(Path, "iterdir", unreadable)
+    assert import_events._run_main([str(folder), "-o", str(tmp_path / "events.json")]) == 2
+    assert "input access denied" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("suffix", [".json", ".ics"])
+def test_ie_api_71_output_errors_return_two(tmp_path, monkeypatch, partial, suffix):
+    def process(*args, **kwargs):
+        if partial:
+            raise import_events.ModelUnavailableError("model missing")
+        return []
+
+    original = import_events._atomic_write_bytes
+
+    def fail_output(path, data):
+        if path.suffix == suffix:
+            raise OSError("output unavailable")
+        return original(path, data)
+
+    monkeypatch.setattr(import_events, "process_folder", process)
+    monkeypatch.setattr(import_events, "_atomic_write_bytes", fail_output)
+    assert import_events._run_main([
+        str(tmp_path), "-o", str(tmp_path / "events.json"),
+        "--emit-ics", str(tmp_path / "events.ics"),
+    ]) == 2
+
+
 def test_ie_cli_70_expanded_outputs_share_validation_and_write_paths(tmp_path, monkeypatch):
     folder = tmp_path / "input"
     folder.mkdir()
@@ -6053,7 +6102,8 @@ def test_cli_reports_invalid_output_parent(tmp_path, caplog):
     rc = import_events._run_main([str(source), "--output", str(output)])
 
     assert rc == 2
-    assert "Could not prepare output directory" in caplog.text
+    assert "Setup or output error" in caplog.text
+    assert "blocked" in caplog.text
 
 
 def test_cli_help_scopes_ocr_timeout_to_tesseract(capsys):

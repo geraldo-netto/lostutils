@@ -39,7 +39,6 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 | ie-obs-80 | open | medium | low | import_events.py:3817 — [observability / operability] Supply os.walk with an onerror handler and propagate recursive traversal failures into the run outcome. A real unreadable child directory is silently omitted while readable siblings are returned and the failure count remains zero; this differs from the already tracked nonrecursive PermissionError path. Surface the failing directory and an incomplete-scan status. Three pillars: neither logs nor process health currently expose the omission. |
-| ie-api-71 | open | medium | low | import_events.py:4985 — [API contract & compatibility] The documented exit contract (1 = some files failed, 2 = setup error) is broken by setup errors escaping `_run_main` as raw tracebacks with exit 1: an output lock held by another run (`FileExistsError` from `_output_lock` in `write_events_json` at line 4902) and an unreadable input directory (`PermissionError` via `_run_file_workers`), both reproduced. Catch `OSError` around `process_folder` and the output writes and return 2 like `_prepare_output_parents`. |
 
 ### `link_queue.py`
 
