@@ -1237,13 +1237,13 @@ def _stream_download(
     last_progress_at = monotonic()
     with open(part, mode) as handle:
         while True:
-            chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+            chunk = response.read1(DOWNLOAD_CHUNK_SIZE)
             now = monotonic()
+            handle.write(chunk)
+            downloaded += len(chunk)
             _guard_download_stall(part, now, last_progress_at)
             if not chunk:
                 break
-            handle.write(chunk)
-            downloaded += len(chunk)
             last_progress_at = now
             if downloaded >= next_report:
                 _log_download_progress(part, downloaded, total)

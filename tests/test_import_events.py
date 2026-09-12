@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -14,11 +15,50 @@ import types
 from collections import OrderedDict
 from pathlib import Path
 from datetime import date, datetime, timezone
+from http.client import HTTPResponse
 
 import pytest
 from hypothesis import assume, given, strategies as st
 
 import import_events
+
+
+def test_ie_watch_70_trickle_reads_preserve_received_bytes(tmp_path):
+    client, server = socket.socketpair()
+    client.settimeout(0.3)
+    release = threading.Event()
+
+    def send():
+        try:
+            server.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\na")
+            if release.wait(2):
+                server.sendall(b"b")
+        except OSError:
+            pass
+
+    sender = threading.Thread(target=send)
+    sender.start()
+    ticks = iter([0.0, 1.0, import_events.DOWNLOAD_STALL_SECONDS + 2])
+
+    def clock():
+        now = next(ticks)
+        if now == 1.0:
+            release.set()
+        return now
+
+    part = tmp_path / "model.part"
+    response = HTTPResponse(client)
+    try:
+        response.begin()
+        with pytest.raises(TimeoutError, match="stalled"):
+            import_events._stream_download(response, part, "wb", 0, monotonic=clock)
+        assert part.read_bytes() == b"ab"
+    finally:
+        release.set()
+        sender.join(timeout=2)
+        response.close()
+        client.close()
+        server.close()
 
 
 @pytest.mark.parametrize("response", ["I cannot help with that", "", "{broken json"])
@@ -3826,7 +3866,7 @@ class _FakeDownloadResponse:
         self.status = status
         self.headers = headers or {}
 
-    def read(self, _size=-1):
+    def read1(self, _size=-1):
         if not self._chunks:
             return b""
         chunk = self._chunks.pop(0)
@@ -3901,7 +3941,7 @@ def test_stream_download_raises_and_keeps_part_on_stall(tmp_path):
         import_events._stream_download(
             response, part, "wb", 0, monotonic=lambda: next(ticks))
 
-    assert part.read_bytes() == b"a"  # bytes received before the stall are kept
+    assert part.read_bytes() == b"ab"  # include bytes received during the delayed read
 
 
 def test_download_to_cache_keeps_part_when_stream_stalls(tmp_path, monkeypatch):
