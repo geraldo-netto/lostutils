@@ -1342,6 +1342,7 @@ class Dispatcher:
         # construction (not import) so a monkeypatched module STATE_FILE is
         # honoured; passing `state_path` overrides the module default.
         self.state_path = state_path if state_path is not None else STATE_FILE
+        self.state_load_error: str | None = None
         self._state_lock = state_lock
         if self._state_lock is None and acquire_state_lock:
             self._state_lock = StateFileLock(self.state_path)
@@ -1580,6 +1581,11 @@ class Dispatcher:
         last-write-wins on the file.
         """
         try:
+            if self.state_load_error is not None:
+                raise OSError(
+                    f"refusing to overwrite queue state after a load failure: {self.state_load_error}; "
+                    "repair the file and restart"
+                )
             self._atomic_write_state(self._build_state_snapshot())
         except Exception as e:
             # Never let a state-save failure interrupt normal flow.
@@ -1617,15 +1623,15 @@ class Dispatcher:
     def _read_state_dict(self) -> "dict | None":
         """Read and YAML-parse STATE_FILE, or None on missing/corrupt/non-dict.
         Shared by _load_state_items and _load_immediate_items (lq-rel-01)."""
-        if not os.path.exists(self.state_path):
-            return None
         try:
             with open(self.state_path, "r", encoding="utf-8") as f:
-                data = _yaml_load(f) or {}
-        except Exception as e:
-            print(f"[warn] could not read {self.state_path}: {e}", file=sys.stderr)
+                return _require_mapping(_yaml_load(f))
+        except FileNotFoundError:
             return None
-        return data if isinstance(data, dict) else None
+        except Exception as e:
+            self.state_load_error = f"could not read {self.state_path}: {e}"
+            print(f"[warn] {self.state_load_error}", file=sys.stderr)
+            return None
 
     @classmethod
     def _parse_state_list(cls, data: dict, key: str) -> "list[QueueItem]":
@@ -1732,6 +1738,10 @@ class Dispatcher:
         # lq-nplus1-01: read+parse the state file ONCE and feed the shared dict
         # to both loaders instead of each re-opening and re-parsing it.
         state = self._read_state_dict()
+        if state is None:
+            if self.state_load_error is not None:
+                self._log(f"[error] {self.state_load_error}; repair the file and restart")
+            return
         in_flight, pending = self._load_state_items(state)
         # lq-rel-01: re-dispatch any persisted immediate backlog so an
         # unprocessed paste of file:/magnet: links survives a restart instead

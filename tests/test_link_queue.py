@@ -3200,6 +3200,7 @@ def _force_restored_log_branches(app, monkeypatch, kind: str) -> list[str]:
     lives on app.dispatcher (façade); patch its state-load + log handlers there."""
     msgs: list[str] = []
     disp = app.dispatcher
+    monkeypatch.setattr(disp, "_read_state_dict", lambda: {})
     monkeypatch.setattr(disp, "_log", lambda m: msgs.append(m))
     monkeypatch.setattr(disp, "_refresh_queue_list", lambda: None)
     monkeypatch.setattr(disp, "_update_status", lambda: None)
@@ -6423,3 +6424,32 @@ def test_lq_conc_92_failed_initialization_releases_ownership(tmp_path, monkeypat
     lock = link_queue.StateFileLock(state)
     lock.acquire()
     lock.release()
+
+
+@pytest.mark.parametrize('original,read_error', [
+    ('queue: [unfinished\n# recoverable: https://example.test/a\n', False),
+    ('- https://example.test/a\n', False), ('false\n', False),
+    ('queue: []\n# retain during transient read failure\n', True),
+])
+def test_lq_rob_92_state_load_failure_survives_shutdown(tmp_path, request, monkeypatch, original, read_error):
+    import builtins
+    path = tmp_path / 'state.yaml'
+    path.write_text(original)
+    real_open = builtins.open
+    reads = []
+    def failing_open(filename, mode='r', *args, **kwargs):
+        if str(filename) == str(path) and mode == 'r':
+            reads.append(filename)
+            if read_error and len(reads) == 1:
+                raise PermissionError('temporary read failure')
+        return real_open(filename, mode, *args, **kwargs)
+    monkeypatch.setattr(builtins, 'open', failing_open)
+    instance = request.getfixturevalue('app')
+    instance._save_state()
+    pump(instance, 0.05)
+    log = instance.log_text.get('1.0', 'end')
+    instance._shutdown(timeout=2)
+    assert path.read_text() == original
+    assert len(reads) == 1
+    assert instance.dispatcher.state_load_error
+    assert 'repair the file and restart' in log
