@@ -41,6 +41,30 @@ def test_oze_test_82_quarantine_setup_rolls_back_move(tmp_path, monkeypatch, fai
     assert sorted(p.name for p in tmp_path.iterdir()) == ["bucket", "source.txt"]
 
 
+@pytest.mark.parametrize("blocker_kind", ["file_link", "directory_link", "dangling"])
+def test_oze_sec_70_move_preserves_symlink_blocker(tmp_path, blocker_kind):
+    source = tmp_path / "note.pdf"
+    source.write_bytes(b"source")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_bytes(b"private")
+    target = {"file_link": secret, "directory_link": outside,
+              "dangling": outside / "missing"}[blocker_kind]
+    blocker = tmp_path / "pdf"
+    blocker.symlink_to(target, target_is_directory=blocker_kind == "directory_link")
+
+    with pytest.raises((ValueError, OSError)):
+        organize_by_extension.move_file(source, blocker / "n00000")
+
+    assert blocker.is_symlink()
+    assert blocker.readlink() == target
+    assert secret.read_bytes() == b"private"
+    assert source.read_bytes() == b"source"
+    assert sorted(p.name for p in outside.iterdir()) == ["secret.txt"]
+    assert not list(tmp_path.glob("pdf.collision*"))
+
+
 from organize_by_extension import (
     ROOT_MAX_LENGTH,
     bucket_name,

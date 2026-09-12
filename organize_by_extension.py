@@ -1627,6 +1627,7 @@ def _resolve_source_collision(source: Path, destination: Path) -> Path:
 
 def _rename_destination_blocker(blocker: Path) -> Path | None:
     try:
+        _require_regular_source(blocker)
         return _atomic_rename_to_free_slot(blocker)
     except FileNotFoundError:
         return None
@@ -1815,7 +1816,7 @@ def _reserve_collision_candidate(
     last_exc: OSError | None,
 ) -> tuple[Path | None, bool, OSError | None]:
     try:
-        os.link(source, candidate)
+        _link_regular_no_follow(source, candidate)
     except FileExistsError as exc:
         return None, False, exc
     except OSError as exc:
