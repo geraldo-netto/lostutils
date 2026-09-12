@@ -11,7 +11,6 @@ There is no repository-wide requirements file. Install only the third-party pack
 | `bookmark-tidy.py` | Merge Chrome, Edge, Firefox, and Netscape bookmark exports or plain-text URL lists, dedupe URLs, preserve immutable folders, and recategorize mutable links with a local llama.cpp model. | Optional `llama-cpp-python` for categorization |
 | `deduplicate-by-namev3.py` | Find near-duplicate text lines with batched Levenshtein distance. | `numpy`, `rapidfuzz` |
 | `hash-recursive-ai5.py` | Recursively find duplicate files with staged BLAKE3 hashing. | `blake3` |
-| `import_events.py` | Extract calendar events from `.ics`, text, image, and PDF files. | Optional extraction backends; see below. |
 | `link_queue.py` | Tk GUI for routing pasted links to configured commands. | `pyyaml`; Tk bindings for Python |
 | `minikeypad.py` | Tk GUI configurator for a MINI-KeyBoard USB keypad. | Optional `pyusb`; native `libusb` backend |
 | `organize_by_extension.py` | Move files into extension buckets, using header sniffing by default. | None |
@@ -192,42 +191,17 @@ The supported device is VID `0x1189`, PID `0x8890`, HID interface `1`. The GUI r
 
 ## Calendar extraction
 
-### `import_events.py`
+Calendar extraction moved to OmniTensor's `event-extraction` workload. The standalone `import_events.py` and its separate model/cache runtime are retired. Calendar hierarchy/table parsing, maintained format regressions, and the sample PDF fixtures now live in OmniTensor.
 
-Extracts calendar events from `.ics`, text, image, and PDF files into JSON, with optional combined `.ics` output:
+After installing and configuring OmniTensor's event provider and `events` extra, select files explicitly:
 
 ```bash
-python3 import_events.py ./events_data -o events.json
-python3 import_events.py ./events_data -o events.json --emit-ics events.ics --recursive
+omnitensor-import-events extract /absolute/invitation.pdf /absolute/calendar.ics --output /absolute/private/events.json
+omnitensor-import-events preview /absolute/private/events.json
+omnitensor-import-events export /absolute/private/events.json --confirm event-1 --output /absolute/private/confirmed.ics
 ```
 
-By default it downloads and uses `ggml-org/Qwen2.5-VL-7B-Instruct-GGUF` with `Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf` and `mmproj-Qwen2.5-VL-7B-Instruct-f16.gguf`. The model cache is selected from `IMPORT_EVENTS_CACHE_DIR`, then `$XDG_CACHE_HOME`, then `~/.cache/lostutils/import_events`.
-
-Exit codes: `0` every file was processed, `1` some files failed extraction but the run covered them all, `2` the run did not cover every file (command-line or setup error, model unavailable, or workers abandoned mid-run). Codes `1` and `2` both still write whatever output was extracted.
-
-Optional runtime dependencies enable richer extraction:
-
-- `llama-cpp-python` loads the local GGUF language/vision models.
-- `paddleocr` adds one OCR backend for images and rendered PDF pages.
-- The `tesseract` executable adds a second OCR backend.
-- `pypdf` extracts text from text-native PDFs.
-- `PyMuPDF` (`fitz`) renders scanned PDFs for OCR/vision fallback.
-- `icalendar` parses and writes iCalendar data.
-
-Missing optional OCR/PDF dependencies degrade gracefully: the script logs the missing backend, uses the remaining stages, and exits non-zero only when a file extraction actually fails. PDF OCR is disabled by default; text-native PDFs use parsed text, while unreadable or scanned PDFs fall back to the vision model when the vision stack is available.
-
-Language handling:
-
-- `--language auto` detects language from available text before downstream stages. If no text exists before OCR, `--ocr-languages` tries a chain of PaddleOCR/Tesseract languages. The default chain is Brazilian Portuguese, English, Spanish, Italian, French, and German.
-- `--ocr-language-score` controls whether OCR stops after the first language in the chain. At the default `0.70`, a confident first-language match skips the remaining OCR languages; otherwise the full chain is exhausted and OCR text is merged.
-- `--ocr-fallback-language` remains available as a compatibility override and is tried first when explicitly set to a non-default language.
-- Explicit `--language` values such as `en`, `pt`, `es`, `it`, `fr`, and `de` are passed through to OCR backends using their native language codes and are included in the LLM prompt.
-
-Useful runtime knobs include `--llm-context`, `--max-content-chars`, `--max-ics-bytes`, `--max-image-bytes`, `--max-text-bytes`, `--llm-max-tokens`, `--llm-gpu-layers`, `--llm-main-gpu`, `--mlock`, `--ocr-engine`, `--ocr-languages`, `--ocr-language-score`, `--ocr-timeout`, `--tesseract-psm`, `--tesseract-path`, `--pdf-ocr-mode`, `--pdf-vision-pages`, `--pdf-vision-dpi`, `--stage-cache`, `--workers`, `--deterministic-order`, and `--summary-only`.
-
-`--ocr-timeout` applies to the killable Tesseract subprocess only. PaddleOCR runs in-process and cannot be interrupted safely, so choose `--ocr-engine tesseract` when a hard per-call OCR deadline is required.
-
-Untrusted inputs are size-bounded before they are read into memory: `--max-ics-bytes` (default 4 MB) and `--max-image-bytes` (default 128 MB) reject an oversize file, while `--max-text-bytes` (default 128 MB) caps how much of a text file is read before decoding. When `--max-content-chars` is omitted, the text budget is computed from the selected LLM context size. The default `--llm-context 0` lets llama.cpp use the model-native context window. The default `--llm-gpu-layers 0` uses CPU; pass a positive layer count or `-1` to opt into llama.cpp GPU offload. `--mlock` is opt-in and is skipped automatically when the model plus projector files would exceed 70% of the memory limit visible to the process.
+Use the candidate IDs returned by preview and confirm or reject every candidate before ICS export. For an explicitly selected directory, `extract /absolute/folder --recursive --output /absolute/private/events.json` expands its files in the client. OmniTensor owns model setup, private source handling, extraction, and canonical JSON/ICS output; see its `docs/event-extraction.md` for setup, supported recurrence fields, and migration details.
 
 ## Tests and CI
 

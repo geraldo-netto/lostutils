@@ -15,7 +15,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PORTABLE_SCRIPTS = (
     "bookmark-tidy.py", "deduplicate-by-namev3.py",
-    "hash-recursive-ai5.py", "import_events.py", "link_queue.py",
+    "hash-recursive-ai5.py", "link_queue.py",
     "minikeypad.py", "organize_by_extension.py", "remove-deduplv3.py",
 )
 
@@ -143,29 +143,6 @@ def test_organizer_cli_preview_then_move(isolated):
     assert len(moved) == 1 and moved[0].read_bytes() == b"portable text\n"
 
 
-def test_events_cli_imports_and_exports_ics_without_models(isolated):
-    work, _ = isolated
-    source = work / "calendriers"
-    source.mkdir()
-    (source / "réunion.ics").write_text(
-        "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Portable tests//EN\n"
-        "BEGIN:VEVENT\nUID:portable-event@example.org\nDTSTAMP:20260101T000000Z\n"
-        "DTSTART:20261012T080000Z\nDTEND:20261012T090000Z\n"
-        "SUMMARY:Réunion\nEND:VEVENT\nEND:VCALENDAR\n", encoding="utf-8",
-    )
-    output = work / "événements.json"
-    exported = work / "export.ics"
-    model_cache = work / "models"
-    _run(isolated, _copy_script(work, "import_events.py"), source, "-o", output,
-         "--emit-ics", exported, "--model-cache-dir", model_cache)
-    events = json.loads(output.read_text(encoding="utf-8"))
-    assert len(events) == 1 and events[0]["title"] == "Réunion"
-    from icalendar import Calendar
-    calendar = Calendar.from_ical(exported.read_bytes())
-    assert str(calendar.walk("VEVENT")[0]["SUMMARY"]) == "Réunion"
-    assert not list(model_cache.rglob("*.gguf"))
-
-
 _LOAD_CHILD = """
 import importlib.util
 from pathlib import Path
@@ -224,11 +201,7 @@ _LOCK_CHILD = _LOAD_CHILD + """
 from contextlib import contextmanager
 
 @contextmanager
-def ownership(kind, path):
-    if kind == "events":
-        with module._exclusive_lock(path, "portable output"):
-            yield
-        return
+def ownership(path):
     lock = module.StateFileLock(str(path))
     lock.acquire()
     try:
@@ -236,15 +209,14 @@ def ownership(kind, path):
     finally:
         lock.release()
 
-kind, mode, target, ready = sys.argv[2:]
-busy_error = FileExistsError if kind == "events" else module.StateFileLockError
+mode, target, ready = sys.argv[2:]
 try:
-    with ownership(kind, Path(target)):
+    with ownership(Path(target)):
         if mode == "hold":
             Path(ready).write_text("ready", encoding="utf-8")
             sys.stdin.readline()
         print("acquired")
-except busy_error:
+except module.StateFileLockError:
     print("busy")
     raise SystemExit(7)
 """
@@ -257,12 +229,11 @@ def _wait_ready(owner, ready):
     assert ready.exists(), "lock owner exited or did not become ready within 10 seconds"
 
 
-@pytest.mark.parametrize("name,kind", [("import_events.py", "events"), ("link_queue.py", "queue")])
-def test_native_lock_contention_and_killed_owner_recovery(isolated, name, kind):
+def test_native_lock_contention_and_killed_owner_recovery(isolated):
     work, env = isolated
-    script = _copy_script(work, name)
+    script = _copy_script(work, "link_queue.py")
     target, ready = work / "shared état.lock", work / "owner-ready"
-    args = ["-c", _LOCK_CHILD, script, kind]
+    args = ["-c", _LOCK_CHILD, script]
     owner = subprocess.Popen(
         [sys.executable, *args, "hold", str(target), str(ready)], cwd=work, env=env,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -1,11 +1,7 @@
 blake3==1.0.9
-charset-normalizer==3.4.9
 coverage==7.15.2
 hypothesis==6.156.6
-icalendar==7.2.0
 numpy==2.5.1
-pymupdf==1.28.0
-pypdf==6.16.2
 pyright==1.1.411
 pytest==9.1.1
 pyyaml==6.0.3
