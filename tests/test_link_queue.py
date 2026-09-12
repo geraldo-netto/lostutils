@@ -4593,8 +4593,8 @@ def test_logsink_opens_when_platform_has_no_nofollow(
 
 # --- lq-decoup-04: live config drives the sweep threshold ---------------
 
-def test_pick_next_item_skips_seq_of_sweep_under_threshold(app):
-    """lq-scal-03: when gap is below configured threshold, sweep skipped."""
+def test_pick_next_item_skips_seq_of_sweep_under_configured_threshold(app):
+    """lq-test-91: retain configured-threshold coverage alongside the default."""
     app.config["seq_of_sweep_gap"] = 100   # ample headroom
     stop_bg_workers(app)
     with app._dispatch_cv:
