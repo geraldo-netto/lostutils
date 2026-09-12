@@ -228,27 +228,31 @@ def _emit_remove_commands(groups, out):
     groups_with_dups = 0
     files_to_remove = 0
     for h, paths in groups.items():
-        # rdv3-rel-01: collapse byte-identical path strings within a group (a
-        # duplicate input line) so the same file can't be picked as survivor AND
-        # emitted for removal. dict.fromkeys preserves first-seen order.
-        paths = list(dict.fromkeys(paths))
-        if len(paths) < 2:
-            continue
-        conflicts = _case_variant_conflicts(paths)
-        if conflicts:
-            _emit_case_variant_warning(h, conflicts, out)
-            paths = [p for p in paths if p not in conflicts]
-            if len(paths) < 2:
-                continue
-        keep = _survivor(paths)
-        to_remove = [p for p in paths if p != keep]
-        groups_with_dups += 1
-        files_to_remove += len(to_remove)
-        out("# duplicates: {hash}\n# saving: {path}\n".format(hash=h, path=keep))
-        for quoted in _chunked_quoted(to_remove):
-            out(f"{RM_COMMAND_PREFIX} {quoted}\n")
-        out("\n")
+        removed = _emit_group_commands(h, paths, out)
+        groups_with_dups += bool(removed)
+        files_to_remove += removed
     return groups_with_dups, files_to_remove
+
+
+def _unambiguous_paths(digest, paths, out):
+    paths = list(dict.fromkeys(paths))
+    conflicts = _case_variant_conflicts(paths)
+    if conflicts:
+        _emit_case_variant_warning(digest, conflicts, out)
+    return [p for p in paths if p not in conflicts]
+
+
+def _emit_group_commands(digest, paths, out):
+    paths = _unambiguous_paths(digest, paths, out)
+    if len(paths) < 2:
+        return 0
+    keep = _survivor(paths)
+    to_remove = [p for p in paths if p != keep]
+    out("# duplicates: {hash}\n# saving: {path}\n".format(hash=digest, path=keep))
+    for quoted in _chunked_quoted(to_remove):
+        out(f"{RM_COMMAND_PREFIX} {quoted}\n")
+    out("\n")
+    return len(to_remove)
 
 
 def _format_summary(group_count, groups_with_dups, files_to_remove, skipped_lines):
