@@ -211,9 +211,11 @@ def test_strict_pinned_copy_rejects_fifo_before_publication_and_closes_source(
     assert not target.exists()
     assert (source / "regular.txt").read_bytes() == b"preserved"
     assert pipe.exists()
-    assert len(opened) == 1
-    with pytest.raises(OSError):
-        os.fstat(opened[0])
+    # rf-link-80: preflight and copying each own a descriptor; both must close.
+    assert len(opened) == 2
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 def test_pinned_special_preflight_allows_regular_files_directories_and_symlinks(

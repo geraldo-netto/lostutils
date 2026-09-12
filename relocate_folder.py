@@ -953,6 +953,28 @@ def _read_pinned_symlink(
     return target
 
 
+def _validate_relative_symlink(source: Path, relative: Path, target: str) -> None:
+    if os.path.isabs(target):
+        return
+    location = Path(os.path.normpath(relative.parent / target))
+    if location.parts and location.parts[0] == os.pardir:
+        raise RuntimeError(
+            f"relative symlink escapes source tree: {source / relative} -> {target}; "
+            "use an absolute target or keep the target inside the source tree"
+        )
+
+
+def _preflight_relative_symlinks(source: Path) -> None:
+    descriptor, _identity = _source_identity_fd(source)
+    try:
+        for relative, directory_fd, name, status in _walk_pinned_entries(descriptor):
+            if stat.S_ISLNK(status.st_mode):
+                target = _read_pinned_symlink(directory_fd, name, status)
+                _validate_relative_symlink(source, relative, target)
+    finally:
+        os.close(descriptor)
+
+
 def _apply_pinned_metadata(
     destination: Path,
     source_stat: os.stat_result,
@@ -1164,8 +1186,10 @@ def _copy_pinned_entry(
             directory_fd, name, entry_stat, target, warning_limiter)
         return entry_stat.st_size
     elif stat.S_ISLNK(mode):
-        os.symlink(_read_pinned_symlink(
-            directory_fd, name, entry_stat), target)
+        link_text = _read_pinned_symlink(directory_fd, name, entry_stat)
+        # Recheck the pinned link: it may have appeared after the preflight.
+        _validate_relative_symlink(source_label, rel, link_text)
+        os.symlink(link_text, target)
         _apply_pinned_metadata(
             target, entry_stat, warning_limiter, symlink=True)
     else:
@@ -2624,6 +2648,7 @@ def _execute_preamble(plan: Plan,
     # for dry-run, but return BEFORE ensure_dest_root — which mkdirs/chowns
     # the destination — so --dry-run never mutates the filesystem.
     _check_cross_device(plan)
+    _preflight_relative_symlinks(plan.source)
     if plan.dry_run:
         advance(MigrationState.DRY_RUN)
         return f"dry-run: would migrate {plan.source} -> {plan.target}"
@@ -2637,8 +2662,8 @@ def _execute_migration(plan: Plan,
     # rf-sec-01: open the source (O_NOFOLLOW|O_DIRECTORY) and hold the fd
     # across the copy so the inode can't be swapped for a symlink/other dir;
     # identity is re-checked just before copying. Opened AFTER the open-files
-    # check (our own held fd would otherwise trip it) and after the dry-run
-    # return (dry-run reads nothing).
+    # check (our own held fd would otherwise trip it). The earlier preflight
+    # closes its read-only descriptor before reaching this mutation phase.
     src_fd, src_id = _source_identity_fd(plan.source)
     try:
         created_dirs = ensure_dest_root(plan.target.parent, plan.source)

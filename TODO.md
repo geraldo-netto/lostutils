@@ -69,7 +69,6 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 | ie-arch-50 | blocked | low | high | import_events.py:1464-4142 — [architecture/modularity] Migrate model lifecycle and extraction behind OmniTensor's planned accelerator-only `event-extraction` workload only after that external workload proves file-format, privacy, partial-result, JSON/ICS, offline, and exit-code parity. |
-| rf-link-80 | blocked | medium | medium | relocate_folder.py:1042 — [API contract & compatibility] Decide how relocation handles valid relative symlinks that escape the source tree: src/link pointing to ../neighbor becomes dangling after a successful migration. relocate_folder.py:1658-1659 and tests/test_relocate_pinned_verification.py:95-101 deliberately require literal target preservation, including dangling links, so automatic rebasing changes that contract. Choose rebasing with revised verification or a preflight warning/refusal policy that preserves literal targets; document the outcome alongside README.md:94-101. |
 
 ## Rejected / Won't fix
 
