@@ -1980,7 +1980,10 @@ def _map_date_units(values: List[str], order: Tuple[str, ...],
     """Map ordered date tokens onto day/month/year, filling year from
     `default_year` when absent (ie-cx-16)."""
     mapped: Dict[str, str] = {}
-    for unit, value in zip((unit for unit in order if unit in {"day", "month", "year"}), values):
+    units = [unit for unit in order if unit in {"day", "month", "year"}]
+    if "year" not in units and len(values) > len(units):
+        units.append("year")
+    for unit, value in zip(units, values):
         mapped[unit] = value
     if "year" not in mapped and default_year is not None:
         mapped["year"] = str(default_year)

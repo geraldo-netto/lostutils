@@ -21,6 +21,16 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+@pytest.mark.parametrize("header", ["Date Activity", "Day Month Activity", "Month Day Activity"])
+def test_ie_rel_80_generic_table_preserves_explicit_years(header):
+    text = f"Calendar 2026\n{header}\n01/02/2027 Planning meeting\n03/04/2028 Workshop\n05/06 Retreat"
+    dates = [line.split(" - ")[0] for line in import_events._calendar_table_lines(text)]
+    expected = ["2027-02-01", "2028-04-03", "2026-06-05"]
+    if header.startswith("Month"):
+        expected = ["2027-01-02", "2028-03-04", "2026-05-06"]
+    assert dates == expected
+
+
 @pytest.mark.parametrize("text, limit", [("€" * 100, 16), ("ação " * 100, 17), ("😀" * 100, 19)])
 def test_ie_rel_70_utf8_window_does_not_trigger_encoding_sniffer(tmp_path, monkeypatch, text, limit):
     source = tmp_path / "text.txt"
