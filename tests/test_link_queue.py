@@ -1658,6 +1658,78 @@ def test_command_timeout_handler(app):
     assert app._get_command_timeout() == int(app.config["command_timeout_seconds"])
 
 
+@pytest.mark.parametrize("value, expected", [
+    (1, 1), ("4", 4), (0, 3), (-2, 3), ("invalid", 3),
+    (None, 3), (True, 3), (1.5, 3), (float("inf"), 3),
+])
+def test_max_attempts_config_normalizes_integer_budget(value, expected):
+    """lq-rel-91: a malformed retry budget cannot disable or unbound retries."""
+    cfg = {"protocols": {}, "max_attempts": value}
+
+    link_queue.ConfigStore._normalize_config_schema(cfg)
+
+    assert cfg["max_attempts"] == expected
+
+
+def test_max_attempts_default_is_persisted_on_first_run(tmp_path):
+    """lq-rel-91: the shipped config exposes three total attempts per link."""
+    path = tmp_path / "config.yaml"
+    store = link_queue.ConfigStore(str(path), str(tmp_path / "missing.json"))
+
+    assert link_queue.DEFAULT_CONFIG["max_attempts"] == 3
+    assert store["max_attempts"] == 3
+    assert link_queue.yaml.safe_load(path.read_text())["max_attempts"] == 3
+
+
+def test_max_attempts_default_applies_to_existing_config(tmp_path):
+    """lq-rel-91: saved settings without a retry budget receive the default."""
+    path = tmp_path / "config.yaml"
+    path.write_text("sleep_between_items: 9\n", encoding="utf-8")
+
+    store = link_queue.ConfigStore(str(path), str(tmp_path / "missing.json"))
+
+    assert store["max_attempts"] == 3
+    assert store["sleep_between_items"] == 9
+
+
+def test_max_attempts_settings_widget_updates_live_and_persists(app):
+    """lq-rel-91: the visible knob controls the retry budget and survives close."""
+    stop_bg_workers(app)
+    app._open_settings_dialog()
+    spinbox = next(
+        widget for widget in descendants(app._settings_dialog)
+        if isinstance(widget, ttk.Spinbox)
+        and str(widget.cget("textvariable")) == str(app.max_attempts_var)
+    )
+    assert float(spinbox.cget("from")) == 1
+    assert app.max_attempts_var.get() == "3"
+    path = Path(app.config.config_file)
+
+    for entered, expected in [("5", 5), ("invalid", 5), ("0", 1), ("4", 4)]:
+        app.max_attempts_var.set(entered)
+        app.root.tk.call(spinbox.cget("command"))
+        assert app.max_attempts_var.get() == str(expected)
+        assert app.config["max_attempts"] == expected
+        assert app.dispatcher._max_attempts() == expected
+        assert f"attempts {expected}" in app._status_settings_var.get()
+
+    assert app._settings_dirty
+    assert link_queue.yaml.safe_load(path.read_text())["max_attempts"] == 3
+    app._on_close_settings_dialog()
+    assert link_queue.yaml.safe_load(path.read_text())["max_attempts"] == 4
+
+
+def test_max_attempts_worker_accessor_never_reads_tk(app, monkeypatch):
+    """lq-rel-91: retries read the committed budget without entering Tcl."""
+    def unexpected_tk_read():
+        raise _TkVarTouched("worker read the attempts StringVar")
+
+    monkeypatch.setattr(app.max_attempts_var, "get", unexpected_tk_read)
+    app.config["max_attempts"] = 7
+
+    assert app.dispatcher._max_attempts() == 7
+
+
 def test_getters_fallback_on_bad_input(app):
     app.sleep_var.set("xx")
     assert app._get_sleep() == int(app.config["sleep_between_items"])
@@ -5633,7 +5705,7 @@ def test_failed_domain_cools_before_released_slot_can_be_claimed(headless_dispat
     monkeypatch.setattr(dispatcher, "_release_item", competing_release)
     dispatcher._worker_step(0, threading.Event())
     assert claims == [None]
-    assert list(dispatcher.queue_items) == [second]
+    assert list(dispatcher.queue_items) == [second, first._replace(attempts=1)]
     assert dispatcher.metrics["failures"] == 1
 
 

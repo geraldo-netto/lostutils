@@ -588,10 +588,10 @@ def _shell_command_argv(template: str, url: str, protocol: str) -> list[str]:
 # recomputed for the tree at render time).
 # `extra` holds mapped (flag, value) pairs parsed from prefix tokens on the
 # input line (e.g. "f:clip.mp4" -> ("-o", "clip.mp4")); appended to the command
-# at run time. Defaults to () so older call sites that build a 4-field item are
-# unaffected.
-QueueItem = namedtuple("QueueItem", "url protocol template shell extra")
-QueueItem.__new__.__defaults__ = ((),)
+# at run time. `attempts` counts completed failed attempts; interrupted work
+# retains its remaining budget when restored from saved state.
+QueueItem = namedtuple("QueueItem", "url protocol template shell extra attempts")
+QueueItem.__new__.__defaults__ = ((), 0)
 COMMAND_TIMEOUT_EXIT = -124
 COMMAND_INTERRUPTED_EXIT = -125
 
@@ -607,6 +607,7 @@ COMMAND_INTERRUPTED_EXIT = -125
 # bare name (tests).
 _SEQ_OF_SWEEP_GAP = 256
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
+DEFAULT_MAX_ATTEMPTS = 3
 
 
 def _placeholder_command(tag: str = "") -> str:
@@ -652,6 +653,7 @@ DEFAULT_CONFIG = {
                                        # in RAM. 0 = unbounded.
     "failure_sleep_seconds": 300,   # 5 minutes — per-domain cooldown after a failure
                                     # (only the failed item's domain pauses; others run)
+    "max_attempts": DEFAULT_MAX_ATTEMPTS,  # queued links: initial try plus retries
     "command_timeout_seconds": DEFAULT_COMMAND_TIMEOUT_SECONDS,
                                     # watchdog: six-hour per-item wall-time cap.
                                     # Users may set 0 to disable it explicitly.
@@ -695,6 +697,7 @@ _CONFIG_INT_SCHEMA = {
     "immediate_worker_count": (0, 0),
     "immediate_queue_maxsize": (10000, 0),
     "failure_sleep_seconds": (300, 0),
+    "max_attempts": (DEFAULT_MAX_ATTEMPTS, 1),
     "command_timeout_seconds": (DEFAULT_COMMAND_TIMEOUT_SECONDS, 0),
     "max_per_domain": (0, 0),
     "log_max_lines": (100, 0),
@@ -1582,6 +1585,8 @@ class Dispatcher:
         fields that YAML can't emit are base64-wrapped so no item is ever
         lost on save (rel-03)."""
         entry: dict = {"shell": bool(it.shell)}
+        if it.attempts:
+            entry["attempts"] = it.attempts
         _encode_state_field(entry, "url", it.url)
         _encode_state_field(entry, "protocol", it.protocol)
         _encode_state_field(entry, "template", it.template)
@@ -1661,7 +1666,15 @@ class Dispatcher:
             template=_decode_state_field(entry, "template", _placeholder_command()),
             shell=bool(entry.get("shell", False)),
             extra=extra,
+            attempts=Dispatcher._state_attempts(entry),
         ), url
+
+    @staticmethod
+    def _state_attempts(entry: dict) -> int:
+        attempts = entry.get("attempts", 0)
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+            raise ValueError("attempts must be a non-negative integer")
+        return attempts
 
     def _load_immediate_items(self, data: "dict | None" = None) -> "list[QueueItem]":
         """Read the persisted immediate-queue backlog (lq-rel-01). Returns []
@@ -3116,6 +3129,7 @@ class Dispatcher:
 
     def _release_item(
         self, idx: int, item: "QueueItem", *, interrupted: bool = False,
+        retry: "QueueItem | None" = None,
     ) -> None:
         """Decrement domain_active and clear our current_items slot. Notify
         the cv so any other waiting worker can re-evaluate."""
@@ -3123,6 +3137,10 @@ class Dispatcher:
         with self._dispatch_cv:
             if interrupted and self.current_items.get(idx) is item:
                 self._interrupted_queue.append(item)
+            elif retry is not None and self.current_items.get(idx) is item:
+                # Publish the retry and release its slot under the same lock:
+                # neither another worker nor a state snapshot may see both.
+                self.queue_items.append(retry)
             self._domain_active[domain] = max(
                 0, self._domain_active.get(domain, 0) - 1
             )
@@ -3174,14 +3192,17 @@ class Dispatcher:
         # clauses — can never leave self._domain_active or current_items
         # incremented. Without this, a single crash would permanently
         # block the affected domain from being claimed again.
-        exit_code = -1
+        exit_code = None
+        retry = None
         try:
-            exit_code = self._run_item(item, f"queue#{idx}")
+            exit_code = self._run_queue_attempt(item, f"queue#{idx}")
             # Publish before releasing the domain slot and waking another worker.
-            if exit_code not in (0, -1, COMMAND_TIMEOUT_EXIT, COMMAND_INTERRUPTED_EXIT):
+            if exit_code not in (None, 0, -1, COMMAND_TIMEOUT_EXIT, COMMAND_INTERRUPTED_EXIT):
                 self._trigger_failure_cooldown(idx, item, exit_code)
+            retry = self._next_retry(item, exit_code)
         finally:
-            self._release_item(idx, item, interrupted=exit_code == COMMAND_INTERRUPTED_EXIT)
+            self._release_item(idx, item, retry=retry,
+                               interrupted=exit_code == COMMAND_INTERRUPTED_EXIT)
             with self.queue_lock:
                 other_free = sum(
                     1 for i, v in self.current_items.items()
@@ -3191,10 +3212,45 @@ class Dispatcher:
 
         if exit_code == 0:
             self._record_metric("completions")
-        elif exit_code not in (COMMAND_TIMEOUT_EXIT, COMMAND_INTERRUPTED_EXIT):
+        elif exit_code not in (None, COMMAND_TIMEOUT_EXIT, COMMAND_INTERRUPTED_EXIT):
             self._record_metric("failures")
         self._update_status()
         self._maybe_inter_item_sleep(stop_self, other_free)
+
+    def _max_attempts(self) -> int:
+        value = self.config.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+        try:
+            if isinstance(value, (bool, float)):
+                raise ValueError
+            attempts = int(value)
+            return attempts if attempts >= 1 else DEFAULT_MAX_ATTEMPTS
+        except (TypeError, ValueError, OverflowError):
+            return DEFAULT_MAX_ATTEMPTS
+
+    def _log_attempts_exhausted(self, item: QueueItem, attempts: int, limit: int) -> None:
+        self._log(f"[failed] {item.url}: attempts exhausted ({attempts}/{limit})")
+
+    def _run_queue_attempt(self, item: QueueItem, label: str) -> "int | None":
+        limit = self._max_attempts()
+        if item.attempts >= limit:
+            self._log_attempts_exhausted(item, item.attempts, limit)
+            return None
+        try:
+            return self._run_item(item, label)
+        except Exception as exc:
+            self._log(f"[{label} error] {item.url}: {exc!r}")
+            return -1
+
+    def _next_retry(self, item: QueueItem, exit_code: "int | None") -> "QueueItem | None":
+        if exit_code in (None, 0, COMMAND_INTERRUPTED_EXIT):
+            return None
+        attempts = item.attempts + 1
+        limit = self._max_attempts()
+        if attempts >= limit:
+            self._log_attempts_exhausted(item, attempts, limit)
+            return None
+        self._log(f"[retry] {item.url}: queued attempt {attempts + 1}/{limit}")
+        return item._replace(attempts=attempts)
 
     def _trigger_failure_cooldown(
         self, idx: int, item: QueueItem, exit_code: int
@@ -3687,6 +3743,8 @@ class _SettingsTabs:
              app.worker_count_var, 1,    32, 4, app._on_worker_count_changed),
             ("Cooldown on failure (s):",
              app.cooldown_var,     0, 86400, 6, app._on_cooldown_changed),
+            ("Queued link attempts (including first):",
+             app.max_attempts_var, 1, 100, 6, app._on_max_attempts_changed),
             ("Max per domain (0 = no cap):",
              app.max_per_domain_var, 0, 32, 4, app._on_max_per_domain_changed),
             ("Command timeout (s, 0 = off):",
@@ -4129,6 +4187,8 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             value=str(self.config.get("worker_count", 1)))
         self.cooldown_var = tk.StringVar(
             value=str(self.config.get("failure_sleep_seconds", 300)))
+        self.max_attempts_var = tk.StringVar(
+            value=str(self.config.get("max_attempts", DEFAULT_MAX_ATTEMPTS)))
         self.max_per_domain_var = tk.StringVar(
             value=str(self.config.get("max_per_domain", 0)))
         self.command_timeout_var = tk.StringVar(
@@ -4505,8 +4565,11 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             self.max_per_domain_var, "max_per_domain", 0,
         )
         cap_text = "no domain cap" if cap <= 0 else f"max/dom: {cap}"
+        attempts = self._read_int_setting(
+            self.max_attempts_var, "max_attempts", DEFAULT_MAX_ATTEMPTS)
         text = (f"sleep {self._format_duration(sleep_s)}   "
                 f"cooldown {self._format_duration(cd_s)}   "
+                f"attempts {attempts}   "
                 f"{cap_text}")
         self._status_settings_var.set(text)
 
@@ -4803,6 +4866,16 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             self.cooldown_var, self._read_failure_sleep_var,
             "failure_sleep_seconds", 300,
             lambda v: f"[config] failure cooldown set to {self._format_duration(v)}")
+
+    def _read_max_attempts_var(self) -> int:
+        return self._get_int_setting(
+            self.max_attempts_var, "max_attempts", DEFAULT_MAX_ATTEMPTS, clamp_min=1)
+
+    def _on_max_attempts_changed(self) -> None:
+        self._apply_int_setting(
+            self.max_attempts_var, self._read_max_attempts_var,
+            "max_attempts", DEFAULT_MAX_ATTEMPTS,
+            lambda v: f"[config] queued link attempts set to {v}")
 
     def _get_max_per_domain(self) -> int:
         return self._get_int_setting(
