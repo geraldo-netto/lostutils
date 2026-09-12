@@ -1,6 +1,7 @@
 """Tests for deduplicate-by-namev3.py — dnv3-rel-* reliability fixes
 (threshold clamp against uint8 overflow, word-boundary cleanup)."""
 import io
+import csv
 import importlib.util
 from pathlib import Path
 
@@ -229,7 +230,7 @@ def _parse_rows(out):
     for ln in out.splitlines():
         if not ln or ln.startswith("#"):  # skip blank + `# source lines:` comments
             continue
-        a, b, d = ln.split(";")
+        a, b, d = next(csv.reader([ln], delimiter=";"))
         rows.append((a, b, int(d)))
     return rows
 
@@ -588,3 +589,20 @@ def test_dnv3_rel_70_bom_does_not_change_collision_identity(tmp_path, prefix):
     output = []
     dn._emit_self_collisions(lines, output.append)
     assert ''.join(output) == '# source lines: 1,2\nabc;abc;0\n'
+
+
+@pytest.mark.parametrize("value", ["#abc", "# source lines: 1,2", '#say "hello"'])
+def test_dnv3_api_60_comment_like_values_remain_data(value):
+    output = []
+    dn._emit_self_collisions({value: [1, 2]}, output.append)
+    dn.emit_pairs([value, value + "d"], 1, 1, output.append)
+    assert _parse_rows("".join(output)) == [(value, value, 0), (value, value + "d", 1)]
+    assert sum(line.startswith("#") for line in "".join(output).splitlines()) == 1
+
+
+@given(st.text(alphabet=st.characters(blacklist_categories=('Cs',), blacklist_characters='\r\n'), min_size=1, max_size=100))
+def test_dnv3_api_60_record_fields_round_trip(value):
+    output = []
+    dn._write_pair(value, value + 'x', 1, output.append)
+    assert not output[0].startswith('#')
+    assert next(csv.reader(output, delimiter=';')) == [value, value + 'x', '1']

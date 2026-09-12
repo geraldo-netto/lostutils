@@ -164,6 +164,7 @@ def _build_parser():
         description="Find near-duplicate strings via batched Levenshtein.",
         epilog=(
             f"Output records use VALUE{OUTPUT_DELIMITER}VALUE{OUTPUT_DELIMITER}DISTANCE. "
+            "Read values as CSV fields; quotes and leading '#' are quoted. "
             "Self-collision records are preceded by a '# source lines:' comment; "
             "machine consumers must ignore lines beginning with '#'."
         ),
@@ -216,9 +217,20 @@ def _emit_self_collisions(line_nums, write):
         if len(lines) > 1:
             src = ",".join(str(x) for x in lines)
             write(f"# source lines: {src}\n")
-            write(
-                f"{cleaned}{OUTPUT_DELIMITER}{cleaned}{OUTPUT_DELIMITER}0\n"
-            )
+            _write_pair(cleaned, cleaned, 0, write)
+
+
+def _output_field(value):
+    if value.startswith("#") or any(c in value for c in (OUTPUT_DELIMITER, '"', "\r", "\n")):
+        return '"' + value.replace('"', '""') + '"'
+    return value
+
+
+def _write_pair(first, second, distance, write):
+    write(
+        f"{_output_field(first)}{OUTPUT_DELIMITER}{_output_field(second)}"
+        f"{OUTPUT_DELIMITER}{distance}\n"
+    )
 
 
 def _emit_results(line_nums, cleaned_strs, threshold, args, write):
@@ -311,10 +323,7 @@ def emit_pairs(cleaned_strs, threshold, workers, write, block_threshold=None, bl
         for r, c in zip(rows.tolist(), cols.tolist()):
             i = start + r
             j = start + c
-            write(
-                f"{cleaned_strs[i]}{OUTPUT_DELIMITER}{cleaned_strs[j]}"
-                f"{OUTPUT_DELIMITER}{int(block[r, c])}\n"
-            )
+            _write_pair(cleaned_strs[i], cleaned_strs[j], int(block[r, c]), write)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,8 @@ python3 deduplicate-by-namev3.py names.txt --threshold 7 --workers -1
 
 The script lowercases and normalizes each line before comparing. `--threshold` is the maximum Levenshtein distance to report, clamped internally to the `uint8` matrix limit. `--workers -1` uses all cores supported by RapidFuzz.
 
+Output uses semicolon-delimited CSV fields. Values containing quotes or beginning with `#` are quoted, so consumers can skip lines beginning with `#` and parse the remaining records with a CSV reader. Source-line comments precede distance-zero collisions; both collision and near-match records use the same quoting rules.
+
 ### `remove-deduplv3.py`
 
 Reads a hash file where each line is `<hash><whitespace><path>` (including the tagged JSON path representation emitted for line-breaking filenames) and emits quoted `rm -f` commands for duplicates while keeping the entry with the longest basename:
