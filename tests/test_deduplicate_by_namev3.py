@@ -539,6 +539,7 @@ def test_emit_results_handles_broken_pipe():
         1,
         args,
         closed_pipe,
+        lambda: None,
     )
 
 
@@ -606,3 +607,38 @@ def test_dnv3_api_60_record_fields_round_trip(value):
     dn._write_pair(value, value + 'x', 1, output.append)
     assert not output[0].startswith('#')
     assert next(csv.reader(output, delimiter=';')) == [value, value + 'x', '1']
+
+
+def test_dnv3_rob_60_early_pipe_close_exits_without_flush_traceback(tmp_path):
+    import os
+    import subprocess
+    import sys
+    source = tmp_path / 'dense.txt'
+    source.write_text(''.join(f'{i:04d}\n' for i in range(200)))
+    proc = subprocess.Popen([sys.executable, str(_PATH), str(source), '-w', '1'],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert os.read(proc.stdout.fileno(), 1)
+        proc.stdout.close()
+        assert proc.wait(timeout=10) == 0
+        assert proc.stderr.read() == b''
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+        proc.stderr.close()
+
+
+def test_dnv3_rob_60_final_buffer_flush_is_guarded(monkeypatch, tmp_path):
+    source = tmp_path / 'names.txt'
+    source.write_text('abc\nabc\n')
+    class ClosedReader(io.StringIO):
+        def flush(self):
+            raise BrokenPipeError('reader closed after buffered write')
+    stream = ClosedReader()
+    monkeypatch.setattr(dn, 'configure_stdout', lambda: None)
+    monkeypatch.setattr(dn.sys, 'stdout', stream)
+    monkeypatch.setattr(dn.sys, 'argv', ['prog', str(source), '-w', '1'])
+    dn.main()
+    assert dn.sys.stdout is not stream
+    dn.sys.stdout.flush()

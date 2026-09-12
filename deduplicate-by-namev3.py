@@ -233,7 +233,7 @@ def _write_pair(first, second, distance, write):
     )
 
 
-def _emit_results(line_nums, cleaned_strs, threshold, args, write):
+def _emit_results(line_nums, cleaned_strs, threshold, args, write, flush):
     try:
         _emit_self_collisions(line_nums, write)
         emit_pairs(
@@ -244,9 +244,22 @@ def _emit_results(line_nums, cleaned_strs, threshold, args, write):
             block_threshold=args.block_threshold,
             block_rows=args.block_rows,
         )
+        flush()
     except BrokenPipeError:
         return False
     return True
+
+
+def _silence_stdout():
+    # Replace the broken descriptor before interpreter shutdown flushes the
+    # original TextIOWrapper again. Rebinding stdout alone leaves that flush live.
+    with open(os.devnull, "w", encoding="utf-8") as sink:
+        try:
+            descriptor = sys.stdout.fileno()
+        except (AttributeError, OSError, ValueError):
+            sys.stdout = io.StringIO()
+        else:
+            os.dup2(sink.fileno(), descriptor)
 
 
 def main():
@@ -278,13 +291,16 @@ def main():
     threshold = clamp_threshold(args.threshold)
 
     write = sys.stdout.write
-    _emit_results(
+    emitted = _emit_results(
         line_nums,
         cleaned_strs,
         threshold,
         args,
         write,
+        sys.stdout.flush,
     )
+    if not emitted:
+        _silence_stdout()
 
 
 def emit_pairs(cleaned_strs, threshold, workers, write, block_threshold=None, block_rows=None):
