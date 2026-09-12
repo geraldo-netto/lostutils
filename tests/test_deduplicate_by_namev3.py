@@ -576,3 +576,15 @@ def test_configure_stdout_rejects_stream_without_binary_buffer(monkeypatch):
 
     with pytest.raises(RuntimeError, match="binary buffer"):
         dn.configure_stdout()
+
+
+@pytest.mark.parametrize('prefix', [b'\xef\xbb\xbf', b''])
+def test_dnv3_rel_70_bom_does_not_change_collision_identity(tmp_path, prefix):
+    source = tmp_path / 'names.txt'
+    source.write_bytes(prefix + b'abc\nabc\n\xffname\n')
+    lines, dropped = dn._load_cleaned_lines(source, dn.REPLACEMENTS, None)
+    assert lines == {'abc': [1, 2], '\udcffname': [3]}
+    assert dropped == 0
+    output = []
+    dn._emit_self_collisions(lines, output.append)
+    assert ''.join(output) == '# source lines: 1,2\nabc;abc;0\n'
