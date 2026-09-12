@@ -779,16 +779,6 @@ def _iter_files(
         logger.info(f"Scanning complete. Found {pending} files to organize ({already_bucketed} already bucketed).")
 
 
-def list_files(
-    root: Path,
-    skip_paths: Iterable[Path],
-    verbose: bool = False,
-    ctx: SniffContext | None = None,
-) -> list[Path]:
-    """Compatibility wrapper returning the streamed scan as a list."""
-    return list(_iter_files(root, skip_paths, verbose, ctx))
-
-
 def _log_scan_progress(scanned: int, pending: int, already_bucketed: int) -> None:
     if scanned % PROGRESS_EVERY == 0:
         logger.info(

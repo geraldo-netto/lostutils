@@ -185,7 +185,7 @@ from organize_by_extension import (
 )
 from organize_by_extension import ( # Added for new tests
     is_bucketed_file,
-    list_files,
+    _iter_files,
     move_file,
     choose_bucket, BUCKET_SIZE,
     _BUCKET_FULL, _walk_scandir, _find_reusable_bucket,
@@ -478,7 +478,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
             self.assertIn("no logs of level INFO", str(cm.exception))
 
     def test_organize_skips_already_bucketed_files_quietly(self):
-        """Verify list_files skips bucketed files and reports them in verbose mode."""
+        """Verify _iter_files skips bucketed files and reports them in verbose mode."""
         with TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
             # Create a file that looks already bucketed: <ext>/<prefix>0000/<file>
@@ -681,7 +681,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
             self.assertTrue(is_bucketed_file(root, root / "pdf" / "f00000" / "f.pdf"))
 
     def test_list_files_skips_symlinks_and_skip_paths(self):
-        """list_files excludes symlinks and explicitly skipped paths."""
+        """_iter_files excludes symlinks and explicitly skipped paths."""
         with TemporaryDirectory() as temp_dir_name:
             root = Path(temp_dir_name)
             real = self.make_file(root, "real.txt")
@@ -689,7 +689,7 @@ class OrganizeByExtensionTest(unittest.TestCase):
             link = root / "link.txt"
             link.symlink_to(real)
 
-            found = list_files(root, skip_paths={skip})
+            found = list(_iter_files(root, skip_paths={skip}))
             self.assertIn(real, found)
             self.assertNotIn(skip, found)
             self.assertNotIn(link, found)
@@ -1041,7 +1041,7 @@ class PerfScanTests(unittest.TestCase):
             valid = self.make_file(root, "valid.txt")
 
             with self.assertLogs("organize_by_extension", level="WARNING") as cm:
-                files = list_files(root, [], ctx=SniffContext(sniff=False))
+                files = list(_iter_files(root, [], ctx=SniffContext(sniff=False)))
 
             self.assertEqual(files, [valid])
             self.assertTrue((private / "source").exists())
@@ -1072,7 +1072,7 @@ class PerfScanTests(unittest.TestCase):
             with resolve_context, self.assertLogs(
                 "organize_by_extension", level="WARNING"
             ) as cm:
-                files = list_files(root, [], ctx=SniffContext(sniff=False))
+                files = list(_iter_files(root, [], ctx=SniffContext(sniff=False)))
 
             self.assertEqual(files, [valid])
             self.assertTrue(any("skipping symlink loop" in line for line in cm.output))
@@ -1092,7 +1092,7 @@ class PerfScanTests(unittest.TestCase):
                 return real_is_dir(self, follow_symlinks=follow_symlinks)
 
             with patch.object(os.DirEntry, "is_dir", flaky_is_dir):
-                files = list_files(root, skip_paths=set())
+                files = list(_iter_files(root, skip_paths=set()))
             names = sorted(p.name for p in files)
             # ok.txt survives; in.txt is unreachable because the racy "sub"
             # never recursed.
@@ -1643,7 +1643,7 @@ class HeadCacheTests(unittest.TestCase):
             pending.write_bytes(b"%PDF-1.4\n")
             head_cache: dict = {}
             ctx = SniffContext(sniff=True, head_cache=head_cache)
-            files = list_files(root, skip_paths=set(), ctx=ctx)
+            files = list(_iter_files(root, skip_paths=set(), ctx=ctx))
             self.assertIn(pending, files)
             self.assertNotIn(bucketed, files)
             self.assertNotIn(bucketed, head_cache)
@@ -3679,17 +3679,17 @@ class WalkScandirHandlesStatError(unittest.TestCase):
             real_stat = _oze.os.DirEntry.stat if hasattr(_oze.os, "DirEntry") else None
 
             # Patch _walk_scandir's iterated entry's stat to raise once.
-            real_list = _oze.list_files
+            real_list = _oze._iter_files
             # easier: pass a path containing an unreadable directory
             sub = root / "unreadable"; sub.mkdir(mode=0o000)
             try:
-                files = _oze.list_files(
+                files = list(_oze._iter_files(
                     root,
                     skip_paths=set(),
                     verbose=False,
                     ctx=_oze.SniffContext(sniff=False, head_cache=None,
                                           extra_families={}),
-                )
+                ))
                 # good.txt always returns; unreadable contents skipped via
                 # _safe_scandir / stat OSError branch.
                 self.assertTrue(any(f.name == "good.txt" for f in files))
@@ -3775,11 +3775,11 @@ class ListFilesStatErrorSkipped(unittest.TestCase):
                     yield _StatFail(e)
 
             with patch.object(_oze, "_walk_scandir", fake_walk):
-                files = _oze.list_files(
+                files = list(_oze._iter_files(
                     root, skip_paths=set(), verbose=False,
                     ctx=_oze.SniffContext(sniff=False, head_cache=None,
                                           extra_families={}),
-                )
+                ))
             self.assertTrue(any(f.name == "ok.txt" for f in files))
             self.assertFalse(any(f.name == "ghost.txt" for f in files))
 
@@ -4978,8 +4978,8 @@ def test_list_files_wraps_bucket_check_with_scan_monitor(tmp_path):
             events.append(("end", path))
 
     with patch.object(oze, "_ScanStallMonitor", FakeMonitor):
-        files = oze.list_files(
-            tmp_path, [], ctx=oze.SniffContext(sniff=False))
+        files = list(oze._iter_files(
+            tmp_path, [], ctx=oze.SniffContext(sniff=False)))
 
     assert files == [source]
     assert events == [
@@ -5456,14 +5456,14 @@ def test_main_help_path_exits_cleanly(monkeypatch, capsys):
 
 # --- oze-obs-04: scan-stage progress heartbeat ----------------------------
 
-def test_list_files_emits_scan_progress(tmp_path, monkeypatch, caplog):
-    """oze-obs-04: list_files emits a periodic 'scanning:' heartbeat every
+def test_iter_files_emits_scan_progress(tmp_path, monkeypatch, caplog):
+    """oze-obs-04: _iter_files emits a periodic 'scanning:' heartbeat every
     PROGRESS_EVERY regular files so a long silent scan shows it is alive."""
     monkeypatch.setattr(oze, "PROGRESS_EVERY", 2)
     for i in range(3):
         (tmp_path / f"f{i}.txt").write_text("x")
     with caplog.at_level(logging.INFO, logger="organize_by_extension"):
-        oze.list_files(tmp_path, skip_paths=set())
+        list(oze._iter_files(tmp_path, skip_paths=set()))
     assert any("scanning:" in r.getMessage() for r in caplog.records), \
         "no scan-progress heartbeat emitted"
 
@@ -6247,8 +6247,8 @@ def test_scan_skips_private_cross_device_staging(tmp_path, caplog):
     (staging / "payload.bin").write_bytes(b"payload")
 
     with caplog.at_level("WARNING"):
-        files = oze.list_files(
-            tmp_path, [], ctx=oze.SniffContext(sniff=False))
+        files = list(oze._iter_files(
+            tmp_path, [], ctx=oze.SniffContext(sniff=False)))
 
     assert files == []
     assert "private cross-device staging" in caplog.text
@@ -6260,8 +6260,8 @@ def test_scan_skips_legacy_cross_device_temp_without_deleting_it(
     stale.write_bytes(b"recover me")
 
     with caplog.at_level("WARNING"):
-        files = oze.list_files(
-            tmp_path, [], ctx=oze.SniffContext(sniff=False))
+        files = list(oze._iter_files(
+            tmp_path, [], ctx=oze.SniffContext(sniff=False)))
 
     assert files == []
     assert stale.read_bytes() == b"recover me"
