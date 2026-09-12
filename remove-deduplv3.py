@@ -347,6 +347,7 @@ def main(argv=None):
 
     try:
         groups_with_dups, files_to_remove = _emit_remove_commands(groups, sys.stdout.write)
+        sys.stdout.flush()
         # rdv3-obs-01: audit summary to stderr (groups with all-identical paths or a
         # single survivor are otherwise silently skipped with no trace).
         print(

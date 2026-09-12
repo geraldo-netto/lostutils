@@ -3,6 +3,7 @@ import builtins
 import io
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,23 @@ _PATH = Path(__file__).resolve().parent.parent / "remove-deduplv3.py"
 _spec = importlib.util.spec_from_file_location("remove_deduplv3", _PATH)
 rd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rd)
+
+
+def test_rdv3_rob_80_real_closed_pipe_exits_cleanly(tmp_path):
+    path = tmp_path / "hashes.txt"
+    path.write_text("h a\nh longer\n")
+    reader, writer = os.pipe()
+    os.close(reader)
+    try:
+        result = subprocess.run(
+            [sys.executable, str(_PATH), str(path)], stdout=writer,
+            stderr=subprocess.PIPE, check=False,
+        )
+    finally:
+        os.close(writer)
+    assert result.returncode == 0
+    assert b"Exception ignored" not in result.stderr
+    assert b"BrokenPipeError" not in result.stderr
 
 
 @pytest.mark.parametrize("alias", ["./file.txt", "sub/../file.txt", "absolute", "dir_link/file.txt"])
