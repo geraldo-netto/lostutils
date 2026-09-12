@@ -1665,7 +1665,7 @@ _CALENDAR_CLOCK_TEXT = (
     r"(?:[:.]\d{2})?\s*[ap]\.?m\.?)"
 )
 _CALENDAR_EVENT_TIME_PREFIX_RE = re.compile(
-    rf"^\s*({_CALENDAR_CLOCK_TEXT})\s*(?:[-:]\s*)?(.+)$",
+    rf"^\s*({_CALENDAR_CLOCK_TEXT})(?:\s+|[-:]\s*)(.+)$",
     re.IGNORECASE,
 )
 _CALENDAR_EVENT_TIME_SUFFIX_RE = re.compile(
@@ -2067,7 +2067,8 @@ def _split_time_explicit(text: str, has_time_columns: bool) -> Optional[Tuple[st
     )
     if not explicit:
         return None
-    if not (has_time_columns or ":" in explicit.group(0) or "h" in explicit.group(0).lower()):
+    clock_prefix = text[:explicit.start(4)]
+    if not (has_time_columns or ":" in clock_prefix or "h" in clock_prefix.lower()):
         return None
     hour = int(explicit.group(1))
     minute = int(explicit.group(2) or 0)

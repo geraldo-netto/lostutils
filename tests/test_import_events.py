@@ -21,6 +21,18 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+@pytest.mark.parametrize("title", ["2 Marathon", "2 Runners", "2 Topics: follow-up", "2 Hikers"])
+def test_ie_rel_81_bare_title_number_is_not_a_clock(title):
+    text = f"Calendar 2026\nDate Activity\n01/02 {title}"
+    assert import_events._calendar_table_lines(text) == [f"2026-02-01 - {title}"]
+
+
+@pytest.mark.parametrize("clock", ["02:30", "02h30", "02H30"])
+def test_ie_rel_81_explicit_clock_still_parses(clock):
+    text = f"Calendar 2026\nDate Activity\n01/02 {clock} Marathon"
+    assert import_events._calendar_table_lines(text) == ["2026-02-01T02:30 - Marathon"]
+
+
 @pytest.mark.parametrize("header", ["Date Activity", "Day Month Activity", "Month Day Activity"])
 def test_ie_rel_80_generic_table_preserves_explicit_years(header):
     text = f"Calendar 2026\n{header}\n01/02/2027 Planning meeting\n03/04/2028 Workshop\n05/06 Retreat"
