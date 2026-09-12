@@ -52,7 +52,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| dnp-val-70 | open | low | low | remove-deduplv3.py:78 — [input validation / command safety] `_decode_record_path` still raises an uncaught `RecursionError` for a `@lostutils-json:[[[[...` payload with 100k brackets. Catch the recursion failure or bound payload nesting and count the record as skipped. Add a permanent CLI regression proving malformed nested JSON does not produce a traceback and valid records still reach the removal plan. |
 
 ## Blocked / Deferred
 

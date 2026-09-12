@@ -75,7 +75,7 @@ def _decode_record_path(path, err_mode="surrogateescape"):
     try:
         decoded = (json.loads(path[len(_ESCAPED_PATH_PREFIX):])
                    if path.startswith(_ESCAPED_PATH_PREFIX) else path)
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError, RecursionError):
         return None
     if not isinstance(decoded, str) or "\x00" in decoded:
         return None

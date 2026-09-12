@@ -17,6 +17,33 @@ rd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rd)
 
 
+@pytest.mark.parametrize("balanced", [False, True], ids=["incomplete", "complete"])
+def test_dnp_val_70_nested_json_does_not_abort_removal_plan(tmp_path, balanced):
+    """dnp-val-70: skip excessive nesting and retain valid records on both sides."""
+    payload = "[" * 100_000
+    if balanced:
+        payload += "0" + "]" * 100_000
+    source = tmp_path / "hashes.txt"
+    source.write_text(
+        'h @lostutils-json:"first.txt"\n'
+        f"h @lostutils-json:{payload}\n"
+        'h @lostutils-json:"longest-survivor.txt"\n'
+        "unique untouched.txt\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(_PATH), str(source)], cwd=tmp_path,
+        capture_output=True, text=True, encoding="utf-8", timeout=10, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr
+    assert "1 skipped line(s)" in result.stderr
+    assert "1 file(s) queued for removal" in result.stderr
+    commands = [line for line in result.stdout.splitlines() if line.startswith("rm ")]
+    assert commands == ["rm -f -- first.txt"]
+    assert "# saving: longest-survivor.txt\n" in result.stdout
+
+
 def test_rdv3_rob_80_real_closed_pipe_exits_cleanly(tmp_path):
     path = tmp_path / "hashes.txt"
     path.write_text("h a\nh longer\n")
