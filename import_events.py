@@ -2682,7 +2682,8 @@ def _stage_cache_path(config: ModelConfig, cache_key: str) -> Path:
 
 def _stage_cache_entries(root: Path) -> List[Path]:
     try:
-        return [path for path in root.glob("*.json") if path.is_file()]
+        return [path for path in root.glob("*.json")
+                if re.fullmatch(r"[0-9a-f]{64}\.json", path.name) and path.is_file()]
     except OSError:
         return []
 

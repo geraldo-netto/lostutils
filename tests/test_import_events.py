@@ -21,6 +21,23 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+@pytest.mark.parametrize("operation", ["prune", "reset"])
+def test_ie_di_70_cache_cleanup_preserves_foreign_json(tmp_path, operation):
+    foreign = ["events.json", "one.json", "a" * 63 + ".json", "G" * 64 + ".json"]
+    for name in foreign:
+        (tmp_path / name).write_text('{"keep": true}')
+    for digit in ("a", "b"):
+        (tmp_path / (digit * 64 + ".json")).write_text('{"text": "cached"}')
+    cfg = import_events.ModelConfig(stage_cache_dir=str(tmp_path), stage_cache_max_entries=1)
+    if operation == "reset":
+        assert import_events.reset_stage_cache_entries(cfg) == 2
+    else:
+        import_events._prune_stage_cache(cfg)
+    for name in foreign:
+        assert (tmp_path / name).read_text() == '{"keep": true}'
+    assert len(import_events._stage_cache_entries(tmp_path)) == (0 if operation == "reset" else 1)
+
+
 @pytest.mark.parametrize("end", ["2026-02-01", "2026-02-01T12:00:00"])
 def test_ie_api_70_all_day_equal_end_is_omitted(end):
     from icalendar import Calendar
@@ -2297,16 +2314,19 @@ def test_prune_stage_cache_scans_directory_only_on_cap_crossing(tmp_path, monkey
     assert len(scans) == 1
 
 
-def test_reset_stage_cache_entries_deletes_json_only(tmp_path):
+def test_reset_stage_cache_entries_deletes_owned_json_only(tmp_path):
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     (cache_dir / "one.json").write_text("{}", encoding="utf-8")
+    owned = cache_dir / ("a" * 64 + ".json")
+    owned.write_text("{}", encoding="utf-8")
     (cache_dir / "notes.txt").write_text("keep", encoding="utf-8")
     cfg = import_events.ModelConfig(stage_cache_dir=str(cache_dir))
 
     assert import_events.reset_stage_cache_entries(cfg) == 1
 
-    assert not (cache_dir / "one.json").exists()
+    assert not owned.exists()
+    assert (cache_dir / "one.json").exists()
     assert (cache_dir / "notes.txt").exists()
 
 
