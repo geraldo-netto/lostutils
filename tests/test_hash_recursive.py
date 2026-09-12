@@ -5100,3 +5100,17 @@ def test_hr_test_90_dump_setup_failure_without_run_config(tmp_path, capsys):
     assert state['writer'] is None
     assert not target.exists()
     assert 'cannot write' in capsys.readouterr().err
+
+
+def test_hr_obs_80_cli_dump_failure_returns_incomplete_with_duplicates(tmp_path):
+    (tmp_path / 'a.bin').write_bytes(b'same')
+    (tmp_path / 'b.bin').write_bytes(b'same')
+    dump = tmp_path / 'missing' / 'hashes.txt'
+    result = subprocess.run(
+        [sys.executable, str(_PATH), '--hashes-file', str(dump), str(tmp_path)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 1
+    assert 'a.bin' in result.stdout and 'b.bin' in result.stdout
+    assert 'cannot write' in result.stderr
+    assert not dump.exists()

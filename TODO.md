@@ -16,7 +16,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| hr-obs-80 | open | medium | low | hash-recursive-ai5.py:2564 — [observability / operability] Include requested hash-dump failures in the final exit status; setup, write, patch, and close errors only warn and never reach _run_exit_code. Reproduced --hashes-file with a missing parent: no dump is created but the CLI exits 0. Track dump failure through finalization and return nonzero while preserving useful duplicate stdout. Three pillars: logs expose the error, process health falsely reports success. |
 
 ### `link_queue.py`
 
