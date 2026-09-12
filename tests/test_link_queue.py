@@ -6361,3 +6361,18 @@ finally:
                for name in ("config", "legacy", "state"))
     assert not marker.exists()
     assert (scripts / "link_queue_state.yaml").exists()
+
+
+@pytest.mark.parametrize('original', ['- command: custom-handler\n', 'custom-handler\n', 'false\n', '0\n', '[]\n', 'null\n', ''])
+def test_lq_val_92_nonmapping_config_survives_saves_and_shutdown(tmp_path, request, original):
+    path = tmp_path / 'cfg.yaml'
+    path.write_text(original)
+    instance = request.getfixturevalue('app')
+    assert instance.config.load_error is not None
+    with pytest.raises(OSError, match='refusing to overwrite'):
+        instance.config.save()
+    instance._save_config()
+    pump(instance, 0.05)
+    assert 'repair the file and restart' in instance.log_text.get('1.0', 'end')
+    instance._shutdown(timeout=2)
+    assert path.read_text() == original

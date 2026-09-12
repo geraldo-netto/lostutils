@@ -122,6 +122,12 @@ def _yaml_load(stream):
     return yaml.load(stream, Loader=_YamlLoader)
 
 
+def _require_mapping(data) -> dict:
+    if not isinstance(data, dict):
+        raise ValueError("document root must be a mapping")
+    return data
+
+
 def _yaml_dump(data, stream, **kwargs):
     """Dump YAML using the fastest safe dumper available."""
     return yaml.dump(data, stream, Dumper=_YamlDumper, **kwargs)
@@ -958,14 +964,14 @@ class ConfigStore(dict):
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, "r", encoding="utf-8") as f:
-                    return (_yaml_load(f) or {}), False
+                    return _require_mapping(_yaml_load(f)), False
             except Exception as e:
                 self._note_load_failure(self.config_file, e)
                 return None, False
         if os.path.exists(self.legacy_file):
             try:
                 with open(self.legacy_file, "r", encoding="utf-8") as f:
-                    return json.load(f), True
+                    return _require_mapping(json.load(f)), True
             except Exception as e:  # pragma: no cover - legacy-config read OSError
                 self._note_load_failure(self.legacy_file, e)
                 return None, False  # pragma: no cover - return after legacy-config failure
