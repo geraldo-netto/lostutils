@@ -70,7 +70,7 @@ def detect_encoding(head):
     return "utf-8"
 
 
-def _decode_record_path(path):
+def _decode_record_path(path, err_mode="surrogateescape"):
     try:
         decoded = (json.loads(path[len(_ESCAPED_PATH_PREFIX):])
                    if path.startswith(_ESCAPED_PATH_PREFIX) else path)
@@ -78,6 +78,7 @@ def _decode_record_path(path):
         return None
     if not isinstance(decoded, str) or "\x00" in decoded:
         return None
+    decoded.encode("utf-8", err_mode)
     return decoded
 
 
@@ -115,27 +116,31 @@ def _configure_stdout_errors(err_mode):
     _fail("stdout does not expose a binary buffer for utf-8 output", 2)
 
 
-def _read_groups(lines):
+def _read_record(raw, err_mode):
+    # Split only the hash/path boundary; whitespace within filenames is data.
+    parts = raw.rstrip("\r\n").split(None, 1)
+    if len(parts) < 2:
+        return None
+    path = _decode_record_path(parts[1], err_mode)
+    return (parts[0], path) if path is not None else None
+
+
+def _read_groups(lines, err_mode="surrogateescape"):
     groups = defaultdict(list)
     skipped = 0
+    encoding_errors = 0
     for raw in lines:
-        line = raw.rstrip("\r\n")
-        if not line:
+        try:
+            record = _read_record(raw, err_mode)
+        except UnicodeEncodeError:
+            encoding_errors += 1
+            record = None
+        if record is None:
             skipped += 1
             continue
-        # split(None, 1) consumes any leading whitespace AND the
-        # whole gap between hash and path; the path keeps its
-        # interior whitespace (tabs, multiple spaces, etc.).
-        parts = line.split(None, 1)
-        if len(parts) < 2:
-            skipped += 1
-            continue
-        path = _decode_record_path(parts[1])
-        if path is None:
-            skipped += 1
-            continue
-        groups[parts[0]].append(path)
-    return groups, skipped
+        digest, path = record
+        groups[digest].append(path)
+    return groups, skipped, encoding_errors
 
 
 def _load_groups(path, forced_encoding, err_mode):
@@ -145,10 +150,10 @@ def _load_groups(path, forced_encoding, err_mode):
         )
         with io.TextIOWrapper(binary, encoding=encoding, errors=err_mode) as text:
             try:
-                groups, skipped = _read_groups(text)
+                groups, skipped, encoding_errors = _read_groups(text, err_mode)
             except UnicodeDecodeError as exc:
                 raise _InputDecodeError(encoding, exc) from exc
-    return encoding, groups, skipped
+    return encoding, groups, skipped, encoding_errors
 
 
 def _validate_encoding(encoding):
@@ -309,7 +314,7 @@ def main(argv=None):
     _configure_stdout_errors(err_mode)
 
     try:
-        groups, skipped_lines = _load_groups(
+        groups, skipped_lines, encoding_errors = _load_groups(
             args.file, args.encoding, err_mode
         )[1:]
     except OSError as e:
@@ -337,6 +342,8 @@ def main(argv=None):
     except BrokenPipeError:
         _silence_stdout_after_broken_pipe()
         return
+    if encoding_errors:
+        _fail(f"{encoding_errors} path(s) cannot be encoded for UTF-8 stdout ({err_mode})", 3)
 
 
 if __name__ == "__main__":

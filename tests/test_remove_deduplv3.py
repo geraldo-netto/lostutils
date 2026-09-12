@@ -2,6 +2,7 @@
 import builtins
 import io
 import importlib.util
+import json
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,25 @@ _PATH = Path(__file__).resolve().parent.parent / "remove-deduplv3.py"
 _spec = importlib.util.spec_from_file_location("remove_deduplv3", _PATH)
 rd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rd)
+
+
+@pytest.mark.parametrize("value, flags, skipped", [
+    ("\udcff", ["--strict"], True), ("\ud800", [], True),
+    ("\udcff", [], False), ("café", ["--strict"], False),
+])
+@pytest.mark.parametrize("survivor", [True, False])
+def test_rdv3_rel_70_validates_output_encoding(tmp_path, value, flags, skipped, survivor):
+    path = tmp_path / "hashes.txt"
+    record = json.dumps(("long-survivor-" if survivor else "") + value)
+    other = "x" if survivor else "a-longer-survivor"
+    path.write_text(f'h @lostutils-json:{record}\nh {other}\n', encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(_PATH), str(path), *flags], capture_output=True, check=False,
+    )
+    assert result.returncode == (3 if skipped else 0)
+    assert b"Traceback" not in result.stderr
+    assert (b"1 skipped line(s)" in result.stderr) is skipped
+    assert (b"rm -f --" in result.stdout) is not skipped
 
 
 @pytest.mark.parametrize("encoding", ["rot_13", "base64_codec", "hex_codec", "zlib_codec"])
@@ -30,9 +50,10 @@ def test_rdv3_val_80_nontext_codec_exits_three(tmp_path, encoding):
 
 @pytest.mark.parametrize("record", ['h @lostutils-json:"/d/ab\\u0000"\n', "h /d/ab\x00\n"])
 def test_rdv3_val_70_nul_paths_are_skipped(record):
-    groups, skipped = rd._read_groups([record, "h /safe\n"])
+    groups, skipped, errors = rd._read_groups([record, "h /safe\n"])
     assert groups == {"h": ["/safe"]}
     assert skipped == 1
+    assert errors == 0
 
 
 @pytest.mark.parametrize("comment_kind", ["saving", "case_conflict"])
@@ -103,7 +124,7 @@ def test_load_groups_peeks_without_reopening_or_losing_prefix(monkeypatch):
 
     monkeypatch.setattr(builtins, "open", open_once)
 
-    encoding, groups, skipped = rd._load_groups(
+    encoding, groups, skipped, errors = rd._load_groups(
         "stream", None, "surrogateescape"
     )
 
@@ -111,10 +132,11 @@ def test_load_groups_peeks_without_reopening_or_losing_prefix(monkeypatch):
     assert encoding == "utf-8"
     assert groups == {"h": ["/first", "/second-longer"]}
     assert skipped == 0
+    assert errors == 0
 
 
 def test_read_groups_decodes_tagged_path_and_skips_invalid_payload():
-    groups, skipped = rd._read_groups(
+    groups, skipped, errors = rd._read_groups(
         [
             'h @lostutils-json:"/with\\nnewline"\n',
             "h @lostutils-json:not-json\n",
@@ -123,6 +145,7 @@ def test_read_groups_decodes_tagged_path_and_skips_invalid_payload():
 
     assert groups == {"h": ["/with\nnewline"]}
     assert skipped == 1
+    assert errors == 0
 
 
 def test_help_documents_exit_codes(capsys):
