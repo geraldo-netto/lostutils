@@ -1732,10 +1732,31 @@ def _reserve_slot_via_rename(source: Path) -> Path:
         except FileExistsError as exc:
             last_exc = exc
             continue
-        os.close(fd)
-        os.replace(source, candidate)
+        try:
+            reserved = os.fstat(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.replace(source, candidate)
+        except OSError:
+            _discard_rename_reservation(candidate, reserved)
+            raise
         return candidate
     _raise_collision_exhausted(source, last_exc)
+
+
+def _discard_rename_reservation(candidate: Path, reserved: os.stat_result) -> None:
+    try:
+        if _stat_snapshot(candidate.lstat()) != _stat_snapshot(reserved):
+            return
+        # The quarantine helper checks identity again after moving the entry,
+        # preserving a substitution that races the initial snapshot check.
+        _unlink_with_rollback(candidate, None, reserved)
+    except OSError as exc:
+        logger.warning(
+            "could not remove collision reservation %s: %s; manual cleanup required",
+            candidate, exc,
+        )
 
 
 def _unlink_source_or_rollback_candidate(source: Path, candidate: Path) -> None:

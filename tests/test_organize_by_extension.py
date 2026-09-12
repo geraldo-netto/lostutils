@@ -6323,3 +6323,46 @@ def _close_pinned_test_descriptors(descriptors):
             os.close(fd)
         except OSError:
             pass
+
+
+@pytest.mark.parametrize('error_number', [errno.ENOSPC, errno.EACCES])
+@pytest.mark.parametrize('substitute', [False, True])
+def test_oze_rob_92_failed_rename_cleans_only_owned_reservation(tmp_path, monkeypatch, error_number, substitute):
+    source = tmp_path / 'pdf'
+    source.write_bytes(b'original data')
+    replacement = tmp_path / 'replacement'
+    replacement.write_bytes(b'another writer')
+    candidate = tmp_path / 'pdf.collision1'
+    real_replace = oze.os.replace
+    def fail(src, dst):
+        if substitute:
+            real_replace(replacement, dst)
+        raise OSError(error_number, 'rename failed')
+    monkeypatch.setattr(oze.os, 'replace', fail)
+    with pytest.raises(OSError) as raised:
+        oze._reserve_slot_via_rename(source)
+    assert raised.value.errno == error_number
+    assert source.read_bytes() == b'original data'
+    if substitute:
+        assert candidate.read_bytes() == b'another writer'
+    else:
+        assert not candidate.exists()
+        assert replacement.read_bytes() == b'another writer'
+    assert not list(tmp_path.glob(oze.PRIVATE_REMOVE_PREFIX + '*'))
+
+
+def test_oze_rob_92_cleanup_failure_reports_original_error(tmp_path, monkeypatch, caplog):
+    source = tmp_path / 'pdf'
+    source.write_bytes(b'original')
+    def fail_replace(*args):
+        raise OSError(errno.ENOSPC, 'rename failed')
+    def fail_cleanup(*args):
+        raise OSError(errno.EACCES, 'cleanup denied')
+    monkeypatch.setattr(oze.os, 'replace', fail_replace)
+    monkeypatch.setattr(oze, '_unlink_with_rollback', fail_cleanup)
+    with pytest.raises(OSError) as raised:
+        oze._reserve_slot_via_rename(source)
+    assert raised.value.errno == errno.ENOSPC
+    assert source.read_bytes() == b'original'
+    assert 'manual cleanup required' in caplog.text
+    assert 'cleanup denied' in caplog.text
