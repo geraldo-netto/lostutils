@@ -33,6 +33,7 @@ import hashlib
 import itertools
 import io
 import json
+import math
 import os
 import stat
 import tempfile
@@ -1525,7 +1526,29 @@ class Dispatcher:
             with self._immediate_q.mutex:
                 backlog = list(self._immediate_q.queue)
         immediate = [self._serialize_item(it) for it in inflight + backlog]
-        return {"queue": pending, "in_flight": in_flight, "immediate": immediate}
+        return {"queue": pending, "in_flight": in_flight, "immediate": immediate,
+                "cooldowns": self._snapshot_cooldowns()}
+
+    def _snapshot_cooldowns(self) -> dict:
+        monotonic_now, wall_now = time.monotonic(), time.time()
+        return {domain: wall_now + until - monotonic_now
+                for domain, until in self._active_cooldowns(monotonic_now).items()}
+
+    def _restore_cooldowns(self, data: dict) -> None:
+        raw = _require_mapping(data.get("cooldowns", {}))
+        wall_now, monotonic_now = time.time(), time.monotonic()
+        restored = {}
+        for domain, expiry in raw.items():
+            if not isinstance(domain, str) or not domain:
+                raise ValueError("cooldown domain must be a nonempty string")
+            if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
+                raise ValueError("cooldown expiry must be a finite timestamp")
+            if not math.isfinite(expiry):
+                raise ValueError("cooldown expiry must be a finite timestamp")
+            if expiry > wall_now:
+                restored[domain] = monotonic_now + expiry - wall_now
+        with self._cooldown_lock:
+            self._cooldown_until.update(restored)
 
     def _atomic_write_state(self, snapshot: dict) -> None:
         """Write `snapshot` to state_path via a uniquely-named tempfile + atomic
@@ -1629,9 +1652,12 @@ class Dispatcher:
         except FileNotFoundError:
             return None
         except Exception as e:
-            self.state_load_error = f"could not read {self.state_path}: {e}"
-            print(f"[warn] {self.state_load_error}", file=sys.stderr)
+            self._note_state_load_failure(e)
             return None
+
+    def _note_state_load_failure(self, error: Exception) -> None:
+        self.state_load_error = f"could not read {self.state_path}: {error}"
+        print(f"[warn] {self.state_load_error}", file=sys.stderr)
 
     @classmethod
     def _parse_state_list(cls, data: dict, key: str) -> "list[QueueItem]":
@@ -1738,6 +1764,12 @@ class Dispatcher:
         # lq-nplus1-01: read+parse the state file ONCE and feed the shared dict
         # to both loaders instead of each re-opening and re-parsing it.
         state = self._read_state_dict()
+        if state is not None:
+            try:
+                self._restore_cooldowns(state)
+            except (ValueError, TypeError, OverflowError) as exc:
+                self._note_state_load_failure(exc)
+                state = None
         if state is None:
             if self.state_load_error is not None:
                 self._log(f"[error] {self.state_load_error}; repair the file and restart")

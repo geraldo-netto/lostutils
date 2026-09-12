@@ -272,3 +272,48 @@ def test_lq_rel_92_credentials_share_domain_limits(dispatcher, blocked_by):
 ])
 def test_lq_rel_92_domain_keys_handle_ipv6_and_invalid_ports(dispatcher, url, expected):
     assert dispatcher._domain_of(url) == expected
+
+
+@pytest.mark.parametrize('elapsed', [60, 301])
+def test_lq_time_92_restart_preserves_remaining_cooldown(dispatcher, monkeypatch, elapsed):
+    wall, mono = [1000.0], [100.0]
+    monkeypatch.setattr(lq.time, 'time', lambda: wall[0])
+    monkeypatch.setattr(lq.time, 'monotonic', lambda: mono[0])
+    dispatcher.queue_items.append(item())
+    monkeypatch.setattr(dispatcher, '_run_item', lambda *_: 1)
+    dispatcher._worker_step(0, threading.Event())
+    dispatcher._save_state()
+    wall[0] += elapsed
+    mono[0] = 10.0  # Reboot: the old monotonic epoch is gone.
+    restored = lq.Dispatcher.headless(dict(dispatcher.config), state_path=dispatcher.state_path)
+    try:
+        restored._restore_queue_from_state()
+        assert restored.queue_items[0].attempts == 1
+        healthy = item('https://healthy.test/a')
+        restored.queue_items.append(healthy)
+        with restored._dispatch_cv:
+            if elapsed < 300:
+                assert restored._try_claim_item(0) == healthy
+                assert restored._try_claim_item(1) is None
+                # A wall-clock jump in this process cannot change the delay.
+                wall[0] += 100000
+                assert restored._try_claim_item(1) is None
+                mono[0] += 300 - elapsed
+            assert restored._try_claim_item(1).url == item().url
+    finally:
+        restored.stop_event.set()
+        restored.close()
+
+
+@pytest.mark.parametrize('cooldowns', [[], {'failed.test': 'tomorrow'}, {'failed.test': float('inf')}, {'failed.test': True}, {1: 1234}])
+def test_lq_time_92_invalid_cooldowns_preserve_state(dispatcher, cooldowns):
+    from pathlib import Path
+    path = Path(dispatcher.state_path)
+    with path.open('w') as stream:
+        lq._yaml_dump({'queue': [dispatcher._serialize_item(item())], 'cooldowns': cooldowns}, stream)
+    original = path.read_bytes()
+    dispatcher._restore_queue_from_state()
+    assert not dispatcher.queue_items
+    assert dispatcher.state_load_error
+    dispatcher._save_state()
+    assert path.read_bytes() == original
