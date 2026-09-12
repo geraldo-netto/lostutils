@@ -1554,10 +1554,8 @@ class Dispatcher:
           in_flight: list of items that were being processed when the app
                      was last shut down. On restart these are restored
                      ahead of the pending queue (FIFO) so they get retried.
-                     For idempotent commands (yt-dlp, wget --continue,
-                     curl, etc.) this is the right thing — they resume.
-                     For non-idempotent commands the user can clear them
-                     before resuming.
+                     Startup resumes these commands automatically, so
+                     handlers should tolerate repeating interrupted work.
 
         Tolerates being called from any thread; concurrent calls produce
         last-write-wins on the file.
@@ -1704,10 +1702,9 @@ class Dispatcher:
     def _restore_queue_from_state(self) -> None:
         """Push any persisted items back onto the queue at startup. Items
         that were in flight when the app last shut down are restored AHEAD
-        of the pending queue (FIFO), so they get retried first. For
-        idempotent commands (yt-dlp, wget --continue, curl, …) this is
-        the right thing — they resume. For non-idempotent commands the
-        user can clear them via the UI before doing anything else.
+        of the pending queue (FIFO), so they get retried first. Startup
+        resumes automatically; there is no review pause before execution.
+        Handlers should tolerate repeating interrupted work.
 
         Each restored QueueItem already carries the template + shell flag
         that was in effect when it was originally enqueued, so re-routing
