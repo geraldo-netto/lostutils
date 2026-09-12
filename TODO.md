@@ -38,7 +38,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| ie-obs-80 | open | medium | low | import_events.py:3817 — [observability / operability] Supply os.walk with an onerror handler and propagate recursive traversal failures into the run outcome. A real unreadable child directory is silently omitted while readable siblings are returned and the failure count remains zero; this differs from the already tracked nonrecursive PermissionError path. Surface the failing directory and an incomplete-scan status. Three pillars: neither logs nor process health currently expose the omission. |
 
 ### `link_queue.py`
 

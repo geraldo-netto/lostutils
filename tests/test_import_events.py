@@ -23,6 +23,33 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+@pytest.mark.parametrize("ordered", [False, True])
+def test_ie_obs_80_recursive_scan_reports_unreadable_child(tmp_path, monkeypatch, caplog, ordered):
+    folder = tmp_path / "input"
+    denied = folder / "denied"
+    denied.mkdir(parents=True)
+    (folder / "visible.txt").write_text("Visible event")
+    (denied / "hidden.txt").write_text("Hidden event")
+    original = os.scandir
+
+    def scandir(path):
+        if Path(path) == denied:
+            raise PermissionError(13, "access denied", str(denied))
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(import_events, "get_llm", lambda config: FakeLlm())
+    output = tmp_path / "events.json"
+    args = [str(folder), "-o", str(output), "--recursive"]
+    if ordered:
+        args.append("--deterministic-order")
+    assert import_events._run_main(args) == 2
+    assert [e["source"] for e in json.loads(output.read_text())] == ["visible.txt"]
+    assert import_events.extraction_failure_count() == 1
+    assert import_events.run_was_truncated()
+    assert str(denied) in caplog.text
+
+
 def test_ie_api_71_live_output_lock_is_setup_error(tmp_path, monkeypatch, caplog):
     output = tmp_path / "events.json"
     output.write_text("old output")

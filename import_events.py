@@ -3862,7 +3862,11 @@ def extract_from_pdf(
 def _walk_files_no_follow(path: Path) -> Iterable[Path]:
     """Yields files under `path` without descending symlinked directories, so
     a symlink cycle cannot drive unbounded traversal (ie-robust-11)."""
-    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+    def onerror(exc: OSError) -> None:
+        _record_extraction_failure(Path(exc.filename or path), exc, "Could not scan directory")
+        _record_run_truncated()
+
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False, onerror=onerror):
         base = Path(dirpath)
         for name in dirnames:
             candidate = base / name
@@ -5043,8 +5047,8 @@ def _run_import(args: argparse.Namespace) -> int:
         # ie-obs-50: same class of result as _handle_model_unavailable — output
         # was written but the run did not cover every file — so the same code.
         logger.error(
-            "Run TRUNCATED: output covers only the files that completed "
-            "before the stalled worker(s) were abandoned.")
+            "Run TRUNCATED: output covers only the files that could be scanned "
+            "and processed; some input remains unprocessed.")
         return 2
     failures = extraction_failure_count()
     if failures:
