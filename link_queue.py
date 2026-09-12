@@ -63,6 +63,7 @@ RETURN_EVENT = "<Return>"
 RIGHT_CLICK_EVENT = "<Button-3>"
 # Partial output is emitted at this size even when the child never writes a newline.
 OUTPUT_LINE_LIMIT = 65536
+WINDOWS_SHELL_ERROR = "Shell mode is unsupported on Windows. Use a direct command with Shell disabled."
 
 
 def _center_window(window, parent=None) -> None:
@@ -649,12 +650,8 @@ def _safe_placeholder_template(template: str) -> str:
 
 
 def _system_shell_label() -> str:
-    """Name the shell `shell=True` really hands the string to (lq-plat-09).
-
-    subprocess routes shell=True through %COMSPEC% on Windows, so promising
-    /bin/sh there would steer users into writing sh syntax cmd.exe mishandles.
-    """
-    return "cmd.exe /c" if os.name == "nt" else "/bin/sh -c"
+    """Name the supported shell, or explain why the mode is unavailable."""
+    return WINDOWS_SHELL_ERROR if os.name == "nt" else "/bin/sh -c"
 
 
 DEFAULT_CONFIG = {
@@ -5858,6 +5855,9 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         if not cfg:
             return  # pragma: no cover - early return: empty selection
         new_val = not bool(cfg.get("shell", False))
+        if new_val and os.name == "nt":
+            messagebox.showerror("Unsupported shell mode", WINDOWS_SHELL_ERROR, parent=self.root)
+            return
         cfg["shell"] = new_val
         self._save_config()
         self._refresh_protocols_tree()
@@ -6053,8 +6053,8 @@ class ProtocolEditor(_FormDialog):
         shell_row.grid(row=2, column=1, sticky="we", pady=2)
         ttk.Checkbutton(
             shell_row,
-            text=f"Run via {_system_shell_label()} "
-                 f"(enables pipes, redirects, &&, …)",
+            text=(_system_shell_label() if os.name == "nt" else
+                  f"Run via {_system_shell_label()} (enables pipes, redirects, &&, …)"),
             variable=self.shell_var,
         ).pack(side=tk.LEFT)
 
@@ -6079,6 +6079,9 @@ class ProtocolEditor(_FormDialog):
 
     def _validate(self, command: str, shell: bool) -> bool:
         """Apply the dispatcher's parsing and shell placeholder rules."""
+        if shell and os.name == "nt":
+            messagebox.showerror("Unsupported shell mode", WINDOWS_SHELL_ERROR, parent=self.dlg)
+            return False
         probe = command or _placeholder_command()
         if not shell:
             try:
@@ -6089,7 +6092,7 @@ class ProtocolEditor(_FormDialog):
                 messagebox.showerror(
                     "Invalid template",
                     f"The command cannot be parsed as a shell argv:\n\n{e}\n\n"
-                    "Either fix the quoting or enable the Shell option.",
+                    "Fix the quoting and keep URL placeholders in their own argument.",
                     parent=self.dlg)
                 return False
         elif error := _shell_template_error(probe):

@@ -21,7 +21,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| lq-plat-92 | open | medium | low | link_queue.py:5968 — [platform / UI / UX] Reject or disable Shell mode in the Windows protocol editor and context-menu toggle. The editor labels it `cmd.exe /c` and accepts `echo {url_quoted}` with shell=True, but `_spawn_shell_proc` always refuses shell=True on Windows, so a configuration accepted by the UI consumes the queued retry budget without launching. Reproduced the editor/runner mismatch with the Windows platform branch selected; make the UI explain the unsupported mode and cover both editor save and toggle. |
 
 ### `minikeypad.py`
 

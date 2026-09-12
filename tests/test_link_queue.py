@@ -5646,7 +5646,7 @@ def test_system_shell_label_names_the_real_shell(monkeypatch):
     assert link_queue._system_shell_label() == "/bin/sh -c"
 
     monkeypatch.setattr(link_queue.os, "name", "nt")
-    assert link_queue._system_shell_label() == "cmd.exe /c"
+    assert "unsupported on Windows" in link_queue._system_shell_label()
 
 
 @pytest.mark.parametrize("template", [None, "cmd /c echo {url}", "cmd /c echo [https] {url}"])
@@ -6555,3 +6555,40 @@ def test_lq_ui_93_running_rerun_waits_and_persists_fresh_budget(app, monkeypatch
     dispatcher._worker_step(1, threading.Event())
     assert calls == [original._replace(attempts=0)]
     assert not dispatcher.queue_items
+
+
+def test_lq_plat_92_windows_editor_refuses_shell_save(app, monkeypatch):
+    errors = []
+    monkeypatch.setattr(link_queue, 'os', types.SimpleNamespace(**(vars(os) | {'name': 'nt'})))
+    monkeypatch.setattr(messagebox, 'showerror', lambda *args, **_: errors.append(args))
+    editors = []
+    real_editor = link_queue.ProtocolEditor
+    def capture_editor(*args):
+        editor = real_editor(*args)
+        editors.append(editor)
+        return editor
+    monkeypatch.setattr(link_queue, 'ProtocolEditor', capture_editor)
+    app._open_protocol_editor(None)
+    editor = editors[0]
+    editor.proto_var.set('unsupported')
+    editor.cmd_text.delete('1.0', 'end')
+    editor.cmd_text.insert('1.0', 'echo {url_quoted}')
+    editor.shell_var.set(True)
+    assert 'unsupported on Windows' in find_widget(editor.dlg, ttk.Checkbutton).cget('text')
+    find_widget(editor.dlg, ttk.Button, text='Save').invoke()
+    assert 'unsupported' not in app.config['protocols']
+    assert errors and 'Windows' in errors[-1][1]
+
+
+def test_lq_plat_92_windows_toggle_refuses_enable_allows_disable(app, monkeypatch):
+    errors = []
+    monkeypatch.setattr(link_queue, 'os', types.SimpleNamespace(**(vars(os) | {'name': 'nt'})))
+    monkeypatch.setattr(messagebox, 'showerror', lambda *args, **_: errors.append(args))
+    app.proto_tree.selection_set('http')
+    original = dict(app.config['protocols']['http'])
+    app._on_toggle_protocol_shell()
+    assert app.config['protocols']['http'] == original
+    assert errors and 'Windows' in errors[-1][1]
+    app.config['protocols']['http']['shell'] = True
+    app._on_toggle_protocol_shell()
+    assert app.config['protocols']['http']['shell'] is False
