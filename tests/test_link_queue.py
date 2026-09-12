@@ -6376,3 +6376,50 @@ def test_lq_val_92_nonmapping_config_survives_saves_and_shutdown(tmp_path, reque
     assert 'repair the file and restart' in instance.log_text.get('1.0', 'end')
     instance._shutdown(timeout=2)
     assert path.read_text() == original
+
+
+def test_lq_conc_92_rejected_startup_preserves_active_config_write(app, monkeypatch):
+    ready, finish = threading.Event(), threading.Event()
+    original_replace = link_queue.os.replace
+    pending, errors = [], []
+    def blocked_replace(source, target):
+        if str(target) == app.config.config_file:
+            pending.append(Path(source))
+            ready.set()
+            assert finish.wait(5)
+        return original_replace(source, target)
+    def save():
+        try:
+            app.config.save()
+        except Exception as exc:
+            errors.append(exc)
+    monkeypatch.setattr(link_queue.os, 'replace', blocked_replace)
+    app.config['max_attempts'] = 7
+    worker = threading.Thread(target=save)
+    worker.start()
+    second_root = tk.Tk()
+    try:
+        assert ready.wait(3)
+        with pytest.raises(RuntimeError, match='already using'):
+            LinkQueueApp(second_root)
+        assert pending[0].exists()
+    finally:
+        finish.set()
+        worker.join(3)
+        second_root.destroy()
+    assert not worker.is_alive()
+    assert not errors
+    assert link_queue._yaml_load(Path(app.config.config_file).read_text())['max_attempts'] == 7
+
+
+def test_lq_conc_92_failed_initialization_releases_ownership(tmp_path, monkeypatch):
+    state = str(tmp_path / 'state.yaml')
+    monkeypatch.setattr(link_queue, 'STATE_FILE', state)
+    def fail(*args):
+        raise OSError('config initialization failed')
+    monkeypatch.setattr(LinkQueueApp, '_initialize', fail)
+    with pytest.raises(OSError, match='config initialization failed'):
+        LinkQueueApp(None)
+    lock = link_queue.StateFileLock(state)
+    lock.acquire()
+    lock.release()

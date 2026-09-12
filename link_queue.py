@@ -1328,7 +1328,7 @@ class Dispatcher:
 
     def __init__(self, config, *, log, refresh, status, marshal,
                  get_sleep, get_failure_sleep, save_config, state_path=None,
-                 acquire_state_lock: bool = True):
+                 acquire_state_lock: bool = True, state_lock: StateFileLock | None = None):
         self.config = config
         self._log = log
         self._refresh_queue_list = refresh
@@ -1342,7 +1342,9 @@ class Dispatcher:
         # construction (not import) so a monkeypatched module STATE_FILE is
         # honoured; passing `state_path` overrides the module default.
         self.state_path = state_path if state_path is not None else STATE_FILE
-        self._state_lock = StateFileLock(self.state_path) if acquire_state_lock else None
+        self._state_lock = state_lock
+        if self._state_lock is None and acquire_state_lock:
+            self._state_lock = StateFileLock(self.state_path)
         if self._state_lock is not None:
             self._state_lock.acquire()
         _sweep_temp_siblings(self.state_path)
@@ -3894,6 +3896,15 @@ class LinkQueueApp(metaclass=_FacadeMeta):
     map_tree: ttk.Treeview
 
     def __init__(self, root: tk.Tk) -> None:
+        state_lock = StateFileLock(STATE_FILE)
+        state_lock.acquire()
+        try:
+            self._initialize(root, state_lock)
+        except BaseException:
+            state_lock.release()
+            raise
+
+    def _initialize(self, root: tk.Tk, state_lock: StateFileLock) -> None:
         self.root = root
         self.root.title("Link Processing Queue")
         self.root.geometry("980x700")
@@ -3925,6 +3936,7 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             get_sleep=self._get_sleep,
             get_failure_sleep=self._get_failure_sleep,
             save_config=self._save_config,
+            state_lock=state_lock,
         )
 
         # Set when a refresh has been scheduled but hasn't yet rebuilt.
