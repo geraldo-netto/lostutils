@@ -5150,12 +5150,9 @@ class LinkQueueApp(metaclass=_FacadeMeta):
         split from the snapshot phase in _do_refresh_queue_list so each is
         separately testable).
 
-        Rows no longer wanted are deleted; survivors keep their relative order
-        (claims/removals never reorder the rest), so inserting each new row at
-        its target position and refreshing only the leading number column
-        reconstitutes the order without any per-row move() or full rebuild. The
-        number/item state is only pushed to Tcl when it differs from our cache
-        (perf-06)."""
+        Rows no longer wanted are deleted. Reorder survivors after a retry
+        without replacing their identities, selection, or focus. Number/item
+        state is only pushed to Tcl when it differs from our cache (perf-06)."""
         self._remove_stale_queue_rows(tree, {row[0] for row in desired})
         prev_numbers = self._row_numbers
         new_numbers: dict = {}
@@ -5164,6 +5161,9 @@ class LinkQueueApp(metaclass=_FacadeMeta):
                 tree, pos, row, prev_numbers)
             new_numbers[iid] = cached
         self._row_numbers = new_numbers
+        order = tuple(new_numbers)
+        if tree.get_children() != order:
+            tree.set_children("", *order)
 
     @staticmethod
     def _remove_stale_queue_rows(tree, desired_iids: set) -> None:

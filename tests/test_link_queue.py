@@ -6500,3 +6500,20 @@ def test_lq_stop_92_shutdown_cancels_detached_descendant_pipe(app, tmp_path, mon
             proc.wait(timeout=3)
         for worker in workers:
             worker.join(3)
+
+
+def test_lq_ui_92_fast_retry_reorders_rows_preserving_selection(app):
+    stop_bg_workers(app)
+    first, second = q('https://a.test/a'), q('https://b.test/b')
+    rows = lambda items: app._desired_queue_rows(items, [], len(items), 0)
+    app._apply_queue_rows(rows([first, second]), app.queue_tree)
+    selected = link_queue._queue_iid_for_item(first)
+    app.queue_tree.selection_set(selected)
+    app.queue_tree.focus(selected)
+    retry = first._replace(attempts=1)
+    app._apply_queue_rows(rows([second, retry]), app.queue_tree)
+    children = app.queue_tree.get_children()
+    assert children == (link_queue._queue_iid_for_item(second), selected)
+    assert [app.queue_tree.set(iid, 'idx') for iid in children] == ['1', '2']
+    assert app.queue_tree.selection() == (selected,)
+    assert app.queue_tree.focus() == selected
