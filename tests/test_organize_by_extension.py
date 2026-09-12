@@ -20,6 +20,35 @@ from hypothesis import given, settings, strategies as st
 import organize_by_extension
 
 
+def test_oze_watch_70_long_copy_progress_is_drained(tmp_path, monkeypatch):
+    """A progressing move may exceed the entire inactivity budget and still count."""
+    source = tmp_path / "source.bin"
+    target = tmp_path / "bucket" / source.name
+    progress = organize_by_extension._MoveProgress()
+    future = organize_by_extension.Future()
+    futures = {future: source}
+    registry = {source: progress}
+    clock = [0.0]
+
+    def advancing_copy(*args, **kwargs):
+        clock[0] += 0.75
+        progress.add(75)
+        if clock[0] >= 6.0:
+            future.set_result((source, target, None))
+            return {future}, set()
+        return set(), {future}
+
+    monkeypatch.setattr(organize_by_extension, "wait", advancing_copy)
+    stats = organize_by_extension._RunStats()
+    organize_by_extension._drain_futures(
+        futures, stats, False, {}, max_stall_seconds=1.0,
+        now_fn=lambda: clock[0], progress_registry=registry,
+    )
+    assert stats.processed == 1
+    assert stats.skipped == stats.timed_out == 0
+    assert not futures and not registry and not progress.abort.is_set()
+
+
 @pytest.mark.parametrize("extension, header", [
     ("webm", b"\x1aE\xdf\xa3"), ("opus", b"OggS"), ("so", b"\x7fELF"),
     ("dng", b"II*\x00"), ("dylib", b"\xcf\xfa\xed\xfe"),
