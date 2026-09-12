@@ -23,6 +23,23 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+def test_ie_cli_70_expanded_outputs_share_validation_and_write_paths(tmp_path, monkeypatch):
+    folder = tmp_path / "input"
+    folder.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(import_events, "process_folder", lambda *args, **kwargs: [])
+    result = import_events._run_main([
+        str(folder), "-o", "~/nested/events.json", "--emit-ics", "~/nested/events.ics"])
+    assert result == 0
+    assert json.loads((home / "nested" / "events.json").read_text()) == []
+    assert "BEGIN:VCALENDAR" in (home / "nested" / "events.ics").read_text()
+    assert not (tmp_path / "~").exists()
+
+
 def test_ie_dep_70_missing_llama_aborts_before_download(tmp_path, monkeypatch):
     folder = tmp_path / "input"
     folder.mkdir()

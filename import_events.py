@@ -4774,9 +4774,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         help=(f"Directory to scan (default: {DEFAULT_INPUT_DIR}, "
                               "created on first run). A named directory must "
                               "already exist."))
-    parser.add_argument("-o", "--output", default="events.json",
+    parser.add_argument("-o", "--output", default="events.json", type=os.path.expanduser,
                         help="JSON file to write extracted events to (default: events.json).")
-    parser.add_argument("--emit-ics", default=None,
+    parser.add_argument("--emit-ics", default=None, type=os.path.expanduser,
                         help="Also write a combined importable .ics file to this path.")
     parser.add_argument(
         "--max-ics-bytes",
@@ -4960,8 +4960,8 @@ def _write_and_print_run_outputs(events: List[Dict[str, Any]], args: argparse.Na
 def _outputs_are_distinct(args: argparse.Namespace) -> bool:
     if not args.emit_ics:
         return True
-    json_target = os.path.normcase(str(Path(args.output).expanduser().resolve()))
-    ics_target = os.path.normcase(str(Path(args.emit_ics).expanduser().resolve()))
+    json_target = os.path.normcase(str(Path(args.output).resolve()))
+    ics_target = os.path.normcase(str(Path(args.emit_ics).resolve()))
     return json_target != ics_target
 
 
@@ -4970,7 +4970,7 @@ def _prepare_output_parents(args: argparse.Namespace) -> None:
     if args.emit_ics:
         targets.append(args.emit_ics)
     for target in targets:
-        parent = Path(target).expanduser().resolve().parent
+        parent = Path(target).resolve().parent
         parent.mkdir(parents=True, exist_ok=True)
         if not parent.is_dir():
             raise NotADirectoryError(f"output parent is not a directory: {parent}")
