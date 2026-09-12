@@ -16,7 +16,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| hr-test-90 | open | low | low | hash-recursive-ai5.py:231 — [test coverage] Cover the no-config path through `_record_dump_failure` (return at line 233) via a meaningful hash-dump failure scenario. The full unit/integration and fuzz suites cover 3/4 statements (75%), failing `tests/check_function_coverage.py --minimum 80`; this unchanged helper is the sole remaining repository-wide function coverage failure. |
 | hr-obs-80 | open | medium | low | hash-recursive-ai5.py:2564 — [observability / operability] Include requested hash-dump failures in the final exit status; setup, write, patch, and close errors only warn and never reach _run_exit_code. Reproduced --hashes-file with a missing parent: no dump is created but the CLI exits 0. Track dump failure through finalization and return nonzero while preserving useful duplicate stdout. Three pillars: logs expose the error, process health falsely reports success. |
 
 ### `link_queue.py`

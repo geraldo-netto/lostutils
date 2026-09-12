@@ -5091,3 +5091,12 @@ def test_zero_identity_fallback_stays_relative_during_swap(tmp_path, monkeypatch
         assert (got.st_dev, got.st_ino) == (st.st_dev, st.st_ino)
     finally:
         os.close(fd)
+
+
+def test_hr_test_90_dump_setup_failure_without_run_config(tmp_path, capsys):
+    state = {'writer': None}
+    target = tmp_path / 'missing' / 'hashes.txt'
+    assert hr._setup_hash_dump(target, state, None) is None
+    assert state['writer'] is None
+    assert not target.exists()
+    assert 'cannot write' in capsys.readouterr().err
