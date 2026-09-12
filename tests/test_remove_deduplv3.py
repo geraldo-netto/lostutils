@@ -14,6 +14,13 @@ rd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rd)
 
 
+@pytest.mark.parametrize("record", ['h @lostutils-json:"/d/ab\\u0000"\n', "h /d/ab\x00\n"])
+def test_rdv3_val_70_nul_paths_are_skipped(record):
+    groups, skipped = rd._read_groups([record, "h /safe\n"])
+    assert groups == {"h": ["/safe"]}
+    assert skipped == 1
+
+
 @pytest.mark.parametrize("comment_kind", ["saving", "case_conflict"])
 def test_rdv3_sec_60_comments_cannot_execute_shell_commands(tmp_path, comment_kind):
     if shutil.which("sh") is None:

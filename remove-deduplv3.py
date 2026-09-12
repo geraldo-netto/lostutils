@@ -72,13 +72,14 @@ def detect_encoding(head):
 
 
 def _decode_record_path(path):
-    if not path.startswith(_ESCAPED_PATH_PREFIX):
-        return path
     try:
-        decoded = json.loads(path[len(_ESCAPED_PATH_PREFIX):])
+        decoded = (json.loads(path[len(_ESCAPED_PATH_PREFIX):])
+                   if path.startswith(_ESCAPED_PATH_PREFIX) else path)
     except (json.JSONDecodeError, TypeError):
         return None
-    return decoded if isinstance(decoded, str) else None
+    if not isinstance(decoded, str) or "\x00" in decoded:
+        return None
+    return decoded
 
 
 def parse_args(argv=None):
