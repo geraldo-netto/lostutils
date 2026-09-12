@@ -4,6 +4,7 @@ import io
 import importlib.util
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,19 @@ _PATH = Path(__file__).resolve().parent.parent / "remove-deduplv3.py"
 _spec = importlib.util.spec_from_file_location("remove_deduplv3", _PATH)
 rd = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rd)
+
+
+@pytest.mark.parametrize("encoding", ["rot_13", "base64_codec", "hex_codec", "zlib_codec"])
+def test_rdv3_val_80_nontext_codec_exits_three(tmp_path, encoding):
+    path = tmp_path / "hashes.txt"
+    path.write_text("h a\nh longer\n")
+    result = subprocess.run(
+        [sys.executable, str(_PATH), str(path), "--encoding", encoding],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "error:" in result.stderr and "Traceback" not in result.stderr
 
 
 @pytest.mark.parametrize("record", ['h @lostutils-json:"/d/ab\\u0000"\n', "h /d/ab\x00\n"])

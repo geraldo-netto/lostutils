@@ -25,7 +25,6 @@ spaces).
 from __future__ import annotations
 
 import argparse
-import codecs
 import io
 import json
 import os
@@ -154,10 +153,11 @@ def _load_groups(path, forced_encoding, err_mode):
 
 def _validate_encoding(encoding):
     try:
-        codecs.lookup(encoding)
+        with io.TextIOWrapper(io.BytesIO(), encoding=encoding):
+            pass
     except LookupError as e:
         _fail(
-            "unknown encoding {encoding!r}: {error}".format(
+            "unknown encoding or non-text codec {encoding!r}: {error}".format(
                 encoding=encoding,
                 error=e,
             ),
