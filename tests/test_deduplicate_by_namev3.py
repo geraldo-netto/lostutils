@@ -642,3 +642,21 @@ def test_dnv3_rob_60_final_buffer_flush_is_guarded(monkeypatch, tmp_path):
     dn.main()
     assert dn.sys.stdout is not stream
     dn.sys.stdout.flush()
+
+
+def test_dnv3_mem_80_dense_pairs_use_row_bounded_indices():
+    import tracemalloc
+    names = [f'{i:04d}' for i in range(600)]
+    count = 0
+    def consume(_record):
+        nonlocal count
+        count += 1
+    tracemalloc.start()
+    try:
+        dn.emit_pairs(names, 7, 1, consume)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert count == len(names) * (len(names) - 1) // 2
+    # Distance matrix plus ample fixed overhead; never retain all match indices.
+    assert peak < len(names) ** 2 + 2_000_000

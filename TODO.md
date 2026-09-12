@@ -11,7 +11,6 @@
 
 | id | status | severity | effort | description |
 |---|---|---|---|---|
-| dnv3-mem-80 | open | medium | medium | deduplicate-by-namev3.py:310 — [memory and cpu management] Stream matching column indices per row instead of materializing all matching pairs and converting both coordinate arrays to Python lists. With 1,000 four-digit strings at threshold 7 and a no-op writer, tracemalloc reports a 40,737,758-byte peak for a 1,000,000-byte distance matrix; dense 2,000-row blocks amplify this as input grows. Bound temporary output-index memory by row/block width and preserve pair ordering. |
 
 ### `hash-recursive-ai5.py`
 

@@ -333,13 +333,15 @@ def emit_pairs(cleaned_strs, threshold, workers, write, block_threshold=None, bl
             workers=workers,
             dtype=np.uint8,
         )
-        mask = block <= threshold
-        mask = np.triu(mask, k=1)  # local: keep only c > r  (j = start+c > i = start+r)
-        rows, cols = np.nonzero(mask)
-        for r, c in zip(rows.tolist(), cols.tolist()):
-            i = start + r
-            j = start + c
-            _write_pair(cleaned_strs[i], cleaned_strs[j], int(block[r, c]), write)
+        _emit_block_pairs(block, cleaned_strs, start, threshold, write)
+
+
+def _emit_block_pairs(block, cleaned_strs, start, threshold, write):
+    # Only one row's matching indices are retained, even for dense matches.
+    for r, row in enumerate(block):
+        for offset in np.flatnonzero(row[r + 1:] <= threshold):
+            c = r + 1 + int(offset)
+            _write_pair(cleaned_strs[start + r], cleaned_strs[start + c], int(row[c]), write)
 
 
 if __name__ == "__main__":
