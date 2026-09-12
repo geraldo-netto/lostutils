@@ -21,6 +21,28 @@ from hypothesis import assume, given, strategies as st
 import import_events
 
 
+def test_ie_cache_70_failed_ocr_is_retried_then_cached(tmp_path, monkeypatch):
+    source = tmp_path / "scan.pdf"
+    source.write_bytes(b"pdf")
+    cfg = import_events.ModelConfig(
+        stage_cache="on", stage_cache_dir=str(tmp_path / "cache"), pdf_ocr_mode="always")
+    attempts = []
+    failures = []
+
+    def render():
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise RuntimeError("temporary renderer failure")
+        return [tmp_path / "page.png"]
+
+    monkeypatch.setattr(import_events, "_pdf_ocr_text_from_paths", lambda *args: "Recovered text")
+    assert import_events._pdf_ocr_text(source, "", cfg, render, failures) == ""
+    assert len(failures) == 1
+    assert import_events._pdf_ocr_text(source, "", cfg, render, failures) == "Recovered text"
+    assert import_events._pdf_ocr_text(source, "", cfg, render, failures) == "Recovered text"
+    assert len(attempts) == 2
+
+
 @pytest.mark.parametrize("operation", ["prune", "reset"])
 def test_ie_di_70_cache_cleanup_preserves_foreign_json(tmp_path, operation):
     foreign = ["events.json", "one.json", "a" * 63 + ".json", "G" * 64 + ".json"]

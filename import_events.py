@@ -3721,6 +3721,7 @@ def _pdf_ocr_text(
     cached = _read_stage_cache_text(config, file_path, "pdf_ocr", options)
     if cached is not None:
         return cached
+    failures_before = len(stage_failures)
     text = _safe_pdf_stage(
         config,
         file_path,
@@ -3730,7 +3731,8 @@ def _pdf_ocr_text(
         "",
         stage_failures,
     )
-    _write_stage_cache_text(config, file_path, "pdf_ocr", options, text)
+    if len(stage_failures) == failures_before:
+        _write_stage_cache_text(config, file_path, "pdf_ocr", options, text)
     return text
 
 
