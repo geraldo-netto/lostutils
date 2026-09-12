@@ -20,6 +20,37 @@ from hypothesis import given, settings, strategies as st
 import organize_by_extension
 
 
+@pytest.mark.parametrize("extension, header", [
+    ("webm", b"\x1aE\xdf\xa3"), ("opus", b"OggS"), ("so", b"\x7fELF"),
+    ("dng", b"II*\x00"), ("dylib", b"\xcf\xfa\xed\xfe"),
+    ("db", b"SQLite format 3\x00"), ("apng", b"\x89PNG\r\n\x1a\n"),
+    ("jfif", b"\xff\xd8\xff"),
+])
+def test_oze_rel_70_preserves_container_family_extensions(tmp_path, extension, header):
+    path = tmp_path / f"sample.{extension}"
+    path.write_bytes(header)
+    assert organize_by_extension.resolve_real_extension(path) == extension
+
+
+def test_oze_rel_70_extra_family_cli_applies_and_merges(tmp_path, monkeypatch):
+    for extension in ("custom", "second"):
+        (tmp_path / f"sample.{extension}").write_bytes(b"OggS")
+    monkeypatch.setattr(sys, "argv", [
+        "organize_by_extension.py", str(tmp_path), "--extra-family", "ogg:custom",
+        "--extra-family", "ogg:second", "--extra-family", "zip:usdz",
+    ])
+    organize_by_extension.main()
+    for extension in ("custom", "second"):
+        assert (tmp_path / extension / "s00000" / f"sample.{extension}").exists()
+
+
+@pytest.mark.parametrize("value", ["ogg", ":opus", "unknown:foo", "ogg:"])
+def test_oze_rel_70_extra_family_rejects_invalid_labels(value):
+    with pytest.raises(SystemExit) as exc:
+        organize_by_extension.build_parser().parse_args([".", "--extra-family", value])
+    assert exc.value.code == 2
+
+
 def test_oze_cli_70_preview_creates_no_probe_in_root(tmp_path, monkeypatch, caplog):
     root = tmp_path / "root"
     bucket = root / "txt" / "n00000"
@@ -144,7 +175,7 @@ from organize_by_extension import (  # noqa: E402 — refactor surface (cx-02/ar
     _Unreadable,
     _family_for,
     _link_exclusive,
-    _parse_extra_zip_family,
+    _parse_family_extensions,
     _safe_scandir,
     _scan_bucket_indices,
     _read_bucket_contents,
@@ -1647,17 +1678,17 @@ class ExtraZipFamilyTests(unittest.TestCase):
             extra = frozenset({"usdz"})
             self.assertEqual(
                 resolve_real_extension(
-                    f, ctx=SniffContext(extra_zip_family=extra)),
+                    f, ctx=SniffContext(extra_families={"zip": extra})),
                 "usdz",
             )
 
-    def test_parse_extra_zip_family_normalises_input(self):
-        self.assertEqual(_parse_extra_zip_family(""), frozenset())
+    def test_parse_family_extensions_normalises_input(self):
+        self.assertEqual(_parse_family_extensions(""), frozenset())
         self.assertEqual(
-            _parse_extra_zip_family(" USDZ , .crx, xpi "),
+            _parse_family_extensions(" USDZ , .crx, xpi "),
             frozenset({"usdz", "crx", "xpi"}),
         )
-        self.assertEqual(_parse_extra_zip_family(",, ,"), frozenset())
+        self.assertEqual(_parse_family_extensions(",, ,"), frozenset())
 
 
 class LinkExclusiveTests(unittest.TestCase):
@@ -1779,7 +1810,7 @@ class ContainerFamilyRegistryTests(unittest.TestCase):
 
     def test_family_for_extends_zip_at_runtime(self):
         base = _family_for("zip")
-        extended = _family_for("zip", extra_zip_family=frozenset({"usdz"}))
+        extended = _family_for("zip", extra_families={"zip": frozenset({"usdz"})})
         self.assertIn("usdz", extended)
         self.assertNotIn("usdz", base)
 
@@ -1794,7 +1825,7 @@ class SniffContextTests(unittest.TestCase):
         ctx = SniffContext()
         self.assertTrue(ctx.sniff)
         self.assertIsNone(ctx.head_cache)
-        self.assertEqual(ctx.extra_zip_family, frozenset())
+        self.assertEqual(ctx.extra_families, {})
 
     def test_resolve_uses_ctx_head_cache(self):
         with TemporaryDirectory() as d:
@@ -3536,7 +3567,7 @@ class SourceCollisionResolution(unittest.TestCase):
             root = Path(d)
             (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             ctx = _oze.SniffContext(sniff=True, head_cache=None,
-                                    extra_zip_family=frozenset())
+                                    extra_families={})
             result = list(_oze._spooled_plan_pairs(
                 root, [root / "avi"], ctx, preview=False,
             ))
@@ -3628,7 +3659,7 @@ class WalkScandirHandlesStatError(unittest.TestCase):
                     skip_paths=set(),
                     verbose=False,
                     ctx=_oze.SniffContext(sniff=False, head_cache=None,
-                                          extra_zip_family=frozenset()),
+                                          extra_families={}),
                 )
                 # good.txt always returns; unreadable contents skipped via
                 # _safe_scandir / stat OSError branch.
@@ -3657,7 +3688,7 @@ class ResolveRealExtensionCtxOnly(unittest.TestCase):
             self.assertEqual(
                 _oze.resolve_real_extension(
                     p, ctx=_oze.SniffContext(
-                        extra_zip_family=frozenset({"usdz"}))),
+                        extra_families={"zip": frozenset({"usdz"})})),
                 "usdz",
             )
 
@@ -3718,7 +3749,7 @@ class ListFilesStatErrorSkipped(unittest.TestCase):
                 files = _oze.list_files(
                     root, skip_paths=set(), verbose=False,
                     ctx=_oze.SniffContext(sniff=False, head_cache=None,
-                                          extra_zip_family=frozenset()),
+                                          extra_families={}),
                 )
             self.assertTrue(any(f.name == "ok.txt" for f in files))
             self.assertFalse(any(f.name == "ghost.txt" for f in files))
@@ -3749,7 +3780,7 @@ class SpooledPlanCollisionsCoversBranches(unittest.TestCase):
             (root / "ext").mkdir()
             (root / "ext" / "deep.txt").write_text("x")
             ctx = _oze.SniffContext(sniff=False, head_cache=None,
-                                    extra_zip_family=frozenset())
+                                    extra_families={})
             files = [root / "ext"]
             result = list(_oze._spooled_plan_pairs(
                 root, files, ctx, preview=False,
@@ -3765,7 +3796,7 @@ class SpooledPlanCollisionsCoversBranches(unittest.TestCase):
             blocker = root / "avi"
             blocker.write_bytes(b"RIFF\x00\x00\x00\x00AVI ")  # -> avi bucket
             ctx = _oze.SniffContext(sniff=True, head_cache={},
-                                    extra_zip_family=frozenset())
+                                    extra_families={})
             before = sorted(p.name for p in root.iterdir())
             with self.assertLogs("organize_by_extension", level="INFO") as cm:
                 result = list(_oze._spooled_plan_pairs(
@@ -3799,7 +3830,7 @@ class SpooledPlanCollisionsCoversBranches(unittest.TestCase):
             root = Path(d)
             (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             ctx = _oze.SniffContext(sniff=True, head_cache={},
-                                    extra_zip_family=frozenset())
+                                    extra_families={})
 
             real_lstat = os.lstat
 
@@ -3825,7 +3856,7 @@ class SpooledPlanCollisionsCoversBranches(unittest.TestCase):
             root = Path(d)
             (root / "ok.txt").write_text("x")
             ctx = _oze.SniffContext(sniff=False, head_cache=None,
-                                    extra_zip_family=frozenset())
+                                    extra_families={})
             result = list(_oze._spooled_plan_pairs(
                 root, [root / "ok.txt"], ctx, preview=False,
             ))
@@ -3837,7 +3868,7 @@ class SpooledPlanCollisionsCoversBranches(unittest.TestCase):
             root = Path(d)
             (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             ctx = _oze.SniffContext(sniff=True, head_cache={},
-                                    extra_zip_family=frozenset())
+                                    extra_families={})
 
             def vanish(a, b):
                 raise FileNotFoundError(a)
@@ -3858,7 +3889,7 @@ class SpooledPlanCollisionsCoversBranches(unittest.TestCase):
             (root / "avi").mkdir()
             (root / "avi" / "inner.bin").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             ctx = _oze.SniffContext(sniff=True, head_cache={},
-                                    extra_zip_family=frozenset())
+                                    extra_families={})
             # Pass the avi DIR as a source — preplan probes is_file, gets
             # False (it's a dir), and the continue branch fires.
             files = [root / "avi", root / "avi" / "inner.bin"]
@@ -3879,7 +3910,7 @@ class SpooledPlanCollisionsCoversBranches(unittest.TestCase):
             (root / "avi").write_bytes(b"RIFF\x00\x00\x00\x00AVI ")
             cache: dict = {}
             ctx = _oze.SniffContext(sniff=True, head_cache=cache,
-                                    extra_zip_family=frozenset())
+                                    extra_families={})
             cache[root / "avi"] = b"RIFF\x00\x00\x00\x00AVI "
             result = list(_oze._spooled_plan_pairs(
                 root, [root / "avi"], ctx, preview=False,
@@ -4594,7 +4625,7 @@ def test_link_regular_no_follow_falls_back_when_nofollow_is_unsupported(
     assert destination.read_bytes() == b"payload"
 
 
-# --- oze-test-07: _parse_extra_zip_family adversarial fuzz ----------------
+# --- oze-test-07: _parse_family_extensions adversarial fuzz ----------------
 
 @pytest.mark.parametrize("raw,must_not_contain", [
     ("", []),                   # empty input → empty set
@@ -4602,23 +4633,23 @@ def test_link_regular_no_follow_falls_back_when_nofollow_is_unsupported(
     ("ZIP, DOCX ,, ", []),      # whitespace + caps
     (".jar,.war", []),          # leading dots stripped
 ])
-def test_parse_extra_zip_family_basic(raw, must_not_contain):
-    result = oze._parse_extra_zip_family(raw)
+def test_parse_family_extensions_basic(raw, must_not_contain):
+    result = oze._parse_family_extensions(raw)
     for bad in must_not_contain:
         assert bad not in result
 
 
-def test_parse_extra_zip_family_strips_dots_and_lowers():
-    result = oze._parse_extra_zip_family(".JaR, .War")
+def test_parse_family_extensions_strips_dots_and_lowers():
+    result = oze._parse_family_extensions(".JaR, .War")
     assert "jar" in result
     assert "war" in result
 
 
-def test_parse_extra_zip_family_handles_nul_byte():
+def test_parse_family_extensions_handles_nul_byte():
     # oze-sec-03 noted no length / charset validation. Current behaviour:
     # NUL passes through. Pin that so a future hardening (reject NUL) is
     # detectable.
-    result = oze._parse_extra_zip_family("a,\x00,b")
+    result = oze._parse_family_extensions("a,\x00,b")
     # The "\x00" entry survives today.
     assert "\x00" in result or all(c.isprintable() for c in result)
 
@@ -5339,43 +5370,43 @@ def test_preplan_leaves_non_blocker_untouched(tmp_path):
     assert plain.exists()
 
 
-def test_parse_extra_zip_family_canonicalises_aliases():
+def test_parse_family_extensions_canonicalises_aliases():
     """oze-arch-01: an aliased synonym is stored canonical so it matches the
     declared_canon resolve_real_extension compares against."""
-    assert oze._parse_extra_zip_family("jpeg") == frozenset({"jpg"})
-    assert oze._parse_extra_zip_family("TIF, htm") == frozenset({"tiff", "html"})
+    assert oze._parse_family_extensions("jpeg") == frozenset({"jpg"})
+    assert oze._parse_family_extensions("TIF, htm") == frozenset({"tiff", "html"})
     # Non-aliased items pass through unchanged.
-    assert oze._parse_extra_zip_family("usdz") == frozenset({"usdz"})
+    assert oze._parse_family_extensions("usdz") == frozenset({"usdz"})
 
 
-# --- oze-sec-03: _parse_extra_zip_family validates content ----------------
+# --- oze-sec-03: _parse_family_extensions validates content ----------------
 
-def test_parse_extra_zip_family_rejects_nul_byte():
+def test_parse_family_extensions_rejects_nul_byte():
     # oze-sec-03: NUL byte must be rejected after validation. Pin the
     # new strict behaviour ([a-z0-9] only).
-    result = oze._parse_extra_zip_family("good,bad\x00item,alsogood")
+    result = oze._parse_family_extensions("good,bad\x00item,alsogood")
     assert "good" in result
     assert "alsogood" in result
     assert all("\x00" not in item for item in result)
 
 
-def test_parse_extra_zip_family_rejects_oversize():
+def test_parse_family_extensions_rejects_oversize():
     huge = "a" * 100
-    result = oze._parse_extra_zip_family(f"ok,{huge},also")
+    result = oze._parse_family_extensions(f"ok,{huge},also")
     assert "ok" in result
     assert "also" in result
     assert huge not in result
 
 
-def test_parse_extra_zip_family_rejects_path_separators():
-    result = oze._parse_extra_zip_family("good,bad/path,../escape")
+def test_parse_family_extensions_rejects_path_separators():
+    result = oze._parse_family_extensions("good,bad/path,../escape")
     assert "good" in result
     assert "bad/path" not in result
     assert "../escape" not in result
 
 
-def test_parse_extra_zip_family_rejects_unicode():
-    result = oze._parse_extra_zip_family("ok,café")
+def test_parse_family_extensions_rejects_unicode():
+    result = oze._parse_family_extensions("ok,café")
     assert "ok" in result
     assert "café" not in result
 

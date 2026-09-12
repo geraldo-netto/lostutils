@@ -628,7 +628,7 @@ class ExtraZipFamilyFuzz(unittest.TestCase):
             path.write_bytes(b"PK\x03\x04rest")
             resolved = oze.resolve_real_extension(
                 path,
-                ctx=oze.SniffContext(extra_zip_family=frozenset({ext})),
+                ctx=oze.SniffContext(extra_families={"zip": frozenset({ext})}),
             )
             self.assertEqual(resolved, ext)
 

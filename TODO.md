@@ -66,7 +66,6 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 | oze-watch-70 | open | medium | medium | organize_by_extension.py:2444 — [watchdog] `_wait_for_move_futures` detects only "no completed future for 300 s" (constant at 63, no override), not progress, so one legitimately long move (multi-GB file onto a FAT/exFAT drive via the copy path) aborts the run with `MoveStallError`, `executor.shutdown(wait=True)` then blocks until the copy finishes anyway, and that completed move is never drained so `processed` under-reports (reproduced with scaled timings). Key the watchdog on bytes copied or scale the deadline by in-flight size, and expose the threshold. |
-| oze-rel-70 | open | medium | low | organize_by_extension.py:256-278 — [reliability / correctness] `CONTAINER_FAMILIES` lacks families for several sniffed headers, so correctly named files of a distinct standard format are relocated as "mismatches" with no opt-out short of `--no-sniff` (reproduced: `clip.webm` → `mkv/`, `voice.opus` → `ogg/`, `lib.so` → `elf/`, `photo.dng` → `tiff/`); zip/rar/ole2/mp4/mp3/gz already have families. Add families for mkv, ogg, elf, tiff, macho, sqlite, png, jpg and generalise `--extra-zip-family` to `--extra-family <label>:<ext,...>`. |
 
 ### `relocate_folder.py`
 

@@ -89,7 +89,7 @@ python3 organize_by_extension.py /path/to/root --preview
 python3 organize_by_extension.py /path/to/root --threads 3
 ```
 
-Bucket paths are shaped as `<extension>/<first-letter>00000/<filename>`, with up to 500 files per bucket. Header sniffing is enabled by default so files can be bucketed by detected type rather than by a misleading extension; pass `--no-sniff` to use filename extensions only. `--extra-zip-family` keeps declared ZIP-container extensions such as `usdz` or `xpi` from being bucketed as plain `zip`. `--prune-empty-dirs` removes empty directories left under the root after moves.
+Bucket paths are shaped as `<extension>/<first-letter>00000/<filename>`, with up to 500 files per bucket. Header sniffing is enabled by default so files can be bucketed by detected type rather than by a misleading extension; pass `--no-sniff` to use filename extensions only. `--extra-family LABEL:EXT,...` adds declared extensions to any detected header family (for example, `--extra-family zip:usdz,crx --extra-family ogg:custom`); repeat the option to extend multiple families. Built-in families preserve formats such as WebM, Opus, DNG, shared libraries, SQLite databases, APNG, and JFIF. `--prune-empty-dirs` removes empty directories left under the root after moves.
 
 Exit codes: `0` every planned file was placed, `1` the run could not complete (unusable root or planning spool, stalled move stage, interrupt), `2` command-line error, `3` the run finished but skipped files or left a duplicate behind after a partial move.
 

@@ -280,6 +280,14 @@ CONTAINER_FAMILIES: tuple[ContainerFamily, ...] = (
     })),
     ContainerFamily("mp3", frozenset({"mp3", "mp2"})),
     ContainerFamily("gz", frozenset({"gz", "tgz"})),
+    ContainerFamily("mkv", frozenset({"mkv", "mka", "mks", "webm"})),
+    ContainerFamily("ogg", frozenset({"ogg", "oga", "ogv", "ogx", "opus", "spx"})),
+    ContainerFamily("elf", frozenset({"elf", "so", "o", "out"})),
+    ContainerFamily("tiff", frozenset({"tiff", "dng", "cr2", "nef", "arw"})),
+    ContainerFamily("macho", frozenset({"macho", "dylib", "bundle", "o"})),
+    ContainerFamily("sqlite", frozenset({"sqlite", "sqlite3", "db", "db3"})),
+    ContainerFamily("png", frozenset({"png", "apng"})),
+    ContainerFamily("jpg", frozenset({"jpg", "jfif", "jpe"})),
 )
 
 _FAMILY_BY_DETECTED: dict[str, ContainerFamily] = {
@@ -289,19 +297,12 @@ _FAMILY_BY_DETECTED: dict[str, ContainerFamily] = {
 
 def _family_for(
     detected_label: str,
-    extra_zip_family: frozenset[str] = frozenset(),
+    extra_families: dict[str, frozenset[str]] | None = None,
 ) -> frozenset[str] | None:
-    """Return the member set for ``detected_label`` or None when no family
-    is registered. For the ``zip`` family, union in ``extra_zip_family``
-    (oze-rel-07) so runtime extensions are honoured without mutating
-    ``CONTAINER_FAMILIES``.
-    """
+    """Combine built-in and runtime members without mutating the registry."""
     fam = _FAMILY_BY_DETECTED.get(detected_label)
-    if fam is None:
-        return None
-    if detected_label == "zip" and extra_zip_family:
-        return fam.members | extra_zip_family
-    return fam.members
+    members = fam.members if fam is not None else frozenset()
+    return members | (extra_families or {}).get(detected_label, frozenset()) or None
 
 
 class _Unreadable:
@@ -429,9 +430,7 @@ class SniffContext:
     * ``head_cache`` — shared per-path head-bytes memo (oze-perf-04). Single dict
       threaded from the scan stage through the planner so each file is opened
       at most once. ``None`` disables caching.
-    * ``extra_zip_family`` — runtime extension of the zip entry in
-      ``CONTAINER_FAMILIES`` (oze-rel-07) so users can teach the script about
-      new zip-based formats without editing source.
+    * ``extra_families`` — runtime members keyed by detected header label.
 
     Passing one ``SniffContext`` parameter end-to-end replaces fifteen-plus
     verbatim argument-pass lines.
@@ -439,7 +438,7 @@ class SniffContext:
 
     sniff: bool = True
     head_cache: dict[Path, HeadBytes] | None = None
-    extra_zip_family: frozenset[str] = frozenset()
+    extra_families: dict[str, frozenset[str]] = field(default_factory=dict)
     stats: _RunStats | None = None
     preview: bool = False
 
@@ -552,7 +551,7 @@ def _resolve_detected_extension(
     declared_canon = EXTENSION_ALIASES.get(declared, declared)
     if declared_canon == detected:
         return declared
-    family = _family_for(detected, ctx.extra_zip_family)
+    family = _family_for(detected, ctx.extra_families)
     if family is not None and declared_canon in family:
         return declared
     # oze-pdf-01: a declared `.pdf` whose header is NOT a PDF may be a carrier
@@ -3299,7 +3298,7 @@ def organize(
     verbose: bool = False,
     num_threads: int = 3,
     sniff: bool = True,
-    extra_zip_family: frozenset[str] = frozenset(),
+    extra_families: dict[str, frozenset[str]] | None = None,
     bucket_size: int = BUCKET_SIZE,
     bucket_manager: BucketManager | None = None,
     head_cache: dict[Path, HeadBytes] | None = None,
@@ -3311,9 +3310,8 @@ def organize(
     If ``preview`` is True, the script prints move actions without performing them.
     If ``sniff`` is True (default), the file's header bytes are inspected and the
     detected real type wins over the declared extension (``mypdf.doc`` → ``pdf/``).
-    ``extra_zip_family`` extends the ZIP container family (oze-rel-07) so newly
-    arrived zip-based formats (``.usdz``, ``.crx``, …) are not bucketed under
-    ``zip/`` by mistake. Handles KeyboardInterrupt gracefully by printing a
+    ``extra_families`` extends header families by detected label so custom
+    formats retain their declared extension. Handles KeyboardInterrupt by printing a
     summary and exiting.
 
     Architecture (oze-decl-01 / oze-arch-01 / oze-arch-02): the body is a thin
@@ -3349,7 +3347,7 @@ def organize(
     if head_cache is None:
         head_cache = {}
     ctx = SniffContext(sniff=sniff, head_cache=head_cache,
-                       extra_zip_family=extra_zip_family, stats=_RunStats(), preview=preview)
+                       extra_families=extra_families or {}, stats=_RunStats(), preview=preview)
     files = _iter_files(
         root,
         skip_paths={Path(__file__).resolve()},
@@ -3503,14 +3501,13 @@ def build_parser() -> argparse.ArgumentParser:
         help='Disable file-header type detection; bucket strictly by filename extension.',
     )
     parser.add_argument(
-        '--extra-zip-family',
-        dest='extra_zip_family',
-        default='',
+        '--extra-family',
+        action='append',
+        type=_parse_extra_family,
+        default=[],
         help=(
-            'Comma-separated extensions to treat as ZIP-family containers '
-            '(e.g. "usdz,crx,xpi"). Files of these extensions whose header is '
-            'PK\\x03\\x04 stay under their declared extension instead of being '
-            'bucketed under zip/.'
+            'Preserve extensions for a detected header label: LABEL:EXT,... '
+            '(e.g. zip:usdz,crx or ogg:custom). Repeat to extend multiple families.'
         ),
     )
     parser.add_argument(
@@ -3527,12 +3524,32 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-_EXTRA_ZIP_FAMILY_MAX_LEN = 16
-_EXTRA_ZIP_FAMILY_VALID = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+_FAMILY_EXTENSION_MAX_LEN = 16
+_FAMILY_EXTENSION_VALID = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
 
 
-def _parse_extra_zip_family(raw: str) -> frozenset[str]:
-    """Split a ``--extra-zip-family`` CSV into a normalised frozenset.
+def _parse_extra_family(raw: str) -> ContainerFamily:
+    label, separator, extensions = raw.partition(":")
+    label = label.strip().lower()
+    known = {signature[2] for signature in MAGIC_SIGNATURES} | {"mp4", "wav", "avi", "webp"}
+    if not separator or label not in known:
+        raise argparse.ArgumentTypeError("expected a known header LABEL:EXT,...")
+    members = _parse_family_extensions(extensions)
+    if not members:
+        raise argparse.ArgumentTypeError("family must contain at least one valid extension")
+    return ContainerFamily(label, members)
+
+
+def _merge_extra_families(families: list[ContainerFamily]) -> dict[str, frozenset[str]]:
+    result: dict[str, frozenset[str]] = {}
+    for family in families:
+        label = family.detected_label
+        result[label] = result.get(label, frozenset()) | family.members
+    return result
+
+
+def _parse_family_extensions(raw: str) -> frozenset[str]:
+    """Split the extension portion of ``--extra-family`` into a frozenset.
 
     Lowercased and stripped of dots/whitespace so ``"USDZ, .crx"`` and
     ``"usdz,crx"`` produce the same set. Empty/blank entries are dropped.
@@ -3540,12 +3557,12 @@ def _parse_extra_zip_family(raw: str) -> frozenset[str]:
     oze-sec-03: each item is validated AFTER normalisation. The set is
     only used for membership tests today, so no exploit exists, but
     defence-in-depth rejects items longer than
-    ``_EXTRA_ZIP_FAMILY_MAX_LEN`` chars or containing anything outside
+    ``_FAMILY_EXTENSION_MAX_LEN`` chars or containing anything outside
     ``[a-z0-9]`` (path separators, NUL, control chars, Unicode).
 
     oze-obs-01: a dropped item is non-fatal (a hard raise would block the
     whole run on a single typo) but is logged at WARNING so a malformed
-    ``--extra-zip-family`` entry doesn't vanish without a trace."""
+    ``--extra-family`` entry doesn't vanish without a trace."""
     if not raw:
         return frozenset()
     out: set[str] = set()
@@ -3553,12 +3570,12 @@ def _parse_extra_zip_family(raw: str) -> frozenset[str]:
         normalised = item.strip().lstrip('.').lower()
         if not normalised:
             continue
-        if len(normalised) > _EXTRA_ZIP_FAMILY_MAX_LEN or any(
-                ch not in _EXTRA_ZIP_FAMILY_VALID for ch in normalised):
+        if len(normalised) > _FAMILY_EXTENSION_MAX_LEN or any(
+                ch not in _FAMILY_EXTENSION_VALID for ch in normalised):
             logger.warning(
-                "ignoring invalid --extra-zip-family item %r "
+                "ignoring invalid --extra-family item %r "
                 "(must be 1..%d chars of [a-z0-9])",
-                item, _EXTRA_ZIP_FAMILY_MAX_LEN)
+                item, _FAMILY_EXTENSION_MAX_LEN)
             continue
         # oze-arch-01: canonicalise synonyms so membership matches the
         # `declared_canon` resolve_real_extension compares against — otherwise an
@@ -3617,7 +3634,7 @@ def main() -> None:
             verbose=bool(args.verbose),
             num_threads=args.threads,
             sniff=args.sniff,
-            extra_zip_family=_parse_extra_zip_family(args.extra_zip_family),
+            extra_families=_merge_extra_families(args.extra_family),
             bucket_size=args.bucket_size,
             prune_empty=args.prune_empty,
             move_stall_seconds=args.move_stall_seconds,
