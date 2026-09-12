@@ -1645,15 +1645,16 @@ def test_sleep_cooldown_maxdomain_handlers(app):
 
 
 def test_command_timeout_handler(app):
-    # lq-cfg-01: the hung-download safety cap is editable from the settings
-    # UI, persists to config, and 0 keeps the documented "off" meaning.
+    # lq-conflict-91: UI edits cannot disable or exceed the attempt ceiling.
     app.command_timeout_var.set("120"); app._on_command_timeout_changed()
     assert app.config["command_timeout_seconds"] == 120
     assert app.dispatcher._command_timeout_seconds() == 120
     app.command_timeout_var.set("0"); app._on_command_timeout_changed()
-    assert app.config["command_timeout_seconds"] == 0
+    assert app.config["command_timeout_seconds"] == 1800
     app.command_timeout_var.set("-5"); app._on_command_timeout_changed()
-    assert app.config["command_timeout_seconds"] == 0   # clamped, not negative
+    assert app.config["command_timeout_seconds"] == 1800
+    app.command_timeout_var.set("21600"); app._on_command_timeout_changed()
+    assert app.config["command_timeout_seconds"] == 1800
     app.command_timeout_var.set("xx")
     assert app._get_command_timeout() == int(app.config["command_timeout_seconds"])
 
@@ -3282,9 +3283,9 @@ def test_command_timeout_seconds_has_safe_default(headless_dispatcher):
     )
 
 
-def test_command_timeout_seconds_zero_explicitly_disables(headless_dispatcher):
+def test_command_timeout_seconds_zero_uses_default(headless_dispatcher):
     headless_dispatcher.config["command_timeout_seconds"] = 0
-    assert headless_dispatcher._command_timeout_seconds() == 0
+    assert headless_dispatcher._command_timeout_seconds() == 1800
 
 
 def test_command_timeout_seconds_positive(headless_dispatcher):
@@ -3292,14 +3293,14 @@ def test_command_timeout_seconds_positive(headless_dispatcher):
     assert headless_dispatcher._command_timeout_seconds() == 7
 
 
-def test_command_timeout_seconds_negative_treated_as_off(headless_dispatcher):
+def test_command_timeout_seconds_negative_uses_default(headless_dispatcher):
     headless_dispatcher.config["command_timeout_seconds"] = -5
-    assert headless_dispatcher._command_timeout_seconds() == 0
+    assert headless_dispatcher._command_timeout_seconds() == 1800
 
 
-def test_command_timeout_seconds_unparseable_treated_as_off(headless_dispatcher):
+def test_command_timeout_seconds_unparseable_uses_default(headless_dispatcher):
     headless_dispatcher.config["command_timeout_seconds"] = "abc"
-    assert headless_dispatcher._command_timeout_seconds() == 0
+    assert headless_dispatcher._command_timeout_seconds() == 1800
 
 
 def test_immediate_concurrency_falls_back_to_worker_count(headless_dispatcher):
@@ -4499,18 +4500,21 @@ def test_queue_iid_for_url_round_trip_unicode_rtl():
 
 # ===== tests for new prod behavior (lq-rel-06, lq-scal-03) ===============
 
-# --- lq-rel-06: hard_deadline = None when timeout=0 (wait forever) -------
+# --- lq-conflict-91: bounded attempts replace the unlimited-timeout policy ---
 
-def test_hard_deadline_logic_for_timeout_zero():
-    """Pin the hard_deadline calculation: timeout=0 → None (wait
-    forever), positive timeout → 2*timeout+5. The fix replaced the old
-    `else 30` cap that silently broke long-running downloads."""
-    # Mirror the inline expression from _run_item.
-    def hd(timeout):
-        return (timeout * 2 + 5) if timeout > 0 else None
-    assert hd(0) is None
-    assert hd(60) == 125
-    assert hd(1) == 7
+def test_short_timeout_reader_uses_budget_plus_cleanup_grace(headless_dispatcher, monkeypatch):
+    from types import SimpleNamespace
+
+    deadlines = []
+    waits = []
+    monkeypatch.setattr(link_queue.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(headless_dispatcher, "_arm_command_timeout", lambda *_: None)
+    monkeypatch.setattr(headless_dispatcher, "_capture_subprocess_output",
+                        lambda _out, _label, _url, deadline, _verbosity: deadlines.append(deadline) or True)
+    proc = SimpleNamespace(stdout=object(), wait=lambda timeout: waits.append(timeout))
+    assert headless_dispatcher._stream_and_wait(proc, "queue", "url", 60, "silent")
+    assert deadlines == [165.0]
+    assert waits == [65.0]
 
 
 def test_seq_of_sweep_gap_constant_exists():

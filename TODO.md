@@ -69,7 +69,6 @@
 | id | status | severity | effort | description |
 |---|---|---|---|---|
 | ie-arch-50 | blocked | low | high | import_events.py:1464-4142 — [architecture/modularity] Migrate model lifecycle and extraction behind OmniTensor's planned accelerator-only `event-extraction` workload only after that external workload proves file-format, privacy, partial-result, JSON/ICS, offline, and exit-code parity. |
-| lq-conflict-91 | blocked | low | low | link_queue.py:2739 — [documentation] `_run_item` says the default command timeout is 0 (off), while `DEFAULT_COMMAND_TIMEOUT_SECONDS` at link_queue.py:609 and `DEFAULT_CONFIG` use six hours. Confirm the intended default and align this comment with the configuration and timeout-default tests; the retry work preserves the current six-hour behavior. |
 | rf-link-80 | blocked | medium | medium | relocate_folder.py:1042 — [API contract & compatibility] Decide how relocation handles valid relative symlinks that escape the source tree: src/link pointing to ../neighbor becomes dangling after a successful migration. relocate_folder.py:1658-1659 and tests/test_relocate_pinned_verification.py:95-101 deliberately require literal target preservation, including dangling links, so automatic rebasing changes that contract. Choose rebasing with revised verification or a preflight warning/refusal policy that preserves literal targets; document the outcome alongside README.md:94-101. |
 
 ## Rejected / Won't fix

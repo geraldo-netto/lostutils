@@ -606,8 +606,18 @@ COMMAND_INTERRUPTED_EXIT = -125
 # The module-level constant stays for legacy callers that import the
 # bare name (tests).
 _SEQ_OF_SWEEP_GAP = 256
-DEFAULT_COMMAND_TIMEOUT_SECONDS = 6 * 60 * 60
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 30 * 60
 DEFAULT_MAX_ATTEMPTS = 3
+
+
+def _bounded_command_timeout(value) -> int:
+    try:
+        if isinstance(value, (bool, float)):
+            raise ValueError
+        seconds = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_COMMAND_TIMEOUT_SECONDS
+    return min(seconds, DEFAULT_COMMAND_TIMEOUT_SECONDS) if seconds > 0 else DEFAULT_COMMAND_TIMEOUT_SECONDS
 
 
 def _placeholder_command(tag: str = "") -> str:
@@ -655,8 +665,8 @@ DEFAULT_CONFIG = {
                                     # (only the failed item's domain pauses; others run)
     "max_attempts": DEFAULT_MAX_ATTEMPTS,  # queued links: initial try plus retries
     "command_timeout_seconds": DEFAULT_COMMAND_TIMEOUT_SECONDS,
-                                    # watchdog: six-hour per-item wall-time cap.
-                                    # Users may set 0 to disable it explicitly.
+                                    # Per-attempt ceiling; queued timeouts consume
+                                    # the same finite retry budget as other failures.
                                     # On expiry yt-dlp / aria2c is terminated,
                                     # then killed so the worker can continue.
     "max_per_domain": 0,            # 0 = no cap; otherwise cap concurrent workers per domain
@@ -698,7 +708,7 @@ _CONFIG_INT_SCHEMA = {
     "immediate_queue_maxsize": (10000, 0),
     "failure_sleep_seconds": (300, 0),
     "max_attempts": (DEFAULT_MAX_ATTEMPTS, 1),
-    "command_timeout_seconds": (DEFAULT_COMMAND_TIMEOUT_SECONDS, 0),
+    "command_timeout_seconds": (DEFAULT_COMMAND_TIMEOUT_SECONDS, 1),
     "max_per_domain": (0, 0),
     "log_max_lines": (100, 0),
     "queue_render_limit": (2000, 0),
@@ -1106,6 +1116,7 @@ class ConfigStore(dict):
             )
             cfg["default_command"] = _placeholder_command()
         ConfigStore._coerce_integer_scalars(cfg)
+        cfg["command_timeout_seconds"] = _bounded_command_timeout(cfg["command_timeout_seconds"])
         ConfigStore._coerce_string_scalars(cfg)
         tm = cfg.get("token_mappings")
         if not isinstance(tm, dict):
@@ -2542,20 +2553,10 @@ class Dispatcher:
         return str(self.config.get("log_verbosity", "summary")).lower()
 
     def _command_timeout_seconds(self) -> int:
-        """Resolve the per-item subprocess wait timeout from config (scal-04).
-        Non-positive / unparseable values mean 'no timeout — wait forever'.
-
-        Lives on Dispatcher (not LinkQueueApp) so `_run_item` can call it
-        directly without going through the app façade — workers run on
-        the Dispatcher instance."""
-        raw = self.config.get(
+        """Every attempt has a positive timeout of at most thirty minutes."""
+        return _bounded_command_timeout(self.config.get(
             "command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS
-        )
-        try:
-            v = int(raw)
-        except (TypeError, ValueError):
-            return 0
-        return v if v > 0 else 0
+        ))
 
     @staticmethod
     def _item_log_id(item: QueueItem) -> str:
@@ -2732,15 +2733,8 @@ class Dispatcher:
                 raise RuntimeError(
                     f"subprocess started without a captured stdout pipe (label={label})"
                 )
-            # scal-04: bound the wall-clock per item so a hung yt-dlp /
-            # aria2c can't lock up the worker. Default = 0 (off) preserves
-            # the historical "wait forever" behaviour. When > 0, a
-            # threading.Timer fires terminate-then-kill on the subprocess
-            # while `_stream_subprocess_output` is mid-read; the pipe
-            # closes on death, the reader unblocks, and proc.wait()
-            # returns immediately afterwards. Direct `proc.wait(timeout=)`
-            # is useless here because the reader holds the loop for the
-            # full subprocess lifetime.
+            # The timer interrupts commands even while output is being read.
+            # Queued timeouts consume an attempt and stop when retries run out.
             timeout = self._command_timeout_seconds()
             # lq-obs-01: snapshot verbosity once per item so a mid-item
             # config edit can't fragment the stream between modes.
@@ -2787,15 +2781,11 @@ class Dispatcher:
                          timeout: float, verbosity: str) -> bool:
         """Read cancellable output in this worker, then wait for process exit.
 
-        lq-rel-02: the bounded wait after streaming stops a SIGTERM/SIGKILL-proof
-        zombie from hanging the worker; the safety net is 2*timeout+5 to cover
-        the timer's terminate->kill ladder. lq-rel-06: `command_timeout_seconds
-        == 0` opts out of the timer entirely ("wait forever" for long idempotent
-        downloads), so the hard deadline is None in that case. The deadline is
-        measured from reader startup: a detached descendant that inherited the
-        pipe cannot postpone it by withholding EOF."""
+        Allow five seconds for the timer's terminate->kill ladder after the
+        attempt timeout. A descendant holding the pipe open must not double
+        the attempt's budget before the next retry can start."""
         hard_deadline = (
-            time.monotonic() + timeout * 2 + 5 if timeout > 0 else None
+            time.monotonic() + timeout + 5 if timeout > 0 else None
         )
         timer = self._arm_command_timeout(proc, label, url, timeout)
         try:
@@ -3744,8 +3734,8 @@ class _SettingsTabs:
              app.max_attempts_var, 1, 100, 6, app._on_max_attempts_changed),
             ("Max per domain (0 = no cap):",
              app.max_per_domain_var, 0, 32, 4, app._on_max_per_domain_changed),
-            ("Command timeout (s, 0 = off):",
-             app.command_timeout_var, 0, 86400, 6, app._on_command_timeout_changed),
+            ("Attempt timeout (s, max 30 min):",
+             app.command_timeout_var, 1, DEFAULT_COMMAND_TIMEOUT_SECONDS, 6, app._on_command_timeout_changed),
         ]:
             ttk.Label(parent, text=label).grid(
                 row=row, column=0, sticky="w", padx=4, pady=4)
@@ -4892,18 +4882,16 @@ class LinkQueueApp(metaclass=_FacadeMeta):
             after=wake_workers)
 
     def _get_command_timeout(self) -> int:
-        return self._get_int_setting(
-            self.command_timeout_var, "command_timeout_seconds", 0, clamp_min=0)
+        return _bounded_command_timeout(self._get_int_setting(
+            self.command_timeout_var, "command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS))
 
     def _on_command_timeout_changed(self) -> None:
         # Workers read the live config per item (_command_timeout_seconds),
         # so persisting the key is the whole wiring.
         self._apply_int_setting(
             self.command_timeout_var, self._get_command_timeout,
-            "command_timeout_seconds", 0,
-            lambda v: ("[config] command timeout disabled" if v == 0
-                       else f"[config] command timeout set to "
-                            f"{self._format_duration(v)}"))
+            "command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS,
+            lambda v: f"[config] attempt timeout set to {self._format_duration(v)}")
 
     def _apply_path_setting(self, var, key, on_msg, off_msg) -> None:
         """Shared body for the path settings handlers (dup-04 / dup-07):
