@@ -20,6 +20,31 @@ from hypothesis import given, settings, strategies as st
 import organize_by_extension
 
 
+def test_oze_cli_70_preview_creates_no_probe_in_root(tmp_path, monkeypatch, caplog):
+    root = tmp_path / "root"
+    bucket = root / "txt" / "n00000"
+    bucket.mkdir(parents=True)
+    (bucket / "note.txt").write_text("bucketed")
+    (root / "next.txt").write_text("pending")
+    organize_by_extension.reset_case_fold_cache()
+    before = root.stat().st_mtime_ns
+    real_open = os.open
+    creations = []
+
+    def observe(path, flags, *args, **kwargs):
+        if flags & os.O_CREAT and Path(path).is_relative_to(root):
+            creations.append(Path(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", observe)
+    with caplog.at_level(logging.INFO):
+        result = organize_by_extension.organize(root, preview=True)
+    assert result.processed == 1
+    assert creations == []
+    assert root.stat().st_mtime_ns == before
+    assert "case" in caplog.text and "assum" in caplog.text
+
+
 @pytest.mark.parametrize("name, expected", [
     ("txt.collision1", "no_extension"),
     ("note.TXT.collision12.collision3", "txt"),
@@ -5975,7 +6000,7 @@ def test_is_bucketed_file_accepts_a_case_variant_directory_when_folding(
     """`PDF/` and `pdf/` are one directory when the filesystem folds, so a
     case-sensitive compare would re-plan the file into where it already is."""
     monkeypatch.setattr(
-        organize_by_extension, "filesystem_folds_case", lambda directory: True)
+        organize_by_extension, "filesystem_folds_case", lambda directory, **kwargs: True)
     bucket = tmp_path / "TXT" / "a00000"
     bucket.mkdir(parents=True)
     target = bucket / "a.txt"
@@ -5984,7 +6009,7 @@ def test_is_bucketed_file_accepts_a_case_variant_directory_when_folding(
     assert is_bucketed_file(tmp_path, target) is True
 
     monkeypatch.setattr(
-        organize_by_extension, "filesystem_folds_case", lambda directory: False)
+        organize_by_extension, "filesystem_folds_case", lambda directory, **kwargs: False)
     assert is_bucketed_file(tmp_path, target) is False
 
 

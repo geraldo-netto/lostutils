@@ -441,6 +441,7 @@ class SniffContext:
     head_cache: dict[Path, HeadBytes] | None = None
     extra_zip_family: frozenset[str] = frozenset()
     stats: _RunStats | None = None
+    preview: bool = False
 
 
 # Module-level default — used when a caller omits ``ctx`` and doesn't need
@@ -684,7 +685,7 @@ def is_bucketed_file(
     # oze-plat-04: `pdf/` and `PDF/` are one directory on a case-folding
     # filesystem, so a case-sensitive compare would re-plan a file into the
     # directory it already sits in and skip it forever on the collision.
-    folds = filesystem_folds_case(root)
+    folds = filesystem_folds_case(root, probe=not ctx.preview)
     resolved = resolve_real_extension(path, ctx=ctx, log_mismatch=False)
     return _name_key(ext_dir, folds) == _name_key(resolved, folds)
 
@@ -970,13 +971,15 @@ def _probe_case_folding(directory: Path) -> bool:
             pass
 
 
-def filesystem_folds_case(directory: Path) -> bool:
+def filesystem_folds_case(directory: Path, *, probe: bool = True) -> bool:
     """Whether `directory`'s filesystem treats file names case-insensitively.
 
     oze-plat-04: NTFS and the APFS default fold case while ext4 does not, and
     `os.path.normcase` only models the Windows half of that — macOS needs a
     real probe. Cached per directory; one probe file per run.
     """
+    if not probe:
+        return os.name == "nt" or sys.platform == "darwin"
     cached = _CASE_FOLD_CACHE.get(directory)
     if cached is None:
         cached = _probe_case_folding(directory)
@@ -2672,6 +2675,8 @@ def plan_moves(
         )
     # The disk-backed spool preserves deterministic path order and the global
     # collision pre-pass without retaining one Python object per source.
+    if preview:
+        manager._folds_case = filesystem_folds_case(root, probe=False)
     plan_pairs = _spooled_plan_pairs(root, files, ctx, preview)
     for source, ext_dir in plan_pairs:
         # oze-rel-18: use `.name` so dotfiles (`.bashrc` → stem="") and
@@ -3334,6 +3339,8 @@ def organize(
             "move_stall_seconds must be a finite positive number"
         )
     root = resolve_root(root)
+    if preview:
+        logger.info("Preview: assuming host-default filename case handling; no filesystem probe")
     if verbose:
         logger.info(f"Organizing files in: {root}")
     # oze-decl-02: accept caller-provided pipeline state so tests / alternate
@@ -3342,7 +3349,7 @@ def organize(
     if head_cache is None:
         head_cache = {}
     ctx = SniffContext(sniff=sniff, head_cache=head_cache,
-                       extra_zip_family=extra_zip_family, stats=_RunStats())
+                       extra_zip_family=extra_zip_family, stats=_RunStats(), preview=preview)
     files = _iter_files(
         root,
         skip_paths={Path(__file__).resolve()},
