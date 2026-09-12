@@ -158,3 +158,40 @@ def test_standalone_script_stops_child_if_nonblocking_setup_is_unsupported(tmp_p
     result = subprocess.run([sys.executable, "-c", code], cwd=tmp_path,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('verbosity', ['silent', 'summary', 'verbose'])
+def test_lq_mem_92_unterminated_output_has_bounded_memory(dispatcher, monkeypatch, verbosity):
+    import io
+    import tracemalloc
+    chunk = b'x' * 65536
+    drained, logged = [], []
+    def chunks(*_args):
+        for index in range(256):
+            drained.append(index)
+            yield chunk
+    def log(message):
+        logged.append(len(message))
+    monkeypatch.setattr(dispatcher, '_iter_output_chunks', chunks)
+    monkeypatch.setattr(dispatcher, '_log', log)
+    tracemalloc.start()
+    try:
+        assert dispatcher._capture_subprocess_output(io.StringIO(), 'job', 'url', None, verbosity)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(drained) == 256  # All 16 MiB consumed, including in silent mode.
+    assert peak < 2_000_000
+    if verbosity == 'silent':
+        assert logged == []
+    else:
+        assert max(logged) <= 65536 + len('| job | ')
+
+
+def test_lq_mem_92_split_long_unicode_lines_preserves_all_text(dispatcher, monkeypatch):
+    payload = ('€' * 70000 + '\r\n' + 'x' * 70000 + '\n尾').encode()
+    monkeypatch.setattr(dispatcher, '_iter_output_chunks', lambda *_: (
+        payload[index:index + 65536] for index in range(0, len(payload), 65536)))
+    lines = list(dispatcher._iter_output_lines(None, None))
+    assert ''.join(lines) == payload.decode().replace('\r\n', '\n')
+    assert max(map(len, lines)) <= 65536

@@ -61,6 +61,8 @@ PASTE_EVENT = "<<Paste>>"
 PAUSED_BUTTON_STYLE = "Paused.TButton"
 RETURN_EVENT = "<Return>"
 RIGHT_CLICK_EVENT = "<Button-3>"
+# Partial output is emitted at this size even when the child never writes a newline.
+OUTPUT_LINE_LIMIT = 65536
 
 
 def _center_window(window, parent=None) -> None:
@@ -2865,8 +2867,11 @@ class Dispatcher:
             # This worker alone reads and closes the wrapper; no other thread
             # can close a descriptor while the wrapper still owns its number.
             with stdout:
-                self._stream_subprocess_output(
-                    self._iter_output_lines(stdout, deadline), label, verbosity)
+                if verbosity == "silent":
+                    self._drain_pipe(self._iter_output_chunks(stdout, deadline))
+                else:
+                    self._stream_subprocess_output(
+                        self._iter_output_lines(stdout, deadline), label, verbosity)
         except InterruptedError:
             return False
         except TimeoutError:
@@ -2899,16 +2904,17 @@ class Dispatcher:
     def _iter_output_lines(self, stdout, deadline):
         decoder = io.IncrementalNewlineDecoder(
             codecs.getincrementaldecoder("utf-8")("replace"), translate=True)
-        pieces = []
+        pending = ""
         for chunk in self._iter_output_chunks(stdout, deadline):
-            fragments = decoder.decode(chunk).split("\n")
-            if len(fragments) == 1:
-                pieces.append(fragments[0])
-                continue
-            yield "".join(pieces) + fragments[0] + "\n"
-            yield from (line + "\n" for line in fragments[1:-1])
-            pieces = [fragments[-1]]
-        tail = "".join(pieces) + decoder.decode(b"", final=True)
+            pending += decoder.decode(chunk)
+            while pending:
+                newline = pending.find("\n", 0, OUTPUT_LINE_LIMIT)
+                if newline < 0 and len(pending) < OUTPUT_LINE_LIMIT:
+                    break
+                end = newline + 1 if newline >= 0 else OUTPUT_LINE_LIMIT
+                yield pending[:end]
+                pending = pending[end:]
+        tail = pending + decoder.decode(b"", final=True)
         if tail:
             yield tail
 
