@@ -2841,6 +2841,9 @@ class Dispatcher:
         timer = self._arm_command_timeout(proc, label, url, timeout)
         try:
             if not self._capture_subprocess_output(proc.stdout, label, url, hard_deadline, verbosity):
+                if self.stop_event.is_set():
+                    # The reader may cancel before shutdown marks the process.
+                    setattr(proc, "_link_queue_interrupted", True)
                 self._kill_process_tree(proc)
                 self._wait_process_tree(proc, time.monotonic() + 1)
                 return False
@@ -2864,6 +2867,8 @@ class Dispatcher:
             with stdout:
                 self._stream_subprocess_output(
                     self._iter_output_lines(stdout, deadline), label, verbosity)
+        except InterruptedError:
+            return False
         except TimeoutError:
             self._log(f"[{label} stuck] output pipe remained open after deadline; closing it  url={url}")
             return False
@@ -2878,12 +2883,14 @@ class Dispatcher:
         descriptor = stdout.fileno()
         os.set_blocking(descriptor, False)
         while True:
+            if self.stop_event.is_set():
+                raise InterruptedError("output read cancelled by shutdown")
             if self._deadline_remaining(deadline) == 0:
                 raise TimeoutError("output deadline expired")
             try:
                 chunk = os.read(descriptor, 65536)
             except BlockingIOError:
-                time.sleep(0.05)
+                self.stop_event.wait(0.05)
                 continue
             if not chunk:
                 return

@@ -6453,3 +6453,50 @@ def test_lq_rob_92_state_load_failure_survives_shutdown(tmp_path, request, monke
     assert len(reads) == 1
     assert instance.dispatcher.state_load_error
     assert 'repair the file and restart' in log
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='detached POSIX session inheritance')
+@pytest.mark.parametrize('timeout', [0, 1800])
+def test_lq_stop_92_shutdown_cancels_detached_descendant_pipe(app, tmp_path, monkeypatch, timeout):
+    import signal
+    stop_bg_workers(app)
+    dispatcher = app.dispatcher
+    pidfile = tmp_path / 'descendant.pid'
+    code = (
+        'import subprocess,sys,time; from pathlib import Path; '
+        'child=subprocess.Popen([sys.executable,"-c","import time;time.sleep(15)"],start_new_session=True); '
+        'Path(sys.argv[1]).write_text(str(child.pid)); time.sleep(15)'
+    )
+    spawned = []
+    def spawn(*_args):
+        proc = subprocess.Popen([sys.executable, '-c', code, str(pidfile)],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, start_new_session=True)
+        spawned.append(proc)
+        return proc
+    monkeypatch.setattr(dispatcher, '_spawn_proc', spawn)
+    # Exercise the reader independently of its deadline, including no deadline.
+    monkeypatch.setattr(dispatcher, '_command_timeout_seconds', lambda: timeout)
+    original = q('https://example.test/interrupted')._replace(attempts=1)
+    dispatcher.queue_items.append(original)
+    dispatcher._ensure_worker_count(1)
+    workers = app._snapshot_worker_threads()
+    try:
+        assert _spin_until(lambda: pidfile.exists() and bool(pidfile.read_text()))
+        app._shutdown(timeout=1)
+        assert not any(worker.is_alive() for worker in workers)
+        assert spawned[0].stdout.closed
+        assert dispatcher._load_state_items() == ([original], [])
+        assert dispatcher.metrics['failures'] == 0
+    finally:
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for proc in spawned:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=3)
+        for worker in workers:
+            worker.join(3)
